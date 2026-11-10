@@ -1,0 +1,15 @@
+# Answers for ./setup --answers FILE (add --yes to ask nothing). Leave a line out to be asked, or to keep the
+# current value on a re-run. A " #" starts a comment. Keep this file private if it holds a password.
+AIOS_URL=http://127.0.0.1:3000          # only when ./setup can't find AIOStreams by itself
+AIOS_CONFIG_ID=                          # the config your apps use (or paste its Stremio link)
+AIOS_CONFIG_PASSWORD=
+RD_OK=yes                                # Real-Debrid without AIOStreams' proxy: continue with index-only reads
+LANGUAGES=English
+AUDIO=no                                 # also sync files without their own subtitle track, from the audio
+ADD_OPENSUBTITLES=yes                    # add Stremio's official OpenSubtitles; asked only when the config has none
+PUBLIC_ADDRESS=                          # where your apps reach subsync; Enter takes the suggestion
+CACHE=no                                 # turn off AIOStreams' 5-minute subtitle cache for subsync (admin sign-in)
+AIOS_USERNAME=                           # AIOStreams sign-in, only if it asks for one
+AIOS_PASSWORD=
+CONFIRM=yes                              # save the shown changes
+TEST_READ=yes                            # the ~1 MB test read at the end

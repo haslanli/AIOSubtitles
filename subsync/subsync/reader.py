@@ -1,0 +1,103 @@
+"""Bounded HTTP range reads of one release file.
+
+Every read is one bounded `Range: bytes=a-b` request with `Connection: close`, read to its length and closed, so no
+connection outlives its read. One info log line per read, naming the job's label, never the URL. A refusal
+(HTTP 403, most likely a debrid per-account download limit) raises Refused so the worker can back off; a
+reply whose total size differs from the file's raises ReadFailed. Before each read the guard
+(budget, pause) may stop the job.
+"""
+import logging
+import time
+import urllib.error
+import urllib.request
+
+log = logging.getLogger("subsync.read")
+
+USER_AGENT = "subsync/1"
+
+
+class ReadFailed(Exception):
+    """The file can't be read as asked (HTTP error, wrong size, short reply)."""
+
+
+class Refused(ReadFailed):
+    """HTTP 403 (or 429): the provider refuses this account for now; back off before any other read."""
+
+
+class Stopped(Exception):
+    """The guard stopped the job before a read (budget spent, a viewer is streaming)."""
+
+
+class RangeReader:
+    def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=0.0, opener=None):
+        self.url, self.label, self.guard, self.timeout = url, label, guard, timeout
+        self.size = size              # expected served size (from the listing), checked on the first reply
+        self.tolerance = size_tolerance
+        self.bytes = 0
+        self.requests = 0
+        self.open = opener or urllib.request.urlopen
+
+    def get(self, start, length):
+        if length <= 0:
+            return b""
+        if self.size is not None and start >= self.size:
+            raise ReadFailed("range past the end")
+        if self.size is not None:
+            length = min(length, self.size - start)
+        if self.guard:
+            self.guard.before_read(length)
+        req = urllib.request.Request(self.url, headers={
+            "Range": f"bytes={start}-{start + length - 1}", "Connection": "close", "User-Agent": USER_AGENT})
+        t0 = time.time()
+        data, status, total = b"", 0, None
+        try:
+            with self.open(req, timeout=self.timeout) as r:
+                status = getattr(r, "status", 200)
+                content_range = r.headers.get("Content-Range") or ""
+                if "/" in content_range and content_range.rsplit("/", 1)[1].strip().isdigit():
+                    total = int(content_range.rsplit("/", 1)[1])
+                elif status == 200:
+                    length_header = r.headers.get("Content-Length")
+                    total = int(length_header) if length_header and length_header.isdigit() else None
+                # read at most what was asked, even when a server ignores the range (status 200)
+                chunks, left = [], length
+                while left > 0:
+                    chunk = r.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    left -= len(chunk)
+                data = b"".join(chunks)
+        except urllib.error.HTTPError as e:
+            status = e.code
+            e.close()
+        except (OSError, ValueError) as e:
+            self._log(start, length, 0, status, t0, type(e).__name__)
+            raise ReadFailed(type(e).__name__) from None
+        finally:
+            self.requests += 1
+        self.bytes += len(data)
+        if self.guard:
+            self.guard.after_read(len(data))
+        self._log(start, length, len(data), status, t0, None)
+        if status in (403, 429):
+            raise Refused(f"HTTP {status}")
+        if status not in (200, 206):
+            raise ReadFailed(f"HTTP {status}")
+        if status == 200 and start != 0:
+            raise ReadFailed("range ignored")
+        if total is not None:
+            if self.size is None:
+                self.size = total
+            elif abs(total - self.size) > self.tolerance * self.size:
+                raise ReadFailed("size differs")
+            else:
+                self.size = total
+        expected = min(length, self.size - start) if self.size is not None else length
+        if len(data) < expected:
+            raise ReadFailed("short reply")
+        return data
+
+    def _log(self, start, length, got, status, t0, error):
+        log.info("read %s bytes=%d-%d got=%d status=%s ms=%d%s", self.label, start, start + length - 1, got,
+                 status or "-", int((time.time() - t0) * 1000), f" error={error}" if error else "")

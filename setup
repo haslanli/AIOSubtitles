@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# AIOSubtitles setup: adds subsync to the AIOStreams you already run. ./setup --help lists the options.
+set -euo pipefail
+cd "$(dirname "$0")"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python 3 is needed (most Linux systems have it)."
+  echo "  Debian/Ubuntu: sudo apt install python3      Fedora: sudo dnf install python3"
+  exit 1
+fi
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; then
+  echo "Python 3.9 or newer is needed; this one is $(python3 --version 2>&1)."
+  exit 1
+fi
+exec python3 -I installer/wizard.py "$@"
