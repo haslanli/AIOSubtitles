@@ -6,6 +6,8 @@ On the Cues route alass gets the candidate as a plain SRT of its parsed lines' t
 a malformed index line), then each line can snap to its release line (refine.py). The snapped copy
 must reach `snap_within` (95 %) within 200 ms, since snapping makes the gate read high; the alass copy needs the usual
 90 %. The more exact copy that passes is offered.
+A copy that misses those bars is still offered when it is clearly better than the original (relgate.clearly_better;
+`better`, off unless given).
 Outcomes: in_sync (the original passes as it is: nothing is published), synced (the re-timed copy passes and moved
 lines by more than 100 ms), keep_original (anything else).
 """
@@ -15,7 +17,7 @@ from . import alass as alass_mod
 from . import imageref, refine
 from .audiofit import AudioFit
 from .langs import lang3
-from .relgate import relgate
+from .relgate import clearly_better, relgate
 from .subs import dialogue_starts, parse, plain_srt, timing_srt, write_like
 
 MIN_LINES = 10
@@ -110,7 +112,8 @@ def check_original(index, text, lang, splits=True, image_ref=False):
 
 
 def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=0.19, vad=None, ffmpeg="ffmpeg",
-                  force_route=None, snap=True, snap_within=0.95, splits=True, image_ref=False, audio_lock=None):
+                  force_route=None, snap=True, snap_within=0.95, splits=True, image_ref=False, audio_lock=None,
+                  better=None):
     lines = parse(text)
     dial = dialogue_starts(lines)
     base = {"lines": len(lines), "dialogue": len(dial)}
@@ -158,12 +161,18 @@ def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=
                 best = snapped
                 out["shift"] = _shift_stats(dial, snap_dial)
                 out["refined"] = True
+        why = "passes against the release track" + (" (snapped)" if out.get("refined") else "")
+        if best is None and better is not None and "gate_synced" in out:
+            ok, note = clearly_better(out["gate_original"], out["gate_synced"], better, MIN_SPAN, recall)
+            out["better"] = {"pass": ok, "why": note}
+            if ok:   # the alass copy, not the snapped one: the snapped copy's own measure reads high
+                best, why = new, "clearly better than the original"
+                out["shift"] = _shift_stats(dial, new_dial)
         if best is None:
             return dict(out, outcome="keep_original", reason="below the bar")
         if out["shift"]["max_ms"] <= MIN_SHIFT_S * 1000:
             return dict(out, outcome="keep_original", reason="shift under 100 ms")
-        return dict(out, outcome="synced", reason="passes against the release track" + (" (snapped)" if out.get("refined") else ""),
-                    body=write_like(text, best))
+        return dict(out, outcome="synced", reason=why, body=write_like(text, best))
     if not audio:
         return dict(base, outcome="keep_original", reason="no text track and the audio route is off", route=None)
     if audio_lock is not None:   # one audio fit at a time: it reads the file through a shared reader

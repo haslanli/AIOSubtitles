@@ -27,4 +27,9 @@ ffmpeg -v error -y -f lavfi -i "color=c=black:s=64x36:r=2:d=90" -f lavfi -i "sin
   -c:v libx264 -preset ultrafast -g 4 -c:a aac -b:a 24k tiny-av.mkv
 mkvmerge -q -o tiny.mkv tiny-av.mkv --language 0:eng tiny.srt
 rm -f tiny-av.mkv tone.expr
-ls -l tiny.mkv
+# The same file as MP4, for the MP4 reader: the text track as mov_text, the movie box at the end (tiny.mp4) and at the
+# start (tiny-fast.mp4), and one without a subtitle track (tiny-nosub.mp4).
+ffmpeg -v error -y -i tiny.mkv -map 0:v -map 0:a -map 0:s -c:v copy -c:a copy -c:s mov_text -metadata:s:s:0 language=eng tiny.mp4
+ffmpeg -v error -y -i tiny.mp4 -map 0 -c copy -movflags +faststart tiny-fast.mp4
+ffmpeg -v error -y -i tiny.mkv -map 0:v -map 0:a -c copy tiny-nosub.mp4
+ls -l tiny.mkv tiny.mp4 tiny-fast.mp4 tiny-nosub.mp4

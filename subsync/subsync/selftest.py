@@ -10,7 +10,8 @@ import json
 import sys
 import time
 
-from .mkv import MkvIndex, NotMatroska
+from .mkv import NotMatroska
+from .mp4 import open_index
 from .reader import RangeReader, ReadFailed, Refused, Stopped
 from .settings import Settings
 from .worker import rewrite
@@ -35,7 +36,7 @@ def run(url, cap_bytes, settings, size=None):
     t0 = time.time()
     out = {"ok": False}
     try:
-        index = MkvIndex(reader).read_head().read_cues()
+        index = open_index(reader)
         index.read_hash()
         text = index.text_tracks()
         out.update(ok=True, matroska=True, size=index.size,

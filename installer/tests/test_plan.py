@@ -49,6 +49,33 @@ class ConfigId(unittest.TestCase):
 
 
 class ViewerChange(unittest.TestCase):
+    def kinds(self, config):
+        return ['subsync' if plan.is_subsync_preset(p, URL) else p['type'] for p in config['presets']
+                if plan.is_subtitle_preset(p)]
+
+    def test_subsync_comes_before_the_other_subtitle_sources(self):
+        new, _ = plan.viewer_change(VIEWER, URL, META)
+        self.assertEqual(self.kinds(new)[0], 'subsync')
+        self.assertEqual(len(self.kinds(new)), len(self.kinds(VIEWER)) + 1)
+        streams = [p for p in VIEWER['presets'] if not plan.is_subtitle_preset(p)]
+        self.assertEqual([p for p in new['presets'] if not plan.is_subtitle_preset(p)], streams)   # the rest keeps its order
+
+    def test_an_install_that_has_subsync_after_the_others_is_moved_once(self):
+        old = dict(VIEWER, presets=list(VIEWER['presets']) + [plan.subsync_preset(VIEWER, URL, META)])
+        self.assertEqual(self.kinds(old)[-1], 'subsync')
+        new, changes = plan.viewer_change(old, URL, META)
+        self.assertEqual(self.kinds(new)[0], 'subsync')
+        self.assertEqual(len(changes), 1)
+        self.assertIn('moves "subsync" before', changes[0])
+        self.assertEqual(sorted(map(str, new['presets'])), sorted(map(str, old['presets'])))        # nothing added or lost
+        self.assertEqual(plan.viewer_change(new, URL, META)[1], [])
+
+    def test_with_no_subtitle_source_subsync_is_added_then_opensubtitles(self):
+        bare = dict(VIEWER, presets=[p for p in VIEWER['presets'] if not plan.is_subtitle_preset(p)])
+        new, changes = plan.viewer_change(bare, URL, META, True)
+        self.assertEqual(self.kinds(new), ['subsync', 'opensubtitles'])
+        self.assertEqual(len(changes), 2)
+
     def test_adds_subsync_once_with_defaults(self):
         new, changes = plan.viewer_change(VIEWER, URL, META)
         added = [p for p in new['presets'] if p['type'] == 'custom']

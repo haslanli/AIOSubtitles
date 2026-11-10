@@ -175,22 +175,38 @@ def opensubtitles_preset(config, metadata=None):
                           'options': {'name': 'OpenSubtitles', 'timeout': 7000, 'resources': ['subtitles']}}, metadata)
 
 
+def _before_other_subtitles(presets, preset):
+    """presets with `preset` placed before the first other subtitle source (at the end when there is none).
+    AIOStreams lists subtitles in the order of the config, and players keep only the first few per language
+    (AIOMetadata: 3), so subsync's entries must come first to be seen."""
+    for i, p in enumerate(presets):
+        if is_subtitle_preset(p):
+            return presets[:i] + [preset] + presets[i:]
+    return presets + [preset]
+
+
 def viewer_change(config, manifest_url, metadata=None, add_opensubtitles=False):
-    """The viewer's config with subsync's addon (an older subsync entry replaced) and, if asked, OpenSubtitles.
+    """The viewer's config with subsync's addon (an older subsync entry replaced) placed before the other subtitle
+    sources and, if asked, OpenSubtitles after it.
     Returns (new config, [plain-language lines]); no lines means nothing to change."""
     new = copy.deepcopy(config)
     presets = new.setdefault('presets', [])
     current = [p for p in presets if is_subsync_preset(p, manifest_url)]
+    others = [p for p in presets if not is_subsync_preset(p, manifest_url)]
     changes = []
     if len(current) == 1 and current[0]['options'].get('manifestUrl') == manifest_url and current[0].get('enabled', True):
-        pass
+        placed = _before_other_subtitles(others, current[0])
+        if placed != presets:
+            new['presets'] = placed
+            changes.append('moves "subsync" before your other subtitle sources (apps that list only a few subtitles '
+                           'per language keep its entries)')
     else:
-        new['presets'] = [p for p in presets if not is_subsync_preset(p, manifest_url)]
-        new['presets'].append(subsync_preset(new, manifest_url, metadata))
+        new['presets'] = others
+        new['presets'] = _before_other_subtitles(others, subsync_preset(new, manifest_url, metadata))
         changes.append('updates the subtitle source "subsync" (new address)' if current
                        else 'adds 1 subtitle source: subsync (synced copies of the subtitles you already get)')
     if add_opensubtitles:
-        new['presets'].insert(len(new['presets']) - 1, opensubtitles_preset(new, metadata))
+        new['presets'].append(opensubtitles_preset(new, metadata))
         changes.append('adds 1 subtitle source: OpenSubtitles (Stremio\'s official one; it lists every language)')
     return new, changes
 

@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import FIXTURES, RangeServer, have  # noqa: E402
 from subsync import pipeline  # noqa: E402
-from subsync.mkv import MkvIndex, oshash  # noqa: E402
+from subsync.mkv import MkvIndex, NotMatroska, oshash  # noqa: E402
+from subsync.mp4 import Mp4Index, open_index  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed, Refused, Stopped  # noqa: E402
 from subsync.subs import parse  # noqa: E402
 
@@ -120,6 +121,99 @@ class MkvTest(unittest.TestCase):
         self.assertAlmostEqual(len(pcm) / 2 / 16000, 10.0, delta=0.1)
 
 
+class Mp4Test(unittest.TestCase):
+    """tiny.mp4 / tiny-fast.mp4: tiny.mkv remuxed (same video, audio and lines; the text track as mov_text), with the
+    movie box at the end and at the start; tiny-nosub.mp4 has no subtitle track."""
+
+    def setUp(self):
+        self.srv = RangeServer(FIXTURES)
+        self.want = [(l["s"], l["e"] - l["s"]) for l in parse(read_text("tiny.srt"))]
+
+    def tearDown(self):
+        self.srv.close()
+
+    def index(self, name):
+        return open_index(RangeReader(self.srv.url(name), "test"))
+
+    def test_the_text_tracks_lines_come_from_the_movie_box_wherever_it_is(self):
+        for name in ("tiny.mp4", "tiny-fast.mp4"):
+            idx = self.index(name)
+            self.assertIsInstance(idx, Mp4Index)
+            tracks = idx.text_tracks()
+            self.assertEqual(len(tracks), 1, name)
+            self.assertEqual((tracks[0]["language"], tracks[0]["forced"]), ("eng", False))
+            cues = tracks[0]["cues"]
+            self.assertEqual(len(cues), len(self.want), name)
+            for (s, d), (ws, wd) in zip(cues, self.want):
+                self.assertAlmostEqual(s, ws, delta=0.002)
+                self.assertAlmostEqual(d, wd, delta=0.002)
+            self.assertEqual(idx.image_tracks(), [])
+            self.assertAlmostEqual(idx.duration(), 90.0, delta=5.0)
+
+    def test_the_index_is_chosen_by_the_files_first_bytes(self):
+        self.assertIsInstance(self.index("tiny.mkv"), MkvIndex)
+        self.assertEqual(len(self.index("tiny.mkv").text_tracks()[0]["cues"]), len(self.want))
+        with self.assertRaises(NotMatroska):
+            self.index("tiny.srt")
+
+    def test_a_file_without_a_subtitle_track_has_no_text_tracks(self):
+        self.assertEqual(self.index("tiny-nosub.mp4").text_tracks(), [])
+
+    def test_the_hash_is_the_opensubtitles_hash(self):
+        path = os.path.join(FIXTURES, "tiny.mp4")
+        with open(path, "rb") as f:
+            data = f.read()
+        self.assertEqual(self.index("tiny.mp4").read_hash(), oshash(len(data), data[:65536], data[-65536:]))
+
+    @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
+    def test_an_audio_window_is_a_bounded_read_and_starts_where_the_lines_start(self):
+        import array
+        import statistics
+        for name in ("tiny.mp4", "tiny-nosub.mp4"):
+            idx = self.index(name)
+            a, b = idx.byte_range(20.0, 10.0)
+            self.assertLess(b - a, idx.size // 3)
+            pcm = idx.window_pcm(20.0, 40.0)
+            self.assertAlmostEqual(len(pcm) / 2 / 16000, 40.0, delta=0.1)
+            x = array.array("h", pcm[:len(pcm) // 2 * 2])
+            onsets, before = [], False          # the fixture's tone is on during each line
+            for i in range(0, len(x) - 160, 160):
+                loud = sum(abs(v) for v in x[i:i + 160]) / 160 > 1000
+                if loud and not before:
+                    onsets.append(20.0 + i / 16000)
+                before = loud
+            self.assertGreater(len(onsets), 8, name)
+            errors = [min((o - s for s, _ in self.want), key=abs) for o in onsets]
+            self.assertLess(abs(statistics.median(errors)), 0.04, name)   # the edit list (encoder delay) is applied
+
+
+class ListedSizeTest(unittest.TestCase):
+    """A listing rounds a file's size (0.01 GiB: up to 5.4 MB off); the real size is taken from the first reply."""
+
+    def setUp(self):
+        self.srv = RangeServer(FIXTURES)
+        self.real = os.path.getsize(TINY)
+
+    def tearDown(self):
+        self.srv.close()
+
+    def test_a_listed_size_within_the_rounding_slack_is_accepted_and_replaced_by_the_real_one(self):
+        r = RangeReader(self.srv.url("tiny.mkv"), "test", size=self.real + 100, size_tolerance=0.0005, size_slack=200)
+        r.get(0, 64)
+        self.assertEqual(r.size, self.real)
+
+    def test_a_listed_size_outside_the_slack_is_still_refused(self):
+        r = RangeReader(self.srv.url("tiny.mkv"), "test", size=self.real + 100, size_tolerance=0.0005, size_slack=50)
+        with self.assertRaises(ReadFailed) as e:
+            r.get(0, 64)
+        self.assertEqual(str(e.exception), "size differs")
+
+    def test_without_slack_the_old_tolerance_applies(self):
+        r = RangeReader(self.srv.url("tiny.mkv"), "test", size=self.real + 100, size_tolerance=0.0005)
+        with self.assertRaises(ReadFailed):
+            r.get(0, 64)
+
+
 @unittest.skipUnless(have(os.environ.get("SUBSYNC_ALASS", "alass")), "alass not installed")
 class PipelineTest(unittest.TestCase):
     def setUp(self):
@@ -150,6 +244,39 @@ class PipelineTest(unittest.TestCase):
                                        audio=False)
             self.assertNotIn("alass_error", r)
             self.assertEqual(r["outcome"], "synced")
+
+    def styled_offset(self):
+        """tiny-offset.srt in another author's timing: lines up to 280 ms earlier or later, a fixed pattern."""
+        pattern = (0, 120, -150, 260, -90, 30, -280, 180, 60, -210)
+        lines, out, n = parse(read_text("tiny-offset.srt")), [], 0
+
+        def stamp(x):
+            ms = int(round(x * 1000))
+            return "%02d:%02d:%02d,%03d" % (ms // 3600000, ms // 60000 % 60, ms // 1000 % 60, ms % 1000)
+        for i, l in enumerate(lines):
+            d = pattern[i % len(pattern)] / 1000
+            n += 1
+            out.append("%d\n%s --> %s\n%s\n" % (n, stamp(l["s"] + d), stamp(l["e"] + d), l["text"]))
+        return "\n".join(out)
+
+    def test_a_copy_clearly_better_than_the_original_is_offered_only_with_the_rule_on(self):
+        text = self.styled_offset()
+        kw = dict(alass=os.environ.get("SUBSYNC_ALASS", "alass"), audio=False, snap=False)
+        off = pipeline.sync_subtitle(self.idx, text, "srt", "eng", **kw)
+        on = pipeline.sync_subtitle(self.idx, text, "srt", "eng", better={}, **kw)
+        self.assertFalse(off["gate_synced"]["pass"])
+        self.assertEqual(off["outcome"], "keep_original")
+        self.assertNotIn("better", off)
+        self.assertEqual(on["outcome"], "synced", on.get("better"))
+        self.assertEqual(on["reason"], "clearly better than the original")
+        self.assertEqual(len(parse(on["body"])), len(parse(text)))
+
+    def test_an_offset_subtitle_is_synced_against_an_mp4s_text_track(self):
+        idx = open_index(RangeReader(self.srv.url("tiny.mp4"), "test"))
+        r = pipeline.sync_subtitle(idx, read_text("tiny-offset.srt"), "srt", "eng",
+                                   alass=os.environ.get("SUBSYNC_ALASS", "alass"), audio=False)
+        self.assertEqual((r["route"], r["outcome"]), ("cues", "synced"))
+        self.assertEqual(r["reference"]["codec"], "mp4/tx3g")
 
     def test_offset_subtitle_is_synced_and_passes(self):
         r = self.run_one("tiny-offset.srt")

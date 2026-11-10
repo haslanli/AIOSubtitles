@@ -84,8 +84,8 @@ class MkvIndex:
         self.first64 = b""
 
     # -- reads -------------------------------------------------------------------------------------------------
-    def read_head(self):
-        head = self.r.get(0, HEAD_BYTES)
+    def read_head(self, head=None):
+        head = self.r.get(0, HEAD_BYTES) if head is None else head
         self.size = self.r.size
         if self.size is None:
             raise NotMatroska("no size")

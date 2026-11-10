@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from subsync import choose, imageref, langs, pipeline, refine, subs  # noqa: E402
 from subsync.mkv import oshash  # noqa: E402
-from subsync.relgate import relgate  # noqa: E402
+from subsync.relgate import clearly_better, relgate  # noqa: E402
 from subsync.vad import FRAME, timestamps  # noqa: E402
 
 ASS = """[Script Info]
@@ -282,6 +282,101 @@ class EarlyRejectTest(unittest.TestCase):
         self.assertFalse(r["pass"])
         self.assertLess(r["span"], 0.6)
         self.assertTrue(relgate(ref, ref, min_span=pipeline.MIN_SPAN)["pass"])
+
+
+def styled(cues, seed, sigma=0.17, shift=0.0):
+    """Another author's timing of the same lines: each start a little earlier or later (not clipped)."""
+    r = random.Random(seed)
+    return sorted(s + shift + r.gauss(0, sigma) for s, _ in cues)
+
+
+class ClearlyBetterTest(unittest.TestCase):
+    """The second way to pass: a third-party subtitle seconds off, re-timed to within its author's own timing style."""
+
+    def setUp(self):
+        self.cues = rhythm(900, 7)
+        self.ref = [s for s, _ in self.cues]
+        self.dur = [d for _, d in self.cues]
+
+    def gates(self, original, copy):
+        return (relgate(self.ref, original, self.dur, min_span=0.7), relgate(self.ref, copy, self.dur, min_span=0.7))
+
+    def test_a_shifted_subtitle_in_another_timing_style_passes_only_the_second_way(self):
+        before, after = self.gates(styled(self.cues, 1, shift=9.0), styled(self.cues, 1))
+        self.assertFalse(before["pass"])
+        self.assertFalse(after["pass"])                       # about 76 % within 200 ms: under the main bar
+        self.assertLess(after["within200"], 0.90)
+        self.assertEqual(after["weak_tenths_500"], [])
+        ok, why = clearly_better(before, after, min_span=0.7)
+        self.assertTrue(ok, why)
+
+    def test_a_copy_no_closer_than_the_original_fails(self):
+        before, after = self.gates(styled(self.cues, 2, sigma=0.20), styled(self.cues, 3, sigma=0.17))
+        self.assertEqual(clearly_better(before, after, min_span=0.7), (False, "not clearly better than the original"))
+
+    def test_a_loose_copy_fails_on_its_median(self):
+        before, after = self.gates(styled(self.cues, 4, shift=9.0), styled(self.cues, 4, sigma=0.45))
+        self.assertEqual(clearly_better(before, after, min_span=0.7)[1], "median error too large")
+
+    def test_a_part_that_does_not_fit_fails(self):
+        cut = styled(self.cues, 5)
+        third = len(cut) // 3
+        cut = sorted(cut[:2 * third] + [c + 3.0 for c in cut[2 * third:]])   # the last third belongs to another cut
+        before, after = self.gates(styled(self.cues, 5, shift=9.0), cut)
+        self.assertTrue(after["weak_tenths_500"])
+        self.assertFalse(clearly_better(before, after, min_span=0.7)[0])
+
+    def test_half_a_film_fails_on_span(self):
+        half = styled(self.cues[:len(self.cues) // 2], 6)
+        before, after = self.gates(styled(self.cues, 6, shift=9.0), half)
+        self.assertEqual(clearly_better(before, after, min_span=0.7)[1], "covers too little of the runtime")
+
+    def test_another_films_subtitle_is_never_accepted_at_any_shift(self):
+        # 40 unrelated subtitles, each tried at its best constant shift (what a re-timer would find)
+        accepted = 0
+        for seed in range(40):
+            other = [s for s, _ in rhythm(900, 1000 + seed)]
+            before = relgate(self.ref, other, self.dur, min_span=0.7)
+            best = None
+            for step in range(-40, 41):
+                g = relgate(self.ref, [c + step * 0.05 for c in other], self.dur, min_span=0.7)
+                if "median_ms" in g and (best is None or g["median_ms"] < best["median_ms"]):
+                    best = g
+            accepted += clearly_better(before, best, min_span=0.7)[0]
+        self.assertEqual(accepted, 0)
+
+    def test_the_numbers_are_settings(self):
+        before, after = self.gates(styled(self.cues, 1, shift=9.0), styled(self.cues, 1))
+        self.assertFalse(clearly_better(before, after, {"median_ms": 50}, min_span=0.7)[0])
+        self.assertFalse(clearly_better(before, after, {"paired": 1.01}, min_span=0.7)[0])
+        self.assertFalse(clearly_better(before, after, {"ratio": 0.01}, min_span=0.7)[0])
+
+
+class AudioWindowReuseTest(unittest.TestCase):
+    def test_a_second_subtitle_of_the_same_file_reuses_the_windows_already_read(self):
+        from subsync.audiofit import AudioFit
+
+        class Index:
+            def __init__(self):
+                self.reads = 0
+
+            def window_pcm(self, start, length, sr, ffmpeg):
+                self.reads += 1
+                return b"\0\0" * int(sr * length)
+
+        class Silent:
+            def speech(self, audio):
+                return []
+        lines = [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}]
+        idx, other = Index(), Index()
+        a, b = AudioFit(idx, lines, vad=Silent()), AudioFit(idx, lines, vad=Silent())
+        a.read_window(10.0, 30.0)
+        a.read_window(10.0, 30.0)
+        b.read_window(10.0, 30.0)
+        b.read_window(50.0, 30.0)
+        self.assertEqual(idx.reads, 2)
+        AudioFit(other, lines, vad=Silent()).read_window(10.0, 30.0)   # another file reads its own
+        self.assertEqual(other.reads, 1)
 
 
 def pgs_events(lines, merge_every=0):

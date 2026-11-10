@@ -23,6 +23,8 @@ TENTHS = 10
 TENTH_MIN_LINES = 5
 TENTH_MIN_SHARE = 0.5
 SPLIT_INTO_S = 0.2
+LOOSE_MS = 500
+BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5}
 
 
 def _pair(ref, cand):
@@ -98,12 +100,21 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
             good = sum(i in err and abs(err[i]) <= WITHIN_MS / 1000 for i in idx)
             if good / len(idx) < TENTH_MIN_SHARE * recall:
                 weak.append(b)
+    loose = []   # the same tenths at 500 ms, for the "clearly better" rule
+    for b in range(TENTHS):
+        a, z = lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS
+        idx = [i for i, c in enumerate(cand) if (a <= c < z or (b == TENTHS - 1 and c == hi)) and i not in split]
+        if len(idx) >= TENTH_MIN_LINES:
+            good = sum(i in err and abs(err[i]) <= LOOSE_MS / 1000 for i in idx)
+            if good / len(idx) < TENTH_MIN_SHARE * recall:
+                loose.append(b)
     span = span_share(ref, cand)
     ok = paired >= MIN_PAIRED * recall and med <= MEDIAN_MS and share >= within_share and not weak
     if min_span is not None and span < min_span:
         ok = False
     out = {"n": n, "paired": round(paired, 3), "median_ms": round(med, 1), "within200": round(share, 3),
            "signed_median_ms": round(statistics.median(err.values()) * 1000, 1), "weak_tenths": weak,
+           "weak_tenths_500": loose,
            "span": round(span, 3), "pass": ok}
     if dur is not None:
         out["splits"] = len(split)
@@ -112,3 +123,29 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
     if recall < 1.0:
         out["ref_recall"] = round(recall, 3)
     return out
+
+
+def clearly_better(original, copy, rule=None, min_span=None, ref_recall=1.0):
+    """The second way to pass: the re-timed copy is much closer to the release's track than the original.
+    A subtitle made by someone else never matches the release's own line starts exactly (its lines begin a little
+    earlier or later), so after a perfect shift only about 80 % of them are within 200 ms and the main bar (90 %) is out
+    of reach, while the original may be seconds off. The copy passes here when at least `paired` of its lines pair,
+    its median error is at most `median_ms` and at most `ratio` of the original's, no tenth of the runtime has fewer
+    than half of its lines within 500 ms, and it covers `min_span` of the release's span.
+    original, copy: relgate() results. Returns (passes, why)."""
+    rule = dict(BETTER, **(rule or {}))
+    recall = max(0.0, min(1.0, ref_recall))
+    if not copy or "median_ms" not in copy:
+        return False, "nothing paired"
+    if copy["paired"] < rule["paired"] * recall:
+        return False, "too few lines pair"
+    if copy["median_ms"] > rule["median_ms"]:
+        return False, "median error too large"
+    if copy.get("weak_tenths_500"):
+        return False, "a part of the runtime does not fit"
+    if min_span is not None and copy.get("span", 0.0) < min_span:
+        return False, "covers too little of the runtime"
+    before = (original or {}).get("median_ms")
+    if before is not None and copy["median_ms"] > rule["ratio"] * before:
+        return False, "not clearly better than the original"
+    return True, "clearly better than the original"

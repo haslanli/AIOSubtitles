@@ -268,6 +268,115 @@ class AddonTest(unittest.TestCase):
         self.assertEqual(self.store.bytes_today("read"), 0)
 
 
+class PickTest(AddonTest):
+    """Audio route on: it starts only when the viewer downloads subsync's own entry for the file."""
+    # AddonTest's own cases describe the audio route being off; they are not repeated here
+    test_manifest = test_known_file_lists_labelled_entries_and_serves_them = None
+    test_unknown_file_queues_a_job_and_lists_pending_entries = test_no_hints_no_job = None
+    test_unlisted_file_is_not_looked_for_again = test_no_subtitle_to_sync_reads_nothing = None
+    URL = "/subtitles/movie/tt9/filename=b.mp4&videoSize=5.json"
+    ALIAS = "name:b.mp4|5"
+
+    def setUp(self):
+        super().setUp()
+        self.s.audio_route = True
+        self.assertTrue(self.s.audio_on_pick)
+        self.job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
+        self.assertEqual(self.job.alias, self.ALIAS)
+
+    def waiting(self):
+        self.worker.pickable[self.ALIAS] = self.job
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+
+    def get(self, path):
+        try:
+            r = urllib.request.build_opener(NoRedirect).open(self.base + path, timeout=10)
+            return r.status, r.read(), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), dict(e.headers)
+
+    def test_a_plain_request_may_not_use_the_audio_route(self):
+        self.assertFalse(self.worker.audio_allowed(self.job))
+        picked = Job("movie", "tt9", self.job.hints)
+        picked.audio = True
+        self.assertTrue(self.worker.audio_allowed(picked))
+        self.s.audio_on_pick = False                       # the old behaviour stays available
+        self.assertTrue(self.worker.audio_allowed(self.job))
+        self.s.audio_route = False
+        self.assertFalse(self.worker.audio_allowed(picked))
+
+    def test_a_file_waiting_for_a_pick_lists_one_subsync_entry_per_language_that_has_a_subtitle(self):
+        self.waiting()
+        self.store.file_read("f" * 16 + "-5", 5, "f" * 16, False, {})   # read a moment ago: no new job
+        self.store.alias(self.ALIAS, "f" * 16 + "-5")
+        subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
+        self.assertEqual([(s["lang"], s["label"], s["variantOf"]) for s in subs], [("eng", "English (Subsync)", "os-9")])
+        self.assertTrue(subs[0]["url"].endswith("/pick/" + token(self.ALIAS) + "/eng.srt"))
+        self.s.audio_route = False
+        self.assertEqual(json.loads(http(self.base + self.URL)[1])["subtitles"], [])
+
+    def test_the_first_answer_is_not_held_back(self):
+        self.s.pending_entry = False
+        self.s.pending_wait = 3.0
+        t0 = time.time()
+        subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
+        self.assertLess(time.time() - t0, 1.0)             # AIOStreams orders addons by who answers first
+        self.assertEqual([s["label"] for s in subs], ["English (Subsync)"])
+
+    def test_the_first_answer_already_has_the_entry_for_every_language_and_the_download_waits_for_the_list(self):
+        self.s.pick_wait = 3.0
+        self.s.languages = type(self.s.languages)(["eng", "rus"])
+        subs = json.loads(http(self.base + self.URL)[1])["subtitles"]     # unknown file: a job is queued
+        self.assertEqual([(s["lang"], s["label"], s["variantOf"]) for s in subs],
+                         [("eng", "English (Subsync)", "original"), ("rus", "Russian (Subsync)", "original")])
+        self.assertEqual([j.audio for j in self.worker.jobs.values()], [False])
+
+        def list_arrives():
+            time.sleep(0.4)
+            with self.worker.cv:
+                self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+                self.worker.cv.notify_all()
+        threading.Thread(target=list_arrives, daemon=True).start()
+        t0 = time.time()
+        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, headers["Location"]), (302, "http://opensubs/x.srt"))
+        self.assertLess(time.time() - t0, 2.5)
+        self.assertEqual(self.get("/pick/" + token(self.ALIAS) + "/rus.srt")[0], 404)   # no Russian subtitle exists
+        self.assertIn(self.ALIAS, self.worker.picked_early)                              # remembered for the index read
+
+    def test_downloading_the_entry_serves_the_original_and_starts_the_audio_route_once(self):
+        self.waiting()
+        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, headers["Location"]), (302, "http://opensubs/x.srt"))
+        self.assertNotIn(self.ALIAS, self.worker.pickable)
+        self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
+        self.get("/pick/" + token(self.ALIAS) + "/eng.srt")           # again: nothing more is queued
+        self.assertEqual(len(self.worker.jobs), 1)
+
+    def test_a_download_before_the_file_is_known_to_need_audio_is_remembered(self):
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
+        self.assertEqual(self.get("/pick/" + token(self.ALIAS) + "/eng.srt")[0], 302)
+        self.assertEqual(len(self.worker.jobs), 0)
+        self.assertIn(self.ALIAS, self.worker.picked_early)
+        self.worker._needs_pick(self.job)                              # the index read ends: no subtitle track
+        self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
+        self.assertNotIn(self.ALIAS, self.worker.pickable)
+
+    def test_a_synced_copy_is_served_from_the_same_link(self):
+        self.waiting()
+        key = self.store.put("f" * 16 + "-5", SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
+        self.store.alias(self.ALIAS, "f" * 16 + "-5")
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual(code, 200)
+        self.assertIn(b"00:00:01,000", body)
+        self.assertIsNotNone(key)
+
+    def test_an_unknown_link_starts_nothing(self):
+        self.assertEqual(self.get("/pick/" + token("name:other.mp4|9") + "/eng.srt")[0], 404)
+        self.assertEqual(self.get("/pick/!!!/eng.srt")[0], 404)
+        self.assertEqual(len(self.worker.jobs), 0)
+
+
 class AddonKeyTest(unittest.TestCase):
     """The routes that start work or show status answer only under the private key; files and /health don't
     need it; a base path a reverse proxy forwards as is is removed first."""

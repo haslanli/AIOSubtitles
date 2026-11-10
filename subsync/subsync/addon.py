@@ -44,6 +44,7 @@ MANIFEST = {
 SUB_ROUTE = re.compile(r"^/subtitles/(movie|series)/([^/]+?)(?:/([^/]*))?\.json$")
 FILE_ROUTE = re.compile(r"^/file/(v\d+_[0-9a-f]{16}-\d+_[0-9a-f]{16})\.(srt|ass)$")
 PENDING_ROUTE = re.compile(r"^/pending/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
+PICK_ROUTE = re.compile(r"^/pick/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 REPROCESS_S = 24 * 3600
 
 
@@ -96,6 +97,40 @@ class App:
         return file_key, out
 
     def subtitles(self, type_, video_id, extras):
+        """The entries for a file, plus (audio route on, started by a pick) one "<Language> (Subsync)" entry per language
+        for a file that has no subtitle track of its own, or whose tracks are not known yet: downloading it is the
+        viewer's pick. It serves the synced copy when there is one, else the original."""
+        t0 = time.time()
+        out = self._with_pick_entries(type_, video_id, extras)
+        log.info("answer %s/%s: %d entries (%d to pick) in %d ms", type_, video_id, len(out),
+                 sum(str(e.get("id", "")).startswith("subsync-pick-") for e in out), (time.time() - t0) * 1000)
+        return out
+
+    def _with_pick_entries(self, type_, video_id, extras):
+        out = self._subtitles(type_, video_id, extras)
+        if not (self.s.audio_route and self.s.audio_on_pick):
+            return out
+        job = Job(type_, video_id, parse_extras(extras))
+        if not (job.hints.get("filename") or job.hints.get("videoHash")):
+            return out
+        if not (self.worker.waits_for_pick(job.alias) or self.worker.busy_with(job.alias)):
+            return out
+        # This answer is kept by AIOStreams (5 minutes) and by players (AIOMetadata: an hour), so the entry must be in
+        # the first one, when the file's subtitle list is usually not known yet: then every language gets it, and the
+        # download waits for the list. Once the list is known, only languages that have a subtitle get it.
+        originals = self.worker.originals.get(job.alias)
+        have = {e["lang"] for e in out}
+        tok = token(job.alias)
+        for lang in self.s.languages:
+            original = (originals or {}).get(lang)
+            if lang in have or (originals is not None and not original):
+                continue
+            out.append({"id": f"subsync-pick-{lang}", "url": f"{self.s.public_base}/pick/{tok}/{lang}.srt",
+                        "lang": lang, "label": f"{lang_name(lang)} (Subsync)",
+                        "variantOf": original["id"] if original else "original"})
+        return out
+
+    def _subtitles(self, type_, video_id, extras):
         hints = parse_extras(extras)
         job = Job(type_, video_id, hints)
         aliases = [job.alias]
@@ -111,6 +146,11 @@ class App:
         if not recent and not self.worker.recently_unlisted(job.alias):
             job = self.worker.submit(job) or job
         if not self.worker.busy_with(job.alias):
+            return out
+        if self.s.audio_route and self.s.audio_on_pick and not self.s.pending_entry:
+            # AIOStreams lists subtitle addons in the order they answer, and players keep the first few per language
+            # (AIOMetadata: 3): an answer held back for the job arrives after the other addons' and its entries are cut.
+            # The "(Subsync)" entry needs no result, so answer at once.
             return out
         # A file being synced now: the Cues route takes a fraction of a second, so wait up to SUBSYNC_PENDING_WAIT_MS
         # for it and list what is ready (players and AIOStreams may keep this answer a while).
@@ -202,6 +242,25 @@ class Handler(BaseHTTPRequestHandler):
                 if original:
                     return self._send(302, b"", "text/plain", {"Location": original, "Cache-Control": "no-store"})
                 return self._send(503, b"", "text/plain", {"Retry-After": "1", "Cache-Control": "no-store"})
+            m = PICK_ROUTE.match(path)
+            if m:
+                try:
+                    alias = alias_of(m.group(1))
+                except ValueError:
+                    return self._send(404, b"")
+                app.worker.pick(alias)
+                file_key = app.store.resolve(alias)
+                good = app.store.last_good(file_key, m.group(2)) if file_key else None
+                body = app.store.body(good["key"]) if good else None
+                if body is not None:
+                    app.store.served(good["key"])
+                    return self._send(200, to_srt(parse(body)) if is_ass(body) else body,
+                                      "application/x-subrip; charset=utf-8", {"Cache-Control": "no-store"})
+                originals = app.worker.wait_for_originals(alias, app.s.pick_wait) or {}
+                original = (originals.get(m.group(2)) or {}).get("url")
+                if original:
+                    return self._send(302, b"", "text/plain", {"Location": original, "Cache-Control": "no-store"})
+                return self._send(404, b"")
             return self._send(404, b"")
         except (BrokenPipeError, ConnectionResetError):
             return None

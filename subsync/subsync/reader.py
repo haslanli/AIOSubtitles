@@ -29,10 +29,13 @@ class Stopped(Exception):
 
 
 class RangeReader:
-    def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=0.0, opener=None):
+    def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=0.0, opener=None, size_slack=0):
         self.url, self.label, self.guard, self.timeout = url, label, guard, timeout
         self.size = size              # expected served size (from the listing), checked on the first reply
         self.tolerance = size_tolerance
+        # bytes the listed size may be off by rounding: addons list sizes to 0.01 GiB, so up to 0.005 GiB (5.4 MB),
+        # which is 0.35 % of a 1.4 GiB episode and far over a relative tolerance
+        self.slack = size_slack
         self.bytes = 0
         self.requests = 0
         self.open = opener or urllib.request.urlopen
@@ -89,7 +92,7 @@ class RangeReader:
         if total is not None:
             if self.size is None:
                 self.size = total
-            elif abs(total - self.size) > self.tolerance * self.size:
+            elif abs(total - self.size) > max(self.tolerance * self.size, self.slack):
                 raise ReadFailed("size differs")
             else:
                 self.size = total

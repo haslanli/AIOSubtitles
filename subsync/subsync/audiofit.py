@@ -24,13 +24,18 @@ class AudioFit:
         self.lines = [l for l in lines if l["kind"] == "dialogue"]
         self.vad = vad or SileroVad()
         self.K, self.W, self.V, self.lead, self.ffmpeg = k, w, v, lead, ffmpeg
-        self.cache = {}
+        # decoded windows are kept on the file's index, so the next subtitle (and the other language) of the same file
+        # reuses them: the first K windows sit at fixed places, and one fit read 4 GB of a 5.5 GB file
+        try:
+            self.cache = index.__dict__.setdefault("audio_windows", {})
+        except AttributeError:
+            self.cache = {}
         self.windows_read = 0
         self.audio_s = 0.0
 
     # -- audio -------------------------------------------------------------------------------------------------
     def read_window(self, start, length):
-        key = (round(start, 2), round(length, 2))
+        key = (round(start, 2), round(length, 2), round(self.lead, 3))
         if key not in self.cache:
             self.cache[key] = self._read_window(start, length)
         return self.cache[key]

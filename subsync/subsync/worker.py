@@ -14,7 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import choose, pipeline
 from .langs import lang3
-from .mkv import MkvIndex, NotMatroska
+from .mkv import MkvIndex, NotMatroska  # noqa: F401
+from .mp4 import open_index
 from .reader import RangeReader, ReadFailed, Refused, Stopped
 from .sources import fetch_subtitle
 from .store import result_key
@@ -76,6 +77,7 @@ class Job:
         self.type, self.video_id = type_, video_id
         self.hints = {k: v for k, v in (hints or {}).items() if v}
         self.not_before = 0.0
+        self.audio = False        # may this job use the audio route (set when the viewer picked subsync's entry)
 
     @property
     def alias(self):
@@ -116,6 +118,8 @@ class Worker(threading.Thread):
         self.done = {}            # alias -> {lang: result key | None}; for pending entries
         self.originals = {}       # alias -> {lang: {"url", "id"} of the original subtitle}, the pending entries' fallback
         self.unlisted = {}        # alias -> when a file was last not found in the listing
+        self.pickable = {}        # alias -> job of a file that needs the audio route and waits for the viewer's pick
+        self.picked_early = {}    # alias -> when its entry was downloaded before the file was known to need audio
         self.stop_flag = False
         self.last_expire = 0.0
         self.vad_lock = threading.Lock()
@@ -126,13 +130,51 @@ class Worker(threading.Thread):
         with self.cv:
             old = self.jobs.get(job.alias)
             if old is not None:
+                old.audio = old.audio or job.audio
                 return old
-            if self.current is not None and self.current.alias == job.alias:
+            if self.current is not None and self.current.alias == job.alias and (self.current.audio or not job.audio):
                 return self.current
             self.jobs[job.alias] = job
             self.queue.append(job)
             self.cv.notify_all()
             return job
+
+    def audio_allowed(self, job):
+        return self.s.audio_route and (job.audio or not self.s.audio_on_pick)
+
+    def waits_for_pick(self, alias):
+        with self.cv:
+            return alias in self.pickable
+
+    def pick(self, alias):
+        """The viewer downloaded subsync's entry for this file: start its audio route, once. Returns True if started."""
+        with self.cv:
+            waiting = self.pickable.pop(alias, None)
+            if waiting is None:
+                if self.s.audio_route and self.s.audio_on_pick:
+                    self.picked_early[alias] = time.time()
+                    while len(self.picked_early) > 2000:
+                        self.picked_early.pop(next(iter(self.picked_early)))
+                return False
+        job = Job(waiting.type, waiting.video_id, waiting.hints)
+        job.audio = True
+        log.info("picked %s: the audio route starts", job.label)
+        self.submit(job)
+        return True
+
+    def _needs_pick(self, job):
+        """A file with no usable subtitle track of its own, read index-only: it waits for the viewer's pick."""
+        with self.cv:
+            early = self.picked_early.pop(job.alias, None)
+            if early is None or time.time() - early > 3600:
+                self.pickable[job.alias] = job
+                while len(self.pickable) > 2000:
+                    self.pickable.pop(next(iter(self.pickable)))
+                return
+        again = Job(job.type, job.video_id, job.hints)   # its entry was already downloaded while this read ran
+        again.audio = True
+        log.info("picked %s: the audio route starts", job.label)
+        self.submit(again)
 
     def recently_unlisted(self, alias, within=UNLISTED_S):
         """A file the listing didn't have (Usenet, uncached) is not looked for again for an hour."""
@@ -171,6 +213,19 @@ class Worker(threading.Thread):
                     break
                 left = end - time.time()
                 if left <= 0:
+                    break
+                self.cv.wait(left)
+            return self.originals.get(alias)
+
+    def wait_for_originals(self, alias, timeout):
+        """The file's original subtitles per language once its subtitle list is known, waiting up to timeout while its
+        job is queued or running (None if still unknown)."""
+        end = time.time() + timeout
+        with self.cv:
+            while alias not in self.originals:
+                busy = alias in self.jobs or (self.current is not None and self.current.alias == alias)
+                left = end - time.time()
+                if not busy or left <= 0:
                     break
                 self.cv.wait(left)
             return self.originals.get(alias)
@@ -262,14 +317,15 @@ class Worker(threading.Thread):
             log.info("no subtitles to sync %s", job.label)   # nothing is read
             return
         guard = JobGuard(self.safety, self.store, self.s.daily_budget,
-                         self.s.file_cap if self.s.audio_route else self.s.index_cap)
+                         self.s.file_cap if self.audio_allowed(job) else self.s.index_cap)
         reader = RangeReader(rewrite(url, self.s.url_rewrite), job.label, guard, timeout=self.s.read_timeout,
-                             size=hints.get("videoSize"), size_tolerance=0.0005)
+                             size=hints.get("videoSize"), size_tolerance=0.0005,
+                             size_slack=self.s.size_slack)
         try:
-            index = MkvIndex(reader).read_head().read_cues()
+            index = open_index(reader)
             oshash = index.read_hash()
         except NotMatroska as e:
-            log.info("not a Matroska file %s (%s): original kept", job.label, e)
+            log.info("file not readable as Matroska or MP4 %s (%s): original kept", job.label, e)
             self.store.file_failed(job.alias)
             return
         except Refused:
@@ -317,7 +373,7 @@ class Worker(threading.Thread):
         route off, a file with no text or image subtitle track stores nothing, so turning the route on later syncs it."""
         tries = choose.order(candidates, filename, oshash) if self.s.rank_by_release else list(enumerate(candidates))
         tries = tries[: self.s.max_tries]
-        audio = self.s.audio_route
+        audio = self.audio_allowed(job)
         def entry(rank, cand, raw):
             sha = hashlib.sha256(raw).hexdigest()
             return {"rank": rank, "cand": cand, "raw": raw, "sha": sha, "got": self.store.fresh(result_key(file_key, sha))}
@@ -387,11 +443,16 @@ class Worker(threading.Thread):
                                            audio_lead=self.s.audio_lead, vad=self.vad() if audio else None,
                                            ffmpeg=self.s.ffmpeg, snap=self.s.snap, snap_within=self.s.snap_within,
                                            splits=self.s.gate_splits, image_ref=self.s.image_ref,
-                                           audio_lock=self.audio_lock)
+                                           audio_lock=self.audio_lock, better=self.s.better)
                 if not audio and r.get("route") is None and r["outcome"] == "keep_original" \
                         and "audio route is off" in (r.get("reason") or ""):
-                    log.info("sync %s %s rank %d: no text or image subtitle track, and the audio route is off", job.label,
-                             lang, e["rank"])
+                    if self.s.audio_route:
+                        log.info("sync %s %s rank %d: no text or image subtitle track; the audio route waits for the "
+                                 "viewer to pick the Subsync entry", job.label, lang, e["rank"])
+                        self._needs_pick(job)
+                    else:
+                        log.info("sync %s %s rank %d: no text or image subtitle track, and the audio route is off",
+                                 job.label, lang, e["rank"])
                     break   # nothing stored
                 if r["outcome"] == "in_sync":
                     r = in_sync_result(e, r)
