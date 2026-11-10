@@ -1,5 +1,9 @@
 # AIOSubtitles: synced subtitles for AIOStreams
 
+> **Status, November 2026: under repair.** In a test on a stock AIOStreams + AIOMetadata setup, this version installed
+> and uninstalled correctly but did not produce a synced subtitle for any of the files played, and its closing test read
+> failed. Fixes are in progress. Until this notice is removed, expect the originals only.
+
 **subsync** makes copies of your subtitles timed to the exact file you are playing, and lists them next to the originals
 as **"English (synced)"** (or any language you pick). It checks every copy against the file's own subtitle track, so a
 copy that doesn't fit is never offered: you get the originals as before.
