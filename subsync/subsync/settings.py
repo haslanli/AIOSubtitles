@@ -1,6 +1,9 @@
 """Settings from the environment. The source config's address and the addon key are secrets and are never logged."""
+import hashlib
+import json
 import os
 
+from . import ALGO_VERSION, RULE_REVISION
 from .worker import lang_list
 
 
@@ -23,15 +26,39 @@ class Settings:
         self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB", "50")) * 1e9)
         self.backoff_s = int(g("SUBSYNC_403_BACKOFF_S", "900"))
         self.retry_stopped_s = int(g("SUBSYNC_RETRY_STOPPED_S", "600"))
-        # the audio route: a file with no text or image subtitle track is timed from its speech, reading 0.3-3 GB of
-        # audio windows (at most SUBSYNC_FILE_CAP_GB); off, every file is read index only (SUBSYNC_INDEX_CAP_MB)
+        # the audio route: a file with no text or image subtitle track is timed from its speech, reading audio windows
+        # within SUBSYNC_AUDIO_BUDGET_GB per file (shorter windows on high-bitrate files, none when they would be
+        # too short); off, every file is read index only (SUBSYNC_INDEX_CAP_MB)
         self.audio_route = _on(g("SUBSYNC_AUDIO_ROUTE", "off"))
+        self.audio_budget = int(float(g("SUBSYNC_AUDIO_BUDGET_GB", "1")) * 1e9) or None
         self.file_cap = int(float(g("SUBSYNC_FILE_CAP_GB", "6")) * 1e9) or None
         # the audio route starts only when the viewer downloads subsync's own entry for the file (proof of play): a plain
         # subtitle request also comes for files nobody played (AIOMetadata asks for the first listed version). Off: the
         # audio route starts on any request, as before.
         self.audio_on_pick = _on(g("SUBSYNC_AUDIO_ON_PICK", "on"))
-        self.pick_wait = float(g("SUBSYNC_PICK_WAIT_MS", "4000")) / 1000   # a pick waits this long for the subtitle list
+        # a pick (the "(Subsync)" entry's download) waits this long for the file's result, like AutoSync; AIOMetadata
+        # gives up on a subtitle after 15 s
+        self.pick_wait = float(g("SUBSYNC_PICK_WAIT_MS", "14000")) / 1000
+        # Every candidate judged, the best fit offered first (up to SUBSYNC_MAIN_ALTERNATIVES for the first language)
+        self.best_fit = _on(g("SUBSYNC_BEST_FIT", "on"))
+        self.alternatives = max(1, int(g("SUBSYNC_MAIN_ALTERNATIVES", "3")))
+        self.skip_ai = _on(g("SUBSYNC_SKIP_AI", "on"))                     # AI-made, machine-translated, forced: never tried
+        self.prefer_plain = _on(g("SUBSYNC_PREFER_PLAIN_TRACK", "on"))     # the plain track as the reference, not the SDH one
+        # Sources subsync searches itself (extra.py); SubDL and Wyzie only with the user's key
+        self.extra_sources = [x.strip().lower() for x in g("SUBSYNC_EXTRA_SOURCES", "tsdb,gestdown,osv3plus").split(",")
+                              if x.strip()]
+        self.subdl_key = g("SUBSYNC_SUBDL_KEY", "").strip()
+        self.wyzie_key = g("SUBSYNC_WYZIE_KEY", "").strip()
+        self.source_timeout = float(g("SUBSYNC_SOURCE_TIMEOUT_S", "10"))
+        self.tsdb_url = g("SUBSYNC_TSDB_URL", "https://api.thesubtitledb.org").rstrip("/")
+        self.cinemeta_url = g("SUBSYNC_CINEMETA_URL", "https://v3-cinemeta.strem.io").rstrip("/")
+        self.gestdown_url = g("SUBSYNC_GESTDOWN_URL", "https://api.gestdown.info").rstrip("/")
+        self.subdl_url = g("SUBSYNC_SUBDL_URL", "https://api.subdl.com").rstrip("/")
+        self.subdl_download_url = g("SUBSYNC_SUBDL_DOWNLOAD_URL", "https://dl.subdl.com").rstrip("/")
+        self.wyzie_url = g("SUBSYNC_WYZIE_URL", "https://sub.wyzie.io").rstrip("/")
+        self.osv3plus_url = g("SUBSYNC_OSV3PLUS_URL", "https://opensubtitles.stremio.homes").rstrip("/")
+        # best fit: originals checked (no alass) for up to this many candidates; alass only on SUBSYNC_MAX_TRIES of them
+        self.gate_tries = max(1, int(g("SUBSYNC_GATE_TRIES", "20")))
         self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB", "16")) * 1024 * 1024)
         self.audio_lead = float(g("SUBSYNC_AUDIO_LEAD_MS", "190")) / 1000
         # a "(synced)" entry for a file still being worked on, served as the original until the copy is ready
@@ -47,12 +74,27 @@ class Settings:
         # the second way to pass: a re-timed copy clearly closer to the release's track than the original
         self.better = {"paired": float(g("SUBSYNC_BETTER_PAIRED", "0.85")),
                        "median_ms": float(g("SUBSYNC_BETTER_MEDIAN_MS", "200")),
-                       "ratio": float(g("SUBSYNC_BETTER_RATIO", "0.5"))} if _on(g("SUBSYNC_BETTER", "on")) else None
+                       "ratio": float(g("SUBSYNC_BETTER_RATIO", "0.5")),
+                       # against another language's track: the alignment's median error (relgate.aligned)
+                       "cross_median_ms": float(g("SUBSYNC_BETTER_CROSS_MEDIAN_MS", "300")),
+                       "cross_paired": float(g("SUBSYNC_BETTER_CROSS_PAIRED", "0.75"))} \
+            if _on(g("SUBSYNC_BETTER", "on")) else None
+        # with no track in a subtitle's language, a track in one of these languages is its reference first
+        self.fallback_reference = tuple(lang_list(g("SUBSYNC_FALLBACK_REFERENCE", "eng")))
+        # the audio route's second way to pass: a re-timed copy clearly closer to the speech than the original
+        self.audio_better = {"matched": int(g("SUBSYNC_AUDIO_BETTER_MATCHED", "25")),
+                             "miss": float(g("SUBSYNC_AUDIO_BETTER_MISS", "0.30")),
+                             "median_ms": float(g("SUBSYNC_AUDIO_BETTER_MEDIAN_MS", "150")),
+                             "within": float(g("SUBSYNC_AUDIO_BETTER_WITHIN", "0.55")),
+                             "min_shift_s": float(g("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S", "1.0"))} \
+            if _on(g("SUBSYNC_AUDIO_BETTER", "on")) else None
         self.gate_splits = _on(g("SUBSYNC_GATE_SPLITS", "on"))               # a line that splits a release line counts as paired
         self.rank_by_release = _on(g("SUBSYNC_RANK_BY_RELEASE", "on"))       # subtitles made for this release tried first
+        self.anchored_guess = _on(g("SUBSYNC_ANCHORED_GUESS", "on"))         # a waiting file's other languages: shifted onto the main guess
         self.list_in_sync = _on(g("SUBSYNC_LIST_IN_SYNC", "on"))             # an in-sync original further down listed as is
         self.image_ref = _on(g("SUBSYNC_IMAGE_REF", "on"))                   # image subtitles' cue times as the reference
         self.fast_path = _on(g("SUBSYNC_FAST_PATH", "on"))                   # originals checked first, in-sync listed at once
+        self.shift_path = _on(g("SUBSYNC_SHIFT_PATH", "on"))                 # then one steady offset (shift.py), alass after
         self.parallel_languages = _on(g("SUBSYNC_PARALLEL_LANGUAGES", "on")) # languages at the same time
         # a private path key for the routes that start work or show status (manifest, subtitles, status), so a published
         # port or a reverse-proxy route can't be used to make subsync read files; the synced files and /health stay
@@ -62,6 +104,16 @@ class Settings:
         self.base_path = "/" + base if base else ""
         # rows of these addons (comma-separated names) are never read (empty by default)
         self.skip_addons = tuple(n.strip() for n in g("SUBSYNC_SKIP_ADDONS", "").split(",") if n.strip())
+
+    @property
+    def rule_id(self):
+        """The pass rule a verdict was judged by: the code version and every setting that changes a verdict. A stored
+        "keep original" judged under another one is judged again."""
+        rule = {"algo": ALGO_VERSION, "revision": RULE_REVISION, "better": self.better, "audio_better": self.audio_better, "snap": self.snap,
+                "snap_within": self.snap_within, "gate_splits": self.gate_splits, "image_ref": self.image_ref,
+                "audio_lead": self.audio_lead, "audio_budget": self.audio_budget, "prefer_plain": self.prefer_plain,
+                "shift_path": self.shift_path, "fallback_reference": self.fallback_reference}
+        return hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdigest()[:12]
 
     def missing(self):
         """What must be set before the service can work."""

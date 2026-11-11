@@ -10,6 +10,14 @@ Splits (on when the reference's durations are given): a candidate line that star
 the reference line its well-paired predecessor (within 200 ms) starts, at least 200 ms in, is the second half of a
 line the release keeps whole. It has no start of its own to measure: it counts as paired and is left out of the
 errors and the coverage tenths. On 60 synthetic cases this added no false accept.
+
+Missing scene: a subtitle for another cut lacks the scenes this release adds, and every line it does have can pair, so
+nothing on the candidate's side shows it. A stretch of at least MISSING_LINES consecutive reference lines over at least
+MISSING_S seconds, inside the candidate's span, with no candidate line starting within 1 s of any of them, fails the gate.
+On Kingdom of Heaven's director's cut (1,099 sure starts of its PGS track): every director's-cut subtitle, English and
+Russian, leaves at most 11 lines (159 s) uncovered; theatrical ones 36 to 111 lines (378 s and more); a theatrical
+subtitle aligned perfectly (the director's-cut subtitle without the lines a theatrical one lacks) 68 lines over 477 s.
+An opening or closing song the candidate leaves out (about 90 s) stays under MISSING_S.
 """
 import bisect
 import statistics
@@ -24,7 +32,9 @@ TENTH_MIN_LINES = 5
 TENTH_MIN_SHARE = 0.5
 SPLIT_INTO_S = 0.2
 LOOSE_MS = 500
-BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5}
+MISSING_LINES = 20
+MISSING_S = 150.0
+BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5, "cross_median_ms": 300.0, "cross_paired": 0.75}
 
 
 def _pair(ref, cand):
@@ -43,6 +53,23 @@ def _pair(ref, cand):
         used_r.add(k)
         m[i] = k
     return m
+
+
+def missing_scene(ref, cand, window=WINDOW):
+    """The longest stretch of consecutive reference starts inside the candidate's span that no candidate start is within
+    `window` of: (lines, seconds). Both sorted."""
+    if not cand:
+        return 0, 0.0
+    best, run = (0, 0.0), []
+    for r in ref[bisect.bisect_left(ref, cand[0]):bisect.bisect_right(ref, cand[-1])]:
+        k = bisect.bisect_left(cand, r - window)
+        if k < len(cand) and cand[k] <= r + window:
+            run = []
+            continue
+        run.append(r)
+        if len(run) > best[0]:
+            best = (len(run), run[-1] - run[0])
+    return best
 
 
 def span_share(ref, cand):
@@ -100,7 +127,8 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
             good = sum(i in err and abs(err[i]) <= WITHIN_MS / 1000 for i in idx)
             if good / len(idx) < TENTH_MIN_SHARE * recall:
                 weak.append(b)
-    loose = []   # the same tenths at 500 ms, for the "clearly better" rule
+    loose = []      # the same tenths at 500 ms, for the "clearly better" rule
+    unpaired = []   # tenths where under half of the lines pair at all (within 1 s), for relgate.aligned
     for b in range(TENTHS):
         a, z = lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS
         idx = [i for i, c in enumerate(cand) if (a <= c < z or (b == TENTHS - 1 and c == hi)) and i not in split]
@@ -108,14 +136,18 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
             good = sum(i in err and abs(err[i]) <= LOOSE_MS / 1000 for i in idx)
             if good / len(idx) < TENTH_MIN_SHARE * recall:
                 loose.append(b)
+            if sum(i in err for i in idx) / len(idx) < TENTH_MIN_SHARE * recall:
+                unpaired.append(b)
     span = span_share(ref, cand)
-    ok = paired >= MIN_PAIRED * recall and med <= MEDIAN_MS and share >= within_share and not weak
+    missing_lines, missing_s = missing_scene(ref, cand)
+    cut = missing_lines >= MISSING_LINES and missing_s >= MISSING_S
+    ok = paired >= MIN_PAIRED * recall and med <= MEDIAN_MS and share >= within_share and not weak and not cut
     if min_span is not None and span < min_span:
         ok = False
     out = {"n": n, "paired": round(paired, 3), "median_ms": round(med, 1), "within200": round(share, 3),
            "signed_median_ms": round(statistics.median(err.values()) * 1000, 1), "weak_tenths": weak,
-           "weak_tenths_500": loose,
-           "span": round(span, 3), "pass": ok}
+           "weak_tenths_500": loose, "unpaired_tenths": unpaired, "missing_lines": missing_lines, "missing_s": round(missing_s, 1),
+           "missing_scene": cut, "span": round(span, 3), "pass": ok}
     if dur is not None:
         out["splits"] = len(split)
     if within_share != WITHIN_SHARE:
@@ -143,9 +175,36 @@ def clearly_better(original, copy, rule=None, min_span=None, ref_recall=1.0):
         return False, "median error too large"
     if copy.get("weak_tenths_500"):
         return False, "a part of the runtime does not fit"
+    if copy.get("missing_scene"):
+        return False, "a scene of the release is missing (another cut)"
     if min_span is not None and copy.get("span", 0.0) < min_span:
         return False, "covers too little of the runtime"
     before = (original or {}).get("median_ms")
     if before is not None and copy["median_ms"] > rule["ratio"] * before:
         return False, "not clearly better than the original"
     return True, "clearly better than the original"
+
+
+def aligned(g, rule=None, min_span=None, ref_recall=1.0):
+    """Against another language's track (the subtitle's own language has none): two translations never start their lines
+    at the same moments (Breaking Bad S01E02's Russian against the English track: 245-267 ms median after alass), so no
+    per-line bar can hold, but the alignment itself can be judged: at least `cross_paired` of the lines pair (translations
+    of a third language split lines differently: Amelie's Russian against the English track, 81-82 %), a median error of
+    at most `cross_median_ms`, at least half of the lines pairing in every tenth of the runtime (a loosely timed
+    translation can have a tenth under half within 500 ms: Breaking Bad's Russian), no missing scene, and the span.
+    Returns (ok, why)."""
+    rule = dict(BETTER, **(rule or {}))
+    recall = max(0.0, min(1.0, ref_recall))
+    if not g or "median_ms" not in g:
+        return False, "nothing paired"
+    if g["paired"] < rule["cross_paired"] * recall:
+        return False, "too few lines pair"
+    if g["median_ms"] > rule["cross_median_ms"]:
+        return False, "median error too large"
+    if g.get("unpaired_tenths"):
+        return False, "a part of the runtime does not fit"
+    if g.get("missing_scene"):
+        return False, "a scene of the release is missing (another cut)"
+    if min_span is not None and g.get("span", 0.0) < min_span:
+        return False, "covers too little of the runtime"
+    return True, "aligned to another language's track"

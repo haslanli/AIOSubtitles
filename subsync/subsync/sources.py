@@ -8,6 +8,9 @@ SUBSYNC_SKIP_ADDONS (empty by default).
 """
 import json
 import logging
+import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -64,6 +67,31 @@ def row_hints(stream):
             "videoHash": bh.get("videoHash")}
 
 
+MIN_VIDEO_BYTES = 10_000_000   # a listed size under this is no video file's: a listing error (Torrentio: 1,679 bytes)
+
+
+def plausible_size(size):
+    return isinstance(size, (int, float)) and not isinstance(size, bool) and size >= MIN_VIDEO_BYTES
+
+
+def same_hash(a, b):
+    """Two OpenSubtitles hashes (hex) name the same file: compared by value, so a hash sent without its leading zeros
+    or in capitals still matches."""
+    try:
+        return int(str(a), 16) == int(str(b), 16)
+    except ValueError:   # not hex: not a hash
+        return False
+
+
+def expected_size(hints, row):
+    """The size the reader checks the played file's first reply against: the request's when a video file can have it,
+    else the listing's, else none (the first reply gives it)."""
+    for size in (hints.get("videoSize"), row_hints(row).get("videoSize")):
+        if plausible_size(size):
+            return size
+    return None
+
+
 def unreadable(stream, skip_addons=()):
     """Why subsync may not read a listed row (None = it may): it reads cached debrid files only. `skip_addons`: addon
     names (lower case) whose rows are never read."""
@@ -85,8 +113,9 @@ def unreadable(stream, skip_addons=()):
 
 
 class Aios:
-    def __init__(self, manifest_url, own_bases=(), timeout=120, skip_addons=()):
+    def __init__(self, manifest_url, own_bases=(), timeout=120, skip_addons=(), size_slack=0):
         self.base = manifest_base(manifest_url)
+        self.size_slack = size_slack     # bytes a listed size may be off by rounding (SUBSYNC_SIZE_SLACK_MB)
         self.skip = tuple(a.strip().lower() for a in skip_addons if a and a.strip())
         self.own = tuple(b.rstrip("/") for b in own_bases if b)
         self.timeout = timeout
@@ -98,13 +127,31 @@ class Aios:
         return _get_json(url, self.timeout).get("streams") or []
 
     def find_row(self, type_, video_id, hints):
-        """The listed cached debrid row for a file the viewer opened (matched by file name and size)."""
+        """The listed cached debrid row of the file a viewer opened (checklist 18a): a row whose listing gives the file's
+        hash; else a row of the file's name with the request's size, or the closest listed size within the rounding
+        slack (Stremio sends the real size, listings round it to 0.01 GiB); else the one row of that name whose listed
+        size no video file can have (Torrentio listed 1,679 bytes for a 3 GB file: the first reply gives the real size;
+        of several such rows the first).
+        Another size of the same name is another file. The file's own hash, read with its index, settles it."""
         name, size = hints.get("filename"), hints.get("videoSize")
-        for s in self.streams(type_, video_id):
-            h = row_hints(s)
-            if unreadable(s, self.skip) is None and name and h.get("filename") == name and (not size or h.get("videoSize") == size):
-                return s
-        return None
+        video_hash = str(hints.get("videoHash") or "").lower()
+        rows = [s for s in self.streams(type_, video_id) if unreadable(s, self.skip) is None]
+        if video_hash:
+            listed = next((s for s in rows if str(row_hints(s).get("videoHash") or "").lower() == video_hash), None)
+            if listed is not None:
+                return listed
+        named = [s for s in rows if name and row_hints(s).get("filename") == name]
+        if not size:
+            return named[0] if named else None
+
+        def off(s):
+            return abs(row_hints(s).get("videoSize") - size)
+        close = sorted((s for s in named if plausible_size(row_hints(s).get("videoSize")) and off(s) <= self.size_slack),
+                       key=off)
+        if close:
+            return close[0]
+        unsized = [s for s in named if not plausible_size(row_hints(s).get("videoSize"))]
+        return unsized[0] if unsized else None
 
     def subtitles(self, type_, video_id, hints):
         """The subtitle list in the order a viewer would see it, without subsync's own entries."""
@@ -141,13 +188,70 @@ def release_info(sub):
             "ai": str(sub.get("ai_translated", "")).lower() == "true"}
 
 
+# OpenSubtitles (the V3+ addon and Stremio's own, whose files come from *.strem.io) answers HTTP 429 when many
+# downloads arrive at once: at most PACE at a time per such host, and a 429 is tried again after a short wait.
+PACED_HOSTS = ("opensubtitles", "strem.io")
+PACE = 2
+RETRIES_429 = 2
+_gates, _gates_lock = {}, threading.Lock()
+
+
+def _gate(host):
+    if not any(p in host for p in PACED_HOSTS):
+        return None
+    with _gates_lock:
+        return _gates.setdefault(host, threading.BoundedSemaphore(PACE))
+
+
+def _wait_429(err, attempt):
+    try:
+        wait = float(err.headers.get("Retry-After") or 0)
+    except (TypeError, ValueError):
+        wait = 0.0
+    return min(max(wait, 1.5 * attempt), 5.0)
+
+
 def fetch_subtitle(url, timeout=30):
-    req = urllib.request.Request(url, headers={"user-agent": USER_AGENT, "Connection": "close"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        raw = r.read(MAX_SUBTITLE_BYTES + 1)
+    """A subtitle's bytes. Gzip is unpacked; a zip (SubDL) gives its subtitle file, the one named for the episode
+    when the link ends in #SxxEyy."""
+    url, _, frag = url.partition("#")
+    gate = _gate((urllib.parse.urlsplit(url).hostname or "").lower())
+    for attempt in range(1, RETRIES_429 + 2):
+        req = urllib.request.Request(url, headers={"user-agent": USER_AGENT, "Connection": "close"})
+        try:
+            if gate:
+                gate.acquire()
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    raw = r.read(MAX_SUBTITLE_BYTES + 1)
+            finally:
+                if gate:
+                    gate.release()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt > RETRIES_429:
+                raise
+            time.sleep(_wait_429(e, attempt))
     if len(raw) > MAX_SUBTITLE_BYTES:
         raise ValueError("subtitle too large")
     if raw[:2] == b"\x1f\x8b":
         import gzip
         raw = gzip.decompress(raw)
+    if raw[:4] == b"PK\x03\x04":
+        raw = _from_zip(raw, frag)
     return raw
+
+
+def _from_zip(raw, frag):
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        names = [i for i in z.infolist() if i.filename.lower().endswith((".srt", ".ass", ".ssa", ".vtt"))
+                 and i.file_size <= MAX_SUBTITLE_BYTES]
+        if not names:
+            raise ValueError("no subtitle in the zip")
+        if frag:
+            want = frag.lower()
+            hits = [i for i in names if want in i.filename.lower().replace(" ", "").replace(".", "")]
+            names = hits or names
+        return z.read(names[0])

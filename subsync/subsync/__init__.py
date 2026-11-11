@@ -6,3 +6,7 @@ as the reference, else short audio windows (Silero VAD); alass sub-to-sub, then 
 line; the gate against the release track. Below the bar the original is kept.
 """
 ALGO_VERSION = "v3"   # part of every stored result's key: a new version recomputes old results
+RULE_REVISION = 6     # part of the rule stamp: a verdict judged by an older revision is judged again (2:; 3:;
+                      # 4: typesetting tracks are no reference, the magnet on in-sync originals; 5: the shift path,
+                      # translations aligned to another language's track, re-centred copies; 6: stacked subtitles
+                      # ranked after plain ones)

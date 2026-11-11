@@ -99,6 +99,12 @@ class Aios:
                             'Give the address you open AIOStreams\' configure page at.')
         return data
 
+    def config_exists(self, uuid):
+        """Whether a config with this ID exists, asked without its password (stock AIOStreams answers HEAD
+        /api/v1/user?uuid= with 200 or 400). None when this AIOStreams can't tell (another answer)."""
+        status, _ = self.call('HEAD', '/api/v1/user?' + urllib.parse.urlencode({'uuid': uuid}), timeout=15, raw=True)
+        return {200: True, 400: False}.get(status)
+
     def get_config(self, uuid, password):
         status, body = self.call('GET', '/api/v1/user', auth=(uuid, password))
         if status != 200 or not (body or {}).get('success'):

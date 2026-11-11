@@ -100,7 +100,7 @@ class Asker:
             stop('Stopped by you.', 'Nothing after this point was changed. Run ./setup again any time.')
 
     def text(self, key, question, *, help=None, current=None, default=None, secret=False, optional=False, check=None,
-             shown=None):
+             shown=None, skip_hint='Enter skips'):
         """One question. `check(value)` returns (good, message, value): a message is shown either way."""
         preset = self.answers.pop(key, None)
         while True:
@@ -115,7 +115,7 @@ class Asker:
             elif default:
                 hint.append(f'Enter = {default}')
             elif optional:
-                hint.append('Enter skips')
+                hint.append(skip_hint)
             if hint:
                 say(paint('2', '  ' + '; '.join(hint)))
             if preset is not None:

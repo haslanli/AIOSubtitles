@@ -176,11 +176,13 @@ class Wizard:
         step(3, 'The config your apps use')
         wrap('subsync is added to one AIOStreams config: the one your Stremio or Jellyfin app is set up with. '
              'Its ID and password are the ones you use on AIOStreams\' configure page.')
-        self.uuid = self.ask.text('AIOS_CONFIG_ID', 'Config ID (or paste your Stremio link)', current=self.keys.get('VIEWER_UUID'),
-                                  shown=short(self.keys.get('VIEWER_UUID', '')),
-                                  help='A long ID like 1a2b3c4d-…; it is part of your Stremio link: …/stremio/<ID>/…',
-                                  check=lambda v: (True, '', plan.config_id_from(v)) if plan.config_id_from(v)
-                                  else (False, 'That has no config ID in it (it looks like 1a2b3c4d-1234-…).', v))
+        def check_id(value):
+            uuid = plan.config_id_from(value)
+            if not uuid:
+                return False, 'That has no config ID in it (it looks like 1a2b3c4d-1234-…).', value
+            if self.aios.config_exists(uuid) is False:
+                return False, 'There is no config with that ID on this AIOStreams. Check it, or paste your Stremio link.', value
+            return True, '', uuid
 
         def check_password(value):
             try:
@@ -188,9 +190,24 @@ class Wizard:
             except AiosError as e:
                 return False, e.message, value
             return True, 'Config found', value
-        self.password = self.ask.text('AIOS_CONFIG_PASSWORD', 'Its password', secret=True,
-                                      help='The password you chose when you saved the config. It is used now and not stored.',
-                                      check=check_password)
+        current = self.keys.get('VIEWER_UUID')
+        while True:
+            self.uuid = self.ask.text('AIOS_CONFIG_ID', 'Config ID (or paste your Stremio link)', current=current,
+                                      shown=short(current or ''),
+                                      help='A long ID like 1a2b3c4d-…; it is part of your Stremio link: …/stremio/<ID>/…\n'
+                                           'Where to find it: AIOStreams\' configure page shows it when you save or load\n'
+                                           'your config (the "UUID"). Or copy your Stremio install link and paste it here\n'
+                                           'whole: setup takes the ID out of it. Its password is asked next.',
+                                      check=check_id)
+            self.password = self.ask.text('AIOS_CONFIG_PASSWORD', 'Its password', secret=True, optional=True,
+                                          help='The password you chose when you saved the config. It is used now and not stored.',
+                                          skip_hint='Enter with nothing typed: give a different config ID',
+                                          check=check_password)
+            if self.password:
+                break
+            if self.ask.yes:
+                stop('"Its password" needs an answer.', 'Add AIOS_CONFIG_PASSWORD=... to the answers file.')
+            current = self.uuid
         settings = self.status['settings']
         debrids = plan.debrid_services(self.viewer)
         names = [plan.DEBRID_SERVICES[d] for d in debrids]
@@ -237,8 +254,10 @@ class Wizard:
                                         self.prev.get('audio', False),
                                         help='Most files have their own subtitle track, and subsync times yours against it\n'
                                              'from a ~1 MB read. A file without one can only be timed from its speech:\n'
-                                             'that reads 0.3 to 3 GB of the file while you watch. Off: those files keep\n'
-                                             'their original subtitles.')
+                                             'after you pick its "<Language> (Subsync)" entry, subsync reads short audio\n'
+                                             'parts of it, at most 1 GB per file; files with a bitrate too high for that\n'
+                                             'keep their original subtitles. Off: those files keep their original subtitles.')
+        self.source_keys()
         self.add_os = False
         if not plan.subtitle_sources(self.viewer):
             self.add_os = self.ask.yesno('ADD_OPENSUBTITLES', 'Your config has no subtitle source, so there is nothing to '
@@ -246,6 +265,19 @@ class Wizard:
                                          help='Stremio\'s official OpenSubtitles addon. It lists every language; subsync\n'
                                               'only syncs the languages you picked above.')
         self.public_address()
+
+    def source_keys(self):
+        """Optional free keys for subtitle sources subsync searches itself (TheSubtitleDB, OpenSubtitles V3+ and
+        Gestdown need none)."""
+        say()
+        wrap('subsync also searches TheSubtitleDB, OpenSubtitles V3+ and Gestdown itself. Two more sources need a free key; '
+             'each finds subtitles the others do not have. Both are optional.')
+        for key, label, where in (('SUBDL_KEY', 'SubDL API key', 'https://subdl.com/panel/api'),
+                                  ('WYZIE_KEY', 'Wyzie Subs API key', 'https://wyzie.io')):
+            value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key),
+                                  help=f'Free at {where}. Stored only in state/secrets.env on this machine.')
+            if value:
+                self.keys[key] = value
 
     def public_address(self):
         say()
@@ -424,7 +456,7 @@ class Wizard:
             'sync_manifest': f'{sync_base}/manifest.json', 'public_base': self.s['public_base'],
             'addon_key': self.keys['ADDON_KEY'], 'languages': self.languages,
             'rewrite': plan.rewrite_rule(self.s['aios_public'], self.s['aios_internal']) if self.s['mode'] != 'remote' else '',
-            'audio': self.audio})
+            'audio': self.audio, 'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
         write_kv(STATE / 'subsync.env', env, 'subsync settings, written by ./setup. Private: holds subsync\'s keys.')
@@ -442,7 +474,8 @@ class Wizard:
         before = dockerenv.run(layers)[1].strip()
         built = bool(before)
         say()
-        say('  Building subsync' + (' (already built: a few seconds)' if built else ' (the first time takes about 10 minutes)') + ' ...')
+        say('  Building subsync' + (' (seconds if nothing changed, a few minutes after an update)' if built
+                                    else ' (the first time takes a few minutes)') + ' ...')
         code, out, err = dockerenv.compose(STATE, 'build', timeout=3600)
         if code != 0:
             tail = '\n'.join((err or out).strip().splitlines()[-15:])
@@ -465,7 +498,17 @@ class Wizard:
             time.sleep(3)
         return False
 
+    def public_health(self):
+        try:
+            status, body = Aios(self.s['public_base'], timeout=10).call('GET', '/health', raw=True)
+        except AiosError:
+            return False
+        return status == 200 and body.strip() == b'ok'
+
     def proxy_rule(self):
+        if self.public_health():   # a re-run: the rule is in place already
+            ok(f"Your web server already reaches subsync at {self.s['public_base']}")
+            return
         target_host = f'127.0.0.1:{self.s["port"]}'
         snippets = plan.proxy_snippets(self.s['public_base'], target_host)
         say()
@@ -484,15 +527,11 @@ class Wizard:
         step(7, 'Checking that it works')
         good = True
         # a) the address apps use
-        try:
-            status, body = Aios(self.s['public_base'], timeout=10).call('GET', '/health', raw=True)
-        except AiosError:
-            status, body = 0, b''
-        if status == 200 and body.strip() == b'ok':
+        if self.public_health():
             ok(f"Your apps can reach subsync at {self.s['public_base']}")
         else:
             good = False
-            warn(f"{self.s['public_base']}/health doesn't answer from this machine (HTTP {status or 'no answer'}).")
+            warn(f"{self.s['public_base']}/health doesn't answer from this machine.")
             note('If you just added the web server rule, reload the web server; some routers also block a machine')
             note('from reaching its own public address, so check it from your phone too: it should say "ok".')
         # b) AIOStreams asks subsync for subtitles
@@ -532,37 +571,56 @@ class Wizard:
             good = False
             warn('subsync\'s config found no ready debrid file for two well-known films.')
             note('If your apps do show ready files for them, run ./setup --status and send its output with a bug report.')
-        # d) one small read, only if the user says yes
+        # d) one small read, only if the user says yes (Enter answers no)
         if rows:
             say()
-            wrap('Last check: read about 1 MB of one of those files (its start and its index), the same small read '
-                 'subsync makes for every file you watch. Your debrid service opens the file for this, so it may show '
-                 'up in your debrid account\'s list.')
-            if self.ask.yesno('TEST_READ', 'Do the 1 MB test read now?', True):
-                row = rows[0]
-                hints = (row.get('streamData') or {})
-                size = hints.get('size') or (row.get('behaviorHints') or {}).get('videoSize')
-                cmd = ['python', '-m', 'subsync.selftest', '--cap-mb', '4'] + (['--size', str(int(size))] if size else [])
-                code, out, err = dockerenv.exec_in(CONTAINER, cmd, stdin=row['url'] + '\n', timeout=180)
-                result = {}
-                try:
-                    result = json.loads(out.strip().splitlines()[-1])
-                except (ValueError, IndexError):
-                    pass
-                if result.get('ok') and result.get('matroska'):
-                    tracks = result.get('text_tracks') or []
-                    ok(f"Read {result['bytes'] / 1e6:.1f} MB in {result['requests']} requests: the file has "
-                       f"{len(tracks)} text subtitle track{'s' if len(tracks) != 1 else ''}"
-                       + (f" ({', '.join(sorted({t['language'] or '?' for t in tracks}))})" if tracks else '')
-                       + (f" and {result['image_tracks']} image one{'s' if result['image_tracks'] != 1 else ''}" if result.get('image_tracks') else ''))
-                elif result.get('ok'):
-                    ok(f"Read works ({result['bytes'] / 1e6:.1f} MB); {result.get('note')}")
-                else:
-                    good = False
-                    bad(f"The test read failed: {result.get('error') or 'no answer'} {result.get('detail') or ''}".strip())
-                    if result.get('error') == 'refused':
-                        note('The debrid service refused the read (HTTP 403/429). Try again later.')
+            wrap('Last check (optional): read the start and the index of one of those files, the same small read '
+                 'subsync makes for every file you watch (usually under 1 MB). Your debrid service opens the file for '
+                 'this, so it may show up in your debrid account\'s list.')
+            if self.ask.yesno('TEST_READ', 'Do the test read now?', False):
+                good = self.test_read(rows) and good
+            else:
+                note('Skipped the test read.')
         return good
+
+    def test_read(self, rows):
+        """subsync's own index read of the smallest ready file, with subsync's own cap and size slack. Files listed under
+        100 MB are skipped: some addons list a wrong size (1,679 bytes for a 3 GB film), which subsync's size check
+        refuses."""
+        def size_of(row):
+            hints = row.get('streamData') or {}
+            return int(hints.get('size') or (row.get('behaviorHints') or {}).get('videoSize') or 0)
+        plausible = [r for r in rows if size_of(r) >= 100 * 10 ** 6] or rows
+        row = min(plausible, key=lambda r: size_of(r) or float('inf'))
+        size = size_of(row)
+        cmd = ['python', '-m', 'subsync.selftest'] + (['--size', str(size)] if size else [])
+        code, out, err = dockerenv.exec_in(CONTAINER, cmd, stdin=row['url'] + '\n', timeout=180)
+        result = {}
+        try:
+            result = json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            pass
+        used = f"{result.get('bytes', 0) / 1e6:.1f} MB in {result.get('requests', 0)} requests"
+        if result.get('ok') and result.get('container'):
+            tracks = result.get('text_tracks') or []
+            ok(f"Read {used} ({result['container'].upper()}, {size / 1e9:.1f} GB): the file has "
+               f"{len(tracks)} text subtitle track{'s' if len(tracks) != 1 else ''}"
+               + (f" ({', '.join(sorted({t['language'] or '?' for t in tracks}))})" if tracks else '')
+               + (f" and {result['image_tracks']} image one{'s' if result['image_tracks'] != 1 else ''}" if result.get('image_tracks') else ''))
+            return True
+        if result.get('ok'):
+            ok(f"Read works ({used}); {result.get('note')}")
+            return True
+        if result.get('error') == 'cap':   # subsync works; this one file is beyond what it reads
+            ok(f"Read works ({used}); {result.get('detail')}")
+            return True
+        if result.get('error') == 'refused':
+            warn('The test read was refused by the debrid service (HTTP 403 or 429), most likely a limit on your account.')
+            note('subsync itself is installed and waits a while after a refusal. Try ./setup again later.')
+            return False
+        warn("The test read didn't work: " + (result.get('detail') or 'no answer from subsync') + '.')
+        note('subsync is installed. Run ./setup again later, or send the output of ./setup --status with a bug report.')
+        return False
 
     def subsync_status(self):
         return subsync_status()
@@ -575,20 +633,23 @@ class Wizard:
     def summary(self, good):
         cache_off = bool(self.s.get('cache_before'))
         lines = ['subsync is running on this machine and is in your AIOStreams config.', '',
-                 f'• You will see "<Language> (synced)" next to the usual subtitles ({plan.language_names(self.languages)}), '
-                 'timed to the exact file you play. When no copy reaches subsync\'s quality bar, nothing is added '
-                 'and the originals stay.',
+                 f'• You will see "<Language> (Subsync)" next to the usual subtitles ({plan.language_names(self.languages)}) '
+                 'while subsync works on a file, and "<Language> (synced)" once a copy timed to that exact file is ready. '
+                 'When no copy is clearly closer than the original, nothing is added and the originals stay.',
                  '• Stremio: playing a file starts subsync on it (a few seconds); the synced copy shows the next time '
                  'you open that file' + ('.' if cache_off else ' (after up to 5 minutes, AIOStreams\' subtitle cache).'),
                  '• AIOStreams\' own Jellyfin server: the same, shown as "(synced)".',
-                 '• AIOMetadata (stock): it keeps subtitle lists up to an hour, shows a plain language name instead of '
-                 '"(synced)", and can rarely play the subtitle next to the one picked.']
+                 '• AIOMetadata (stock): it shows plain language names ("English (external)"), and it keeps each '
+                 'title\'s subtitle list and text for an hour, also its "no subtitles" answer (see below).']
         box('Done' if good else 'Installed, with warnings (see above)', lines, '1;32' if good else '1;33')
         say()
-        say('  Your apps keep the same links (nothing to change in them):')
-        say(f"    Stremio   {self.s['aios_public']}/stremio/{self.uuid}/{self.viewer_encrypted}/manifest.json")
-        if (self.status['settings'].get('jellyfin') or {}).get('enabled'):
-            say(f"    Jellyfin  {self.s['aios_public']}/jellyfin/{self.uuid}/{self.viewer_encrypted}")
+        say('  Your apps keep the same links: nothing to change in them.')
+        say()
+        wrap('If you use AIOMetadata: restart it once now, so it asks for subtitles again (its container may have '
+             'another name):')
+        say('    docker restart aiometadata')
+        wrap('and to see synced copies within 5 minutes instead of an hour, add this to its environment:')
+        say('    JELLYFIN_SUBTITLE_TTL=300')
         if self.add_os:
             say()
             wrap('Your config had no subtitles before: in Stremio, install the addon once more with the same link, '
@@ -694,7 +755,13 @@ def cmd_uninstall(args):
         note('AIOStreams\' subtitle cache setting for subsync stays; it does nothing without subsync.')
     for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
         (STATE / name).unlink(missing_ok=True)
-    ok('Done. Backups of your config stay in state/backups/.')
+    ok('Done.')
+    say()
+    say('  These stay, in case you set it up again; remove them when you no longer need them:')
+    say(f"    • the subsync image (about 1 GB): docker image rm aiosubtitles/subsync:{s.get('version') or VERSION}")
+    if s.get('public_kind') == 'path':
+        say(f"    • the rule in your web server for {s.get('public_base')}: remove it there and reload the web server")
+    say(f'    • this folder, {REPO}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)')
     return 0
 
 

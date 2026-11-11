@@ -31,6 +31,8 @@ class FakeAios:
                         {'type': 'newznab', 'instanceId': 'nzb', 'enabled': True, 'options': {'name': 'Geek'}}],
             'failover': {'enabled': True}, 'preloadStreams': {'enabled': True}}}}
         self.gated, self.signed_in, self.subsync_up, self.throttle = gated, False, False, 0
+        self.head_check = True      # stock 2.37: HEAD /api/v1/user?uuid= says whether a config exists
+        self.sizes = [1000]         # the ready files the sync config lists
         self.setting = {'*': 300}
         self.log = []
         outer = self
@@ -61,6 +63,16 @@ class FakeAios:
                 n = int(self.headers.get('Content-Length') or 0)
                 return json.loads(self.rfile.read(n) or b'{}')
 
+            def do_HEAD(self):
+                u = urllib.parse.urlsplit(self.path)
+                outer.log.append(('HEAD', u.path, None))
+                code = 404
+                if u.path == '/api/v1/user' and outer.head_check:
+                    code = 200 if urllib.parse.parse_qs(u.query).get('uuid', [''])[0] in outer.users else 400
+                self.send_response(code)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
             def do_GET(self):
                 path = urllib.parse.urlsplit(self.path).path
                 outer.log.append(('GET', path, self.headers.get('User-Agent', '')))
@@ -86,10 +98,13 @@ class FakeAios:
                         return self._json(200, {'subtitles': []})
                     if resource == 'stream':
                         data = self.headers.get('User-Agent', '').startswith('AIO')
-                        row = {'url': f'{PUBLIC}/api/v1/debrid/playback/x/file.mkv', 'behaviorHints': {'videoSize': 1000}}
-                        if data:
-                            row['streamData'] = {'type': 'debrid', 'size': 1000, 'service': {'id': 'torbox', 'cached': True}}
-                        return self._json(200, {'streams': [row]})
+                        rows = []
+                        for size in outer.sizes:
+                            row = {'url': f'{PUBLIC}/api/v1/debrid/playback/x/file-{size}.mkv', 'behaviorHints': {'videoSize': size}}
+                            if data:
+                                row['streamData'] = {'type': 'debrid', 'size': size, 'service': {'id': 'torbox', 'cached': True}}
+                            rows.append(row)
+                        return self._json(200, {'streams': rows})
                 return self._json(404, {'success': False})
 
             def do_PUT(self):
@@ -159,14 +174,17 @@ class Flow(unittest.TestCase):
         self.state = Path(self.tmp.name) / 'state'
         self.aios = FakeAios()
         self.exec_calls = []
+        self.built = False
+        self.selftest = {'ok': True, 'container': 'mkv', 'matroska': True, 'size': 1000,
+                         'text_tracks': [{'language': 'eng', 'lines': 900, 'forced': False}], 'image_tracks': 0,
+                         'bytes': 700000, 'requests': 4}
         container = {'name': 'aiostreams', 'image': 'ghcr.io/viren070/aiostreams:latest', 'port': 3000, 'base_url': PUBLIC,
                      'host_network': False, 'networks': ['aio_default'], 'ips': [], 'published': []}
 
         def exec_in(name, cmd, stdin=None, timeout=120):
             self.exec_calls.append((cmd, stdin))
             if 'subsync.selftest' in cmd:
-                return 0, json.dumps({'ok': True, 'matroska': True, 'size': 1000, 'text_tracks': [{'language': 'eng', 'lines': 900, 'forced': False}],
-                                      'image_tracks': 0, 'bytes': 700000, 'requests': 4}) + '\n', ''
+                return (0 if self.selftest.get('ok') else 1), json.dumps(self.selftest) + '\n', ''
             return 0, json.dumps({'subtitle_requests': getattr(self.aios, 'subtitle_calls', 0)}), ''
 
         self.patches = [
@@ -180,14 +198,16 @@ class Flow(unittest.TestCase):
             mock.patch.object(dockerenv, 'lan_address', lambda: '192.168.1.5'),
             mock.patch.object(dockerenv, 'container_state', lambda n: 'running healthy'),
             mock.patch.object(dockerenv, 'compose', self._compose),
-            mock.patch.object(dockerenv, 'run', lambda *a, **k: (0, '', '')),
+            mock.patch.object(dockerenv, 'run', lambda *a, **k: (0, '["sha256:built"]' if self.built else '', '')),
             mock.patch.object(dockerenv, 'exec_in', exec_in),
-            mock.patch.object(wizard.Aios, 'call', self._call_public_health(wizard.Aios.call)),
+            mock.patch.object(wizard.Aios, 'call', self._call_public_health(wizard.Aios.call, self.aios)),
         ]
         for p in self.patches:
             p.start()
 
     def _compose(self, state, *args, **kw):
+        if 'build' in args:
+            self.built = True
         if 'up' in args:
             self.aios.subsync_up = True
         if 'down' in args:
@@ -195,12 +215,27 @@ class Flow(unittest.TestCase):
         return 0, '', ''
 
     @staticmethod
-    def _call_public_health(real):
+    def _call_public_health(real, aios):
         def call(self, method, path, *a, **k):
-            if self.base.startswith(PUBLIC) and path == '/health':
-                return 200, b'ok'
+            if self.base.startswith(PUBLIC) and path == '/health':   # the user's web server, once subsync runs
+                return (200, b'ok') if aios.subsync_up else (502, b'')
             return real(self, method, path, *a, **k)
         return call
+
+    def run_interactive(self, inputs, *extra, enters=12):
+        """A run where the user types the answers, then presses Enter at most `enters` times (accepting defaults);
+        after that the input ends (EOFError), so a question asked over and over stops the run instead of looping."""
+        answers = iter(list(inputs) + [''] * enters)
+
+        def typed(prompt=''):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise EOFError from None
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch('builtins.input', typed):
+            code = wizard.main(list(extra))
+        return code, out.getvalue()
 
     def tearDown(self):
         for p in self.patches:
@@ -218,6 +253,8 @@ class Flow(unittest.TestCase):
 
     ANSWERS = {'AIOS_CONFIG_ID': f'{PUBLIC}/stremio/{UUID}/ENC/manifest.json', 'AIOS_CONFIG_PASSWORD': PASSWORD,
                'LANGUAGES': 'English, Russian', 'TEST_READ': 'yes'}
+    LINK = f'{PUBLIC}/stremio/{UUID}/ENC/manifest.json'
+
 
     def test_install_rerun_uninstall(self):
         code, out = self.run_setup(self.ANSWERS)
@@ -247,7 +284,7 @@ class Flow(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(json.loads(backups[0].read_text())['config']['presets'][0]['type'], 'zilean')
         selftest = [c for c in self.exec_calls if 'subsync.selftest' in c[0]]
-        self.assertEqual(selftest[0][1], f'{PUBLIC}/api/v1/debrid/playback/x/file.mkv\n')    # the link goes in on stdin
+        self.assertEqual(selftest[0][1], f'{PUBLIC}/api/v1/debrid/playback/x/file-1000.mkv\n')    # the link goes in on stdin
         self.assertIn('--size', selftest[0][0])
         listing_agents = {ua for m, p, ua in self.aios.log if m == 'GET' and '/stream/' in str(p)}
         self.assertTrue(all(ua.startswith('AIO') for ua in listing_agents))
@@ -269,6 +306,104 @@ class Flow(unittest.TestCase):
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])   # as before
         self.assertNotIn(sync_id, self.aios.users)
         self.assertFalse((self.state / 'secrets.env').exists())
+
+    def test_an_unknown_config_id_is_caught_before_the_password(self):
+        # test 13: a well-formed but unknown ID used to ask for the password forever
+        code, out = self.run_interactive(['00000000-0000-4000-8000-000000000000', self.LINK, PASSWORD])
+        self.assertEqual(code, 0, out)
+        self.assertIn('There is no config with that ID on this AIOStreams', out)
+        self.assertEqual(out.count('Its password'), 1)
+
+    def test_without_the_head_check_the_id_is_taken_as_given(self):
+        self.aios.head_check = False                                   # an AIOStreams without it: no false "unknown"
+        code, out = self.run_interactive([self.LINK, PASSWORD])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('There is no config with that ID', out)
+
+    def test_an_empty_password_goes_back_to_the_config_id(self):
+        code, out = self.run_interactive([self.LINK, 'wrong-password', '', self.LINK, PASSWORD])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count('Config ID (or paste your Stremio link)'), 2)
+        self.assertNotIn('wrong-password', out)
+
+    def test_the_first_question_has_more_help(self):
+        code, out = self.run_interactive(['?', self.LINK, PASSWORD])
+        self.assertEqual(code, 0, out)
+        self.assertIn('Where to find it', out)
+
+    def test_the_test_read_defaults_to_no(self):
+        answers = dict(self.ANSWERS)
+        del answers['TEST_READ']
+        code, out = self.run_setup(answers)
+        self.assertEqual(code, 0, out)
+        self.assertEqual([c for c in self.exec_calls if 'subsync.selftest' in c[0]], [])   #
+        self.assertIn('Do the test read now? [y/n]', out)
+
+    def test_the_test_read_takes_the_smallest_ready_file_with_subsync_s_own_cap(self):
+        self.aios.sizes = [102_682_361_361, 1_511_641_761]             # a 102.7 GB remux was listed first
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
+        cmd, stdin = next(c for c in self.exec_calls if 'subsync.selftest' in c[0])
+        self.assertEqual(stdin, f'{PUBLIC}/api/v1/debrid/playback/x/file-1511641761.mkv\n')
+        self.assertNotIn('--cap-mb', cmd)                              # subsync's own index cap (16 MB)
+
+    def test_the_test_read_skips_files_listed_with_an_impossible_size(self):
+        # Oracle, 2026-11-10: Torrentio listed 1679 and 229376 bytes for 3 GB files, and the size check refused them
+        self.aios.sizes = [1679, 229_376, 102_682_361_361, 1_511_641_761]
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
+        cmd, stdin = next(c for c in self.exec_calls if 'subsync.selftest' in c[0])
+        self.assertEqual(stdin, f'{PUBLIC}/api/v1/debrid/playback/x/file-1511641761.mkv\n')
+
+    def test_an_index_over_subsync_s_cap_is_a_note_not_a_failure(self):
+        self.selftest = {'ok': False, 'error': 'cap', 'bytes': 262160, 'requests': 2,
+                         'detail': 'its index is larger than subsync reads (16 MB): subsync keeps the original subtitles for this file'}
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('The test read failed', out)
+        self.assertIn('its index is larger than subsync reads', out)
+
+    def test_closing_text(self):
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn(f'/stremio/{UUID}/ENC-', out)                 # no install links with the encrypted password
+        self.assertIn('JELLYFIN_SUBTITLE_TTL', out)                    # AIOMetadata users are told
+        self.assertIn('docker restart', out)
+        self.assertIn('a few minutes', out)                            # the build took 3, not 10
+
+    def test_the_web_server_rule_is_shown_only_while_it_is_needed(self):
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertIn('Your web server needs one rule', out)
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('already built: a few seconds', out)          # an update rebuilds: minutes, not seconds
+        self.assertNotIn('Your web server needs one rule', out)
+        self.assertIn('already reaches subsync', out)
+
+    def test_uninstall_says_what_stays(self):
+        self.run_setup(self.ANSWERS)
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
+        self.assertEqual(code, 0, out)
+        self.assertIn('docker image rm aiosubtitles/subsync:', out)
+        self.assertIn('state/backups', out)
+        self.assertIn('web server', out)
+
+    def test_optional_subtitle_source_keys_reach_subsync_and_are_never_shown(self):
+        # SubDL and Wyzie are searched by subsync itself when the user gives a free key
+        code, out = self.run_setup(dict(self.ANSWERS, SUBDL_KEY='subdl-secret-key', WYZIE_KEY='wyzie-secret-key'))
+        self.assertEqual(code, 0, out)
+        env = wizard.read_kv(self.state / 'subsync.env')
+        self.assertEqual((env['SUBSYNC_SUBDL_KEY'], env['SUBSYNC_WYZIE_KEY']), ('subdl-secret-key', 'wyzie-secret-key'))
+        self.assertNotIn('subdl-secret-key', out)
+        self.assertNotIn('wyzie-secret-key', out)
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps them
+        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_SUBDL_KEY'], 'subdl-secret-key')
+
+    def test_without_keys_nothing_is_written(self):
+        self.run_setup(self.ANSWERS)
+        env = wizard.read_kv(self.state / 'subsync.env')
+        self.assertNotIn('SUBSYNC_SUBDL_KEY', env)
+        self.assertNotIn('SUBSYNC_WYZIE_KEY', env)
 
     def test_short_rate_limit_is_waited_out(self):
         self.aios.throttle = 2

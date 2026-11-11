@@ -20,13 +20,15 @@ def main():
         sys.exit(2)
     store = Store(s.data, s.cap_bytes)
     safety = Safety(backoff_s=s.backoff_s)
-    aios = Aios(s.source_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons)
+    aios = Aios(s.source_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack)
 
     def vad_factory():
         from .vad import SileroVad
         return SileroVad()
 
-    worker = Worker(s, store, aios, safety, vad_factory=vad_factory)
+    from .extra import ExtraSources
+    extra = ExtraSources(s) if (s.extra_sources or s.subdl_key or s.wyzie_key) else None
+    worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra)
     worker.start()
     server = serve(App(s, store, worker, safety), s.port)
     def stop(*_):

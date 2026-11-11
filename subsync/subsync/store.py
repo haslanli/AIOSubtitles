@@ -2,10 +2,14 @@
 
 results    one row per (file, subtitle): key subsync:v1:<oshash>-<size>:<sha256(subtitle)[:16]>
 last_good  per (file, language): the synced result a viewer is offered; a new or better-ranked subtitle replaces it
-           only when it passes; an original that passes as it is clears it (nothing to offer)
+           only when it passes; an original that passes as it is clears it (nothing to offer). With best fit
+           the worker sets it from its ranking instead (set_offers).
+offers     per (file, language): the offered results, best fit first (last_good is the first)
 files      per file: served size, hash, whether it has a usable text track, read failures and back-off
 aliases    file hints (AIOS videoHash, or file name + size) -> file key, so a listing finds a file read earlier
 budget     bytes received per UTC day
+pickable   files that wait for the viewer's pick before the audio route may start (kept across a restart)
+originals  per file hint: the original subtitle per language (the pick entries' fallback, kept across a restart)
 
 Lifetimes: synced/in_sync rows live 180 days after last served; keep_original is retried after 30 days
 (or when ALGO_VERSION changes, which changes the key); read_failed backs off 1 h / 6 h / 24 h, then stops.
@@ -23,6 +27,7 @@ DAY = 86400
 KEEP_SERVED_S = 180 * DAY
 RETRY_KEEP_ORIGINAL_S = 30 * DAY
 READ_FAILED_BACKOFF_S = (3600, 6 * 3600, 24 * 3600)
+KEEP_PICKABLE_S = 7 * DAY
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -39,6 +44,11 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS aliases (alias TEXT PRIMARY KEY, file_key TEXT NOT NULL, updated REAL);
 CREATE TABLE IF NOT EXISTS budget (day TEXT NOT NULL, kind TEXT NOT NULL, bytes INTEGER NOT NULL,
   PRIMARY KEY (day, kind));
+CREATE TABLE IF NOT EXISTS pickable (alias TEXT PRIMARY KEY, type TEXT NOT NULL, video_id TEXT NOT NULL,
+  hints TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS originals (alias TEXT PRIMARY KEY, langs TEXT NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS offers (file_key TEXT NOT NULL, lang TEXT NOT NULL, pos INTEGER NOT NULL, key TEXT NOT NULL,
+  updated REAL NOT NULL, PRIMARY KEY (file_key, lang, pos));
 """
 
 
@@ -98,7 +108,8 @@ class Store:
         return None
 
     def put(self, file_key, sub_sha, lang, rank, outcome, reason=None, route=None, detail=None, fmt=None, body=None,
-            candidate_id=None):
+            candidate_id=None, offer=True):
+        """offer=False (best fit): the result is stored but what is offered is left to set_offers."""
         key = result_key(file_key, sub_sha)
         now = self.clock()
         body_bytes = 0
@@ -117,11 +128,11 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (key, file_key, sub_sha, lang, rank, outcome, reason, route,
                              json.dumps(detail or {}), fmt, body_bytes, candidate_id, now, now, retry))
-            if outcome == "synced":
+            if outcome == "synced" and offer:
                 lg = self.last_good(file_key, lang)
                 if lg is None or rank is None or lg["rank"] is None or rank <= lg["rank"]:
                     self.db.execute("INSERT OR REPLACE INTO last_good VALUES (?,?,?,?,?)", (file_key, lang, key, rank, now))
-            elif outcome == "in_sync" and rank == 0:
+            elif outcome == "in_sync" and rank == 0 and offer:
                 # the subtitle a viewer sees first is fine as it is: no synced copy to offer
                 self.db.execute("DELETE FROM last_good WHERE file_key=? AND lang=?", (file_key, lang))
         self.enforce_cap()
@@ -133,13 +144,32 @@ class Store:
                                   (file_key, lang)).fetchone()
         return {"key": row[0], "rank": row[1], "updated": row[2]} if row else None
 
-    def offers(self, file_key, langs):
-        """The synced results to list for a file, one per language that has one."""
+    def set_offers(self, file_key, lang, keys):
+        """Best fit: what is offered for a file and language, best first; the first becomes last_good."""
+        now = self.clock()
+        with self.lock:
+            self.db.execute("DELETE FROM offers WHERE file_key=? AND lang=?", (file_key, lang))
+            for pos, key in enumerate(keys):
+                self.db.execute("INSERT INTO offers VALUES (?,?,?,?,?)", (file_key, lang, pos, key, now))
+            if keys:
+                self.db.execute("INSERT OR REPLACE INTO last_good VALUES (?,?,?,?,?)", (file_key, lang, keys[0], None, now))
+            else:
+                self.db.execute("DELETE FROM last_good WHERE file_key=? AND lang=?", (file_key, lang))
+
+    def offers(self, file_key, langs, counts=None):
+        """The synced results to list for a file: per language its offers in order (up to counts[lang], default 1),
+        else its last_good."""
         out = []
         for lang in langs:
-            lg = self.last_good(file_key, lang)
-            if lg:
-                r = self.get(lg["key"])
+            n = (counts or {}).get(lang, 1)
+            with self.lock:
+                keys = [k for (k,) in self.db.execute("SELECT key FROM offers WHERE file_key=? AND lang=? ORDER BY pos",
+                                                       (file_key, lang))]
+            if not keys:
+                lg = self.last_good(file_key, lang)
+                keys = [lg["key"]] if lg else []
+            for key in keys[:n]:
+                r = self.get(key)
                 if r and r["outcome"] == "synced" and os.path.exists(self._body_path(r["key"])):
                     out.append(r)
         return out
@@ -184,6 +214,32 @@ class Store:
             row = self.db.execute("SELECT retry_at FROM files WHERE file_key=? AND fails>0", (alias,)).fetchone()
         return bool(row and row[0] is not None and row[0] > self.clock())
 
+    # -- files waiting for a pick, and their original subtitles ---------------------------------------------------
+    def pickable_put(self, alias, type_, video_id, hints):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO pickable VALUES (?,?,?,?,?)",
+                            (alias, type_, video_id, json.dumps(hints), self.clock()))
+
+    def pickable_get(self, alias):
+        with self.lock:
+            row = self.db.execute("SELECT type, video_id, hints FROM pickable WHERE alias=? AND created>?",
+                                  (alias, self.clock() - KEEP_PICKABLE_S)).fetchone()
+        return {"type": row[0], "video_id": row[1], "hints": json.loads(row[2])} if row else None
+
+    def pickable_drop(self, alias):
+        with self.lock:
+            self.db.execute("DELETE FROM pickable WHERE alias=?", (alias,))
+
+    def originals_put(self, alias, langs):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO originals VALUES (?,?,?)", (alias, json.dumps(langs), self.clock()))
+
+    def originals_get(self, alias):
+        with self.lock:
+            row = self.db.execute("SELECT langs FROM originals WHERE alias=? AND updated>?",
+                                  (alias, self.clock() - KEEP_PICKABLE_S)).fetchone()
+        return json.loads(row[0]) if row else None
+
     # -- budget ------------------------------------------------------------------------------------------------
     def add_bytes(self, kind, n):
         with self.lock:
@@ -210,6 +266,7 @@ class Store:
             pass
         self.db.execute("DELETE FROM results WHERE key=?", (key,))
         self.db.execute("DELETE FROM last_good WHERE key=?", (key,))
+        self.db.execute("DELETE FROM offers WHERE key=?", (key,))
 
     def enforce_cap(self):
         """Least recently served synced bodies go first until the store is under its cap."""
@@ -229,6 +286,8 @@ class Store:
                 self._drop(key)
             self.db.execute("DELETE FROM results WHERE outcome='keep_original' AND retry_at < ?", (now,))
             self.db.execute("DELETE FROM budget WHERE day < ?", (day_of(now - 40 * DAY),))
+            self.db.execute("DELETE FROM pickable WHERE created < ?", (now - KEEP_PICKABLE_S,))
+            self.db.execute("DELETE FROM originals WHERE updated < ?", (now - KEEP_PICKABLE_S,))
         return len(old)
 
     def stats(self):

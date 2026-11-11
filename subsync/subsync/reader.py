@@ -7,6 +7,7 @@ reply whose total size differs from the file's raises ReadFailed. Before each re
 (budget, pause) may stop the job.
 """
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -38,6 +39,7 @@ class RangeReader:
         self.slack = size_slack
         self.bytes = 0
         self.requests = 0
+        self._lock = threading.Lock()   # audio windows are read up to 4 at once (audiofit.AudioFit.prefetch)
         self.open = opener or urllib.request.urlopen
 
     def get(self, start, length):
@@ -78,8 +80,8 @@ class RangeReader:
             self._log(start, length, 0, status, t0, type(e).__name__)
             raise ReadFailed(type(e).__name__) from None
         finally:
-            self.requests += 1
-        self.bytes += len(data)
+            self._count(requests=1)
+        self._count(got=len(data))
         if self.guard:
             self.guard.after_read(len(data))
         self._log(start, length, len(data), status, t0, None)
@@ -100,6 +102,67 @@ class RangeReader:
         if len(data) < expected:
             raise ReadFailed("short reply")
         return data
+
+    def stream(self, start, length, chunk=256 * 1024):
+        """One bounded range request read in chunks as the caller takes them; a caller that stops early (closes the
+        generator) closes the connection, and only the bytes read are counted. The same checks as get()."""
+        if length <= 0:
+            return
+        if self.size is not None and start >= self.size:
+            raise ReadFailed("range past the end")
+        if self.size is not None:
+            length = min(length, self.size - start)
+        if self.guard:
+            self.guard.before_read(length)
+        req = urllib.request.Request(self.url, headers={
+            "Range": f"bytes={start}-{start + length - 1}", "Connection": "close", "User-Agent": USER_AGENT})
+        t0 = time.time()
+        try:
+            r = self.open(req, timeout=self.timeout)
+        except urllib.error.HTTPError as e:
+            self._count(requests=1)
+            e.close()
+            self._log(start, length, 0, e.code, t0, None)
+            if e.code in (403, 429):
+                raise Refused(f"HTTP {e.code}") from None
+            raise ReadFailed(f"HTTP {e.code}") from None
+        except (OSError, ValueError) as e:
+            self._count(requests=1)
+            self._log(start, length, 0, 0, t0, type(e).__name__)
+            raise ReadFailed(type(e).__name__) from None
+        self._count(requests=1)
+        got, status = 0, getattr(r, "status", 200)
+        try:
+            if status == 200 and start != 0:
+                raise ReadFailed("range ignored")
+            content_range = r.headers.get("Content-Range") or ""
+            if "/" in content_range and content_range.rsplit("/", 1)[1].strip().isdigit():
+                total = int(content_range.rsplit("/", 1)[1])
+                if self.size is None:
+                    self.size = total
+                elif abs(total - self.size) > max(self.tolerance * self.size, self.slack):
+                    raise ReadFailed("size differs")
+                else:
+                    self.size = total
+            left = length
+            while left > 0:
+                data = r.read(min(chunk, left))
+                if not data:
+                    raise ReadFailed("short reply")
+                got += len(data)
+                left -= len(data)
+                yield data
+        finally:
+            r.close()
+            self._count(got=got)
+            if self.guard:
+                self.guard.after_read(got)
+            self._log(start, length, got, status, t0, None)
+
+    def _count(self, got=0, requests=0):
+        with self._lock:
+            self.bytes += got
+            self.requests += requests
 
     def _log(self, start, length, got, status, t0, error):
         log.info("read %s bytes=%d-%d got=%d status=%s ms=%d%s", self.label, start, start + length - 1, got,

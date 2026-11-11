@@ -11,7 +11,7 @@ Fragmented files (`moof`) are not supported.
 import struct
 import subprocess
 
-from .mkv import HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, NotMatroska, oshash
+from .mkv import HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, NotMatroska, add_audio_bytes, oshash
 
 MAX_MOOV = 64 * 1024 * 1024
 TEXT_SAMPLE_ENTRIES = {b"tx3g": 2, b"text": 2, b"wvtt": 8}   # codec -> largest size of an empty sample
@@ -297,6 +297,7 @@ class Mp4Index:
             raise NotMp4("no audio samples there")
         a, b = offs[first], offs[last] + self._size(t, last)
         data = self.r.get(a, b - a)
+        add_audio_bytes(self, len(data))
         if t["codec"] == b"mp4a":
             fmt, parts = "aac", []
             for i in range(first, last + 1):

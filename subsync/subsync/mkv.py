@@ -7,6 +7,16 @@ attachments), and decoded from a pipe.
 """
 import struct
 import subprocess
+import threading
+
+AUDIO_BYTES_LOCK = threading.Lock()
+
+
+def add_audio_bytes(index, n):
+    """Bytes of audio windows read for this file (its audio budget); windows may be read in parallel."""
+    with AUDIO_BYTES_LOCK:
+        index.audio_bytes = getattr(index, "audio_bytes", 0) + n
+
 
 HEAD_BYTES = 256 * 1024
 HASH_CHUNK = 64 * 1024
@@ -21,6 +31,47 @@ NOT_DIALOGUE = ("forced", "sign", "song", "karaoke", "commentary")
 
 class NotMatroska(Exception):
     pass
+
+
+def pipe_until(cmd, head, chunks, need, timeout=300):
+    """Run a decoder on head + chunks (an iterator, e.g. RangeReader.stream) and stop feeding it once its output holds
+    `need` bytes, or once it ends by itself; the iterator is then closed, which ends its read. Returns the output."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out, enough = bytearray(), threading.Event()
+
+    def drain():
+        while True:
+            b = p.stdout.read1(65536) if hasattr(p.stdout, "read1") else p.stdout.read(65536)
+            if not b:
+                break
+            out.extend(b)
+            if len(out) >= need:
+                enough.set()
+        enough.set()
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        p.stdin.write(head)
+        for c in chunks:
+            if enough.is_set():
+                break
+            p.stdin.write(c)
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        if hasattr(chunks, "close"):
+            chunks.close()
+        try:
+            p.stdin.close()
+        except OSError:
+            pass
+    try:
+        p.wait(timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+    reader.join(timeout)
+    return bytes(out)
 
 
 def vint(buf, pos, strip=True):
@@ -267,13 +318,32 @@ class MkvIndex:
         b = min(later) if later else (self.cues_at if self.cues_at and self.cues_at > a else self.size)
         return a, b
 
-    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg"):
-        """16 kHz mono s16le PCM of [start, start+length) from the default audio track, one bounded read."""
+    def audio_tracks(self):
+        """Audio tracks in file order: {"index" (ffmpeg 0:a:N), "language", "default"}."""
+        audio = [t for t in self.tracks if t.get("type") == 2]
+        default = self.audio_track_index()
+        return [{"index": i, "language": t.get("bcp47") or t.get("language", "und"), "default": i == default}
+                for i, t in enumerate(audio)]
+
+    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024, track=None):
+        """16 kHz mono s16le PCM of [start, start+length) from the default audio track (or audio track `track`), one bounded read. The range runs
+        to the first seek point after the window, which can be far past it on a file with sparse Cues: the read is
+        streamed into the decoder and stops once the window is decoded. Bytes read are added to `audio_bytes`."""
         a, b = self.byte_range(start, length)
-        data = self.r.get(a, b - a)
         header = self.ebml + bytes.fromhex("18538067") + bytes.fromhex("01FFFFFFFFFFFFFF") + self.info + self.tracks_raw
-        out = subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-f", "matroska", "-i", "pipe:0", "-ss", f"{start:.3f}",
-                              "-t", f"{length:.3f}", "-copyts", "-map", f"0:a:{self.audio_track_index() or 0}",
-                              "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
-                             input=header + data, capture_output=True, timeout=300)
-        return out.stdout
+        cmd = [ffmpeg, "-nostdin", "-v", "error", "-f", "matroska", "-i", "pipe:0", "-ss", f"{start:.3f}",
+               "-t", f"{length:.3f}", "-copyts", "-map", f"0:a:{track if track is not None else (self.audio_track_index() or 0)}",
+               "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"]
+        got = [0]
+
+        def counted(chunks):   # this read's own bytes (other windows may be read at the same time)
+            try:
+                for c in chunks:
+                    got[0] += len(c)
+                    yield c
+            finally:
+                chunks.close()   # the decoder stopped early: the connection closes now
+        try:
+            return pipe_until(cmd, header, counted(self.r.stream(a, b - a, chunk)), int(length * sr) * 2)
+        finally:
+            add_audio_bytes(self, got[0])

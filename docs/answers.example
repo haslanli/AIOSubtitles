@@ -12,4 +12,4 @@ CACHE=no                                 # turn off AIOStreams' 5-minute subtitl
 AIOS_USERNAME=                           # AIOStreams sign-in, only if it asks for one
 AIOS_PASSWORD=
 CONFIRM=yes                              # save the shown changes
-TEST_READ=yes                            # the ~1 MB test read at the end
+TEST_READ=no                             # the small test read at the end (about 1 MB); Enter answers no

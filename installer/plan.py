@@ -338,6 +338,8 @@ def subsync_env(s):
         'SUBSYNC_URL_REWRITE': s.get('rewrite', ''),
         'SUBSYNC_AUDIO_ROUTE': 'on' if s['audio'] else 'off',
         'SUBSYNC_DAILY_BUDGET_GB': str(s.get('daily_budget_gb', 50)),
+        'SUBSYNC_SUBDL_KEY': s.get('subdl_key', ''),
+        'SUBSYNC_WYZIE_KEY': s.get('wyzie_key', ''),
     }
     return {k: v for k, v in env.items() if v not in (None, '')}
 
