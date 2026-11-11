@@ -183,7 +183,7 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 
 ### subsync's settings
 
-./setup writes the first group into `state/subsync.env`, each line with its explanation above it; the others keep the defaults shown. To change one, add `NAME=value` to `state/subsync.env` and run `docker compose -f state/compose.yaml up -d`. Running ./setup again rewrites that file, so add it again afterwards.
+./setup writes the first group into `state/subsync.env` from your answers, each line with its explanation above it; the others keep the defaults shown. To change one, add `NAME=value` to `state/subsync.env` and run `docker compose -f state/compose.yaml up -d`. Running ./setup again rewrites only the first group's lines and keeps yours.
 
 #### Written by ./setup
 

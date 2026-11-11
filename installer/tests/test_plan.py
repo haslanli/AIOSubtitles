@@ -3,7 +3,7 @@ import copy
 import unittest
 
 from installer import plan
-from subsync import realdebrid
+from subsync import explain, realdebrid
 
 META = {
     'custom': {'OPTIONS': [{'id': 'name', 'default': 'Custom Addon'}, {'id': 'timeout', 'default': 7000},
@@ -190,11 +190,26 @@ class Files(unittest.TestCase):
         self.assertEqual(env['SUBSYNC_SOURCE_PASSWORD'], 'P')
         self.assertEqual(sorted(env), sorted(['SUBSYNC_SOURCE_MANIFEST', 'SUBSYNC_SOURCE_PASSWORD', 'SUBSYNC_PUBLIC_BASE',
                                              'SUBSYNC_BASE_PATH', 'SUBSYNC_ADDON_KEY',
-                                             'SUBSYNC_LANGUAGES', 'SUBSYNC_URL_REWRITE', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_DAILY_BUDGET_GB']))
+                                             'SUBSYNC_LANGUAGES', 'SUBSYNC_URL_REWRITE', 'SUBSYNC_AUDIO_ROUTE']))
+        self.assertLessEqual(set(env), set(explain.WRITTEN_BY_SETUP))          # ./setup writes only the lines it owns
         env = plan.subsync_env(dict(self.S, audio=True, public_base='http://1.2.3.4:8790', rewrite=''))
         self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'on')
         self.assertNotIn('SUBSYNC_BASE_PATH', env)
         self.assertNotIn('SUBSYNC_URL_REWRITE', env)
+
+    def test_hand_added_lines_are_kept(self):
+        written = plan.subsync_env(self.S)
+        current = plan.parse_env('# a note\nSUBSYNC_MAX_TRIES=9   # mine\nSUBSYNC_EXTRA_SOURCES=\nTZ=Europe/Berlin\n'
+                                 'SUBSYNC_LANGUAGES=fre\nSUBSYNC_PORT=9000\nnot a line\n')
+        self.assertEqual(current['SUBSYNC_EXTRA_SOURCES'], '')                 # an empty value means something: kept
+        merged, kept = plan.merge_env(written, current)
+        self.assertEqual(kept, ['SUBSYNC_MAX_TRIES', 'SUBSYNC_EXTRA_SOURCES', 'TZ'])
+        self.assertEqual(merged['SUBSYNC_MAX_TRIES'], '9')
+        self.assertEqual(merged['SUBSYNC_EXTRA_SOURCES'], '')
+        self.assertEqual(merged['TZ'], 'Europe/Berlin')
+        self.assertEqual(merged['SUBSYNC_LANGUAGES'], 'eng,rus')             # ./setup's answer wins on the lines it owns
+        self.assertNotIn('SUBSYNC_PORT', merged)                              # an owned line ./setup no longer writes goes
+        self.assertEqual(list(merged)[:len(written)], list(written))          # ./setup's lines first, yours after
 
     def test_compose(self):
         text = plan.compose_yaml({'version': '1.0.0', 'networks': ['aio_default', 'proxy'], 'bind': '127.0.0.1', 'port': 8790})

@@ -62,15 +62,22 @@ def write_private(path, text):
     tmp.replace(path)
 
 
-def write_kv(path, values, header, explained=False):
-    """KEY=value lines under a header; with `explained`, each setting's explanation (explain.py) above its line."""
-    body = [f'# {line}' for line in header.splitlines()]
+def write_kv(path, values, header):
+    body = [f'# {line}' for line in header.splitlines()] + [f'{k}={v}' for k, v in values.items() if v not in (None, '')]
+    write_private(path, '\n'.join(body) + '\n')
+
+
+ENV_HEADER = ('subsync settings. ./setup rewrites the lines it sets from your answers and keeps every line you add.\n'
+              'Private: holds subsync\'s keys. Every setting, with its explanation and default: the README\'s Settings section.')
+NOT_A_SETTING = 'Not a subsync setting: kept as you wrote it.'
+
+
+def write_env(path, values):
+    """state/subsync.env: each line with its setting's explanation (explain.py) above it. Empty values are written: an
+    empty value is a setting too."""
+    body = [f'# {line}' for line in ENV_HEADER.splitlines()]
     for k, v in values.items():
-        if v in (None, ''):
-            continue
-        if explained:
-            body += [''] + docs.comment(explain.SETTINGS[k][1])
-        body.append(f'{k}={v}')
+        body += [''] + docs.comment(explain.SETTINGS[k][1] if k in explain.SETTINGS else NOT_A_SETTING) + [f'{k}={v}']
     write_private(path, '\n'.join(body) + '\n')
 
 
@@ -428,8 +435,11 @@ class Wizard:
             'audio': self.audio, 'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
-        write_kv(STATE / 'subsync.env', env, 'subsync settings, written by ./setup. Private: holds subsync\'s keys.\n'
-                 'Every setting, with its explanation and default: the README\'s Settings section.', explained=True)
+        env_path = STATE / 'subsync.env'
+        env, kept = plan.merge_env(env, plan.parse_env(env_path.read_text() if env_path.exists() else ''))
+        write_env(env_path, env)
+        if kept:
+            ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         (STATE / 'compose.yaml').write_text(plan.compose_yaml({
             'version': VERSION, 'host_network': self.s['mode'] == 'host', 'networks': self.s.get('networks'),
             'bind': self.s.get('bind'), 'port': self.s['port']}))

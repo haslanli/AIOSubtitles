@@ -280,7 +280,7 @@ class Flow(unittest.TestCase):
         self.assertEqual(env['SUBSYNC_LANGUAGES'], 'eng,rus')
         self.assertEqual(env['SUBSYNC_SOURCE_PASSWORD'], wizard.read_kv(self.state / 'secrets.env')['SYNC_PASSWORD'])
         env_text = ' '.join((self.state / 'subsync.env').read_text().replace('\n# ', ' ').split())
-        self.assertIn(explain.SETTINGS['SUBSYNC_DAILY_BUDGET_GB'][1] + ' SUBSYNC_DAILY_BUDGET_GB=50', env_text)
+        self.assertIn(explain.SETTINGS['SUBSYNC_LANGUAGES'][1] + ' SUBSYNC_LANGUAGES=eng,rus', env_text)
         self.assertIn('ports: ["127.0.0.1:8790:8790"]', (self.state / 'compose.yaml').read_text())
         for name in ('secrets.env', 'subsync.env', 'settings.json'):
             self.assertEqual(stat.S_IMODE(os.stat(self.state / name).st_mode), 0o600, name)
@@ -417,6 +417,21 @@ class Flow(unittest.TestCase):
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.aios.throttle, 0)
+
+    def test_a_rerun_keeps_settings_added_by_hand(self):
+        self.run_setup(self.ANSWERS)
+        with open(self.state / 'subsync.env', 'a') as f:
+            f.write('SUBSYNC_MAX_TRIES=9\nSUBSYNC_EXTRA_SOURCES=\nSUBSYNC_LANGUAGES=fre\n')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+        self.assertEqual(code, 0, out)
+        text = (self.state / 'subsync.env').read_text()
+        self.assertIn('SUBSYNC_MAX_TRIES=9\n', text)
+        self.assertIn('SUBSYNC_EXTRA_SOURCES=\n', text)
+        self.assertEqual(text.count('SUBSYNC_LANGUAGES='), 1)
+        self.assertIn('SUBSYNC_LANGUAGES=eng,rus\n', text)
+        flat = ' '.join(text.replace('\n# ', ' ').split())
+        self.assertIn(explain.SETTINGS['SUBSYNC_MAX_TRIES'][1] + ' SUBSYNC_MAX_TRIES=9', flat)
+        self.assertIn('Kept the lines of state/subsync.env that ./setup doesn\'t set: SUBSYNC_MAX_TRIES, SUBSYNC_EXTRA_SOURCES', out)
 
     def test_real_debrid_only_stops_setup_with_the_reason(self):
         self.aios.users[UUID]['config']['services'] = [{'id': 'realdebrid', 'enabled': True, 'credentials': {'apiKey': 'rd'}},

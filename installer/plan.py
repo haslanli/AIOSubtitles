@@ -9,7 +9,7 @@ import re
 import secrets
 import urllib.parse
 
-from subsync import realdebrid
+from subsync import explain, realdebrid
 
 SUBSYNC_PORT = 8790
 SUBSYNC_HOST = 'aiosubtitles-subsync'   # its name on AIOStreams' Docker network(s)
@@ -320,11 +320,32 @@ def subsync_env(s):
         'SUBSYNC_LANGUAGES': ','.join(three for _, _, three in s['languages']),
         'SUBSYNC_URL_REWRITE': s.get('rewrite', ''),
         'SUBSYNC_AUDIO_ROUTE': 'on' if s['audio'] else 'off',
-        'SUBSYNC_DAILY_BUDGET_GB': str(s.get('daily_budget_gb', 50)),
         'SUBSYNC_SUBDL_KEY': s.get('subdl_key', ''),
         'SUBSYNC_WYZIE_KEY': s.get('wyzie_key', ''),
     }
     return {k: v for k, v in env.items() if v not in (None, '')}
+
+
+ENV_LINE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+
+
+def parse_env(text):
+    """The KEY=value lines of an env file, empty values included (an empty value is a setting too). Comment and other
+    lines are skipped; in an unquoted value, a " #" starts a comment, as Docker Compose reads it."""
+    out = {}
+    for line in (text or '').splitlines():
+        m = ENV_LINE.match(line)
+        if m:
+            value = m.group(2)
+            out[m.group(1)] = value if value.startswith(('"', "'")) else re.sub(r'\s+#.*$', '', value).strip()
+    return out
+
+
+def merge_env(written, current):
+    """state/subsync.env: ./setup's lines (`written`: the settings it owns, explain.WRITTEN_BY_SETUP), then every other
+    line of the current file as the user wrote it. Returns (values, names kept from the current file)."""
+    kept = [k for k in current if k not in explain.WRITTEN_BY_SETUP]
+    return {**written, **{k: current[k] for k in kept}}, kept
 
 
 def compose_yaml(s):

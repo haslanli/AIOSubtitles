@@ -169,8 +169,10 @@ QUESTIONS = {
 
 _THRESHOLD = "Higher or lower than recommended trades how many copies are offered against how closely they fit."
 
+SETUP_GROUP = "Written by ./setup"   # ./setup owns these lines of state/subsync.env; it keeps every other line
+
 GROUPS = [
-    ("Written by ./setup", {
+    (SETUP_GROUP, {
         "SUBSYNC_SOURCE_MANIFEST": (
             None,
             "The link of subsync's own AIOStreams config, which subsync finds files and subtitles through. ./setup makes "
@@ -498,3 +500,4 @@ GROUPS = [
 ]
 
 SETTINGS = {name: entry for _, group in GROUPS for name, entry in group.items()}
+WRITTEN_BY_SETUP = tuple(dict(GROUPS)[SETUP_GROUP])
