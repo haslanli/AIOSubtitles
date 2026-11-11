@@ -3,6 +3,7 @@ import copy
 import unittest
 
 from installer import plan
+from subsync import realdebrid
 
 META = {
     'custom': {'OPTIONS': [{'id': 'name', 'default': 'Custom Addon'}, {'id': 'timeout', 'default': 7000},
@@ -122,7 +123,7 @@ class SyncConfig(unittest.TestCase):
         viewer, _ = plan.viewer_change(VIEWER, URL, META)
         sync = plan.sync_config(viewer, URL)
         self.assertEqual([p['type'] for p in sync['presets']], ['zilean', 'opensubtitles-v3-plus'])
-        self.assertEqual([s['id'] for s in sync['services']], ['torbox', 'realdebrid'])
+        self.assertEqual([s['id'] for s in sync['services']], ['torbox'])
         self.assertEqual(sync['failover'], {'enabled': False, 'attempts': 3, 'precacheFailover': False})
         self.assertEqual(sync['preloadStreams'], {'enabled': False, 'selector': 'x'})
         self.assertIs(sync['precacheNextEpisode'], False)
@@ -137,16 +138,21 @@ class SyncConfig(unittest.TestCase):
 
 
 class RealDebrid(unittest.TestCase):
-    def test_direct_or_proxied(self):
-        cfg = copy.deepcopy(VIEWER)
-        self.assertTrue(plan.real_debrid_direct(cfg, {}))
-        cfg['proxy'] = {'enabled': True, 'id': 'builtin'}
-        self.assertFalse(plan.real_debrid_direct(cfg, {}))
-        cfg['proxy']['proxiedServices'] = ['torbox']
-        self.assertTrue(plan.real_debrid_direct(cfg, {}))
-        forced = {'forced': {'proxy': {'enabled': True, 'proxiedServices': None}}}
-        self.assertFalse(plan.real_debrid_direct(copy.deepcopy(VIEWER), forced))
-        self.assertFalse(plan.real_debrid_direct({'services': [{'id': 'torbox'}]}, {}))
+    def test_the_sync_config_has_no_way_to_real_debrid(self):
+        viewer = copy.deepcopy(VIEWER)
+        viewer['presets'] += [
+            {'type': 'comet', 'instanceId': 'com', 'enabled': True, 'options': {'name': 'Comet', 'services': ['realdebrid', 'torbox']}},
+            {'type': 'custom', 'instanceId': 'tio', 'enabled': True,
+             'options': {'name': 'Torrentio', 'manifestUrl': 'https://torrentio.example/realdebrid=KEY/manifest.json'}}]
+        sync = plan.sync_config(viewer, URL)
+        self.assertEqual(realdebrid.without_real_debrid(sync)[1], [])
+        self.assertEqual([p['options']['name'] for p in sync['presets']], ['Zilean', 'OpenSubtitles V3+', 'Comet'])
+        self.assertEqual(sync['presets'][-1]['options']['services'], ['torbox'])
+
+    def test_a_service_named_in_an_addon_link_counts_for_the_sync_config(self):
+        linked = {'services': [], 'presets': [{'type': 'custom', 'enabled': True, 'options': {
+            'name': 'Torrentio', 'manifestUrl': 'https://torrentio.example/torbox=KEY/manifest.json'}}]}
+        self.assertEqual(plan.sync_config_problems(plan.sync_config(linked)), [])
 
 
 class Addresses(unittest.TestCase):
@@ -172,7 +178,8 @@ class Addresses(unittest.TestCase):
 
 
 class Files(unittest.TestCase):
-    S = {'sync_manifest': 'http://aiostreams:3000/stremio/u/e/manifest.json', 'public_base': 'https://a.example.com/subsync',
+    S = {'sync_manifest': 'http://aiostreams:3000/stremio/u/e/manifest.json', 'sync_password': 'P',
+         'public_base': 'https://a.example.com/subsync',
          'addon_key': 'K', 'languages': plan.parse_languages('en, ru')[0], 'rewrite': 'a=b', 'audio': False}
 
     def test_env(self):
@@ -180,7 +187,9 @@ class Files(unittest.TestCase):
         self.assertEqual(env['SUBSYNC_LANGUAGES'], 'eng,rus')
         self.assertEqual(env['SUBSYNC_BASE_PATH'], '/subsync')
         self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'off')
-        self.assertEqual(sorted(env), sorted(['SUBSYNC_SOURCE_MANIFEST', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_BASE_PATH', 'SUBSYNC_ADDON_KEY',
+        self.assertEqual(env['SUBSYNC_SOURCE_PASSWORD'], 'P')
+        self.assertEqual(sorted(env), sorted(['SUBSYNC_SOURCE_MANIFEST', 'SUBSYNC_SOURCE_PASSWORD', 'SUBSYNC_PUBLIC_BASE',
+                                             'SUBSYNC_BASE_PATH', 'SUBSYNC_ADDON_KEY',
                                              'SUBSYNC_LANGUAGES', 'SUBSYNC_URL_REWRITE', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_DAILY_BUDGET_GB']))
         env = plan.subsync_env(dict(self.S, audio=True, public_base='http://1.2.3.4:8790', rewrite=''))
         self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'on')

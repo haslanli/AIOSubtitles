@@ -20,6 +20,7 @@ class Settings:
         # where players fetch the synced files, and the AIOStreams config subsync finds files through: no defaults
         self.public_base = g("SUBSYNC_PUBLIC_BASE", "").rstrip("/")
         self.source_manifest = g("SUBSYNC_SOURCE_MANIFEST", "")
+        self.source_password = g("SUBSYNC_SOURCE_PASSWORD", "")    # subsync reads its config with it: the Real-Debrid check
         self.languages = lang_list(g("SUBSYNC_LANGUAGES", "eng"))
         self.max_tries = int(g("SUBSYNC_MAX_TRIES", "6"))                      # subtitles tried per language and file
         self.cap_bytes = int(float(g("SUBSYNC_STORE_CAP_MB", "2048")) * 1024 * 1024)
@@ -118,4 +119,5 @@ class Settings:
     def missing(self):
         """What must be set before the service can work."""
         return [name for name, value in (("SUBSYNC_SOURCE_MANIFEST", self.source_manifest),
+                                         ("SUBSYNC_SOURCE_PASSWORD", self.source_password),
                                          ("SUBSYNC_PUBLIC_BASE", self.public_base)) if not value]

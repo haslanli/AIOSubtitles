@@ -5,15 +5,22 @@ and order as the viewer's config, without subsync itself).
 That config has no preload or precache and failover off: a read of a listed link then opens that row only.
 Background rows: cached debrid only; never Usenet, uncached, library-matched rows or rows of the addons named in
 SUBSYNC_SKIP_ADDONS (empty by default).
+
+Real-Debrid is never used (realdebrid.py): before every request through the link, the config behind it is read with
+its password (SUBSYNC_SOURCE_PASSWORD) and nothing is asked when it could reach Real-Debrid or can't be read; a listed
+Real-Debrid row is never read.
 """
+import base64
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import realdebrid
 from .langs import lang3
 
 log = logging.getLogger("subsync.sources")
@@ -56,7 +63,7 @@ def parse_extras(text):
 def _get_json(url, timeout):
     req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                "Connection": "close"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with realdebrid.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read(16 * 1024 * 1024))
 
 
@@ -103,6 +110,9 @@ def unreadable(stream, skip_addons=()):
         return "no url"
     if d.get("type") != "debrid":
         return f"type {d.get('type')}"
+    service_problem = realdebrid.row_problem(stream)
+    if service_problem:
+        return service_problem
     if svc.get("cached") is not True:
         return "not cached"
     if d.get("library"):
@@ -112,17 +122,66 @@ def unreadable(stream, skip_addons=()):
     return None
 
 
+CONFIG_LINK = re.compile(r"^(?P<instance>.+?)/stremio/(?P<uuid>[^/]+)/[^/]+$")
+
+
 class Aios:
-    def __init__(self, manifest_url, own_bases=(), timeout=120, skip_addons=(), size_slack=0):
+    def __init__(self, manifest_url, own_bases=(), timeout=120, skip_addons=(), size_slack=0, password=""):
         self.base = manifest_base(manifest_url)
         self.size_slack = size_slack     # bytes a listed size may be off by rounding (SUBSYNC_SIZE_SLACK_MB)
         self.skip = tuple(a.strip().lower() for a in skip_addons if a and a.strip())
         self.own = tuple(b.rstrip("/") for b in own_bases if b)
         self.timeout = timeout
+        self.password = password         # of the config behind the link, to read it for the Real-Debrid check
+
+    CONFIG_RETRY_MAX_S = 5   # AIOStreams' user API answers 429 past a few calls in 5 s: one wait and a second try
+
+    def _read_config(self):
+        link = CONFIG_LINK.match(self.base)
+        if not link or not self.password:
+            raise ValueError("no config link and password")
+        auth = base64.b64encode(f"{link['uuid']}:{self.password}".encode()).decode()
+        req = urllib.request.Request(link["instance"] + "/api/v1/user", headers={
+            "accept": "application/json", "user-agent": USER_AGENT, "authorization": "Basic " + auth, "Connection": "close"})
+        try:
+            r = realdebrid.urlopen(req, timeout=self.timeout)
+        except urllib.error.HTTPError as e:
+            if e.code != 429:
+                raise
+            time.sleep(min(_wait_429(e, 1), self.CONFIG_RETRY_MAX_S))
+            e.close()
+            r = realdebrid.urlopen(req, timeout=self.timeout)
+        with r:
+            body = json.loads(r.read(16 * 1024 * 1024))
+        if not body.get("success"):
+            raise ValueError("refused")
+        return body["data"]["userData"]
+
+    def check_config(self):
+        """Before every request through the link: the config behind it must hold no way to Real-Debrid (AIOStreams
+        searches and checks every service in a config while it answers a listing). Raises realdebrid.Blocked if it
+        could reach Real-Debrid or can't be read."""
+        try:
+            config = self._read_config()
+        except urllib.error.HTTPError as e:
+            reason = f"HTTP {e.code}"
+            e.close()
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            reason = str(e) if isinstance(e, ValueError) else type(e).__name__
+        else:
+            _, ways = realdebrid.without_real_debrid(config)
+            if not ways:
+                return
+            log.warning("Real-Debrid check: subsync's config could reach Real-Debrid (%s); nothing is listed or read "
+                        "through it until ./setup is run again", "; ".join(ways))
+            raise realdebrid.Blocked("subsync's config could reach Real-Debrid")
+        log.warning("Real-Debrid check: can't read subsync's config (%s), so nothing is listed through it", reason)
+        raise realdebrid.Blocked("subsync's config can't be checked for Real-Debrid")
 
     def streams(self, type_, video_id):
         if not self.base:
             return []
+        self.check_config()
         url = f"{self.base}/stream/{urllib.parse.quote(type_)}/{urllib.parse.quote(video_id)}.json"
         return _get_json(url, self.timeout).get("streams") or []
 
@@ -135,7 +194,12 @@ class Aios:
         Another size of the same name is another file. The file's own hash, read with its index, settles it."""
         name, size = hints.get("filename"), hints.get("videoSize")
         video_hash = str(hints.get("videoHash") or "").lower()
-        rows = [s for s in self.streams(type_, video_id) if unreadable(s, self.skip) is None]
+        listed = self.streams(type_, video_id)
+        real_debrid = sum(1 for s in listed if realdebrid.row_service(s) == realdebrid.SERVICE)
+        if real_debrid:
+            log.warning("Real-Debrid check: %d listed Real-Debrid file%s skipped, never read", real_debrid,
+                        "" if real_debrid == 1 else "s")
+        rows = [s for s in listed if unreadable(s, self.skip) is None]
         if video_hash:
             listed = next((s for s in rows if str(row_hints(s).get("videoHash") or "").lower() == video_hash), None)
             if listed is not None:
@@ -157,6 +221,7 @@ class Aios:
         """The subtitle list in the order a viewer would see it, without subsync's own entries."""
         if not self.base:
             return []
+        self.check_config()
         ex = extras(hints)
         url = f"{self.base}/subtitles/{urllib.parse.quote(type_)}/{urllib.parse.quote(video_id)}{'/' + ex if ex else ''}.json"
         out = []
@@ -222,7 +287,7 @@ def fetch_subtitle(url, timeout=30):
             if gate:
                 gate.acquire()
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with realdebrid.urlopen(req, timeout=timeout) as r:
                     raw = r.read(MAX_SUBTITLE_BYTES + 1)
             finally:
                 if gate:

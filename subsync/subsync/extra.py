@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+from . import realdebrid
 from .langs import lang3, name as lang_name
 from .sources import extras, release_info
 
@@ -47,7 +48,7 @@ class ExtraSources:
 
     def _get(self, url, timeout=None):
         req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout or self.s.source_timeout) as r:
+        with realdebrid.urlopen(req, timeout=timeout or self.s.source_timeout) as r:
             return json.loads(r.read(4 * 1024 * 1024) or b"null")
 
     def search(self, type_, video_id, langs=None, hints=None):

@@ -20,7 +20,8 @@ def main():
         sys.exit(2)
     store = Store(s.data, s.cap_bytes)
     safety = Safety(backoff_s=s.backoff_s)
-    aios = Aios(s.source_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack)
+    aios = Aios(s.source_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack,
+                password=s.source_password)
 
     def vad_factory():
         from .vad import SileroVad

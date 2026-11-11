@@ -9,6 +9,8 @@ import re
 import secrets
 import urllib.parse
 
+from subsync import realdebrid
+
 SUBSYNC_PORT = 8790
 SUBSYNC_HOST = 'aiosubtitles-subsync'   # its name on AIOStreams' Docker network(s)
 SUBSYNC_PRESET_NAME = 'subsync'
@@ -19,12 +21,8 @@ SUBTITLE_PRESETS = {'opensubtitles', 'opensubtitles-v3-plus', 'subsource', 'subd
 USENET_PRESETS = {'newznab', 'nzbhydra', 'easynews', 'easynews-search', 'easynewsPlus', 'easynewsPlusPlus',
                   'usenet-streamer', 'streamnzb', 'davex'}
 USENET_SERVICES = {'stremio_nntp', 'nzbdav', 'aiostreams', 'altmount', 'easynews', 'stremthru_newz'}
-DEBRID_SERVICES = {'realdebrid': 'Real-Debrid', 'alldebrid': 'AllDebrid', 'premiumize': 'Premiumize',
-                   'debridlink': 'Debrid-Link', 'torbox': 'TorBox', 'offcloud': 'Offcloud', 'putio': 'put.io',
-                   'easydebrid': 'EasyDebrid', 'debrider': 'Debrider', 'pikpak': 'PikPak', 'seedr': 'Seedr',
-                   'torrin': 'Torrin'}
-# The sync config: no Usenet, no subsync, and nothing that starts work in the background, so a read of a listed
-# link opens that one file and nothing else (no failover to the next row, no preload, no pre-caching).
+# The sync config: no Usenet, no Real-Debrid, no subsync, and nothing that starts work in the background, so a read of
+# a listed link opens that one file and nothing else (no failover to the next row, no preload, no pre-caching).
 SYNC_SETTINGS = {
     'failover': {'enabled': False, 'precacheFailover': False},
     'preloadStreams': {'enabled': False},
@@ -90,27 +88,10 @@ def new_key(nbytes=18):
 
 # ------------------------------------------------------------------------------------------- reading a config
 
-def services_on(config):
-    return [s.get('id') for s in config.get('services') or [] if s.get('enabled', True) and s.get('id')]
-
-
-def debrid_services(config):
-    return [s for s in services_on(config) if s in DEBRID_SERVICES]
-
-
-def proxy_covers(config, status_settings, service):
-    """Does AIOStreams send this service's streams through its own proxy (the instance's forced proxy, else the
-    config's)? Then the debrid service only sees this server's address, for subsync's reads and the viewer's."""
-    forced = ((status_settings or {}).get('forced') or {}).get('proxy') or {}
-    proxy = forced if forced.get('enabled') else (config.get('proxy') or {})
-    if not proxy.get('enabled'):
-        return False
-    listed = proxy.get('proxiedServices')
-    return not listed or service in listed
-
-
-def real_debrid_direct(config, status_settings):
-    return 'realdebrid' in services_on(config) and not proxy_covers(config, status_settings, 'realdebrid')
+def debrid_names(config):
+    """The names of the debrid services a config uses (its service list and its addons' links), in a fixed order."""
+    used = realdebrid.debrid_in_use(config)
+    return [name for service, name in realdebrid.DEBRID_SERVICES.items() if service in used]
 
 
 def is_subtitle_preset(preset):
@@ -221,12 +202,13 @@ def without_subsync(config, manifest_url=None):
 
 def sync_config(viewer, manifest_url=None):
     """The config subsync finds files through: the viewer's sources (so it finds the file being watched) and subtitle
-    sources (so it syncs what the viewer sees), without subsync itself, without Usenet, and with nothing that resolves
-    or queues in the background."""
+    sources (so it syncs what the viewer sees), without subsync itself, without Usenet, without any way to Real-Debrid
+    (realdebrid.without_real_debrid), and with nothing that resolves or queues in the background."""
     new = copy.deepcopy(viewer)
     new['presets'] = [p for p in new.get('presets') or []
                       if not is_subsync_preset(p, manifest_url) and p.get('type') not in USENET_PRESETS]
     new['services'] = [s for s in new.get('services') or [] if s.get('id') not in USENET_SERVICES]
+    new, _ = realdebrid.without_real_debrid(new)
     for key, value in SYNC_SETTINGS.items():
         if isinstance(value, dict):
             new[key] = {**(new.get(key) or {}), **value}
@@ -240,7 +222,7 @@ def sync_config(viewer, manifest_url=None):
 def sync_config_problems(sync):
     """Why the sync config can't find any file subsync could read (empty = it can)."""
     problems = []
-    if not [s for s in services_on(sync) if s in DEBRID_SERVICES]:
+    if not realdebrid.debrid_in_use(sync):
         problems.append('no debrid service (subsync reads files from debrid services only, not Usenet or torrents)')
     if not stream_sources(sync):
         problems.append('no stream source other than Usenet ones')
@@ -331,6 +313,7 @@ def subsync_env(s):
     subsync's own defaults."""
     env = {
         'SUBSYNC_SOURCE_MANIFEST': s['sync_manifest'],
+        'SUBSYNC_SOURCE_PASSWORD': s['sync_password'],
         'SUBSYNC_PUBLIC_BASE': s['public_base'],
         'SUBSYNC_BASE_PATH': base_path_of(s['public_base']),
         'SUBSYNC_ADDON_KEY': s['addon_key'],

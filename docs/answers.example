@@ -1,15 +1,94 @@
-# Answers for ./setup --answers FILE (add --yes to ask nothing). Leave a line out to be asked, or to keep the
-# current value on a re-run. A " #" starts a comment. Keep this file private if it holds a password.
-AIOS_URL=http://127.0.0.1:3000          # only when ./setup can't find AIOStreams by itself
-AIOS_CONFIG_ID=                          # the config your apps use (or paste its Stremio link)
+# Answers for ./setup --answers FILE (add --yes to ask nothing). Leave a line out to be asked, or to keep the current
+# value on a re-run. A " #" starts a comment. Keep this file private if it holds a password.
+
+# Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins that
+# container's Docker network and finds files through it, so the wrong one means it finds none of the files you play.
+# Pick the one whose address your Stremio or Jellyfin app uses.
+AIOS_CONTAINER=
+
+# Asked only when ./setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams'
+# configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to
+# AIOStreams at this address, so it must work from this machine.
+AIOS_URL=http://127.0.0.1:3000
+
+# The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page
+# when you save or load the config, and part of your Stremio link (…/stremio/<ID>/…). You can paste the whole
+# Stremio link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this config,
+# and subsync's own config is made from it.
+AIOS_CONFIG_ID=
+
+# The password you chose when you saved that config. ./setup uses it to read the config and save the change, and
+# doesn't store it; subsync gets its own config with its own random password. While setting up, Enter with nothing
+# typed goes back to give a different ID; ./setup --restore and --uninstall need it to change the config. If you put
+# it in an answers file, keep that file private.
 AIOS_CONFIG_PASSWORD=
-RD_OK=yes                                # Real-Debrid without AIOStreams' proxy: continue with index-only reads
+
+# The subtitle languages to sync, by name or code, separated by commas: English, Spanish, ru; up to four, default
+# English. For each language and each file you play, subsync downloads that language's subtitles from your subtitle
+# sources and the ones it searches itself, and checks them against the file. Each extra language adds those
+# downloads and a few seconds of work per file; the video file is still read only once.
 LANGUAGES=English
-AUDIO=no                                 # also sync files without their own subtitle track, from the audio
-ADD_OPENSUBTITLES=yes                    # add Stremio's official OpenSubtitles; asked only when the config has none
-PUBLIC_ADDRESS=                          # where your apps reach subsync; Enter takes the suggestion
-CACHE=no                                 # turn off AIOStreams' 5-minute subtitle cache for subsync (admin sign-in)
-AIOS_USERNAME=                           # AIOStreams sign-in, only if it asks for one
+
+# Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, unless
+# you often watch such files; most files have a track. Off: those files keep their original subtitles, and subsync
+# reads about 1 MB of each file. On: after you pick such a file's "<Language> (Subsync)" entry, subsync reads short
+# audio parts of it, up to 1 GB per file (counted in the daily limit and in your debrid service's traffic), and the
+# copy is there the next time you open the file; files with too high a bitrate (most 4K remuxes) keep their
+# originals.
+AUDIO=no
+
+# Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, which
+# often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't asked.
+# Cost: one SubDL search for each file you play, plus a download per subtitle tried, counted against your key's own
+# limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user.
+SUBDL_KEY=
+
+# Optional: your free Wyzie Subs API key, from https://wyzie.io. With it, subsync also searches Wyzie Subs, which
+# often has subtitles the other sources don't, so a copy that fits is more likely. Without it, Wyzie Subs isn't
+# asked. Cost: one search per language for each file you play, plus a download per subtitle tried, counted against
+# your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by
+# your user.
+WYZIE_KEY=
+
+# Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds
+# Stremio's official OpenSubtitles addon to your config: free, no account, it lists every language, and subsync
+# syncs only the ones you picked. Recommended: yes. No: subsync works only from the sources it searches itself, and
+# your apps get no original subtitles through AIOStreams. In Stremio, install your addon link once more afterwards
+# so it starts asking for subtitles.
+ADD_OPENSUBTITLES=yes
+
+# The address your apps download synced subtitle files from. The suggestion sits behind the same web address as
+# AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (./setup shows it); on a
+# home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every device you
+# watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced files and
+# a health check are open at that address.
+PUBLIC_ADDRESS=
+
+# AIOStreams keeps every subtitle answer for 5 minutes. Yes turns that off for subsync only, so a copy made while
+# you watch shows the next time you open the file instead of up to 5 minutes later; other subtitle sources keep
+# their cache. It needs AIOStreams' admin sign-in and changes that one setting on your AIOStreams server.
+# Recommended: yes if you have the admin sign-in. Cost: AIOStreams asks subsync every time, a few milliseconds.
+CACHE=no
+
+# Your AIOStreams sign-in (the account of its web page), asked only when this AIOStreams needs one to save configs,
+# or for the subtitle cache setting (then an admin account). Used during setup and not stored.
+AIOS_USERNAME=
+
+# The password of that AIOStreams account. Used during setup and not stored. If you put it in an answers file, keep
+# that file private.
 AIOS_PASSWORD=
-CONFIRM=yes                              # save the shown changes
-TEST_READ=no                             # the small test read at the end (about 1 MB); Enter answers no
+
+# Save the changes ./setup just showed: subsync added to your config (after a backup copy) and subsync's own config
+# created or updated. Default yes. No: nothing is changed; run ./setup again any time. ./setup --restore and
+# --uninstall ask the same before they change anything, and there the default is no.
+CONFIRM=yes
+
+# A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as it
+# does for every file you play. Yes: you see now that reading works and whether that file has its own subtitle
+# track; your debrid service opens the file, so it may show in your debrid account's list. No (default): the first
+# file you play is the first read.
+TEST_READ=no
+
+# Asked by ./setup --uninstall when ./setup had added OpenSubtitles to your config. Yes takes it out again, leaving
+# your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.
+REMOVE_OPENSUBTITLES=yes

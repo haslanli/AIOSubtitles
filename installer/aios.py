@@ -9,6 +9,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from subsync import realdebrid
+
 UA = 'AIOSubtitles/1.0 (setup)'   # starts with "AIO": stock AIOStreams then includes file details in stream listings
 
 
@@ -37,7 +39,7 @@ class Aios:
         self.base = base.rstrip('/')
         self.timeout = timeout
         self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar), realdebrid.GuardedRedirects)
         self.signed_in = False
 
     def call(self, method, path, body=None, auth=None, timeout=None, raw=False):
@@ -63,6 +65,7 @@ class Aios:
         url = path if path.startswith('http') else self.base + path
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
+            realdebrid.check(url)
             with self.opener.open(req, timeout=timeout or self.timeout) as r:
                 payload = r.read()
                 return r.status, payload if raw else (json.loads(payload) if payload[:1] in (b'{', b'[') else {}), None
@@ -77,6 +80,9 @@ class Aios:
             except ValueError:
                 return e.code, {'error': {'code': 'RATE_LIMIT_EXCEEDED' if e.code == 429 else None,
                                           'message': payload[:300].decode('utf-8', 'replace')}}, wait
+        except realdebrid.Blocked:
+            raise AiosError('Stopped a request to Real-Debrid: AIOSubtitles never uses Real-Debrid.',
+                            'Give the address of your AIOStreams, not of Real-Debrid.') from None
         except (urllib.error.URLError, OSError, ValueError) as e:
             raise AiosError(f'Can\'t reach AIOStreams at {self.base} ({getattr(e, "reason", e)}).',
                             'Check the address, and that AIOStreams is running (docker ps).') from None

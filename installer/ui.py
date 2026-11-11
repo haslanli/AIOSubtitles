@@ -5,6 +5,8 @@ import re
 import sys
 import textwrap
 
+from subsync import explain
+
 COLOR = sys.stdout.isatty() and os.environ.get('NO_COLOR') is None
 WIDTH = 72
 
@@ -82,8 +84,10 @@ def masked(value):
 
 
 class Asker:
-    """Questions with defaults. Enter keeps the current answer (or takes the default); '?' shows more help.
-    Answers can come from a KEY=value file (--answers) and, with --yes, nothing is asked."""
+    """Questions with defaults, each shown with its one explanation (subsync/subsync/explain.py, by the question's
+    answers-file key; a key without one is refused). Enter keeps the current answer (or takes the default); '?' shows
+    the question and its explanation again. Answers can come from a KEY=value file (--answers) and, with --yes, nothing
+    is asked."""
 
     def __init__(self, answers=None, yes=False):
         self.answers, self.yes = dict(answers or {}), yes
@@ -99,16 +103,16 @@ class Asker:
             say()
             stop('Stopped by you.', 'Nothing after this point was changed. Run ./setup again any time.')
 
-    def text(self, key, question, *, help=None, current=None, default=None, secret=False, optional=False, check=None,
+    def text(self, key, question, *, current=None, default=None, secret=False, optional=False, check=None,
              shown=None, skip_hint='Enter skips'):
         """One question. `check(value)` returns (good, message, value): a message is shown either way."""
+        explanation = explain.QUESTIONS[key][1]
         preset = self.answers.pop(key, None)
         while True:
             say()
             say(f'  {paint("1", question)}')
-            if help:
-                lines = help.strip().splitlines()
-                say(paint('2', f'  {lines[0]}' + ('  (type ? for more)' if len(lines) > 1 else '')))
+            for line in textwrap.wrap(explanation, WIDTH):
+                say(paint('2', f'  {line}'))
             hint = []
             if current:
                 hint.append(f'Enter keeps: {masked(current) if secret else (shown or current)}')
@@ -128,7 +132,6 @@ class Asker:
             else:
                 value = self._input('  > ', secret).strip()
             if value == '?':
-                say(paint('2', '\n'.join('    ' + line for line in (help or 'No more help for this one.').strip().splitlines())))
                 continue
             if not value:
                 value = current or default or ''
@@ -150,7 +153,7 @@ class Asker:
                     ok(message)
             return value
 
-    def choose(self, key, question, options, current=None, help=None):
+    def choose(self, key, question, options, current=None):
         """options: [(value, label)]. Returns the chosen value."""
         values = [v for v, _ in options]
         default = current if current in values else values[0]
@@ -165,16 +168,16 @@ class Asker:
             if answer.isdigit() and 1 <= int(answer) <= len(options):
                 return True, '', values[int(answer) - 1]
             return False, f'Type a number from 1 to {len(options)}.', answer
-        return self.text(key, 'Your choice (number)', help=help, default=str(values.index(default) + 1), check=check)
+        return self.text(key, 'Your choice (number)', default=str(values.index(default) + 1), check=check)
 
-    def yesno(self, key, question, default, help=None):
+    def yesno(self, key, question, default):
         def check(answer):
             if answer.lower() in ('y', 'yes', 'on', 'true', '1'):
                 return True, '', 'yes'
             if answer.lower() in ('n', 'no', 'off', 'false', '0'):
                 return True, '', 'no'
             return False, 'Type y or n.', answer
-        return self.text(key, f'{question} [y/n]', help=help, default='yes' if default else 'no', check=check) == 'yes'
+        return self.text(key, f'{question} [y/n]', default='yes' if default else 'no', check=check) == 'yes'
 
     def pause(self, question):
         if self.yes:

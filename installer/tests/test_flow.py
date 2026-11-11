@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import stat
 import tempfile
 import threading
@@ -14,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, wizard
+from subsync import explain, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
 PASSWORD = 'viewer-secret-password'
@@ -276,6 +278,9 @@ class Flow(unittest.TestCase):
         self.assertEqual(env['SUBSYNC_URL_REWRITE'], f'{PUBLIC}=http://aiostreams:3000')
         self.assertEqual(env['SUBSYNC_PUBLIC_BASE'], f'{PUBLIC}/subsync')
         self.assertEqual(env['SUBSYNC_LANGUAGES'], 'eng,rus')
+        self.assertEqual(env['SUBSYNC_SOURCE_PASSWORD'], wizard.read_kv(self.state / 'secrets.env')['SYNC_PASSWORD'])
+        env_text = ' '.join((self.state / 'subsync.env').read_text().replace('\n# ', ' ').split())
+        self.assertIn(explain.SETTINGS['SUBSYNC_DAILY_BUDGET_GB'][1] + ' SUBSYNC_DAILY_BUDGET_GB=50', env_text)
         self.assertIn('ports: ["127.0.0.1:8790:8790"]', (self.state / 'compose.yaml').read_text())
         for name in ('secrets.env', 'subsync.env', 'settings.json'):
             self.assertEqual(stat.S_IMODE(os.stat(self.state / name).st_mode), 0o600, name)
@@ -326,10 +331,12 @@ class Flow(unittest.TestCase):
         self.assertEqual(out.count('Config ID (or paste your Stremio link)'), 2)
         self.assertNotIn('wrong-password', out)
 
-    def test_the_first_question_has_more_help(self):
+    def test_each_question_shows_its_explanation_and_again_on_a_question_mark(self):
         code, out = self.run_interactive(['?', self.LINK, PASSWORD])
         self.assertEqual(code, 0, out)
-        self.assertIn('Where to find it', out)
+        flat = ' '.join(out.split())
+        self.assertEqual(flat.count('part of your Stremio link (…/stremio/<ID>/…)'), 2)     # shown, then shown again
+        self.assertIn('Each extra language adds those downloads', flat)
 
     def test_the_test_read_defaults_to_no(self):
         answers = dict(self.ANSWERS)
@@ -411,6 +418,43 @@ class Flow(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.aios.throttle, 0)
 
+    def test_real_debrid_only_stops_setup_with_the_reason(self):
+        self.aios.users[UUID]['config']['services'] = [{'id': 'realdebrid', 'enabled': True, 'credentials': {'apiKey': 'rd'}},
+                                                       {'id': 'nzbdav', 'enabled': True, 'credentials': {}}]
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 1, out)
+        self.assertIn(realdebrid.REAL_DEBRID_ONLY, out)
+        self.assertEqual([m for m, *_ in self.aios.log if m in ('PUT', 'POST')], [])   # nothing saved or created
+        self.assertEqual(list(self.aios.users), [UUID])
+
+    def test_real_debrid_beside_another_service_never_reaches_subsync(self):
+        config = self.aios.users[UUID]['config']
+        config['services'].append({'id': 'realdebrid', 'enabled': True, 'credentials': {'apiKey': 'rd'}})
+        config['presets'].append({'type': 'custom', 'instanceId': 'tio', 'enabled': True, 'options': {
+            'name': 'Torrentio RD', 'manifestUrl': 'https://torrentio.example/realdebrid=KEY/manifest.json'}})
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
+        sync = self.aios.users[wizard.read_kv(self.state / 'secrets.env')['SYNC_UUID']]['config']
+        self.assertEqual([s['id'] for s in sync['services']], ['torbox'])
+        self.assertNotIn('Torrentio RD', json.dumps(sync))
+        self.assertIn('Real-Debrid is never used: subsync reads through TorBox only', out)
+        self.assertIn('"Torrentio RD" left out: its link names Real-Debrid', out)
+        self.assertNotIn('index-only', out)
+
+    def test_without_real_debrid_nothing_is_said_about_it(self):
+        self.aios.users[UUID]['config']['presets'].append({'type': 'custom', 'instanceId': 'mf', 'enabled': True, 'options': {
+            'name': 'Encrypted', 'manifestUrl': 'https://mf.example/D-q83hf8Hf73hf73Hfh38fh3/manifest.json'}})
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('Real-Debrid is never used', out)
+        self.assertIn('"Encrypted" left out', out)
+
+    def test_the_self_test_never_takes_a_real_debrid_row(self):
+        row = {'url': 'http://x', 'streamData': {'type': 'debrid', 'service': {'id': 'realdebrid', 'cached': True}}}
+        self.assertFalse(wizard.readable(row))
+        row['streamData']['service']['id'] = 'torbox'
+        self.assertTrue(wizard.readable(row))
+
     def test_wrong_password_is_asked_again_then_stops(self):
         code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_PASSWORD='nope'))
         self.assertEqual(code, 1)
@@ -421,9 +465,46 @@ class Flow(unittest.TestCase):
         self.aios.gated = True
         code, out = self.run_setup(dict(self.ANSWERS, AIOS_USERNAME='admin', AIOS_PASSWORD='adminpw', CACHE='yes'))
         self.assertEqual(code, 0, out)
-        self.assertIn('sign in', out)
+        self.assertIn('Signed in', out)
         self.assertEqual(self.aios.setting, {'*': 300, 'aiosubtitles-subsync': -1})
         self.assertNotIn('adminpw', out)
+
+
+class RealDebridGate(unittest.TestCase):
+    def setUp(self):
+        real = socket.create_connection
+
+        def local_only(address, *args, **kwargs):   # fails before any lookup or packet leaves this machine
+            if address[0] not in ('127.0.0.1', 'localhost', '::1'):
+                raise AssertionError(f'a connection to {address[0]} was opened')
+            return real(address, *args, **kwargs)
+        guard = mock.patch('socket.create_connection', local_only)
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def test_setup_never_sends_a_request_to_real_debrid(self):
+        with self.assertLogs('subsync.realdebrid', 'WARNING'):
+            with self.assertRaises(wizard.AiosError) as caught:
+                wizard.Aios('https://api.real-debrid.com').call('GET', '/rest/1.0/user')
+        self.assertIn('Real-Debrid', caught.exception.message)
+
+    def test_setup_never_follows_a_redirect_to_real_debrid(self):
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(307)
+                self.send_header('Location', 'https://1.download.real-debrid.com/d/x')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with self.assertLogs('subsync.realdebrid', 'WARNING'):
+            with self.assertRaises(wizard.AiosError):
+                wizard.Aios(f'http://127.0.0.1:{server.server_address[1]}').call('GET', '/api/v1/status')
 
 
 if __name__ == '__main__':

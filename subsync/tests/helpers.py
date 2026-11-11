@@ -1,9 +1,11 @@
 """Test helpers: a local HTTP range server (stands in for AIOS's proxy), with switchable faults."""
 import os
 import shutil
+import socket
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -85,3 +87,18 @@ class TempDir:
 
 def have(tool):
     return shutil.which(tool) is not None
+
+
+LOCAL = ("127.0.0.1", "localhost", "::1")
+
+
+def local_network_only():
+    """A patch that fails the test, before any lookup or packet, when code opens a connection to anything but this
+    machine: tests about addresses that must never be reached can't reach them, even while the code is wrong."""
+    real = socket.create_connection
+
+    def guarded(address, *args, **kwargs):
+        if address[0] not in LOCAL:
+            raise AssertionError(f"a connection to {address[0]} was opened")
+        return real(address, *args, **kwargs)
+    return mock.patch("socket.create_connection", guarded)

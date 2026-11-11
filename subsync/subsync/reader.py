@@ -12,6 +12,8 @@ import time
 import urllib.error
 import urllib.request
 
+from . import realdebrid
+
 log = logging.getLogger("subsync.read")
 
 USER_AGENT = "subsync/1"
@@ -40,7 +42,7 @@ class RangeReader:
         self.bytes = 0
         self.requests = 0
         self._lock = threading.Lock()   # audio windows are read up to 4 at once (audiofit.AudioFit.prefetch)
-        self.open = opener or urllib.request.urlopen
+        self.open = opener or realdebrid.urlopen   # refuses Real-Debrid addresses, redirects included
 
     def get(self, start, length):
         if length <= 0:

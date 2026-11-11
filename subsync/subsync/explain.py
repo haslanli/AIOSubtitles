@@ -1,0 +1,500 @@
+"""One explanation for every setting and every fixed rule, written once and shown wherever the user meets it: with each
+./setup question (and again on "?"), in docs/answers.example, in the README's settings section and above each line of
+state/subsync.env. Tests fail when a setting has no explanation or a documented default differs from the code's.
+
+Each text says what the setting does, what to choose and why, what changes either way (what you see, what is read or
+downloaded, what gets faster or slower) and what it costs. Nothing in AIOSubtitles is shared between installs, so every
+setting changes only the subtitles of the install it is set on.
+
+No packages besides the standard library, so ./setup imports this module too.
+"""
+from .realdebrid import REASON
+
+# ------------------------------------------------------------------------------------------- fixed rules
+
+RULES = [
+    ("Real-Debrid is never used",
+     "AIOSubtitles never makes a single call to Real-Debrid: no search, no cache check (asking whether a file is ready), "
+     f"no download, no file read, because {REASON}. With Real-Debrid beside another service, such as TorBox, subsync uses only the other one, so a file you play from "
+     "Real-Debrid gets a synced copy only when that service has the same file ready. With Real-Debrid as your only "
+     "debrid service, ./setup stops. subsync also checks its config before every request through it, skips files "
+     "listed as Real-Debrid's, and refuses and logs any request to real-debrid.com. Your apps play Real-Debrid files "
+     "as before."),
+    ("Addons added by link must show their debrid service",
+     "An addon you added to AIOStreams by its link (a custom addon, or another AIOStreams) carries its own settings in "
+     "that link, sometimes with a debrid key. subsync's config keeps such an addon only when its link names a debrid "
+     "service other than Real-Debrid and doesn't name Real-Debrid; one whose link names Real-Debrid, or is encrypted "
+     "so nobody can tell, is left out, because AIOStreams would let it search Real-Debrid for subsync. ./setup names "
+     "each addon it leaves out. Your own config and apps keep every addon; subsync only finds fewer files when a "
+     "left-out addon was the only one listing a file. Addons built into AIOStreams are not affected: they take their "
+     "debrid service from your service list."),
+    ("Usenet is never read",
+     "subsync never reads through Usenet: its config leaves out Usenet sources (Newznab indexers, NZBHydra, Easynews "
+     "and similar) and Usenet services (NzbDAV, AltMount and similar). Why: every listing through an indexer spends "
+     "calls of its daily limit, and opening a Usenet file usually starts a download of the whole file. A file you play "
+     "from Usenet gets a synced copy only when your debrid service has the same file ready. Your indexer calls and "
+     "download queue stay untouched; there is no switch for this."),
+    ("Only ready debrid files are read",
+     "subsync reads a file only when your debrid service already has it ready (cached), never one the service would "
+     "first have to download, and never one found in your debrid account's own download list. So subsync never adds a "
+     "download to your account. Files played from plain torrents or web links get no synced copy."),
+    ("Only MKV and MP4 files",
+     "subsync reads the subtitle tracks of MKV and MP4 files only, the formats nearly all streaming releases use. Other "
+     "files (AVI, M2TS and the like) keep their original subtitles, after one small read that shows the format."),
+    ("A copy is offered only after it passes the check",
+     "Each synced copy is checked against the file itself before it is offered: at least 90 % of its lines must start "
+     "within 200 ms (a fifth of a second) of the file's own subtitle track, spread over the whole film (95 % when its "
+     "lines were snapped onto the track), or it must be clearly better than the original (SUBSYNC_BETTER). Files "
+     "without a subtitle track are checked against their speech instead (the audio route). A copy that fails is never "
+     "offered: you get the original subtitles, as without subsync."),
+    ("At most four languages",
+     "./setup syncs up to four languages. Each one is a separate sync for every file you play, with its own subtitle "
+     "downloads and a few seconds of work, though the video file is read only once."),
+    ("subsync's config starts nothing in the background",
+     "subsync's own AIOStreams config has failover, preloading, pre-caching of the next episode, service wrap, "
+     "cache-and-play and owned-file checks turned off, whatever your config uses. So reading a listed file opens that "
+     "one file and nothing else, and subsync never starts a download. Your own config keeps its settings."),
+    ("Nothing changes without your yes",
+     "./setup shows each change to your AIOStreams config before saving it, saves a copy of your config first (in "
+     "state/backups/), and changes nothing if you answer no. ./setup --restore FILE puts a saved copy back; "
+     "./setup --uninstall takes subsync out again."),
+    ("Links and keys stay private",
+     "subsync's log never contains stream links, config addresses, keys or passwords, and the files in state/ that "
+     "hold them can be read only by your user. The routes that make subsync work (its subtitle lists and status) "
+     "answer only under a private key in their address, so nobody who finds subsync's address can make it read files; "
+     "only the synced files and a health check are open."),
+]
+
+# ------------------------------------------------------------------------------------------- ./setup's questions
+# answers-file key -> (example value for docs/answers.example, explanation), in the order ./setup asks them
+
+QUESTIONS = {
+    "AIOS_CONTAINER": (
+        "",
+        "Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins "
+        "that container's Docker network and finds files through it, so the wrong one means it finds none of the files "
+        "you play. Pick the one whose address your Stremio or Jellyfin app uses."),
+    "AIOS_URL": (
+        "http://127.0.0.1:3000",
+        "Asked only when ./setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' "
+        "configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to "
+        "AIOStreams at this address, so it must work from this machine."),
+    "AIOS_CONFIG_ID": (
+        "",
+        "The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page "
+        "when you save or load the config, and part of your Stremio link (…/stremio/<ID>/…). You can paste the whole "
+        "Stremio link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this "
+        "config, and subsync's own config is made from it."),
+    "AIOS_CONFIG_PASSWORD": (
+        "",
+        "The password you chose when you saved that config. ./setup uses it to read the config and save the change, and "
+        "doesn't store it; subsync gets its own config with its own random password. While setting up, Enter with "
+        "nothing typed goes back to give a different ID; ./setup --restore and --uninstall need it to change the config. "
+        "If you put it in an answers file, keep that file private."),
+    "LANGUAGES": (
+        "English",
+        "The subtitle languages to sync, by name or code, separated by commas: English, Spanish, ru; up to four, "
+        "default English. For each language and each file you play, subsync downloads that language's subtitles from "
+        "your subtitle sources and the ones it searches itself, and checks them against the file. Each extra language "
+        "adds those downloads and a few seconds of work per file; the video file is still read only once."),
+    "AUDIO": (
+        "no",
+        "Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, "
+        "unless you often watch such files; most files have a track. Off: those files keep their original subtitles, "
+        "and subsync reads about 1 MB of each file. On: after you pick such a file's \"<Language> (Subsync)\" entry, "
+        "subsync reads short audio parts of it, up to 1 GB per file (counted in the daily limit and in your debrid "
+        "service's traffic), and the copy is there the next time you open the file; files with too high a bitrate "
+        "(most 4K remuxes) keep their originals."),
+    "SUBDL_KEY": (
+        "",
+        "Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, "
+        "which often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't "
+        "asked. Cost: one SubDL search for each file you play, plus a download per subtitle tried, counted against your "
+        "key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user."),
+    "WYZIE_KEY": (
+        "",
+        "Optional: your free Wyzie Subs API key, from https://wyzie.io. With it, subsync also searches Wyzie Subs, "
+        "which often has subtitles the other sources don't, so a copy that fits is more likely. Without it, Wyzie Subs "
+        "isn't asked. Cost: one search per language for each file you play, plus a download per subtitle tried, counted "
+        "against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, "
+        "readable only by your user."),
+    "ADD_OPENSUBTITLES": (
+        "yes",
+        "Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds "
+        "Stremio's official OpenSubtitles addon to your config: free, no account, it lists every language, and subsync "
+        "syncs only the ones you picked. Recommended: yes. No: subsync works only from the sources it searches itself, "
+        "and your apps get no original subtitles through AIOStreams. In Stremio, install your addon link once more "
+        "afterwards so it starts asking for subtitles."),
+    "PUBLIC_ADDRESS": (
+        "",
+        "The address your apps download synced subtitle files from. The suggestion sits behind the same web address as "
+        "AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (./setup shows it); "
+        "on a home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every device "
+        "you watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced "
+        "files and a health check are open at that address."),
+    "CACHE": (
+        "no",
+        "AIOStreams keeps every subtitle answer for 5 minutes. Yes turns that off for subsync only, so a copy made "
+        "while you watch shows the next time you open the file instead of up to 5 minutes later; other subtitle sources "
+        "keep their cache. It needs AIOStreams' admin sign-in and changes that one setting on your AIOStreams server. "
+        "Recommended: yes if you have the admin sign-in. Cost: AIOStreams asks subsync every time, a few milliseconds."),
+    "AIOS_USERNAME": (
+        "",
+        "Your AIOStreams sign-in (the account of its web page), asked only when this AIOStreams needs one to save "
+        "configs, or for the subtitle cache setting (then an admin account). Used during setup and not stored."),
+    "AIOS_PASSWORD": (
+        "",
+        "The password of that AIOStreams account. Used during setup and not stored. If you put it in an answers file, "
+        "keep that file private."),
+    "CONFIRM": (
+        "yes",
+        "Save the changes ./setup just showed: subsync added to your config (after a backup copy) and subsync's own "
+        "config created or updated. Default yes. No: nothing is changed; run ./setup again any time. ./setup --restore "
+        "and --uninstall ask the same before they change anything, and there the default is no."),
+    "TEST_READ": (
+        "no",
+        "A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as "
+        "it does for every file you play. Yes: you see now that reading works and whether that file has its own "
+        "subtitle track; your debrid service opens the file, so it may show in your debrid account's list. No "
+        "(default): the first file you play is the first read."),
+    "REMOVE_OPENSUBTITLES": (
+        "yes",
+        "Asked by ./setup --uninstall when ./setup had added OpenSubtitles to your config. Yes takes it out again, "
+        "leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' "
+        "subtitles."),
+}
+
+# ------------------------------------------------------------------------------------------- subsync's settings
+# environment name -> (default as written in the environment, None when required; explanation), grouped for the README
+
+_THRESHOLD = "Higher or lower than recommended trades how many copies are offered against how closely they fit."
+
+GROUPS = [
+    ("Written by ./setup", {
+        "SUBSYNC_SOURCE_MANIFEST": (
+            None,
+            "The link of subsync's own AIOStreams config, which subsync finds files and subtitles through. ./setup makes "
+            "that config from yours, without Usenet, Real-Debrid, subsync itself or anything that works in the "
+            "background, and writes this. Required: subsync doesn't start without it. Keep it private: anyone with it "
+            "can list through that config."),
+        "SUBSYNC_SOURCE_PASSWORD": (
+            None,
+            "The password of subsync's own config: random, made by ./setup, never yours. Before every request through "
+            "that config, subsync reads it with this password and checks that it holds no way to Real-Debrid; when the "
+            "check fails or the password is wrong, nothing is listed and the log says why. Required: subsync doesn't "
+            "start without it. Keep it private."),
+        "SUBSYNC_PUBLIC_BASE": (
+            None,
+            "The address your apps download synced files from: your answer to ./setup's address question, like "
+            "https://aio.example.com/subsync. subsync puts it in every entry it lists, so a wrong one makes entries "
+            "show but fail to load. Required: subsync doesn't start without it."),
+        "SUBSYNC_BASE_PATH": (
+            "",
+            "The path part of that address, like /subsync, when your web server passes it on unchanged; subsync removes "
+            "it from incoming requests. ./setup sets it from the address, and leaves it empty when subsync has its own "
+            "port."),
+        "SUBSYNC_ADDON_KEY": (
+            "",
+            "A private key in the address of the routes that make subsync work: its manifest, its subtitle lists and "
+            "its status. Without the key those routes answer \"not found\", so nobody who finds subsync's address can "
+            "make it read files; synced files and /health stay open for your apps. Made by ./setup; keep it private. "
+            "Empty: no key and every route open, safe only where nobody else can reach subsync."),
+        "SUBSYNC_LANGUAGES": (
+            "eng",
+            "The languages to sync, as codes separated by commas, like eng,rus: ./setup writes your answer to its "
+            "languages question. Each language is a separate sync for every file you play, with its own subtitle "
+            "downloads and a few seconds of work; the video file is read only once."),
+        "SUBSYNC_AUDIO_ROUTE": (
+            "off",
+            "Your answer to ./setup's audio question, on or off: whether files with no subtitle track of their own are "
+            "synced from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each after you pick their "
+            "\"(Subsync)\" entry. Recommended: off unless you often watch such files. Off: they keep their original "
+            "subtitles and subsync reads about 1 MB per file."),
+        "SUBSYNC_URL_REWRITE": (
+            "",
+            "Rewrites the start of stream links, like https://aio.example.com=http://aiostreams:3000, so subsync reads "
+            "files from AIOStreams over Docker on this machine instead of out through your web server and back. "
+            "./setup sets it when both run here and leaves it empty when they don't. A wrong rule makes every read fail, "
+            "and files keep their original subtitles."),
+        "SUBSYNC_SUBDL_KEY": ("", QUESTIONS["SUBDL_KEY"][1]),
+        "SUBSYNC_WYZIE_KEY": ("", QUESTIONS["WYZIE_KEY"][1]),
+        "SUBSYNC_PORT": (
+            "8790",
+            "The port subsync listens on: inside its container, or on the machine itself when AIOStreams uses host "
+            "networking. Change it only when 8790 is taken, by giving ./setup's address question another port; ./setup "
+            "then sets it."),
+    }),
+    ("Limits and safety", {
+        "SUBSYNC_DAILY_BUDGET_GB": (
+            "50",
+            "The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until "
+            "the next day and new files keep their original subtitles. 50 is far above normal use (about 1 MB per file; "
+            "up to 1 GB per file with the audio route), so it only catches something going wrong. Lower it if your "
+            "debrid service or server has a tight traffic limit."),
+        "SUBSYNC_INDEX_CAP_MB": (
+            "16",
+            "The most subsync reads of one file to find its subtitle tracks (the start, the index, and 64 KB at each "
+            "end), in MB. Most files need about 1 MB; files with very many tracks need more, and one needing more than "
+            "this keeps its original subtitles. Recommended: 16. Higher: a few more such files get copies, each costing "
+            "that much more data."),
+        "SUBSYNC_FILE_CAP_GB": (
+            "6",
+            "The most subsync reads of one file in all when the audio route works on it, in GB: an outer safety limit, "
+            "since the audio budget (1 GB) normally stops first. Recommended: 6. 0 removes it, which is not recommended."),
+        "SUBSYNC_AUDIO_BUDGET_GB": (
+            "1",
+            "With the audio route on, the most audio subsync reads per file, in GB. Within it, high-bitrate files get "
+            "shorter audio parts, or none when they would be too short to judge, and then keep their originals. "
+            "Recommended: 1. Higher: more 4K files get copies, at more data each. 0 removes the limit, which is not "
+            "recommended."),
+        "SUBSYNC_403_BACKOFF_S": (
+            "900",
+            "After a debrid service refuses a read (HTTP 403 or 429, usually a per-account limit), subsync stops all "
+            "reads for this many seconds, doubling with each refusal in a row up to 6 hours; the refused file itself "
+            "waits 1, 6, then 24 hours. Recommended: 900 (15 minutes). Shorter: copies resume sooner, but subsync keeps "
+            "knocking on a limit your own playback needs too."),
+        "SUBSYNC_RETRY_STOPPED_S": (
+            "600",
+            "A file whose work stopped because the daily limit was spent, or reads were paused after a refusal, is tried "
+            "again after this many seconds. Recommended: 600 (10 minutes). Shorter only means more checks of a pause "
+            "that is still on."),
+        "SUBSYNC_READ_TIMEOUT_S": (
+            "60",
+            "How long one read of a file may wait for an answer, in seconds, before it counts as failed; a failed file "
+            "is tried again 1, 6 and 24 hours later. Recommended: 60. Shorter: slow services fail more often."),
+        "SUBSYNC_SIZE_SLACK_MB": (
+            "5.5",
+            "How far a file's listed size may be from its real size and still be taken for the same file, in MB; "
+            "listings round sizes to 0.01 GiB, up to 5.4 MB off. Recommended: 5.5. Lower: rounded listings stop "
+            "matching and those files get no copy. Higher: another file of the same name could be taken, though its "
+            "own hash still catches that."),
+        "SUBSYNC_STORE_CAP_MB": (
+            "2048",
+            "Disk space for synced copies, in MB; past it, the copies served longest ago are deleted and made again "
+            "when needed, which costs a new read. 2048 holds about 20,000 copies. Lower it on a small disk."),
+        "SUBSYNC_SKIP_ADDONS": (
+            "",
+            "Names of AIOStreams addons, separated by commas, whose listed files subsync never reads; empty by default. "
+            "Use it for an addon whose files you don't want read; those files get no synced copy."),
+    }),
+    ("Which subtitles are tried", {
+        "SUBSYNC_EXTRA_SOURCES": (
+            "tsdb,gestdown,osv3plus",
+            "Subtitle sources subsync searches itself, beside your AIOStreams config's: tsdb (TheSubtitleDB), gestdown "
+            "(Gestdown, series only) and osv3plus (OpenSubtitles V3+); none needs a key. Recommended: all three: they "
+            "often have subtitles taken from the very release, which fit best. Each search sends the title's IMDb id, "
+            "and OpenSubtitles V3+ also gets the file's hash, size and name; remove a source to stop asking it."),
+        "SUBSYNC_SOURCE_TIMEOUT_S": (
+            "10",
+            "How long subsync waits for each source it searches itself, in seconds; a slower source is left out for "
+            "that file and the others still count. Recommended: 10. Longer: slow sources count more often, and your "
+            "copy can take that much longer."),
+        "SUBSYNC_SKIP_AI": (
+            "on",
+            "On: subtitles marked as AI-made, machine-translated or forced (covering only foreign-language parts) are "
+            "never tried. Recommended: on: they read badly or cover only part of the film. Off: they can become synced "
+            "copies like any other."),
+        "SUBSYNC_RANK_BY_RELEASE": (
+            "on",
+            "On: subtitles made for this exact release (by its file hash or release name) are tried first. "
+            "Recommended: on: they usually fit as they are, so your copy is ready sooner. Off: subtitles are tried in "
+            "your sources' order."),
+        "SUBSYNC_BEST_FIT": (
+            "on",
+            "On: subsync judges every subtitle it tries and lists the best-fitting copy first. Off: it lists the first "
+            "copy that passes, in your sources' order, and stops there. Recommended: on: the first entry you see fits "
+            "best. Cost: every try is made, a few more downloads and seconds per file."),
+        "SUBSYNC_MAIN_ALTERNATIVES": (
+            "3",
+            "With best fit on, how many synced copies of your first language are listed, best first. Recommended: 3, "
+            "so you can switch when the first has a problem the check can't see, like a poor translation. 1: a shorter "
+            "list."),
+        "SUBSYNC_GATE_TRIES": (
+            "20",
+            "With best fit on, how many subtitles per language subsync checks as they are (a fraction of a second "
+            "each, no re-timing), looking for one that already fits. Recommended: 20. Higher: more downloads per file "
+            "for a slightly better chance of an exact fit."),
+        "SUBSYNC_MAX_TRIES": (
+            "6",
+            "How many subtitles per language and file subsync re-times with alass (the timing tool) before it stops; "
+            "each try is a download and a few seconds of work. Recommended: 6. Higher: a better chance on hard files, "
+            "at more time and downloads. Lower: faster, and more files keep their originals."),
+    }),
+    ("How copies are made and checked", {
+        "SUBSYNC_FAST_PATH": (
+            "on",
+            "On: each subtitle is first checked as it is, and one that already fits is listed at once without "
+            "re-timing. Recommended: on: faster, and a fitting original is never altered. Off: every subtitle is "
+            "re-timed first."),
+        "SUBSYNC_SHIFT_PATH": (
+            "on",
+            "On: before full re-timing, subsync tries moving the whole subtitle by one steady amount, the common case "
+            "of a film a second early or late. Recommended: on: fast and exact when it applies. Off: full re-timing "
+            "every time, slower."),
+        "SUBSYNC_SNAP": (
+            "on",
+            "On: after re-timing, each line moves to start exactly where the file's own matching line starts, wherever "
+            "that match is clear. Recommended: on: lines appear right on cue. Off: lines keep their author's timing "
+            "inside the re-timed blocks."),
+        "SUBSYNC_SNAP_WITHIN": (
+            "0.95",
+            "The share of lines that must start within 200 ms of the file's track for a copy whose lines were snapped "
+            "(0.95 = 95 %). Snapped lines look better to the check than they are, so they need more than the 90 % other "
+            "copies need. Recommended: 0.95. Lower: more copies offered, a few slightly off."),
+        "SUBSYNC_BETTER": (
+            "on",
+            "On: a copy that misses the 90 % bar is still offered when it is clearly better than the original: its "
+            "typical error is 200 ms or less and at most half the original's, at least 85 % of its lines pair with the "
+            "file's lines, and no part of the film is missing. Recommended: on: such a copy is a plain improvement. "
+            "Off: only copies that meet the bar; the rest keep their originals."),
+        "SUBSYNC_BETTER_PAIRED": (
+            "0.85",
+            "For \"clearly better\": the share of the copy's lines that must pair with a line of the file's track "
+            "(0.85 = 85 %). Recommended: 0.85. " + _THRESHOLD),
+        "SUBSYNC_BETTER_MEDIAN_MS": (
+            "200",
+            "For \"clearly better\": the copy's typical error, the median distance of its line starts from the file's, "
+            "must be at most this many ms. Recommended: 200. " + _THRESHOLD),
+        "SUBSYNC_BETTER_RATIO": (
+            "0.5",
+            "For \"clearly better\": the copy's typical error must be at most this share of the original's (0.5 = "
+            "half). Recommended: 0.5: a smaller gain isn't worth replacing the original. " + _THRESHOLD),
+        "SUBSYNC_BETTER_CROSS_MEDIAN_MS": (
+            "300",
+            "For \"clearly better\" when the only track to check against is in another language (a translation checked "
+            "against the English track): the typical error must be at most this many ms. Recommended: 300, looser than "
+            "200 because translations split and merge lines. " + _THRESHOLD),
+        "SUBSYNC_BETTER_CROSS_PAIRED": (
+            "0.75",
+            "For \"clearly better\" against another language's track: the share of the copy's lines that must pair "
+            "(0.75 = 75 %). Recommended: 0.75. " + _THRESHOLD),
+        "SUBSYNC_FALLBACK_REFERENCE": (
+            "eng",
+            "When a file has no track in a subtitle's language, the languages whose track it is checked against first, "
+            "as codes separated by commas. Recommended: eng: English tracks are the most common and the most complete. "
+            "Empty: such subtitles are checked against no other language's track."),
+        "SUBSYNC_PREFER_PLAIN_TRACK": (
+            "on",
+            "On: copies are checked against the file's plain subtitle track rather than its SDH track (the one with "
+            "sound descriptions like [door slams], which has extra lines). Recommended: on: a cleaner comparison and "
+            "fewer copies refused for lines the SDH track adds."),
+        "SUBSYNC_IMAGE_REF": (
+            "on",
+            "On: files whose only subtitles are images (PGS or VobSub, common in Blu-ray rips) are checked against those "
+            "images' timings. Recommended: on. Off: such files keep their originals, unless the audio route is on."),
+        "SUBSYNC_GATE_SPLITS": (
+            "on",
+            "On: when a subtitle splits one of the file's lines in two, the second half counts as matched. Recommended: "
+            "on: otherwise good copies that split lines fail the check and you get the original."),
+        "SUBSYNC_LIST_IN_SYNC": (
+            "on",
+            "On: an original further down the list that already fits the file is listed as a synced copy too. "
+            "Recommended: on: you can see that it fits. Off: it stays listed only under its original name."),
+        "SUBSYNC_PARALLEL_LANGUAGES": (
+            "on",
+            "On: your languages are synced at the same time. Recommended: on: copies are ready sooner. Off: one after "
+            "another, less work at once on a small server."),
+        "SUBSYNC_ANCHORED_GUESS": (
+            "on",
+            "With several languages, while a file waits for the audio route: your other languages are shifted onto the "
+            "first language's best guess, so all of them start in step. Recommended: on. Off: they stay as they are "
+            "until their own copies are ready."),
+    }),
+    ("When the audio route works", {
+        "SUBSYNC_AUDIO_ON_PICK": (
+            "on",
+            "With the audio route on: on, subsync reads a file's audio only after you pick its \"(Subsync)\" entry, "
+            "which shows you are playing it; off, on any subtitle request, including the ones AIOMetadata sends for a "
+            "version you never play. Recommended: on: no audio is read for files you only browse. Off: copies come "
+            "sooner, at up to 1 GB read for every file merely opened."),
+        "SUBSYNC_PICK_WAIT_MS": (
+            "14000",
+            "How long your app's download of a \"(Subsync)\" entry waits for the synced copy, in ms, before it gets the "
+            "original instead. Recommended: 14000 (AIOMetadata gives up after 15 s). Lower: the original comes sooner "
+            "and more often."),
+        "SUBSYNC_PENDING_ENTRY": (
+            "off",
+            "On: instead of \"(Subsync)\" entries, a \"(synced)\" entry is listed for a file still being worked on, "
+            "served as the original until the copy is ready, and subtitle lists wait up to SUBSYNC_PENDING_WAIT_MS. "
+            "Recommended: off: the \"(Subsync)\" entry already gives the copy once it is ready, and lists don't wait."),
+        "SUBSYNC_PENDING_WAIT_MS": (
+            "1000",
+            "With pending entries on, how long a subtitle list waits for a file's work before answering, and how long a "
+            "pending entry waits for its copy, in ms. Recommended: 1000. Longer: more copies on the first try, slower "
+            "lists."),
+        "SUBSYNC_AUDIO_LEAD_MS": (
+            "190",
+            "Audio route: in good releases a subtitle appears about 190 ms before the speech starts, so copies timed "
+            "from speech are moved this much earlier. Recommended: 190. 0: lines appear exactly as speech starts, a "
+            "little late to the eye."),
+        "SUBSYNC_AUDIO_BETTER": (
+            "on",
+            "Audio route: on, a copy that misses the standard bar against the speech is still offered when it is "
+            "clearly closer to the speech than the original (the five rules below). Recommended: on. Off: only copies "
+            "that meet the standard bar; more of these files keep their originals."),
+        "SUBSYNC_AUDIO_BETTER_MATCHED": (
+            "25",
+            "Audio route, \"clearly closer\": at least this many of the copy's lines must match speech. Recommended: "
+            "25. " + _THRESHOLD),
+        "SUBSYNC_AUDIO_BETTER_MISS": (
+            "0.30",
+            "Audio route, \"clearly closer\": at most this share of the copy's lines may match no speech (0.30 = 30 %). "
+            "Recommended: 0.30. " + _THRESHOLD),
+        "SUBSYNC_AUDIO_BETTER_MEDIAN_MS": (
+            "150",
+            "Audio route, \"clearly closer\": the copy's typical error from the speech must be at most this many ms. "
+            "Recommended: 150. " + _THRESHOLD),
+        "SUBSYNC_AUDIO_BETTER_WITHIN": (
+            "0.55",
+            "Audio route, \"clearly closer\": at least this share of lines must start within 200 ms of the speech "
+            "(0.55 = 55 %), lower than for a subtitle track because speech detection is less exact. Recommended: 0.55. "
+            + _THRESHOLD),
+        "SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S": (
+            "1.0",
+            "Audio route, \"clearly closer\": the copy must have moved the lines by at least this many seconds; a "
+            "smaller change isn't worth replacing the original. Recommended: 1.0."),
+    }),
+    ("Programs and addresses", {
+        "SUBSYNC_DATA": (
+            "/data",
+            "Where subsync keeps its database and synced copies inside its container, on a Docker volume that survives "
+            "updates. Leave it."),
+        "SUBSYNC_ALASS": (
+            "alass",
+            "The alass program subsync re-times subtitles with, built into its image. Leave it."),
+        "SUBSYNC_FFMPEG": (
+            "ffmpeg",
+            "The ffmpeg program that decodes short audio parts for the audio route, built into its image. Leave it."),
+        "SUBSYNC_VAD_MODEL": (
+            "",
+            "The file of the speech-detection model (Silero VAD) the audio route uses; empty takes the one in the image. "
+            "Leave it."),
+        "SUBSYNC_TSDB_URL": (
+            "https://api.thesubtitledb.org",
+            "The address of TheSubtitleDB's API, a source subsync searches itself. Change it only if the service "
+            "moves."),
+        "SUBSYNC_GESTDOWN_URL": (
+            "https://api.gestdown.info",
+            "The address of Gestdown's API (series subtitles), a source subsync searches itself. Change it only if the "
+            "service moves."),
+        "SUBSYNC_CINEMETA_URL": (
+            "https://v3-cinemeta.strem.io",
+            "The address of Cinemeta, Stremio's catalogue, which subsync asks for a series' TheTVDB number before it "
+            "searches Gestdown. Change it only if it moves."),
+        "SUBSYNC_OSV3PLUS_URL": (
+            "https://opensubtitles.stremio.homes",
+            "The address of OpenSubtitles V3+, a source subsync searches itself. Change it only if the service moves."),
+        "SUBSYNC_SUBDL_URL": (
+            "https://api.subdl.com",
+            "The address of SubDL's search API, used only with a SubDL key. Change it only if the service moves."),
+        "SUBSYNC_SUBDL_DOWNLOAD_URL": (
+            "https://dl.subdl.com",
+            "The address SubDL's subtitle files are downloaded from, used only with a SubDL key. Change it only if the "
+            "service moves."),
+        "SUBSYNC_WYZIE_URL": (
+            "https://sub.wyzie.io",
+            "The address of Wyzie Subs' API, used only with a Wyzie key. Change it only if the service moves."),
+    }),
+]
+
+SETTINGS = {name: entry for _, group in GROUPS for name, entry in group.items()}

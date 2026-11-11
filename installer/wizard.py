@@ -4,7 +4,8 @@
 It installs one thing, the subsync service (in Docker, built on this machine), and makes two config changes in
 AIOStreams, each shown to you first and saved only after you say yes:
   1. your config gets one more subtitle source, subsync (a backup copy is saved first);
-  2. a second config, made from yours, that subsync uses to find files (no Usenet, nothing in the background).
+  2. a second config, made from yours, that subsync uses to find files (no Usenet, no Real-Debrid, nothing in the
+     background).
 It doesn't install or change AIOStreams itself or AIOMetadata.
 
   ./setup                  install, or change languages and options (safe to run again)
@@ -25,9 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from installer import dockerenv, plan  # noqa: E402
+from installer import docs, dockerenv, plan  # noqa: E402
 from installer.aios import Aios, AiosError  # noqa: E402
 from installer.ui import Asker, Stop, bad, box, note, ok, paint, say, step, stop, warn, wrap  # noqa: E402
+from subsync import explain, realdebrid  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 STATE = Path(os.environ.get('AIOSUBTITLES_STATE') or REPO / 'state')
@@ -60,8 +62,15 @@ def write_private(path, text):
     tmp.replace(path)
 
 
-def write_kv(path, values, header):
-    body = [f'# {line}' for line in header.splitlines()] + [f'{k}={v}' for k, v in values.items() if v not in (None, '')]
+def write_kv(path, values, header, explained=False):
+    """KEY=value lines under a header; with `explained`, each setting's explanation (explain.py) above its line."""
+    body = [f'# {line}' for line in header.splitlines()]
+    for k, v in values.items():
+        if v in (None, ''):
+            continue
+        if explained:
+            body += [''] + docs.comment(explain.SETTINGS[k][1])
+        body.append(f'{k}={v}')
     write_private(path, '\n'.join(body) + '\n')
 
 
@@ -139,8 +148,6 @@ class Wizard:
                 warn(f"The container \"{container['name']}\" looks like AIOStreams, but I can't reach it from here.")
             url = self.ask.text('AIOS_URL', 'What address do you open AIOStreams at?', current=self.prev.get('aios_url'),
                                 default=None if self.prev.get('aios_url') else 'http://127.0.0.1:3000',
-                                help='The address of its configure page, without /stremio/... For example\n'
-                                     'http://127.0.0.1:3000 or https://aio.example.com',
                                 check=self._check_aios)
         self.aios = Aios(url)
         settings = self.status['settings']
@@ -174,8 +181,7 @@ class Wizard:
     # 3 -------------------------------------------------------------------------------------------------------
     def read_viewer(self):
         step(3, 'The config your apps use')
-        wrap('subsync is added to one AIOStreams config: the one your Stremio or Jellyfin app is set up with. '
-             'Its ID and password are the ones you use on AIOStreams\' configure page.')
+
         def check_id(value):
             uuid = plan.config_id_from(value)
             if not uuid:
@@ -193,14 +199,8 @@ class Wizard:
         current = self.keys.get('VIEWER_UUID')
         while True:
             self.uuid = self.ask.text('AIOS_CONFIG_ID', 'Config ID (or paste your Stremio link)', current=current,
-                                      shown=short(current or ''),
-                                      help='A long ID like 1a2b3c4d-…; it is part of your Stremio link: …/stremio/<ID>/…\n'
-                                           'Where to find it: AIOStreams\' configure page shows it when you save or load\n'
-                                           'your config (the "UUID"). Or copy your Stremio install link and paste it here\n'
-                                           'whole: setup takes the ID out of it. Its password is asked next.',
-                                      check=check_id)
+                                      shown=short(current or ''), check=check_id)
             self.password = self.ask.text('AIOS_CONFIG_PASSWORD', 'Its password', secret=True, optional=True,
-                                          help='The password you chose when you saved the config. It is used now and not stored.',
                                           skip_hint='Enter with nothing typed: give a different config ID',
                                           check=check_password)
             if self.password:
@@ -208,31 +208,25 @@ class Wizard:
             if self.ask.yes:
                 stop('"Its password" needs an answer.', 'Add AIOS_CONFIG_PASSWORD=... to the answers file.')
             current = self.uuid
-        settings = self.status['settings']
-        debrids = plan.debrid_services(self.viewer)
-        names = [plan.DEBRID_SERVICES[d] for d in debrids]
+        names = plan.debrid_names(self.viewer)
         subs = plan.subtitle_sources(self.viewer)
         say()
-        (ok if debrids else warn)('Debrid services: ' + (', '.join(names) if names else 'none'))
-        for d in debrids:
-            note(f"{plan.DEBRID_SERVICES[d]}: {'through AIOStreams (it only sees this server)' if plan.proxy_covers(self.viewer, settings, d) else 'direct to your apps'}")
+        (ok if names else warn)('Debrid services: ' + (', '.join(names) if names else 'none'))
         (ok if subs else warn)('Subtitle sources: ' + (', '.join(subs) if subs else 'none yet'))
+        if realdebrid.real_debrid_only(self.viewer):
+            stop(realdebrid.REAL_DEBRID_ONLY, 'After adding it on AIOStreams\' configure page, run ./setup again.')
+        cleaned, ways = realdebrid.without_real_debrid(self.viewer)
+        if realdebrid.SERVICE in realdebrid.debrid_in_use(self.viewer):
+            ok(f'Real-Debrid is never used: subsync reads through {", ".join(plan.debrid_names(cleaned))} only')
+        if ways:
+            note('subsync\'s own config leaves out:')
+            for line in ways:
+                note(f'  {line}')
         problems = plan.sync_config_problems(plan.sync_config(self.viewer))
         if problems:
             stop('subsync can\'t work with this config: ' + '; '.join(problems) + '.',
-                 'Add a debrid service (TorBox, Real-Debrid, ...) on AIOStreams\' configure page, then run ./setup again.')
-        self.rd_direct = plan.real_debrid_direct(self.viewer, settings)
-        if self.rd_direct:
-            box('Real-Debrid: please read', [
-                'Your config streams Real-Debrid files straight to your apps. subsync reads a small part of the file '
-                'being watched from this server, so Real-Debrid sees your account used from two places at the same '
-                'time, which it may treat as account sharing.',
-                '',
-                'To keep this small, subsync reads only the file\'s index (about 1 MB per file) and never the audio. '
-                'To avoid it completely, turn on AIOStreams\' proxy for Real-Debrid, so Real-Debrid only ever sees '
-                'this server.'], colour='1;33')
-            if not self.ask.yesno('RD_OK', 'Continue with index-only reads for Real-Debrid?', True):
-                stop('Stopped; nothing was changed.', 'Run ./setup again after turning on the proxy, or any time.')
+                 'Add a debrid service other than Real-Debrid (TorBox, ...) on AIOStreams\' configure page, then run '
+                 './setup again.')
 
     # 4 -------------------------------------------------------------------------------------------------------
     def choices(self):
@@ -243,55 +237,33 @@ class Wizard:
             langs, error = plan.parse_languages(value)
             return (False, error, value) if error else (True, '', value)
         text = self.ask.text('LANGUAGES', 'Which subtitle languages should be synced?', current=prev_langs, default='English',
-                             help='Names or codes, separated by commas: English, Spanish, ru\n'
-                                  'Each one is synced separately for every file you watch.', check=check_langs)
+                             check=check_langs)
         self.languages = plan.parse_languages(text)[0]
-        if self.rd_direct:
-            self.audio = False
-            note('Audio route: off (Real-Debrid is read index-only).')
-        else:
-            self.audio = self.ask.yesno('AUDIO', 'Also sync files that carry no subtitles of their own, by listening to the audio?',
-                                        self.prev.get('audio', False),
-                                        help='Most files have their own subtitle track, and subsync times yours against it\n'
-                                             'from a ~1 MB read. A file without one can only be timed from its speech:\n'
-                                             'after you pick its "<Language> (Subsync)" entry, subsync reads short audio\n'
-                                             'parts of it, at most 1 GB per file; files with a bitrate too high for that\n'
-                                             'keep their original subtitles. Off: those files keep their original subtitles.')
+        self.audio = self.ask.yesno('AUDIO', 'Also sync files that carry no subtitles of their own, by listening to the audio?',
+                                    self.prev.get('audio', False))
         self.source_keys()
         self.add_os = False
         if not plan.subtitle_sources(self.viewer):
             self.add_os = self.ask.yesno('ADD_OPENSUBTITLES', 'Your config has no subtitle source, so there is nothing to '
-                                                              'sync yet. Add OpenSubtitles (free, no account needed)?', True,
-                                         help='Stremio\'s official OpenSubtitles addon. It lists every language; subsync\n'
-                                              'only syncs the languages you picked above.')
+                                                              'sync yet. Add OpenSubtitles (free, no account needed)?', True)
         self.public_address()
 
     def source_keys(self):
         """Optional free keys for subtitle sources subsync searches itself (TheSubtitleDB, OpenSubtitles V3+ and
         Gestdown need none)."""
-        say()
-        wrap('subsync also searches TheSubtitleDB, OpenSubtitles V3+ and Gestdown itself. Two more sources need a free key; '
-             'each finds subtitles the others do not have. Both are optional.')
-        for key, label, where in (('SUBDL_KEY', 'SubDL API key', 'https://subdl.com/panel/api'),
-                                  ('WYZIE_KEY', 'Wyzie Subs API key', 'https://wyzie.io')):
-            value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key),
-                                  help=f'Free at {where}. Stored only in state/secrets.env on this machine.')
+        for key, label in (('SUBDL_KEY', 'SubDL API key'), ('WYZIE_KEY', 'Wyzie Subs API key')):
+            value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key))
             if value:
                 self.keys[key] = value
 
     def public_address(self):
-        say()
-        wrap('Your apps download the synced subtitle files from subsync, so it needs an address they can reach, '
-             'like they reach AIOStreams.')
         lan = dockerenv.lan_address()
         kind, default = plan.public_default(self.s['aios_public'], lan)
         prev = self.prev.get('public_base')
         if prev:
             kind = 'path' if plan.base_path_of(prev) else 'port'
         url = self.ask.text('PUBLIC_ADDRESS', 'subsync\'s address for your apps', current=prev, default=default,
-                            help='Behind the same web address as AIOStreams: https://aio.example.com/subsync\n'
-                                 '(one line in your web server, shown next). On your home network:\n'
-                                 f'http://{lan or "this-machine-ip"}:{plan.SUBSYNC_PORT}', check=plan.check_public)
+                            check=plan.check_public)
         kind = 'path' if plan.base_path_of(url) else 'port'
         port = urllib.parse.urlsplit(url).port
         if kind == 'port':
@@ -339,8 +311,8 @@ class Wizard:
             say('    no change (subsync is already in it)')
         say()
         say(f'  {paint("1", "subsync's own config")} ' + ('(update)' if sync_exists else '(new)'))
-        say('    a copy of yours without Usenet sources and without subsync, with nothing running in the')
-        say('    background, so subsync can find the file you are watching. It never appears in your apps.')
+        say('    a copy of yours without Usenet, Real-Debrid and subsync, with nothing running in the background,')
+        say('    so subsync can find the file you are watching. It never appears in your apps.')
         self.cache = self.offer_cache_setting()
         if not self.ask.yesno('CONFIRM', 'Save these changes?', True):
             stop('Nothing was changed.', 'Run ./setup again when you are ready.')
@@ -402,8 +374,7 @@ class Wizard:
             return action()
 
     def sign_in(self, why):
-        user = self.ask.text('AIOS_USERNAME', f'AIOStreams sign-in {why}: username',
-                             help='The account you sign in to AIOStreams\' web page with.')
+        user = self.ask.text('AIOS_USERNAME', f'AIOStreams sign-in {why}: username')
 
         def check(value):
             try:
@@ -411,15 +382,12 @@ class Wizard:
             except AiosError as e:
                 return False, e.message, value
             return True, 'Signed in', value
-        self.ask.text('AIOS_PASSWORD', 'Its password', secret=True, check=check, help='Used now and not stored.')
+        self.ask.text('AIOS_PASSWORD', 'Its password', secret=True, check=check)
 
     def offer_cache_setting(self):
         """AIOStreams keeps each addon's subtitle answer 5 minutes; without that for subsync, a synced copy shows the
         next time a film is opened instead of up to 5 minutes later. Needs AIOStreams' admin sign-in."""
-        say()
-        wrap('Optional: AIOStreams keeps every subtitle answer for 5 minutes. Turning that off for subsync only '
-             'lets a synced copy appear as soon as it is ready. This needs AIOStreams\' admin sign-in.')
-        if not self.ask.yesno('CACHE', 'Change that setting now?', False):
+        if not self.ask.yesno('CACHE', 'Turn off AIOStreams\' 5-minute subtitle cache for subsync?', False):
             return None
         if not self.aios.signed_in:
             self.sign_in('(admin)')
@@ -453,17 +421,19 @@ class Wizard:
             self.proxy_rule()
         sync_base = f"{self.s['aios_internal']}/stremio/{self.keys['SYNC_UUID']}/{self.sync_encrypted}"
         env = plan.subsync_env({
-            'sync_manifest': f'{sync_base}/manifest.json', 'public_base': self.s['public_base'],
+            'sync_manifest': f'{sync_base}/manifest.json', 'sync_password': self.keys['SYNC_PASSWORD'],
+            'public_base': self.s['public_base'],
             'addon_key': self.keys['ADDON_KEY'], 'languages': self.languages,
             'rewrite': plan.rewrite_rule(self.s['aios_public'], self.s['aios_internal']) if self.s['mode'] != 'remote' else '',
             'audio': self.audio, 'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
-        write_kv(STATE / 'subsync.env', env, 'subsync settings, written by ./setup. Private: holds subsync\'s keys.')
+        write_kv(STATE / 'subsync.env', env, 'subsync settings, written by ./setup. Private: holds subsync\'s keys.\n'
+                 'Every setting, with its explanation and default: the README\'s Settings section.', explained=True)
         (STATE / 'compose.yaml').write_text(plan.compose_yaml({
             'version': VERSION, 'host_network': self.s['mode'] == 'host', 'networks': self.s.get('networks'),
             'bind': self.s.get('bind'), 'port': self.s['port']}))
-        self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio, rd_direct=self.rd_direct,
+        self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio,
                       manifest_url=self.manifest_url, installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
         for kept in ('cache_before', 'added_opensubtitles'):
             self.s.setdefault(kept, self.prev.get(kept))
@@ -573,10 +543,6 @@ class Wizard:
             note('If your apps do show ready files for them, run ./setup --status and send its output with a bug report.')
         # d) one small read, only if the user says yes (Enter answers no)
         if rows:
-            say()
-            wrap('Last check (optional): read the start and the index of one of those files, the same small read '
-                 'subsync makes for every file you watch (usually under 1 MB). Your debrid service opens the file for '
-                 'this, so it may show up in your debrid account\'s list.')
             if self.ask.yesno('TEST_READ', 'Do the test read now?', False):
                 good = self.test_read(rows) and good
             else:
@@ -671,10 +637,10 @@ def subsync_status():
 
 
 def readable(row):
-    """A listed row subsync could read: a ready (cached) debrid file with a link."""
+    """A listed row subsync could read: a ready (cached) debrid file with a link, never a Real-Debrid one."""
     d = row.get('streamData') or {}
     return bool(row.get('url')) and d.get('type') == 'debrid' and (d.get('service') or {}).get('cached') is True \
-        and not d.get('library')
+        and not d.get('library') and realdebrid.row_problem(row) is None
 
 
 # ------------------------------------------------------------------------------------------- other commands
@@ -785,8 +751,8 @@ def main(argv=None):
         say()
         say(paint('1', '  AIOSubtitles · subsync setup'))
         wrap('subsync makes copies of your subtitles timed to the exact file you play, and lists them next to the '
-             'originals as "<Language> (synced)". This adds it to the AIOStreams you already run. Press Enter to '
-             'accept what is shown; type ? for more help.')
+             'originals as "<Language> (synced)". This adds it to the AIOStreams you already run. Each question says '
+             'what it does; press Enter to accept what is shown.')
         w = Wizard(args)
         if w.prev:
             say(paint('2', '  Already set up here: your answers are kept unless you change them.'))
