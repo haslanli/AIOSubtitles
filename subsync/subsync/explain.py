@@ -623,7 +623,7 @@ PUBLIC_REAL_DEBRID_WARNING = (
 
 PUBLIC_PASSWORD_TEXT = (
     "Your AIOStreams password, used once, now, for two things: to add AIOSubtitles to your AIOStreams config (if you "
-    "leave that box checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, Usenet or "
+    "leave the box below checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, Usenet or "
     "automatic fallback to other sources, so opening a file opens only that file. It is not stored. You'll be asked "
     "again only if you refresh.")
 
@@ -640,7 +640,7 @@ PUBLIC_FIELDS = {
     "languages": (
         "The languages you want synced subtitles in, up to four, like English, Spanish. Each one is a separate sync "
         "for every file you play, so fewer is faster. The first one gets up to three synced choices, the others one "
-        "each. You can change them later on your settings page."),
+        "each. You can change them later; a change applies from the next file you play."),
     "add_addon": (
         "Adds AIOSubtitles to your AIOStreams config, before your other subtitle sources, so your apps show its "
         "synced subtitles first (many apps show only a few per language). Recommended. Unchecked, nothing in your own "
@@ -669,8 +669,8 @@ PUBLIC_TEXTS = {
         "makes on your AIOStreams, and offers your usual subtitles re-timed to fit. A copy synced once is shared with "
         "everyone who plays the same file, so many files have one ready before you press play."),
     "signed_up": (
-        "You're signed up. Keep the link below: it is the only key to your settings, and nobody, AIOSubtitles "
-        "included, can recover it. If you lose it, sign up again."),
+        "Keep this link: it is the only key to your settings, and nobody, AIOSubtitles included, can recover it. If you "
+        "lose it, sign up again. Keep it private too: anyone with it can change your settings or delete your data."),
     "manual": (
         "Add AIOSubtitles to your AIOStreams config yourself: on AIOStreams' configure page, open Addons, add a "
         "custom addon, paste the link above as its manifest link, place it before your other subtitle sources and "
@@ -684,18 +684,79 @@ PUBLIC_TEXTS = {
     "addon_left": (
         "Remove the AIOSubtitles addon from your AIOStreams config yourself (Addons, then delete it and save); its "
         "link no longer works."),
-    "privacy": (
-        "What is read: your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, its "
-        "subtitle track (about 1 MB) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your "
-        "AIOStreams. What is stored: one record, encrypted so that it opens only with your personal link (your "
-        "AIOStreams address, AIOSubtitles' own config there and its password, your config's id, your languages), "
-        "and how much was read for you each day. AIOSubtitles' own config holds your debrid keys, as your own config "
-        "does, and the service can open it while your requests come in. Your AIOStreams password is never stored. "
-        "Synced subtitles, with the names and sizes of the files they fit, are shared and kept 180 days after last "
-        "use, without who played them. Logs name the titles synced, never who asked. AIOSubtitles runs behind "
-        "Cloudflare, which passes every request on and so sees your internet address and the links you open, your "
-        "personal link included. AIOSubtitles itself keeps no log of requests. Backups of the stored data are kept "
-        "for up to 30 days. How long: until you delete your "
-        "data on your settings page, or 180 days after your last request; then AIOSubtitles' own config can't be "
-        "removed from your AIOStreams, because opening your record needs your link."),
 }
+
+
+# The privacy page in four parts, each under its heading; the lead-in words ("What is read:") are part of the text, so
+# PUBLIC_TEXTS["privacy"] is the same text as one paragraph.
+PRIVACY_PARTS = (
+    ("What is read", "What is read:",
+     "your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, its subtitle track "
+     "(about 1 MB) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your AIOStreams."),
+    ("What is stored", "What is stored:",
+     "one record, encrypted so that it opens only with your personal link (your AIOStreams address, AIOSubtitles' own "
+     "config there and its password, your config's id, your languages), and how much was read for you each day. "
+     "AIOSubtitles' own config holds your debrid keys, as your own config does, and the service can open it while your "
+     "requests come in. Your AIOStreams password is never stored. Synced subtitles, with the names and sizes of the "
+     "files they fit, are shared and kept 180 days after last use, without who played them. Logs name the titles "
+     "synced, never who asked."),
+    ("Who else sees your requests", "",
+     "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address and the "
+     "links you open, your personal link included. AIOSubtitles itself keeps no log of requests. Backups of the stored "
+     "data are kept for up to 30 days."),
+    ("How long it is kept", "How long:",
+     "until you delete your data on your settings page, or 180 days after your last request; then AIOSubtitles' own "
+     "config can't be removed from your AIOStreams, because opening your record needs your link."),
+)
+PUBLIC_TEXTS["privacy"] = " ".join(f"{lead} {text}".strip() for _, lead, text in PRIVACY_PARTS)
+
+# The sign-up page's heading, with the words the hand-drawn mark goes under.
+PUBLIC_HEADLINE = ("Subtitles,", "in sync", "with the file you play.")
+
+# What to have ready before signing up; the last line takes the attempts allowed per hour.
+PUBLIC_BEFORE = (
+    "The install link of your AIOStreams config and its password, both from AIOStreams' configure page.",
+    "A debrid service in that config other than Real-Debrid, such as TorBox.",
+    "An AIOStreams that opens from the internet over https.",
+)
+
+# Adding AIOSubtitles by hand, step by step (the words of PUBLIC_TEXTS["manual"]).
+PUBLIC_MANUAL_STEPS = (
+    "On AIOStreams' configure page, open Addons.",
+    "Add a custom addon and paste your personal link as its manifest link.",
+    "Place it before your other subtitle sources and save.",
+)
+
+# What the delete step removes.
+PUBLIC_DELETE_LIST = (
+    "Everything AIOSubtitles keeps about you is deleted.",
+    "Its own config is removed from your AIOStreams.",
+    "Your personal link stops working at once.",
+)
+
+PUBLIC_TEXTS.update({
+    "tries": "Each try counts: {n} sign-up attempts per address in an hour.",
+    "kept_note": "For your safety, the link, password and invite code aren't kept after an error: enter them again.",
+    "password_once": "Your password is used for this sign-up only and is not stored.",
+    "made_config": ("Made AIOSubtitles' own config on your AIOStreams, without Real-Debrid, Usenet or automatic "
+                    "fallback to other sources."),
+    "languages_chosen": "Languages: {names}.",
+    "next": ("Play something in your app. For each file, AIOSubtitles offers synced copies of your subtitles in your "
+             "app's subtitle list. A file nobody has played before takes a few seconds; if your app has already picked "
+             "a subtitle by then, the synced copy is there the next time you open the file."),
+    "settings_link": "It is your personal link with /configure at the end. Bookmark it to come back.",
+    "settings_lead": ("This page opens with your personal link. Keep the link private: anyone with it can change these "
+                      "settings or delete your data."),
+    "reset": "Resets at 00:00 UTC, {when}. Files that already have a synced copy don't count.",
+    "limit_reached": "Until 00:00 UTC you get only copies already synced for someone; nobody else is affected.",
+    "languages_saved": "Languages saved: {names}. They apply from the next file you play.",
+    "refreshed": "Refreshed: AIOSubtitles' config on your AIOStreams now matches yours.",
+    "refresh_manual": ("AIOSubtitles' config on your AIOStreams now matches yours, but AIOSubtitles couldn't put itself "
+                       "back in your own config."),
+    "undone": "This can't be undone.",
+    "not_found": ("If this was your personal link, its data may have been deleted, or the link was cut short: copy the "
+                  "whole link again."),
+    "strip": ("An illustration: your subtitles slide along the file's own subtitle track until their lines land on "
+              "it."),
+})
+

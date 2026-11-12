@@ -1,6 +1,7 @@
 """Public mode: its settings, the pool of users' workers, the shared store's memory per language, and the worker's turn
 and limits."""
 import base64
+import re
 import os
 import sys
 import unittest
@@ -545,7 +546,7 @@ class PublicTextsTest(unittest.TestCase):
         import re
         from subsync import explain, pages
         source = open(pages.__file__).read()
-        used = set(re.findall(r'_(?:field|check)\("(\w+)"', source)) | set(re.findall(r'help="(\w+)"', source))
+        used = set(re.findall(r'_(?:field|check|chips)\("(\w+)"', source)) | set(re.findall(r'help="(\w+)"', source))
         used.discard("password")   # its explanation is named by help=
         self.assertEqual(used - set(explain.PUBLIC_FIELDS), set())
 
@@ -567,7 +568,7 @@ class PublicTextsTest(unittest.TestCase):
                               (5 * 1024 * 1024, " 5.0 MB of"), (12 * 1024 * 1024, " 12 MB of")):
             with self.subTest(nbytes=nbytes):
                 html = pages.settings_page(s, record, {"files": 1, "bytes": nbytes}, "https://x.test/u/t/manifest.json")
-                self.assertIn(shown, html)
+                self.assertRegex(html, r"(?<![\d.])" + re.escape(shown.strip()))   # the number whole, not a tail
 
     def test_the_privacy_text_names_cloudflare_and_the_backups_before_how_long(self):
         from subsync import explain

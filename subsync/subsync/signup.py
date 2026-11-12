@@ -34,9 +34,11 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class SignupError(Exception):
-    def __init__(self, message, code=400):
+    """A plain message for the page; `field` names the form field it is about (the page marks it), or None."""
+
+    def __init__(self, message, code=400, field=None):
         super().__init__(message)
-        self.message, self.code = message, code
+        self.message, self.code, self.field = message, code, field
 
 
 @dataclass
@@ -47,6 +49,7 @@ class SignupResult:
     warning: str = None
     added: bool = False
     manual: bool = False
+    languages: list = field(default_factory=list)
 
 
 def public_api(instance, timeout):
@@ -60,29 +63,32 @@ def parse_link(text):
     """(instance address, config id) from an AIOStreams config link (https only)."""
     text = (text or "").strip()
     if not text or len(text) > MAX_LINK or _CONTROL.search(text):
-        raise SignupError("Paste the link of your AIOStreams config: the one that ends in /manifest.json.")
+        raise SignupError("Paste the link of your AIOStreams config: the one that ends in /manifest.json.", field="link")
     parts = urllib.parse.urlsplit(text)
     if parts.scheme != "https":
         raise SignupError("The link must start with https://, so your password crosses the internet encrypted. "
-                          "Use the address your AIOStreams has on the internet.")
+                          "Use the address your AIOStreams has on the internet.", field="link")
     if parts.username is not None or parts.password is not None:
         raise SignupError("Paste the link without a name or password in its address: the one AIOStreams' configure "
-                          "page gives.")
+                          "page gives.", field="link")
     if parts.query or parts.fragment or not parts.hostname:
-        raise SignupError("That isn't an AIOStreams config link: copy it again from AIOStreams' configure page.")
+        raise SignupError("That isn't an AIOStreams config link: copy it again from AIOStreams' configure page.",
+                          field="link")
     prefix, sep, rest = parts.path.partition("/stremio/")
     pieces = rest.split("/")
     if not sep or len(pieces) < 2 or not _UUID.match(pieces[0]) or not pieces[1] or (
             len(pieces) > 2 and pieces[2:] != ["manifest.json"]):
         raise SignupError("That isn't an AIOStreams config link: it should look like "
-                          "https://…/stremio/<config id>/…/manifest.json. Copy it again from AIOStreams' configure page.")
+                          "https://…/stremio/<config id>/…/manifest.json. Copy it again from AIOStreams' configure page.",
+                          field="link")
     return f"https://{parts.netloc}{prefix.rstrip('/')}", pieces[0].lower()
 
 
 def _password(form):
     password = form.get("password") or ""
     if not password or len(password) > MAX_PASSWORD or _CONTROL.search(password):
-        raise SignupError("Type your AIOStreams password: the one you set on AIOStreams' configure page.")
+        raise SignupError("Type your AIOStreams password: the one you set on AIOStreams' configure page.",
+                          field="password")
     return password
 
 
@@ -91,12 +97,37 @@ def _languages(text):
         text = "English"
     langs, problem = parse_languages(text)
     if problem:
-        raise SignupError(problem)
+        raise SignupError(problem, field="languages")
     return [three for _, _, three in langs]
 
 
-def _plain(e, doing):
-    """An AIOStreams error in plain words, without the link or the password."""
+def form_languages(form):
+    """The languages a form chose, as text for _languages. The page's chips send each ticked box (`lang`) and the
+    order they were picked in (`lang_order`, kept by the page's script; without it, the order the page showed, and
+    boxes ticked since then follow in the page's order). An older form sends typed names (`languages`). None when the
+    form has neither."""
+    if form.get("lang_ui") != "1":
+        return form.get("languages")
+    chosen = form.get("lang") or []
+    if isinstance(chosen, str):
+        chosen = [chosen]
+    chosen = [c.strip() for c in chosen if c.strip()]
+    if not chosen:
+        raise SignupError("Choose at least one language.", field="languages")
+    order = [c for c in (form.get("lang_order") or "").split(",") if c in chosen]
+    return ", ".join(dict.fromkeys(order + chosen))
+
+
+WRONG_PASSWORD_CODES = ("USER_INVALID_DETAILS", "USER_INVALID_PASSWORD", "USER_NOT_FOUND")
+WRONG_PASSWORD = ("Your AIOStreams didn't accept this password for this link. Type the password of this config: the one "
+                  "you set on AIOStreams' configure page.")
+
+
+def _plain(e, doing, own_password=False):
+    """An AIOStreams error in plain words, without the link or the password. own_password: the call used the
+    person's own password, so a refused config is about that password."""
+    if own_password and str(e.code) in WRONG_PASSWORD_CODES:
+        return WRONG_PASSWORD
     if "Can't reach" in e.message:
         return (f"{doing}: AIOSubtitles can't reach your AIOStreams from the internet. Check the link, and that "
                 "your AIOStreams can be opened from outside your home network.")
@@ -125,10 +156,12 @@ class SignupGate:
                     del self.attempts[key]
             seen = self.attempts[ip]
             if len(seen) >= self.s.signups_per_hour:
-                raise SignupError("Too many sign-up attempts from your address in the last hour. Try again later.", 429)
+                raise SignupError("Too many sign-up attempts from your address in the last hour. Try again in an hour.",
+                              429)
             seen.append(now)   # every attempt counts, wrong invite codes included
         if self.s.invite and not hmac.compare_digest(str(invite or "").strip().encode(), self.s.invite.encode()):
-            raise SignupError("That invite code isn't right. AIOSubtitles is open only to invited people for now.", 403)
+            raise SignupError("That invite code isn't right. AIOSubtitles is open only to invited people for now.", 403,
+                              field="invite")
         if self.count_users() >= self.s.max_users:
             raise SignupError("AIOSubtitles is full for now. Try again in a few days.", 503)
 
@@ -140,7 +173,7 @@ def _read_viewer(api, uuid, password):
         status = api.status()
         viewer, _ = api.get_config(uuid, password)
     except AiosError as e:
-        raise SignupError(_plain(e, "Reading your AIOStreams config")) from None
+        raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True), field=_field_of(e)) from None
     except (KeyError, TypeError, ValueError, AttributeError):
         raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Is the link from AIOStreams?")
     if not isinstance(viewer, dict) or not isinstance(status, dict):
@@ -148,6 +181,15 @@ def _read_viewer(api, uuid, password):
     presets = (status.get("settings") or {}).get("presets") if isinstance(status.get("settings"), dict) else None
     metadata = {p["ID"]: p for p in presets or [] if isinstance(p, dict) and "ID" in p}
     return viewer, metadata
+
+
+def _field_of(e):
+    """The field an AIOStreams error is about: the password it refused, or the link it couldn't reach."""
+    if str(e.code) in WRONG_PASSWORD_CODES:
+        return "password"
+    if "Can't reach" in e.message or "not like AIOStreams" in e.message:
+        return "link"
+    return None
 
 
 def _sync_for(viewer, manifest_url):
@@ -219,7 +261,7 @@ def signup(settings, users, form, api_factory=public_api, timeout=30):
                                             form.get("add_opensubtitles") == "on")
     log.info("signed up: %d language%s%s", len(langs), "" if len(langs) == 1 else "s",
              ", Real-Debrid left out" if warning else "")
-    return SignupResult(token, manifest_url, changes, warning, added, manual)
+    return SignupResult(token, manifest_url, changes, warning, added, manual, langs)
 
 
 def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
@@ -243,7 +285,7 @@ def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
         record["languages"] = _languages(form.get("languages"))
     users.update(token, record)
     log.info("refreshed a sync config%s", ", Real-Debrid left out" if warning else "")
-    return SignupResult(token, manifest_url, changes, warning, added, manual)
+    return SignupResult(token, manifest_url, changes, warning, added, manual, record["languages"])
 
 
 def set_languages(users, token, text):
@@ -269,7 +311,8 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=30):
         try:
             viewer, _ = api.get_config(record["main_uuid"], password)
         except AiosError as e:
-            raise SignupError(_plain(e, "Reading your AIOStreams config") + " Nothing was deleted.") from None
+            raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True) + " Nothing was deleted.",
+                              field=_field_of(e)) from None
         if not isinstance(viewer, dict):
             raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Nothing was deleted.")
     try:

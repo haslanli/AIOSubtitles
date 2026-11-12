@@ -118,7 +118,7 @@ class PublicHttpTest(Base):
         code, body, headers = http(self.base + "/")
         text = body.decode()
         self.assertEqual(code, 200)
-        for name in ('name="link"', 'name="password"', 'name="languages"', 'name="add_addon"', 'action="/signup"'):
+        for name in ('name="link"', 'name="password"', 'name="lang"', 'name="add_addon"', 'action="/signup"'):
             self.assertIn(name, text)
         self.assertNotIn('name="invite"', text)                      # no code set
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
@@ -205,7 +205,7 @@ class PublicHttpTest(Base):
         self.assertIn("3 of 40", text)
         self.assertEqual(headers["Cache-Control"], "no-store")
         code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="languages", languages="Russian, en"))
-        self.assertEqual(code, 200)
+        self.assertEqual(code, 303)                      # saved, then the page again, so a reload sends nothing
         self.assertEqual(self.users.open(token)["languages"], ["rus", "eng"])
         self.assertEqual(self.pool.app(token).s.languages, ["rus", "eng"])     # the worker uses them from now on
 
@@ -218,8 +218,9 @@ class PublicHttpTest(Base):
         main = self.fake.configs[uuid]["config"]
         main["presets"] = [p for p in main["presets"] if p["options"].get("name") != "AIOSubtitles"]
         self.fake.refuse_save_for.add(uuid)                     # the sync config saves; the person's own doesn't
-        code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD))
-        text = body.decode()
+        code, _, headers = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD))
+        self.assertEqual((code, headers["Location"]), (303, "configure?done=refreshed-manual"))
+        text = http(f"{self.base}/u/{token}/configure?done=refreshed-manual")[1].decode()
         self.assertNotIn("Refreshed", text)
         self.assertIn("couldn", text)
 
@@ -227,7 +228,7 @@ class PublicHttpTest(Base):
         uuid, _, _, _, token = self.sign_up()
         code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD,
                                                                         add_addon="on"))
-        self.assertEqual(code, 200, body)
+        self.assertEqual(code, 303, body)
         self.assertNotIn(PASSWORD, body.decode())
 
     def test_delete_flow(self):

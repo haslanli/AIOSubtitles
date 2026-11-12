@@ -16,8 +16,9 @@ from http.server import ThreadingHTTPServer
 
 from . import pages
 from .addon import App, Handler
+from .aiosconfig import parse_languages
 from .settings import Settings
-from .signup import SignupError, SignupGate, delete, public_api, refresh, set_languages, signup
+from .signup import SignupError, SignupGate, delete, form_languages, public_api, refresh, set_languages, signup
 from .sources import Aios
 from .users import day_of
 from .worker import OverLimit, Safety, Turn, Worker
@@ -177,11 +178,15 @@ class Pool:
 # ------------------------------------------------------------------------------------------- the router
 
 PAGE_HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; "
-                               "frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; "
+                               "base-uri 'none'; frame-ancestors 'none'",
     "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff",
     "Cache-Control": "no-store"}
+PERSONAL_HEADERS = dict(PAGE_HEADERS, **{"X-Robots-Tag": "noindex"})   # pages under a personal link
+SCRIPT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600",
+                  "Referrer-Policy": "no-referrer"}
 MAX_FORM = 8192
+MAX_FIELDS = 50          # the sign-up form with every language chip ticked fits
 USER_PATH = re.compile(r"^/u/([A-Za-z0-9_-]{43})(/.*)?$")
 PUBLIC_MANIFEST = {
     "id": "org.aiosubtitles.public",
@@ -207,7 +212,7 @@ class PublicService:
 
     def __init__(self, settings, env, store, users, pool, api_factory=public_api, timeout=30, clock=time.time):
         self.s, self.env, self.store, self.users, self.pool = settings, env, store, users, pool
-        self.api_factory, self.timeout = api_factory, timeout
+        self.api_factory, self.timeout, self.clock = api_factory, timeout, clock
         self.gate = SignupGate(settings, users.count, clock=clock)
         # the routes everyone shares (synced files, health) need no person's service: an App that never works
         self.shared = App(settings, store, Worker(settings, store, Aios(""), Safety(), limits=StoreOnly()), Safety())
@@ -236,8 +241,24 @@ class PublicHandler(Handler):
     def do_POST(self):
         self._route("POST")
 
-    def _html(self, code, text):
-        self._send(code, text, "text/html; charset=utf-8", PAGE_HEADERS)
+    def _html(self, code, text, personal=False):
+        self._send(code, text, "text/html; charset=utf-8", PERSONAL_HEADERS if personal else PAGE_HEADERS)
+
+    def _not_found(self):
+        """404: a short page for a browser, nothing for an app. The same for any unknown address, a personal link
+        nobody signed up with included, so the answer tells nothing about which links exist."""
+        if "text/html" in (self.headers.get("Accept") or ""):
+            return self._html(404, pages.not_found_page())
+        return self._send(404, b"")
+
+    def _see(self, done):
+        """After a save: the settings page again by its address, so reloading it sends nothing a second time."""
+        self.send_response(303)
+        self.send_header("Location", f"configure?done={done}")
+        self.send_header("Content-Length", "0")
+        for k, v in PERSONAL_HEADERS.items():
+            self.send_header(k, v)
+        self.end_headers()
 
     def _form(self):
         try:
@@ -247,14 +268,17 @@ class PublicHandler(Handler):
             raise FormError("The form arrived without its length.", 411) from None
         if length < 0 or length > MAX_FORM:
             self.close_connection = True
-            raise FormError("The form is too large.", 413)
+            raise FormError("The form is too large: send it again from this page.", 413)
         raw = self.rfile.read(length)
         try:
             text = raw.decode("utf-8")
-            fields = urllib.parse.parse_qs(text, keep_blank_values=True, max_num_fields=20)
+            fields = urllib.parse.parse_qs(text, keep_blank_values=True, max_num_fields=MAX_FIELDS)
         except (UnicodeDecodeError, ValueError):
             raise FormError("The form couldn't be read. Send it again from the page.") from None
-        return {k: v[0] for k, v in fields.items()}
+        form = {k: v[0] for k, v in fields.items()}
+        if "lang" in fields:
+            form["lang"] = fields["lang"]           # every ticked language chip, in the page's order
+        return form
 
     def _route(self, method):
         svc = self.service
@@ -266,25 +290,27 @@ class PublicHandler(Handler):
                 return self._signup()
             if path == "/privacy" and method == "GET":
                 return self._html(200, pages.privacy_page(svc.s))
+            if path == "/static/app.js" and method == "GET":
+                return self._send(200, pages.APP_JS, "text/javascript; charset=utf-8", SCRIPT_HEADERS)
             if path == "/health" or path.startswith("/file/"):
                 return self.dispatch(svc.shared, path, False) if method == "GET" else self._send(405, b"")
             m = USER_PATH.match(path)
             if not m:
-                return self._send(404, b"")
+                return self._not_found()
             token, rest = m.group(1), m.group(2) or "/"
             if rest == "/configure":
                 return self._configure(token, method)
             if method != "GET":
                 return self._send(405, b"")
             if rest == "/status":        # the service's own numbers are not for the people using it
-                return self._send(404, b"")
+                return self._not_found()
             if rest == "/manifest.json":
                 if svc.users.open(token) is None:
-                    return self._send(404, b"")
+                    return self._not_found()
                 return self._json(PUBLIC_MANIFEST, cache="max-age=3600")
             app = svc.pool.app(token)
             if app is None:
-                return self._send(404, b"")
+                return self._not_found()
             return self.dispatch(app, rest, True)
         except (BrokenPipeError, ConnectionResetError):
             return None
@@ -299,26 +325,30 @@ class PublicHandler(Handler):
         except FormError as e:
             return self._html(e.code, pages.signup_page(svc.s, error=e.message))
         try:
+            form["languages"] = form_languages(form)
             svc.gate.check(svc.client_ip(self), form.get("invite"))
             result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout)
         except SignupError as e:
-            return self._html(e.code, pages.signup_page(svc.s, error=e.message,
-                                                        languages=form.get("languages") or "English"))
-        return self._html(200, pages.result_page(result))
+            return self._html(e.code, pages.signup_page(svc.s, error=e.message, field=e.field,
+                                                        order=_chosen(form)))
+        return self._html(200, pages.result_page(result), personal=True)
 
     def _configure(self, token, method):
         svc = self.service
         record = svc.users.open(token)
         if record is None:
-            return self._send(404, b"")
+            return self._not_found()
         manifest_url = svc.manifest_url(token)
 
-        def page(code=200, message=None, error=None):
+        def page(code=200, message=None, error=None, notice=None, field=None):
             current = svc.users.open(token) or record
             return self._html(code, pages.settings_page(svc.s, current, svc.users.usage(token), manifest_url,
-                                                        message=message, error=error))
+                                                        message=message, error=error, notice=notice,
+                                                        now=svc.clock(), field=field), personal=True)
         if method == "GET":
-            return page()
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            message, notice = pages.done_message((query.get("done") or [None])[0], record)
+            return page(message=message, notice=notice)
         if method != "POST":
             return self._send(405, b"")
         try:
@@ -328,29 +358,42 @@ class PublicHandler(Handler):
         action = form.get("action")
         try:
             if action == "languages":
-                set_languages(svc.users, token, form.get("languages"))
+                set_languages(svc.users, token, form_languages(form))
                 svc.pool.stop(token)          # the next request opens the record with the new languages
-                return page(message="Languages saved.")
+                return self._see("languages")
             if action == "refresh":
-                result = refresh(svc.s, svc.users, token, {"password": form.get("password"), "add_addon": "on"},
-                                 api_factory=svc.api_factory, timeout=svc.timeout)
+                try:
+                    result = refresh(svc.s, svc.users, token, {"password": form.get("password"), "add_addon": "on"},
+                                     api_factory=svc.api_factory, timeout=svc.timeout)
+                except SignupError as e:      # the password field is called "refresh" on this page
+                    return page(e.code, error=e.message, field="refresh" if e.field == "password" else e.field)
                 svc.pool.stop(token)
-                if result.manual:
-                    return page(error="AIOSubtitles' config on your AIOStreams now matches yours, but AIOSubtitles "
-                                "couldn't put itself back in your own config. "
-                                + pages.explain.PUBLIC_TEXTS["manual"].replace("the link above", "your personal link"))
-                return page(message="Refreshed: AIOSubtitles' config on your AIOStreams now matches yours."
-                            + (" " + result.warning if result.warning else ""))
+                return self._see("refreshed-manual" if result.manual else "refreshed-rd" if result.warning
+                                 else "refreshed")
             if action == "delete-confirm":
-                return self._html(200, pages.delete_confirm_page())
+                return self._html(200, pages.delete_confirm_page(), personal=True)
             if action == "delete":
                 svc.pool.stop(token)
-                outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
-                                 api_factory=svc.api_factory, timeout=svc.timeout)
-                return self._html(200, pages.deleted_page(outcome))
+                try:
+                    outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
+                                     api_factory=svc.api_factory, timeout=svc.timeout)
+                except SignupError as e:      # back to the delete step, not the settings page
+                    return self._html(e.code, pages.delete_confirm_page(
+                        error=e.message, field="delete" if e.field == "password" else e.field), personal=True)
+                return self._html(200, pages.deleted_page(outcome), personal=True)
         except SignupError as e:
-            return page(e.code, error=e.message)
+            return page(e.code, error=e.message, field=e.field)
         return page(400, error="Choose one of the buttons on this page.")
+
+
+def _chosen(form):
+    """The languages a form chose, as codes in order, to show them again after a problem (never anything else)."""
+    try:
+        text = form_languages(form)
+    except SignupError:
+        return []                 # none chosen: show none ticked, as sent
+    langs, problem = parse_languages(text or "")
+    return None if problem else [three for _, _, three in langs]
 
 
 class _CappedServer(ThreadingHTTPServer):
