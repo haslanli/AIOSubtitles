@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from subsync import explain  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 
-CODE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "subsync")
+# The package's own folder, wherever the tests run from (in the image they sit apart from the code).
+CODE = os.path.dirname(os.path.abspath(explain.__file__))
 REGISTER_NOTE = re.compile(r"\b(?:AD\d{1,3}|S4-\d+|P-S4-[A-Z0-9-]+)\b")
 
 
