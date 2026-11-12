@@ -3,12 +3,16 @@
 Sign-up uses the person's AIOStreams password once, in this request only, to read their config, make a sync config on
 their AIOStreams (as ./setup makes one: no Real-Debrid, no Usenet, no AIOSubtitles, nothing that starts work in the
 background, so opening a file opens only that file) and, if they leave the box checked, add AIOSubtitles to their own
-config. The password is never stored or logged; the record keeps the sync config's own link and password (made here).
+config. The password is never logged, and stored only when the person ticks the box that lets AIOSubtitles keep it:
+then it sits in their encrypted record and the daily check (recheck.py) rebuilds the sync config from their config by
+itself; unticking deletes it. The record keeps the sync config's own link and password (made here).
 
 Errors come back as SignupError with a plain message that never repeats the link or the password.
 """
 import collections
+import hashlib
 import hmac
+import json
 import logging
 import re
 import threading
@@ -219,18 +223,14 @@ def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=Fal
     return (changes if added else []), added, not added
 
 
-def signup(settings, users, form, api_factory=public_api, timeout=30):
-    langs = _languages(form.get("languages"))
-    instance, uuid = parse_link(form.get("link"))
-    password = _password(form)
-    api = api_factory(instance, timeout)
-    viewer, metadata = _read_viewer(api, uuid, password)
-    token = new_token()
-    manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
-    # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles' own config
-    # then lacks those addons too, so it asks their sites itself
-    clean_up = form.get("add_addon") == "on" and form.get("clean_up") == "on"
-    sync, warning = _sync_for(without_builtin_twins(viewer)[0] if clean_up else viewer, manifest_url)
+def sync_fingerprint(sync):
+    """A short fingerprint of a sync config as AIOSubtitles last made it: the daily rebuild saves only when it differs."""
+    return hashlib.sha256(json.dumps(sync, sort_keys=True).encode()).hexdigest()[:32]
+
+
+def _new_sync(api, instance, sync):
+    """A new sync config on `instance`, checked by its manifest: (id, link, password). Nothing is left behind when the
+    check fails."""
     sync_password = new_key(24)
     try:
         sync_uuid, sync_encrypted = api.create_config(sync, sync_password)
@@ -248,10 +248,77 @@ def signup(settings, users, form, api_factory=public_api, timeout=30):
         message = _plain(e, "Checking AIOSubtitles' config on your AIOStreams") if isinstance(e, AiosError) else \
             "Your AIOStreams answered in a way AIOSubtitles doesn't know when checking its config."
         raise SignupError(message) from None
+    return sync_uuid, f"{instance}/stremio/{sync_uuid}/{sync_encrypted}/manifest.json", sync_password
+
+
+def _put_sync(api, record, sync, gone=False):
+    """`sync` saved into the record's sync config, or into a new one when that one is gone (`gone`: known already, so
+    not tried): (id, link, password)."""
+    if not gone:
+        try:
+            api.save_config(record["sync_uuid"], record["sync_password"], sync)
+            return record["sync_uuid"], record["sync_link"], record["sync_password"]
+        except AiosError as e:
+            if str(e.code) not in WRONG_PASSWORD_CODES:
+                raise SignupError(_plain(e, "Updating AIOSubtitles' config on your AIOStreams")) from None
+    return _new_sync(api, record["instance"], sync)
+
+
+def drop_sync(api, fields):
+    """Removes a sync config this service made and won't use (best effort): (id, link, password)."""
+    try:
+        api.delete_config(fields[0], fields[2])
+    except AiosError:
+        pass
+
+
+def all_clear(settings, record, now):
+    """A record after a sign-up, a refresh or a rebuild: nothing to report, the next check a period from now."""
+    record.update(state=None, unreachable=0, checked_at=now, next_check=now + settings.recheck_hours * HOUR)
+    record.pop("state_detail", None)
+    record.pop("main_gone_since", None)
+
+
+def _synced(settings, record, sync, fields, now):
+    record["sync_uuid"], record["sync_link"], record["sync_password"] = fields
+    record.update(sync_fp=sync_fingerprint(sync), synced_at=now)
+    all_clear(settings, record, now)
+
+
+def rebuild(settings, record, token, api, password, force=False):
+    """With the password a person let AIOSubtitles keep: AIOSubtitles' config made again from theirs, saved only when
+    it changed (or `force`: when it is gone). Returns the new sync config, or None when nothing changed; the record's
+    sync fields are updated. Raises SignupError (field "password" when the password is refused). Their own config is
+    never changed."""
+    viewer, _ = _read_viewer(api, record["main_uuid"], password)
+    sync, _ = _sync_for(viewer, f"{settings.public_base}/u/{token}/manifest.json")
+    if not force and sync_fingerprint(sync) == record.get("sync_fp"):
+        return None
+    fields = _put_sync(api, record, sync, gone=force)
+    record["sync_uuid"], record["sync_link"], record["sync_password"] = fields
+    record["sync_fp"] = sync_fingerprint(sync)
+    return sync
+
+
+def signup(settings, users, form, api_factory=public_api, timeout=30):
+    langs = _languages(form.get("languages"))
+    instance, uuid = parse_link(form.get("link"))
+    password = _password(form)
+    api = api_factory(instance, timeout)
+    viewer, metadata = _read_viewer(api, uuid, password)
+    token = new_token()
+    manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
+    # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles' own config
+    # then lacks those addons too, so it asks their sites itself
+    clean_up = form.get("add_addon") == "on" and form.get("clean_up") == "on"
+    sync, warning = _sync_for(without_builtin_twins(viewer)[0] if clean_up else viewer, manifest_url)
+    sync_uuid, sync_link, sync_password = _new_sync(api, instance, sync)
+    record = {"instance": instance, "main_uuid": uuid, "languages": langs, "version": 1}
+    _synced(settings, record, sync, (sync_uuid, sync_link, sync_password), users.clock())
+    if form.get("keep_password") == "on":    # the person chose it (unticked by default): AIOSubtitles refreshes by itself
+        record["auto_password"] = password
     try:   # the record first: the person's own config gets the link only once the link works
-        users.create(token, {"instance": instance, "main_uuid": uuid, "sync_uuid": sync_uuid,
-                             "sync_link": f"{instance}/stremio/{sync_uuid}/{sync_encrypted}/manifest.json",
-                             "sync_password": sync_password, "languages": langs, "version": 1})
+        users.create(token, record)
     except Exception:
         try:
             api.delete_config(sync_uuid, sync_password)
@@ -267,35 +334,74 @@ def signup(settings, users, form, api_factory=public_api, timeout=30):
 
 
 def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
-    """Rebuilds the sync config from the person's config as it is now (and puts AIOSubtitles back if it is missing)."""
-    record = users.open(token)
-    if record is None:
-        raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
-    password = _password(form)
-    api = api_factory(record["instance"], timeout)
-    viewer, metadata = _read_viewer(api, record["main_uuid"], password)
-    manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
-    sync, warning = _sync_for(viewer, manifest_url)
-    try:
-        api.save_config(record["sync_uuid"], record["sync_password"], sync)
-    except AiosError as e:
-        raise SignupError(_plain(e, "Updating AIOSubtitles' config on your AIOStreams")) from None
-    changes, added, manual = [], False, False
-    if form.get("add_addon") == "on":
-        changes, added, manual = _add_addon(api, record["main_uuid"], password, viewer, manifest_url, metadata, False)
-    if (form.get("languages") or "").strip():
-        record["languages"] = _languages(form.get("languages"))
-    users.update(token, record)
-    log.info("refreshed a sync config%s", ", Real-Debrid left out" if warning else "")
+    """Rebuilds the sync config from the person's config as it is now (and puts AIOSubtitles back if it is missing).
+    A gone sync config is made again. With a new config link (`link`), that config becomes theirs; on another
+    AIOStreams the sync config moves there and the old one is removed. The kept password follows the box
+    (`keep_password`): ticked keeps this password, unticked deletes a kept one."""
+    with users.locked(token):
+        record = users.open(token)
+        if record is None:
+            raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
+        link = (form.get("link") or "").strip()
+        instance, main_uuid = parse_link(link) if link else (record["instance"], record["main_uuid"])
+        password = _password(form)
+        languages = _languages(form.get("languages")) if (form.get("languages") or "").strip() else None
+        api = api_factory(instance, timeout)
+        viewer, metadata = _read_viewer(api, main_uuid, password)
+        manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
+        sync, warning = _sync_for(viewer, manifest_url)
+        old = None
+        if instance != record["instance"]:
+            fields = _new_sync(api, instance, sync)
+            old = (record["instance"], record["sync_uuid"], record["sync_password"])
+        else:
+            fields = _put_sync(api, record, sync)
+        made = fields[0] != record["sync_uuid"]
+        try:
+            record["instance"], record["main_uuid"] = instance, main_uuid
+            changes, added, manual = [], False, False
+            if form.get("add_addon") == "on":
+                changes, added, manual = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata, False)
+            if languages:
+                record["languages"] = languages
+            _synced(settings, record, sync, fields, users.clock())
+            if form.get("keep_password") == "on":
+                record["auto_password"] = password
+            else:
+                record.pop("auto_password", None)
+            users.update(token, record)
+        except Exception:
+            if made:           # a config made here and not recorded: removed, so nothing holds their keys unused
+                drop_sync(api, fields)
+            raise
+    if old is not None:   # the sync config on the AIOStreams they left: removed, if that one still answers
+        try:
+            api_factory(old[0], timeout).delete_config(old[1], old[2])
+        except AiosError:
+            pass
+    log.info("refreshed a sync config%s%s", ", Real-Debrid left out" if warning else "",
+             ", on another AIOStreams" if old else "")
     return SignupResult(token, manifest_url, changes, warning, added, manual, record["languages"])
 
 
+def forget_password(users, token):
+    """Deletes a kept AIOStreams password at once (the settings page's button); nothing else changes."""
+    with users.locked(token):
+        record = users.open(token)
+        if record is None:
+            raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
+        if record.pop("auto_password", None) is not None:
+            users.update(token, record)
+    log.info("a kept password was deleted")
+
+
 def set_languages(users, token, text):
-    record = users.open(token)
-    if record is None:
-        raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
-    record["languages"] = _languages(text)
-    users.update(token, record)
+    with users.locked(token):
+        record = users.open(token)
+        if record is None:
+            raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
+        record["languages"] = _languages(text)
+        users.update(token, record)
     return record["languages"]
 
 

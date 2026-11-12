@@ -248,12 +248,32 @@ class Wizard:
         self.languages = plan.parse_languages(text)[0]
         self.audio = self.ask.yesno('AUDIO', 'Also sync files that carry no subtitles of their own, by listening to the audio?',
                                     self.prev.get('audio', False))
+        self.audio_budget = self.ask_audio_budget() if self.audio else None
+        if self.audio_budget is None:      # audio off: the last answer (or a value set by hand) is kept for later
+            self.audio_budget_kept = self.known_audio_budget()
         self.source_keys()
         self.add_os = False
         if not plan.subtitle_sources(self.viewer):
             self.add_os = self.ask.yesno('ADD_OPENSUBTITLES', 'Your config has no subtitle source, so there is nothing to '
                                                               'sync yet. Add OpenSubtitles (free, no account needed)?', True)
         self.public_address()
+
+    def known_audio_budget(self):
+        """The last answer to the audio limit question, or a value set by hand in state/subsync.env before; None."""
+        env_path = STATE / 'subsync.env'
+        by_hand = plan.parse_env(env_path.read_text() if env_path.exists() else '').get('SUBSYNC_AUDIO_BUDGET_GB')
+        return self.prev.get('audio_budget') or plan.audio_budget(by_hand or '', allowed_too=by_hand)
+
+    def ask_audio_budget(self):
+        """The most the audio route may read of one file, in GB: 0.5, 1 (recommended), 2 or 4. Enter keeps the last
+        answer, or a value set by hand in state/subsync.env before."""
+        current = self.known_audio_budget()
+
+        def check(value):
+            chosen = plan.audio_budget(value, allowed_too=current)
+            return (True, '', chosen) if chosen else (False, 'Type 0.5, 1, 2 or 4 (GB per file).', value)
+        return self.ask.text('AUDIO_BUDGET', 'How much of each file may the audio route read, in GB: 0.5, 1, 2 or 4?',
+                             current=current, default='1', check=check)
 
     def source_keys(self):
         """Optional free keys for subtitle sources subsync searches itself (TheSubtitleDB, OpenSubtitles V3+ and
@@ -432,7 +452,8 @@ class Wizard:
             'public_base': self.s['public_base'],
             'addon_key': self.keys['ADDON_KEY'], 'languages': self.languages,
             'rewrite': plan.rewrite_rule(self.s['aios_public'], self.s['aios_internal']) if self.s['mode'] != 'remote' else '',
-            'audio': self.audio, 'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
+            'audio': self.audio, 'audio_budget': self.audio_budget,
+            'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
         env_path = STATE / 'subsync.env'
@@ -444,6 +465,7 @@ class Wizard:
             'version': VERSION, 'host_network': self.s['mode'] == 'host', 'networks': self.s.get('networks'),
             'bind': self.s.get('bind'), 'port': self.s['port']}))
         self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio,
+                      audio_budget=self.audio_budget or getattr(self, 'audio_budget_kept', None),   # for when it's on again
                       manifest_url=self.manifest_url, installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
         for kept in ('cache_before', 'added_opensubtitles'):
             self.s.setdefault(kept, self.prev.get(kept))
@@ -672,7 +694,8 @@ def cmd_status():
         note(f"read today: {st.get('bytes_today', 0) / 1e6:.1f} MB")
         if st.get('backing_off'):
             warn('backing off after a refused read (it waits before reading again)')
-    say(f"  AIOStreams: {s.get('aios_public')}  ·  languages: {', '.join(s.get('languages', []))}  ·  audio: {'on' if s.get('audio') else 'off'}")
+    audio = f"on, up to {s.get('audio_budget') or '1'} GB per file" if s.get('audio') else 'off'
+    say(f"  AIOStreams: {s.get('aios_public')}  ·  languages: {', '.join(s.get('languages', []))}  ·  audio: {audio}")
     say(f"  config: {short(keys.get('VIEWER_UUID', ''))}  ·  subsync's config: {short(keys.get('SYNC_UUID', ''))}")
     say(f'  logs: docker logs {CONTAINER}')
     return 0

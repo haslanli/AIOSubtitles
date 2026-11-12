@@ -13,6 +13,8 @@ GET  /pick/<token>/<lang>.srt                  a "<Language> (Subsync)" entry: t
      up to SUBSYNC_PICK_WAIT_MS for a job working on the file), else a redirect to the original; for a language that
      has no subtitle at all a one-line note; 503 while the file's subtitle list is still unknown. With the audio
      route on (pick mode) the download also starts the audio route for a file that needs it.
+GET  /notice.srt                               public mode: what the person must do, while the daily check (recheck.py)
+     found something only they can fix; listed as one "AIOSubtitles: action needed" entry after the others
 GET  /health, /status
 
 With SUBSYNC_ADDON_KEY set, the manifest, the subtitles route and /status answer only under /<key>/ (the manifest URL
@@ -29,7 +31,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import srclimits
+from . import explain, srclimits
 from .langs import name as lang_name
 from .sources import parse_extras
 from .subs import apply_recipe, is_ass, parse, to_srt
@@ -71,9 +73,13 @@ def alias_of(tok):
     return base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4)).decode()
 
 
+REFUSALS_FOR_NOTICE = 3   # reads refused in a row before a person is told their debrid service refuses them
+
+
 class App:
-    def __init__(self, settings, store, worker, safety):
+    def __init__(self, settings, store, worker, safety, state=None, detail=None):
         self.s, self.store, self.worker, self.safety = settings, store, worker, safety
+        self.state, self.detail = state, detail      # public mode: what the daily check found (the person's record)
         self.subtitle_requests, self.last_subtitle_request = 0, None   # the installer's self-test reads these
         self.texts, self.texts_lock = {}, threading.Lock()   # public mode: this person's rebuilt copies, for an hour
 
@@ -100,6 +106,26 @@ class App:
                 while len(self.texts) > srclimits.TEXT_KEEP_ENTRIES:
                     self.texts.pop(next(iter(self.texts)))
         return text
+
+    def action(self):
+        """Public mode: the state only the person can fix now (explain.PUBLIC_STATES), or None."""
+        if not self.s.public:
+            return None
+        if self.state in explain.PUBLIC_STATES and explain.PUBLIC_STATES[self.state][2]:
+            return self.state
+        if getattr(self.safety, "refusals", 0) >= REFUSALS_FOR_NOTICE:
+            return "reads_refused"
+        return None
+
+    def notice_text(self):
+        """The "action needed" entry's subtitle: what to do, in two cues; None when nothing is needed."""
+        state = self.action()
+        if state is None:
+            return None
+        title, text, _ = explain.PUBLIC_STATES[state]
+        text = text.replace("{detail}", self.detail or "")
+        return (f"1\n00:00:01,000 --> 00:00:09,000\n{title}.\n{text}\n\n"
+                f"2\n00:00:09,500 --> 00:00:16,000\n{explain.PUBLIC_TEXTS['notice_where']}\n")
 
     def route(self, path):
         """(path without the base path and key, keyed) for a request path."""
@@ -139,6 +165,9 @@ class App:
         viewer's pick. It serves the synced copy when there is one, else the original."""
         t0 = time.time()
         out = self._with_pick_entries(type_, video_id, extras)
+        if self.action() is not None:     # public mode: one entry after the others while only the person can fix something
+            out.append({"id": "aiosubtitles-notice", "url": f"{self.s.public_base}/notice.srt",
+                        "lang": self.s.languages[0], "label": explain.PUBLIC_NOTICE_LABEL})
         log.info("answer %s/%s: %d entries (%d to pick) in %d ms", type_, video_id, len(out),
                  sum(str(e.get("id", "")).startswith("subsync-pick-") for e in out), (time.time() - t0) * 1000)
         return out
@@ -295,6 +324,11 @@ class Handler(BaseHTTPRequestHandler):
                 if original:
                     return self._send(302, b"", "text/plain", {"Location": original, "Cache-Control": "no-store"})
                 return self._send(503, b"", "text/plain", {"Retry-After": "1", "Cache-Control": "no-store"})
+            if path == "/notice.srt" and keyed:
+                text = app.notice_text()
+                if text is None:   # fixed since the list that holds this entry was made (apps keep lists a while)
+                    text = f"1\n00:00:01,000 --> 00:00:08,000\n{explain.PUBLIC_NOTICE_DONE}\n"
+                return self._send(200, text, "application/x-subrip; charset=utf-8", {"Cache-Control": "no-store"})
             m = PICK_ROUTE.match(path)
             if m:
                 try:

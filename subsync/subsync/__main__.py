@@ -85,7 +85,9 @@ def main_public(s):
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
-    log.info("public mode: listening on %d; up to %d people, %d active at once", s.port, s.max_users, s.active_workers)
+    log.info("public mode: listening on %d; up to %d people, %d active at once, %d file%s at once; trusted proxy %s",
+             s.port, s.max_users, s.active_workers, pool.turn.places, "" if pool.turn.places == 1 else "s",
+             ", ".join(s.trusted_proxy) or "none")
     server.serve_forever()
 
 

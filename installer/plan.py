@@ -4,6 +4,7 @@ Nothing here talks to AIOStreams; wizard.py reads the config, calls these, shows
 the user says yes.
 """
 import ipaddress
+import math
 import re
 import urllib.parse
 
@@ -109,10 +110,37 @@ def subsync_env(s):
         'SUBSYNC_LANGUAGES': ','.join(three for _, _, three in s['languages']),
         'SUBSYNC_URL_REWRITE': s.get('rewrite', ''),
         'SUBSYNC_AUDIO_ROUTE': 'on' if s['audio'] else 'off',
+        'SUBSYNC_AUDIO_BUDGET_GB': s.get('audio_budget') if s['audio'] else '',
         'SUBSYNC_SUBDL_KEY': s.get('subdl_key', ''),
         'SUBSYNC_WYZIE_KEY': s.get('wyzie_key', ''),
     }
     return {k: v for k, v in env.items() if v not in (None, '')}
+
+
+AUDIO_BUDGETS = ('0.5', '1', '2', '4')   # GB per file the audio route may read: ./setup's choices (explain.py)
+
+
+def _gigabytes(text):
+    """'1 GB', '1gb', '1.0' -> '1'; '.5' -> '0.5'; None when it isn't a positive number."""
+    value = (text or '').strip().lower()
+    if value.endswith('gb'):
+        value = value[:-2].strip()
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    if not (math.isfinite(number) and number > 0):
+        return None
+    return str(int(number)) if number == int(number) else str(number)
+
+
+def audio_budget(text, allowed_too=None):
+    """An answer to ./setup's audio limit question as written in subsync.env ('0.5', '1', '2' or '4'), or None.
+    `allowed_too`: a value set by hand before, kept when it is given again."""
+    value = _gigabytes(text)
+    if value is not None and (value in AUDIO_BUDGETS or (allowed_too is not None and value == _gigabytes(allowed_too))):
+        return value
+    return None
 
 
 ENV_LINE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$')

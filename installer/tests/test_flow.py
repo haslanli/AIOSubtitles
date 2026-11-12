@@ -312,6 +312,50 @@ class Flow(unittest.TestCase):
         self.assertNotIn(sync_id, self.aios.users)
         self.assertFalse((self.state / 'secrets.env').exists())
 
+    def test_the_audio_limit_is_asked_only_with_the_audio_route(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('How much of each file', out)
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', wizard.read_kv(self.state / 'subsync.env'))
+
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('How much of each file', out)
+        self.assertIn(explain.QUESTIONS['AUDIO_BUDGET'][1][:60], ' '.join(out.split()))
+        env = wizard.read_kv(self.state / 'subsync.env')
+        self.assertEqual(env['SUBSYNC_AUDIO_BUDGET_GB'], '1')          # the recommended default
+        self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'on')
+
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO_BUDGET': '2'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')
+
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps it
+        self.assertEqual(code, 0, out)
+        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')
+
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'no'})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', wizard.read_kv(self.state / 'subsync.env'))
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
+        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')   # remembered
+
+    def test_an_audio_limit_set_by_hand_is_kept_while_the_audio_route_is_off(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        env_path = self.state / 'subsync.env'
+        env_path.write_text(env_path.read_text() + 'SUBSYNC_AUDIO_BUDGET_GB=3\n')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})      # audio stays off
+        self.assertEqual(code, 0, out)
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(wizard.read_kv(env_path)['SUBSYNC_AUDIO_BUDGET_GB'], '3')
+
+    def test_a_wrong_audio_limit_is_asked_again(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='yes', AUDIO_BUDGET='3'))
+        self.assertNotEqual(code, 0)
+        self.assertIn('0.5, 1, 2 or 4', out)
+
     def test_an_unknown_config_id_is_caught_before_the_password(self):
         # test 13: a well-formed but unknown ID used to ask for the password forever
         code, out = self.run_interactive(['00000000-0000-4000-8000-000000000000', self.LINK, PASSWORD])

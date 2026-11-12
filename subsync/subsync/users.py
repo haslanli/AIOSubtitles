@@ -56,6 +56,12 @@ class Users:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self.lock = threading.RLock()
+        self._record_locks = [threading.Lock() for _ in range(64)]
+
+    def locked(self, token):
+        """A lock for one person's record, held around reading it, asking AIOStreams and writing it back, so a refresh
+        and the daily check never write over each other's changes."""
+        return self._record_locks[int(self.user_id(token)[:8], 16) % len(self._record_locks)]
 
     def close(self):
         with self.lock:

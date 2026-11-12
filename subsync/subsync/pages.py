@@ -398,7 +398,9 @@ def signup_page(settings, error=None, field=None, order=None):
                           "inputmode=\"url\" placeholder=\"https://…/stremio/…/manifest.json\"",
                           error=error if field == "link" else None)
                  + _field("password", "Your AIOStreams password", "password", extra="required autocomplete=\"off\"",
-                          error=error if field == "password" else None, reveal=True) + "</fieldset>")
+                          error=error if field == "password" else None, reveal=True)
+                 + _check("keep_password", "Keep my password, so AIOSubtitles follows my config by itself", checked=False)
+                 + "</fieldset>")
     parts.append(_languages_fieldset(number + 1, order, error if field == "languages" else None))
     parts.append(f"<fieldset><legend><span class=\"no\">{number + 2:02d}</span>Your AIOStreams config</legend>"
                  + _check("add_addon", "Add AIOSubtitles to my AIOStreams config")
@@ -495,7 +497,7 @@ def _share(used, limit):
     return max(0.015, min(1.0, used / limit))
 
 
-DONE = ("languages", "refreshed", "refreshed-rd", "refreshed-manual")
+DONE = ("languages", "refreshed", "refreshed-rd", "refreshed-manual", "forgot")
 
 
 def done_message(code, record):
@@ -509,10 +511,31 @@ def done_message(code, record):
         return texts["refreshed"], explain.PUBLIC_REAL_DEBRID_WARNING
     if code == "refreshed-manual":
         return None, " ".join((texts["refresh_manual"],) + explain.PUBLIC_MANUAL_STEPS)
+    if code == "forgot":
+        return texts["forgot"], None
     return None, None
 
 
-def settings_page(settings, record, usage, manifest_url, message=None, error=None, notice=None, now=0, field=None):
+def days_ago(then, now):
+    """When something happened, in plain words: "today", "yesterday", "5 days ago"; "at sign-up" when unknown."""
+    if not then:
+        return "at sign-up"
+    days = int(now // 86400) - int(then // 86400)
+    return "today" if days <= 0 else "yesterday" if days == 1 else f"{days} days ago"
+
+
+def _state_note(record, state):
+    """What the daily check found (or the live reads-refused state), as a note at the top of the settings page."""
+    state = state or record.get("state")
+    if state not in explain.PUBLIC_STATES:
+        return ""
+    title, text, action = explain.PUBLIC_STATES[state]
+    text = text.replace("{detail}", record.get("state_detail") or "")
+    return _note("warn", text, title, "status")
+
+
+def settings_page(settings, record, usage, manifest_url, message=None, error=None, notice=None, now=0, field=None,
+                  state=None):
     files_limit, bytes_limit = settings.user_files_per_day, settings.user_daily_bytes
     full = usage["files"] >= files_limit or usage["bytes"] >= bytes_limit
     limit_mb = bytes_limit / (1024 * 1024)
@@ -523,8 +546,14 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
         f"{_megabytes(usage['bytes'])} MB of {limit_mb:.0f} MB read</p><div class=\"track\" aria-hidden=\"true\">"
         f"<i style=\"--v:{_share(usage['bytes'], bytes_limit):.3f}\"></i></div></div>")
     limit = _note("warn", explain.PUBLIC_TEXTS["limit_reached"], "Today's limit is reached") if full else ""
-    status = (_note("ok", message, role="status") + _note("warn", notice, role="status")
-              + _problem(error, field, "That didn't go through", ("refresh", "languages")))
+    status = (_note("ok", message, role="status") + _note("warn", notice, role="status") + _state_note(record, state)
+              + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages")))
+    kept = bool(record.get("auto_password"))
+    copied = explain.PUBLIC_TEXTS["copied_auto" if kept else "copied"].format(when=days_ago(record.get("synced_at"), now))
+    forget = ("<form method=\"post\" action=\"configure\"><input type=\"hidden\" name=\"action\" "
+              "value=\"forget-password\"><div class=\"actions\"><button class=\"btn quiet\" type=\"submit\" "
+              "aria-describedby=\"forget_password-help\">Stop keeping my password</button></div>"
+              + _help("forget_password") + "</form>") if kept else ""
     body = (status
             + "<div class=\"layout settled\"><div class=\"rail enter\"><p class=\"kicker\" style=\"--i:0\">Your settings</p>"
             "<h1 style=\"--i:1\">Your AIOSubtitles</h1>"
@@ -538,12 +567,16 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
             "value=\"languages\">" + _languages_fieldset(None, record["languages"], error if field == "languages" else None)
             + "<div class=\"actions\"><button class=\"btn\" type=\"submit\">Save languages</button></div></form></section>"
             "<section class=\"panel rise\" aria-labelledby=\"refresh-h\"><h2 id=\"refresh-h\">Refresh after changing your "
-            "AIOStreams config</h2><form method=\"post\" action=\"configure\"><input type=\"hidden\" name=\"action\" "
-            "value=\"refresh\">" + _field("password", "Your AIOStreams password", "password",
-                                          extra="required autocomplete=\"off\"", help="refresh",
-                                          error=error if field == "refresh" else None, reveal=True)
+            f"AIOStreams config</h2><p class=\"help\">{e(copied)}</p><form method=\"post\" action=\"configure\">"
+            "<input type=\"hidden\" name=\"action\" value=\"refresh\">"
+            + _field("password", "Your AIOStreams password", "password", extra="required autocomplete=\"off\"",
+                     help="refresh", error=error if field == "refresh" else None, reveal=True)
+            + _field("link", "A new AIOStreams link (optional)", "url", extra="autocomplete=\"off\" spellcheck=\"false\" "
+                     "inputmode=\"url\" placeholder=\"https://…/stremio/…/manifest.json\"", help="new_link",
+                     error=error if field == "new_link" else None)
+            + _check("keep_password", "Keep my password, so AIOSubtitles follows my config by itself", checked=kept)
             + "<input type=\"hidden\" name=\"add_addon\" value=\"on\"><div class=\"actions\"><button class=\"btn\" "
-              "type=\"submit\">Refresh</button></div></form></section>"
+              "type=\"submit\">Refresh</button></div></form>" + forget + "</section>"
             "<section class=\"panel cut rise\" aria-labelledby=\"delete-h\"><h2 id=\"delete-h\">Delete my data</h2>"
             f"<p class=\"help\" id=\"delete-help\">{e(explain.PUBLIC_FIELDS['delete'])}</p><form method=\"post\" "
             "action=\"configure\"><input type=\"hidden\" name=\"action\" value=\"delete-confirm\"><div class=\"actions\">"

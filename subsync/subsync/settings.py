@@ -3,7 +3,10 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
+import socket
+import struct
 
 from . import ALGO_VERSION, RULE_REVISION
 from .worker import lang_list
@@ -11,6 +14,59 @@ from .worker import lang_list
 
 def _on(value):
     return str(value).strip().lower() in ("1", "on", "true", "yes")
+
+
+ROUTE_FILE = "/proc/net/route"            # Linux: the kernel's IPv4 routing table
+CPU_MAX_FILE = "/sys/fs/cgroup/cpu.max"   # cgroup v2: the container's processor limit ("max 100000" when none)
+
+
+def default_gateway(path=None):
+    """This machine's default IPv4 gateway (inside a Docker container: the address its network reaches it from), or
+    None when there is none or it can't be read."""
+    try:
+        with open(path or ROUTE_FILE, encoding="ascii") as f:
+            rows = f.read().splitlines()[1:]
+    except (OSError, ValueError):
+        return None
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 4 or fields[1] != "00000000":
+            continue
+        try:
+            gateway, flags = int(fields[2], 16), int(fields[3], 16)
+        except ValueError:
+            continue
+        if flags & 0x2 and gateway:          # RTF_GATEWAY
+            return socket.inet_ntoa(struct.pack("<L", gateway))
+    return None
+
+
+def _processors():
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count()
+
+
+def available_cpus(cpu_max=None, count=None):
+    """The processors this process may use: the ones it may run on, within the container's limit, at least 1."""
+    n = (count or _processors)() or 1
+    try:
+        with open(cpu_max or CPU_MAX_FILE, encoding="ascii") as f:
+            quota, period = f.read().split()[:2]
+        if quota != "max":
+            n = min(n, max(1, math.ceil(int(quota) / int(period))))
+    except (OSError, ValueError):
+        pass
+    return max(1, n)
+
+
+def _places(value):
+    """SUBSYNC_SYNCS_AT_ONCE: a whole number from 1, or auto (the processors available); None when it is neither."""
+    value = str(value).strip().lower()
+    if value == "auto":
+        return available_cpus()
+    return int(value) if value.isdigit() and int(value) >= 1 else None
 
 
 class Settings:
@@ -127,8 +183,24 @@ class Settings:
         self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS", "30"))
         self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN", "30")) * 60
         self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS", "180"))
-        self.trusted_proxy = tuple(a.strip() for a in g("SUBSYNC_TRUSTED_PROXY", "127.0.0.1").split(",") if a.strip())
+        # each person's AIOStreams checked again, at most this often, while they use the service (recheck.py); 0: never
+        self.recheck_hours = float(g("SUBSYNC_RECHECK_HOURS", "24"))
+        # the web server's addresses; "gateway" is this container's default gateway, found at start (the address a
+        # web server reaching subsync through a port Docker publishes comes from), so no fixed Docker network is needed
+        proxies = [a.strip() for a in g("SUBSYNC_TRUSTED_PROXY", "127.0.0.1").split(",") if a.strip()]
+        self.gateway_missing = False
+        trusted = []
+        for proxy in proxies:
+            if proxy.lower() == "gateway":
+                gateway = default_gateway()
+                self.gateway_missing = gateway is None
+                proxy = gateway
+            if proxy and proxy not in trusted:
+                trusted.append(proxy)
+        self.trusted_proxy = tuple(trusted)
         self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS", "64"))
+        # files worked on at once for everyone (each person's worker takes a place of one shared turn)
+        self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE", "1"))
 
     def secret_bytes(self):
         """The public mode's secret: base64url of at least 32 random bytes. ValueError otherwise."""
@@ -173,4 +245,9 @@ class Settings:
         if self.public and self.wyzie_key:
             out.append("Wyzie Subs isn't used in public mode (one free key per network, paused when used from servers): "
                        "remove SUBSYNC_WYZIE_KEY or turn public mode off.")
+        if self.syncs_at_once is None:
+            out.append("SUBSYNC_SYNCS_AT_ONCE must be a whole number from 1, or auto.")
+        if self.public and self.gateway_missing:
+            out.append("SUBSYNC_TRUSTED_PROXY says gateway, but this machine has no default gateway to trust: give your "
+                       "web server's address instead.")
         return out

@@ -69,7 +69,8 @@ class Base(unittest.TestCase):
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
         self.env = dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                         "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": ""}, **env)
+                         "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "",
+                         "SUBSYNC_RECHECK_HOURS": "0"}, **env)
         self.s = Settings(self.env)
         self.store = Store(self.dir)
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes())
@@ -288,6 +289,114 @@ class ConnectionCapTest(Base):
             held.close()
         time.sleep(0.2)
         self.assertEqual(http(self.base + "/health")[0], 200)
+
+
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+class PublicCheckTest(Base):
+    """The daily check as people see it: a note on the settings page, one "action needed" entry in their subtitle
+    lists while only they can fix something, the kept-password box, and Refresh with a new link."""
+
+    def setUp(self):
+        self.start()
+
+    def set_record(self, token, **fields):
+        record = self.users.open(token)
+        record.update(fields)
+        self.users.update(token, record)
+        self.pool.stop(token)                 # the next request opens the record again
+
+    def subtitles(self, token):
+        code, body, _ = http(f"{self.base}/u/{token}/subtitles/movie/tt1.json")
+        self.assertEqual(code, 200)
+        return json.loads(body)["subtitles"]
+
+    def notices(self, token):
+        return [s for s in self.subtitles(token) if s["id"] == "aiosubtitles-notice"]
+
+    def test_one_notice_entry_while_an_action_is_needed(self):
+        from subsync import explain
+        uuid, code, text, headers, token = self.sign_up()
+        self.assertEqual(self.notices(token), [])
+        code, body, _ = http(f"{self.base}/u/{token}/notice.srt")     # an entry kept by an app after the fix
+        self.assertEqual(code, 200)
+        self.assertIn(explain.PUBLIC_NOTICE_DONE, body.decode())
+        self.set_record(token, state="sync_gone")
+        notes = self.notices(token)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["label"], "AIOSubtitles: action needed")
+        self.assertEqual(notes[0]["lang"], "eng")
+        self.assertEqual(notes[0]["url"], f"https://subs.test/u/{token}/notice.srt")
+        code, body, headers = http(f"{self.base}/u/{token}/notice.srt")
+        self.assertEqual(code, 200)
+        self.assertIn(explain.PUBLIC_STATES["sync_gone"][1][:40], " ".join(body.decode().split()))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.set_record(token, state="unreachable")       # a note on the settings page only
+        self.assertEqual(self.notices(token), [])
+        self.set_record(token, state=None)
+        self.assertEqual(self.notices(token), [])
+
+    def test_reads_refused_three_times_needs_an_action(self):
+        uuid, code, text, headers, token = self.sign_up()
+        self.pool.app(token).safety.refusals = 3
+        self.assertEqual(len(self.notices(token)), 1)
+        page = http(f"{self.base}/u/{token}/configure")[1].decode()
+        from subsync import explain
+        import html
+        self.assertIn(html.escape(explain.PUBLIC_STATES["reads_refused"][0]), page)
+
+    def test_the_settings_page_shows_the_state_and_when_the_config_was_copied(self):
+        from subsync import explain
+        uuid, code, text, headers, token = self.sign_up()
+        page = http(f"{self.base}/u/{token}/configure")[1].decode()
+        self.assertIn("copied from yours today", page)
+        self.set_record(token, state="main_gone")
+        page = http(f"{self.base}/u/{token}/configure")[1].decode()
+        self.assertIn(explain.PUBLIC_STATES["main_gone"][0], page)
+        self.assertIn('name="link"', page)                  # Refresh takes the new link
+
+    def test_the_kept_password_box_and_forgetting_it(self):
+        uuid, code, text, headers, token = self.sign_up()
+        self.assertNotIn("auto_password", self.users.open(token))
+        signup_page = http(self.base + "/")[1].decode()
+        self.assertIn('name="keep_password"', signup_page)
+        self.assertNotIn('name="keep_password" value="on" checked', signup_page)    # unticked by default
+        uuid, code, text, headers, token = self.sign_up(keep_password="on")
+        self.assertEqual(self.users.open(token)["auto_password"], PASSWORD)
+        page = http(f"{self.base}/u/{token}/configure")[1].decode()
+        self.assertIn('value="forget-password"', page)
+        code, _, headers = http(f"{self.base}/u/{token}/configure", form(action="forget-password"))
+        self.assertEqual(code, 303)
+        self.assertNotIn("auto_password", self.users.open(token))
+        page = http(f"{self.base}/u/{token}/configure?done=forgot")[1].decode()
+        self.assertNotIn('value="forget-password"', page)
+
+    def test_refresh_with_a_new_link_over_http(self):
+        uuid, code, text, headers, token = self.sign_up()
+        new_main = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
+        code, _, headers = http(f"{self.base}/u/{token}/configure",
+                                form(action="refresh", password=PASSWORD,
+                                     link=f"{INSTANCE}/stremio/{new_main}/ENCRYPTED/manifest.json"))
+        self.assertEqual(code, 303, headers)
+        self.assertEqual(self.users.open(token)["main_uuid"], new_main)
+
+    def test_a_request_starts_the_check_in_the_background(self):
+        self.tearDown()
+        self.start(SUBSYNC_RECHECK_HOURS="24")
+        uuid, code, text, headers, token = self.sign_up()
+        record = self.users.open(token)
+        sync_uuid = record["sync_uuid"]
+        record.pop("checked_at")
+        record["next_check"] = 0                      # a record from before the check existed: due at once
+        self.users.update(token, record)
+        heads = sum(1 for m, _ in self.fake.requests if m == "HEAD")
+        self.subtitles(token)
+        deadline = time.time() + 5
+        while time.time() < deadline and not self.users.open(token).get("checked_at"):
+            time.sleep(0.05)
+        self.assertIsNotNone(self.users.open(token).get("checked_at"))
+        self.assertEqual(sum(1 for m, _ in self.fake.requests if m == "HEAD"), heads + 1)
+        self.assertEqual(self.users.open(token)["sync_uuid"], sync_uuid)
+        self.service.checker.join(5)
 
 
 if __name__ == "__main__":

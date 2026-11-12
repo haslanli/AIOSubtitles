@@ -65,23 +65,33 @@ RULES = [
      "answer only under a private key in their address, so nobody who finds subsync's address can make it read files; "
      "only the synced files and a health check are open."),
     ("Public mode: your AIOStreams password is used once",
-     "When you sign up or refresh, AIOSubtitles uses your AIOStreams password once, in that request, and then forgets "
-     "it: it is never written to disk or to a log. It needs it to read your config, to make a separate config for "
-     "AIOSubtitles on your AIOStreams (without Real-Debrid, Usenet, AIOSubtitles itself or anything that starts work in "
-     "the background, so opening a file opens only that file) and, if you leave the box checked, to add AIOSubtitles "
-     "to your own config. Without that separate config, a file that failed to open could make your AIOStreams move on "
-     "to another source, Real-Debrid or a Usenet download among them."),
+     "When you sign up or refresh, AIOSubtitles uses your AIOStreams password in that request and then forgets it, "
+     "unless you tick the box that lets it keep the password: then it is kept encrypted in your record, never in a "
+     "log, until you untick it. It needs it to read your config, to make a separate config for AIOSubtitles on your "
+     "AIOStreams (without Real-Debrid, Usenet, AIOSubtitles itself or anything that starts work in the background, so "
+     "opening a file opens only that file) and, if you leave the box checked, to add AIOSubtitles to your own config. "
+     "Without that separate config, a file that failed to open could make your AIOStreams move on to another source, "
+     "Real-Debrid or a Usenet download among them."),
+    ("Public mode: your AIOStreams is checked about once a day",
+     "While you use AIOSubtitles, it checks your AIOStreams at most once a day, in the background: whether your config "
+     "still exists (a question that needs no password) and whether its own config there still opens. It repairs a "
+     "changed link by itself and tells you what only you can fix, on your settings page and with one \"AIOSubtitles: "
+     "action needed\" entry in your subtitle lists. Without a kept password it can't see services or addons you add "
+     "or remove, so press Refresh after such a change; with one, it rebuilds its own config from yours by itself, "
+     "leaving Real-Debrid and Usenet out, and never changes your config."),
     ("Public mode: Real-Debrid is left out",
      f"If your AIOStreams uses Real-Debrid, AIOSubtitles leaves it out of its own config and never reads a Real-Debrid "
      f"file, because {REASON}. It syncs only files from your other services: a file you play from Real-Debrid gets a "
      "synced copy when another of your services has the same file ready. With Real-Debrid as your only debrid service, "
      "sign-up stops, because AIOSubtitles would have nothing to read. Your own config and apps keep Real-Debrid as "
      "before, and your AIOStreams still searches it when you browse."),
-    ("Public mode: one file at a time",
-     "The service works on one file at a time for everyone, in the order people asked, because it runs on a small "
-     "server; a file's subtitle track is about 1 MB and is synced in seconds. Files already synced for someone are "
-     "served at once. When many people play new files together, the synced copy can come after your app has picked a "
-     "subtitle; the next time you open the file, it is there."),
+    ("Public mode: a few files at once",
+     "The service works on a set number of files at once for everyone (SUBSYNC_SYNCS_AT_ONCE), in the order people "
+     "asked; two people playing the same file of a torrent never read it twice at once: the second gets the first "
+     "one's work. A file's "
+     "subtitle track is about 1 MB and is synced in seconds. Files already synced for someone are served at once. When "
+     "many people play new files together, the synced copy can come after your app has picked a subtitle; the next "
+     "time you open the file, it is there."),
     ("Public mode: limits per person",
      "Each person can have a few files waiting and read a set number of new files and megabytes a day (UTC), by "
      "default 3 waiting, 40 files and 500 MB, and the whole service reads at most its own daily total; files already "
@@ -165,9 +175,18 @@ QUESTIONS = {
         "Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, "
         "unless you often watch such files; most files have a track. Off: those files keep their original subtitles, "
         "and subsync reads about 1 MB of each file. On: after you pick such a file's \"<Language> (Subsync)\" entry, "
-        "subsync reads short audio parts of it, up to 1 GB per file (counted in the daily limit and in your debrid "
-        "service's traffic), and the copy is there the next time you open the file; files with too high a bitrate "
-        "(most 4K remuxes) keep their originals."),
+        "subsync reads short audio parts of it, up to the limit you choose next (1 GB recommended; counted in the "
+        "daily limit and in your debrid service's traffic), and the copy is there the next time you open the file; "
+        "files with too high a bitrate for that limit keep their originals."),
+    "AUDIO_BUDGET": (
+        "1",
+        "Asked only with the audio route on: the most it reads of one file, through your debrid service: 0.5, 1, 2 "
+        "or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, "
+        "re-encodes); remuxes usually carry image subtitles and need no audio. Higher: very high-quality files such "
+        "as 4K remuxes get synced too, but each can cost that much data and take longer than the 14 seconds an app "
+        "waits, so the copy comes the next time you open the file. Lower: less data on a metered connection; more "
+        "high-bitrate files keep their originals. Smaller files are read only as far as needed. A change makes "
+        "subsync judge again the files it kept as originals."),
     "SUBDL_KEY": (
         "",
         "Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, "
@@ -275,6 +294,14 @@ GROUPS = [
             "synced from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each after you pick their "
             "\"(Subsync)\" entry. Recommended: off unless you often watch such files. Off: they keep their original "
             "subtitles and subsync reads about 1 MB per file."),
+        "SUBSYNC_AUDIO_BUDGET_GB": (
+            "1",
+            "With the audio route on, the most audio subsync reads of one file, in GB: your answer to ./setup's audio "
+            "limit question (0.5, 1, 2 or 4), written only while the audio route is on. Within it, high-bitrate files "
+            "get shorter audio parts, or none when they would be too short to judge, and then keep their originals; a "
+            "smaller file is read only as far as needed. Recommended: 1. Higher: very high-quality files such as 4K "
+            "remuxes get copies too, at up to that much data each. Lower: less data, more such files keep their "
+            "originals. Another number set here by hand works too; 0 removes the limit, which is not recommended."),
         "SUBSYNC_URL_REWRITE": (
             "",
             "Rewrites the start of stream links, like https://aio.example.com=http://aiostreams:3000, so subsync reads "
@@ -305,13 +332,8 @@ GROUPS = [
         "SUBSYNC_FILE_CAP_GB": (
             "6",
             "The most subsync reads of one file in all when the audio route works on it, in GB: an outer safety limit, "
-            "since the audio budget (1 GB) normally stops first. Recommended: 6. 0 removes it, which is not recommended."),
-        "SUBSYNC_AUDIO_BUDGET_GB": (
-            "1",
-            "With the audio route on, the most audio subsync reads per file, in GB. Within it, high-bitrate files get "
-            "shorter audio parts, or none when they would be too short to judge, and then keep their originals. "
-            "Recommended: 1. Higher: more 4K files get copies, at more data each. 0 removes the limit, which is not "
-            "recommended."),
+            "since the audio limit (SUBSYNC_AUDIO_BUDGET_GB, at most 4 GB from ./setup) normally stops first. "
+            "Recommended: 6. 0 removes it, which is not recommended."),
         "SUBSYNC_403_BACKOFF_S": (
             "900",
             "After a debrid service refuses a read (HTTP 403 or 429, usually a per-account limit), subsync stops all "
@@ -616,7 +638,7 @@ GROUPS = [
         "SUBSYNC_MAX_USERS": (
             "200",
             "Public mode only: how many people can be signed up at once; past it the sign-up page says the service is "
-            "full. Each person costs a little disk and, while they play, a worker, so the limit keeps a small server "
+            "full. Each person costs a little disk and, while they play, a worker, so the limit keeps the server "
             "within what it can carry. Raise it only after watching memory, processor use and the daily read total "
             "for a while."),
         "SUBSYNC_SIGNUPS_PER_HOUR": (
@@ -640,8 +662,9 @@ GROUPS = [
         "SUBSYNC_USER_QUEUE": (
             "3",
             "Public mode only: files one person may have waiting at once. A request past it is answered with what the "
-            "shared store already has and starts nothing. The service works on one file at a time for everyone, so a "
-            "longer queue for one person delays everyone else; 3 covers someone opening a few episodes in a row."),
+            "shared store already has and starts nothing. Everyone's files wait for the same few places "
+            "(SUBSYNC_SYNCS_AT_ONCE), so a longer queue for one person delays everyone else; 3 covers someone opening "
+            "a few episodes in a row."),
         "SUBSYNC_ACTIVE_WORKERS": (
             "30",
             "Public mode only: how many people can have a worker (the part that finds and syncs their files) running "
@@ -663,13 +686,30 @@ GROUPS = [
             "127.0.0.1",
             "Public mode only: the addresses of the web server in front of subsync, comma-separated. Only requests "
             "from these may say, in their X-Forwarded-For header, which address they came from, and the sign-up limit "
-            "per address counts that one. Set it to your web server's address as subsync sees it; a wrong value makes "
-            "every visitor count as one address, or lets visitors choose their own."),
+            "per address counts that one. Set it to your web server's address as subsync sees it, or to gateway when "
+            "the web server reaches subsync through a port Docker publishes: subsync then trusts its Docker network's "
+            "gateway, found at start, with no fixed network to set up. A wrong value makes every visitor count as one "
+            "address, or lets visitors choose their own."),
         "SUBSYNC_MAX_CONNECTIONS": (
             "64",
             "Public mode only: requests handled at once. Each one takes a thread and some memory, so past it the "
             "service answers \"busy, try again\" (HTTP 503) at once instead of running out of memory. Apps ask for "
-            "subtitles again on their own. Raise it only on a server with more memory."),
+            "subtitles again on their own. Raise it together with the memory the service may use."),
+        "SUBSYNC_RECHECK_HOURS": (
+            "24",
+            "Public mode only: how often, at most, each person's AIOStreams is checked again while they use the service, "
+            "in hours; 0 turns the check off. A check asks their AIOStreams two things (does their config still exist, "
+            "does AIOSubtitles' own config there still open), repairs a changed link, and tells the person on their "
+            "settings page and in their subtitle lists what only they can fix; for people who let AIOSubtitles keep "
+            "their password it also rebuilds AIOSubtitles' config from theirs. Shorter notices changes sooner, at "
+            "more calls to every AIOStreams; people who don't use the service aren't checked."),
+        "SUBSYNC_SYNCS_AT_ONCE": (
+            "1",
+            "Public mode only: how many files the service works on at once for everyone, or auto for as many as the "
+            "processors it may use. More lets people who play new files at the same time wait less, at more processor "
+            "use and more requests to each AIOStreams at once; one public AIOStreams shared by many people limits how "
+            "many requests one address may make, so 2 suits a server with 2 processors. A torrent's file is never "
+            "read twice at once: whoever plays it second waits for the first one's work and reads nothing."),
     }),
 ]
 
@@ -684,10 +724,10 @@ PUBLIC_REAL_DEBRID_WARNING = (
     "same file ready.")
 
 PUBLIC_PASSWORD_TEXT = (
-    "Your AIOStreams password, used once, now, for two things: to add AIOSubtitles to your AIOStreams config (if you "
-    "leave the box below checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, Usenet or "
-    "automatic fallback to other sources, so opening a file opens only that file. It is not stored. You'll be asked "
-    "again only if you refresh.")
+    "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams config (if you leave the "
+    "box below checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, Usenet or "
+    "automatic fallback to other sources, so opening a file opens only that file. It is not stored unless you tick "
+    "\"Keep my password\" below. You'll be asked again only if you refresh.")
 
 CONTACT = "https://github.com/haslanli/AIOSubtitles/issues"
 
@@ -716,9 +756,26 @@ PUBLIC_FIELDS = {
         "again on AIOStreams' configure page."),
     "invite": "The code you were given. AIOSubtitles is open only to invited people for now.",
     "refresh": (
-        "Your AIOStreams password, used once, now, to read your config again and rebuild AIOSubtitles' own config from "
-        "it, for example after you added or removed a service, and to put AIOSubtitles back in your config if it is "
-        "missing. It is not stored."),
+        "Your AIOStreams password, used now to read your config again and rebuild AIOSubtitles' own config from it, for "
+        "example after you added or removed a service, to make that config again if it is gone, and to put "
+        "AIOSubtitles back in your config if it is missing. It is not stored unless \"Keep my password\" is ticked."),
+    "new_link": (
+        "Optional: the link of another AIOStreams config, if you moved to a new one. AIOSubtitles reads that config "
+        "with the password above, follows it from now on, and moves its own config there if it is on another "
+        "AIOStreams; your personal link stays the same. Empty: AIOSubtitles keeps following the config you signed up "
+        "with."),
+    "keep_password": (
+        "Off by default. Ticked: AIOSubtitles keeps your AIOStreams password, encrypted so that it opens only with your "
+        "personal link, and about once a day while you use it rebuilds its own config from yours, so services and "
+        "addons you add or remove are followed without Refresh; Real-Debrid and Usenet stay out, and your own config "
+        "is never changed. The cost: that password can change your whole AIOStreams config, all your keys included, "
+        "so if AIOSubtitles' server were broken into while you use it, it could be read. Unticked: it is used once and "
+        "forgotten. Untick and refresh, or press \"Stop keeping my password\", to delete it at once; the encrypted "
+        "backups keep it up to 30 days more."),
+    "forget_password": (
+        "Deletes the AIOStreams password AIOSubtitles kept, at once (the encrypted backups keep it up to 30 days more); "
+        "nothing else changes. AIOSubtitles then stops following changes to your config by itself, and you press "
+        "Refresh after you change it."),
     "delete": (
         "Deletes everything AIOSubtitles keeps about you and removes its own config from your AIOStreams; your "
         "personal link stops working at once. Optional: with your AIOStreams password it also takes itself out of "
@@ -764,9 +821,11 @@ PRIVACY_PARTS = (
      "AIOSubtitles' server, never your internet address."),
     ("What is stored", "What is stored:",
      "one record, encrypted so that it opens only with your personal link (your AIOStreams address, AIOSubtitles' own "
-     "config there and its password, your config's id, your languages), and how much was read for you each day. "
-     "AIOSubtitles' own config holds your debrid keys, as your own config does, and the service can open it while your "
-     "requests come in. Your AIOStreams password is never stored. For each synced subtitle only its new timing "
+     "config there and its password, your config's id, your languages, and when your AIOStreams was last checked), and "
+     "how much was read for you each day. AIOSubtitles' own config holds your debrid keys, as your own config does, and "
+     "the service can open it while your requests come in. Your AIOStreams password is stored only if you tick \"Keep "
+     "my password\", in the same encrypted record, until you untick it (and up to 30 days more in the encrypted "
+     "backups). For each synced subtitle only its new timing "
      "(never its text), with the names and sizes of the files it fits, is shared and kept 180 days after last use, "
      "without who played them. Logs name the titles "
      "synced, never who asked."),
@@ -778,6 +837,38 @@ PRIVACY_PARTS = (
      "until you delete your data on your settings page, or 180 days after your last request; then AIOSubtitles' own "
      "config can't be removed from your AIOStreams, because opening your record needs your link."),
 )
+# What the daily check (recheck.py) found, as the settings page and the "action needed" entry say it: state ->
+# (title, text, whether only the person can fix it). "{detail}" is the plain reason a rebuild couldn't be made.
+PUBLIC_STATES = {
+    "sync_gone": (
+        "AIOSubtitles' config on your AIOStreams is gone",
+        "AIOSubtitles can no longer open the separate config it made on your AIOStreams, so it can't sync new files for "
+        "you. Press Refresh with your AIOStreams password: it makes that config again.", True),
+    "main_gone": (
+        "The AIOStreams config you signed up with is gone",
+        "Your AIOStreams no longer has the config you signed up with. If you moved to a new config, press Refresh with "
+        "its link and password: AIOSubtitles then follows it, and your personal link stays the same.", True),
+    "password_refused": (
+        "Your kept password no longer works",
+        "AIOSubtitles couldn't open your AIOStreams config with the password it kept, so it deleted that password and "
+        "stopped following your config by itself. If you changed your password, press Refresh with the new one, and "
+        "tick \"Keep my password\" to let it keep the new one.", True),
+    "cannot_rebuild": (
+        "Your AIOStreams config can't be followed as it is",
+        "AIOSubtitles tried to follow a change in your AIOStreams config and couldn't: {detail} Until that changes, it "
+        "keeps using the config it made before.", True),
+    "reads_refused": (
+        "Your debrid service refused AIOSubtitles' reads",
+        "Your debrid service refused AIOSubtitles' last reads, so it pauses and tries again later. If you changed your "
+        "debrid key in AIOStreams, press Refresh so AIOSubtitles' config gets the new one.", True),
+    "unreachable": (
+        "AIOSubtitles couldn't reach your AIOStreams",
+        "The last three checks couldn't reach your AIOStreams from the internet. While it can't be reached, AIOSubtitles "
+        "can't sync new files for you; nothing needs doing once it is back.", False),
+}
+PUBLIC_NOTICE_LABEL = "AIOSubtitles: action needed"
+PUBLIC_NOTICE_DONE = "AIOSubtitles: nothing needs doing any more. This entry goes away by itself."
+
 PUBLIC_TEXTS["privacy"] = " ".join(f"{lead} {text}".strip() for _, lead, text in PRIVACY_PARTS)
 
 # The sign-up page's heading, with the words the hand-drawn mark goes under.
@@ -807,7 +898,14 @@ PUBLIC_DELETE_LIST = (
 PUBLIC_TEXTS.update({
     "tries": "Each try counts: {n} sign-up attempts per address in an hour.",
     "kept_note": "For your safety, the link, password and invite code aren't kept after an error: enter them again.",
-    "password_once": "Your password is used for this sign-up only and is not stored.",
+    "password_once": "Your password is used for this sign-up only and is not stored, unless you tick \"Keep my password\".",
+    "copied": ("AIOSubtitles' config on your AIOStreams was copied from yours {when}. After you add or remove a service or "
+               "addon in AIOStreams, press Refresh."),
+    "copied_auto": ("AIOSubtitles' config on your AIOStreams was copied from yours {when}. AIOSubtitles keeps your "
+                    "password and follows changes to your config by itself, about once a day while you use it."),
+    "forgot": ("Your kept password is deleted. AIOSubtitles no longer follows your config by itself: press Refresh after "
+               "you change it."),
+    "notice_where": "Open your AIOSubtitles settings page: your personal link with /configure at the end.",
     "made_config": ("Made AIOSubtitles' own config on your AIOStreams, without Real-Debrid, Usenet or automatic "
                     "fallback to other sources."),
     "languages_chosen": "Languages: {names}.",

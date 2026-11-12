@@ -121,6 +121,10 @@ class FakeAiostreams:
         import uuid as uuidlib
         self.configs, self.requests, self.fault, self.hang_s = {}, [], None, 3.0
         self.refuse_save_for = set()   # config ids whose saves are refused
+        self.encrypted = {}            # config id -> the encrypted password its link carries (default "ENC" + id[:8])
+        self.auth_ids = []             # the config ids each password-checked request named
+        self.inflight = self.max_inflight = 0
+        self.lock = threading.Lock()
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -150,16 +154,32 @@ class FakeAiostreams:
                 return json.loads(self.rfile.read(n) or b"{}")
 
             def handle_any(self):
-                path = self.path.split("?")[0]
+                with outer.lock:
+                    outer.inflight += 1
+                    outer.max_inflight = max(outer.max_inflight, outer.inflight)
+                try:
+                    self.handle_one()
+                finally:
+                    with outer.lock:
+                        outer.inflight -= 1
+
+            def handle_one(self):
+                import urllib.parse
+                path, _, query = self.path.partition("?")
                 outer.requests.append((self.command, path))
                 if outer.fault == "hang":
                     time.sleep(outer.hang_s)
+                if self.command == "HEAD" and path == "/api/v1/user":   # stock: does a config exist (no password)
+                    asked = (urllib.parse.parse_qs(query).get("uuid") or [""])[0]
+                    return self.answer(200 if asked in outer.configs else 400, {"success": asked in outer.configs})
                 if outer.fault == "html":
                     return self.answer(200, "<html><body>Welcome</body></html>", "text/html")
                 if path == "/api/v1/status":
                     return self.answer(200, outer.STATUS)
                 if path == "/api/v1/user":
                     uuid, password = self.auth()
+                    if uuid:
+                        outer.auth_ids.append(uuid)
                     if self.command == "POST":
                         if outer.fault == "rate_limited":
                             self.send_response(429)
@@ -177,7 +197,8 @@ class FakeAiostreams:
                         b = self.body()
                         new = str(uuidlib.uuid4())
                         outer.configs[new] = {"password": b["password"], "config": b["config"]}
-                        return self.answer(201, {"success": True, "data": {"uuid": new, "encryptedPassword": "ENC" + new[:8]}})
+                        return self.answer(201, {"success": True, "data": {"uuid": new,
+                                                                           "encryptedPassword": outer.enc(new)}})
                     stored = outer.configs.get(uuid)
                     if stored is None or stored["password"] != password or (
                             outer.fault == "wrong_password" and self.command == "GET"):
@@ -186,7 +207,7 @@ class FakeAiostreams:
                     if self.command == "GET":
                         data = "not a config" if outer.fault == "bad_config" else stored["config"]
                         return self.answer(200, {"success": True, "data": {"userData": data,
-                                                                           "encryptedPassword": "ENC" + uuid[:8]}})
+                                                                           "encryptedPassword": outer.enc(uuid)}})
                     if self.command == "PUT":
                         if outer.fault == "refuse_save" or uuid in outer.refuse_save_for:
                             return self.answer(500, {"success": False, "error": {"code": "INTERNAL", "message": "boom"}})
@@ -207,6 +228,9 @@ class FakeAiostreams:
         self.server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def enc(self, uuid):
+        return self.encrypted.get(uuid, "ENC" + uuid[:8])
 
     def add(self, config, password):
         import uuid as uuidlib

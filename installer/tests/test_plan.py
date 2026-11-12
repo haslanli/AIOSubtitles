@@ -209,6 +209,22 @@ class Files(unittest.TestCase):
         self.assertNotIn('SUBSYNC_BASE_PATH', env)
         self.assertNotIn('SUBSYNC_URL_REWRITE', env)
 
+    def test_the_audio_limit_is_written_only_with_the_audio_route(self):
+        env = plan.subsync_env(dict(self.S, audio=True, audio_budget='2'))
+        self.assertEqual(env['SUBSYNC_AUDIO_BUDGET_GB'], '2')
+        self.assertLessEqual(set(env), set(explain.WRITTEN_BY_SETUP))
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', plan.subsync_env(dict(self.S, audio=False, audio_budget='2')))
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', plan.subsync_env(dict(self.S, audio=True)))
+
+    def test_audio_limit_answers(self):
+        for typed, value in (('1', '1'), ('0.5', '0.5'), ('.5', '0.5'), ('2 GB', '2'), ('4gb', '4'), ('1.0', '1')):
+            with self.subTest(typed=typed):
+                self.assertEqual(plan.audio_budget(typed), value)
+        for typed in ('3', '0', '-1', 'lots', '', '8'):
+            with self.subTest(typed=typed):
+                self.assertIsNone(plan.audio_budget(typed))
+        self.assertEqual(plan.audio_budget('3', allowed_too='3'), '3')   # a value set by hand before is kept
+
     def test_hand_added_lines_are_kept(self):
         written = plan.subsync_env(self.S)
         current = plan.parse_env('# a note\nSUBSYNC_MAX_TRIES=9   # mine\nSUBSYNC_EXTRA_SOURCES=\nTZ=Europe/Berlin\n'

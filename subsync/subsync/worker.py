@@ -1,4 +1,5 @@
-"""The queue and the worker: one file at a time.
+"""The queue and the worker: one file at a time per worker (in public mode, every person's worker shares one Turn
+with SUBSYNC_SYNCS_AT_ONCE places, and never two of them work on the same file at once).
 
 A job is a file a viewer opened or played. A subtitle request that names the file (its name, size or hash, as Stremio
 and AIOStreams send them) queues it; the file is then found in subsync's own AIOStreams listing (cached debrid only).
@@ -56,27 +57,62 @@ class OverLimit(Exception):
 
 
 class Turn:
-    """One holder at a time, in the order they asked: in public mode every person's worker shares one, so the service
-    works on one file at a time for everyone."""
+    """Up to `places` holders at once, let in in the order they asked: in public mode every person's worker shares one,
+    so the service works on that many files at once for everyone (SUBSYNC_SYNCS_AT_ONCE). `claim(key)` keeps one file
+    to one worker at a time, so the same file is never worked on twice at once; a worker takes its file's claim before
+    its place, so a place is never held while waiting for a claim of the same key."""
 
-    def __init__(self):
+    def __init__(self, places=1):
+        self.places = max(1, int(places or 1))
         self._cv = threading.Condition()
-        self._next = 0
-        self._serving = 0
+        self._next = 0          # the next ticket handed out
+        self._let_in = 0        # tickets let in so far (the next one to let in)
+        self._inside = 0
+        self._claims = set()
 
     def __enter__(self):
         with self._cv:
             ticket = self._next
             self._next += 1
-            while ticket != self._serving:
+            while ticket != self._let_in or self._inside >= self.places:
                 self._cv.wait()
+            self._let_in += 1
+            self._inside += 1
+            self._cv.notify_all()
         return self
 
     def __exit__(self, *exc):
         with self._cv:
-            self._serving += 1
+            self._inside -= 1
             self._cv.notify_all()
         return False
+
+    @contextlib.contextmanager
+    def claim(self, key):
+        with self._cv:
+            while key in self._claims:
+                self._cv.wait()
+            self._claims.add(key)
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._claims.discard(key)
+                self._cv.notify_all()
+
+
+class NoTurn:
+    """Self-hosted: one worker and nothing shared, so nothing to wait for."""
+    places = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def claim(self, key):
+        return contextlib.nullcontext()
 
 
 class JobGuard:
@@ -150,7 +186,7 @@ class Worker(threading.Thread):
         self.s, self.store, self.aios, self.safety = settings, store, aios, safety
         # public mode: the turn every person's worker shares, and this person's limits (may_queue, may_start_file,
         # file_started, before_read, after_read)
-        self.turn = turn if turn is not None else contextlib.nullcontext()
+        self.turn = turn if turn is not None else NoTurn()
         self.limits = limits
         self.extra = extra          # extra.ExtraSources: sources subsync searches itself
         # public mode: an opaque key of this person for the sources' fair shares (sourcestate.Ledger), never logged
@@ -463,7 +499,7 @@ class Worker(threading.Thread):
             if job is None:
                 break
             try:
-                with self.turn:
+                with self.turn.claim(job.alias), self.turn:
                     if not self.stop_flag:
                         self.process(job)
             except OverLimit as e:
@@ -530,9 +566,16 @@ class Worker(threading.Thread):
                 self.unlisted.pop(next(iter(self.unlisted)))
             return
         bt = bt_alias(row)
-        if bt:   # the listed torrent: TheSubtitleDB finds subtitles made for its very video by its hash
-            _, info_hash, file_idx = bt.split(":")
-            hints.update(infoHash=info_hash, fileIdx=int(file_idx))
+        if not bt:
+            return self._process_row(job, hints, row, None)
+        # the listed torrent: TheSubtitleDB finds subtitles made for its very video by its hash
+        _, info_hash, file_idx = bt.split(":")
+        hints.update(infoHash=info_hash, fileIdx=int(file_idx))
+        with self.turn.claim(bt):   # another person playing the same torrent file under another name waits, then reads nothing
+            return self._process_row(job, hints, row, bt)
+
+    def _process_row(self, job, hints, row, bt):
+        """The file's work once its listed row is known (`bt`: the row's torrent file, or None)."""
         known = self.store.resolve(bt) if bt else None
         if known and self.store.judged_all(known, self.s.languages, self.s.rule_id, time.time() - JUDGED_FOR_S):
             # the same file of the same torrent, judged for every language here lately (read through someone else's

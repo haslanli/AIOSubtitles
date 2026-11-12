@@ -5,7 +5,7 @@
 # An image built for another processor under emulation (QEMU runs these tests hours slower) can leave them out with
 # --build-arg SUBSYNC_TESTS=skip; then run them on the machine the image is for, from the image, before using it.
 # alass is compiled on the machine that builds, for the processor the image is for: an image for another processor
-# (an x86_64 server built on an ARM machine) then needs no emulated compiler, which crashes under QEMU.
+# (for example an x86_64 image built on an ARM machine) then needs no emulated compiler, which crashes under QEMU.
 FROM --platform=$BUILDPLATFORM rust@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS alass
 ARG TARGETARCH
 RUN set -e; arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \

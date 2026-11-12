@@ -29,9 +29,69 @@ class PublicSettingsTest(unittest.TestCase):
         self.assertEqual(s.user_keep_days, 180)
         self.assertEqual(s.trusted_proxy, ("127.0.0.1",))
         self.assertEqual(s.max_connections, 64)
+        self.assertEqual(s.syncs_at_once, 1)
 
     def test_trusted_proxy_is_a_list(self):
         self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "127.0.0.1, ::1"}).trusted_proxy, ("127.0.0.1", "::1"))
+
+    def route_file(self, text):
+        from helpers import TempDir
+        tmp = TempDir()
+        folder = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        path = os.path.join(folder, "route")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    ROUTES = ("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+              "eth0\t0000FEA9\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+              "eth0\t00000000\t013D1EAC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+              "eth0\t003D1EAC\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n")
+
+    def test_trusted_proxy_gateway_is_found_at_start(self):
+        """`gateway`: the address the container's own network reaches it from (its default gateway), so a web server
+        reaching subsync through a port Docker publishes is trusted without a fixed network."""
+        from unittest import mock
+        from subsync import settings as settings_module
+        with mock.patch.object(settings_module, "ROUTE_FILE", self.route_file(self.ROUTES)):
+            self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "gateway"}).trusted_proxy, ("172.30.61.1",))
+            both = Settings({"SUBSYNC_TRUSTED_PROXY": "gateway, 127.0.0.1", "SUBSYNC_PUBLIC": "on"})
+            self.assertEqual(both.trusted_proxy, ("172.30.61.1", "127.0.0.1"))
+            self.assertEqual(both.conflicts(), [])
+
+    def test_trusted_proxy_gateway_without_a_default_route_stops_public_mode(self):
+        from unittest import mock
+        from subsync import settings as settings_module
+        no_default = self.ROUTES.splitlines()[0] + "\n" + self.ROUTES.splitlines()[1] + "\n"
+        for path in (self.route_file(no_default), "/nonexistent/route"):
+            with self.subTest(path=path), mock.patch.object(settings_module, "ROUTE_FILE", path):
+                s = Settings({"SUBSYNC_TRUSTED_PROXY": "gateway", "SUBSYNC_PUBLIC": "on"})
+                self.assertEqual(s.trusted_proxy, ())
+                problems = s.conflicts()
+                self.assertEqual(len(problems), 1)
+                self.assertIn("SUBSYNC_TRUSTED_PROXY", problems[0])
+                self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "gateway"}).conflicts(), [])   # self-hosted: unused
+
+    def test_syncs_at_once(self):
+        from unittest import mock
+        from subsync import settings as settings_module
+        self.assertEqual(Settings({"SUBSYNC_SYNCS_AT_ONCE": "2"}).syncs_at_once, 2)
+        with mock.patch.object(settings_module, "available_cpus", return_value=3):
+            self.assertEqual(Settings({"SUBSYNC_SYNCS_AT_ONCE": "auto"}).syncs_at_once, 3)
+        for wrong in ("0", "-1", "two", "1.5", ""):
+            with self.subTest(value=wrong):
+                s = Settings({"SUBSYNC_SYNCS_AT_ONCE": wrong, "SUBSYNC_PUBLIC": "on"})
+                self.assertIsNone(s.syncs_at_once)
+                self.assertTrue(any("SUBSYNC_SYNCS_AT_ONCE" in p for p in s.conflicts()))
+
+    def test_available_cpus_follows_the_containers_limit(self):
+        from subsync import settings as settings_module
+        self.assertEqual(settings_module.available_cpus(cpu_max=self.route_file("max 100000\n"), count=lambda: 2), 2)
+        self.assertEqual(settings_module.available_cpus(cpu_max=self.route_file("150000 100000\n"), count=lambda: 4), 2)
+        self.assertEqual(settings_module.available_cpus(cpu_max=self.route_file("50000 100000\n"), count=lambda: 4), 1)
+        self.assertEqual(settings_module.available_cpus(cpu_max="/nonexistent/cpu.max", count=lambda: 6), 6)
+        self.assertEqual(settings_module.available_cpus(cpu_max="/nonexistent/cpu.max", count=lambda: None), 1)
 
     def test_missing_in_public_mode(self):
         self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on"}).missing(), ["SUBSYNC_SECRET_KEY", "SUBSYNC_PUBLIC_BASE"])
@@ -276,6 +336,113 @@ class WorkerHooksTest(unittest.TestCase):
         for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
             self.assertLessEqual(a1, b0)
 
+    def test_a_turn_with_two_places_lets_two_in_and_keeps_the_order(self):
+        import threading
+        import time
+        from subsync.worker import Turn
+        turn, order, threads, release = Turn(2), [], [], threading.Event()
+        self.assertEqual(turn.places, 2)
+
+        def hold(i):
+            with turn:
+                order.append(i)
+                release.wait(2)
+        for i in range(4):
+            t = threading.Thread(target=hold, args=(i,))
+            t.start()
+            threads.append(t)
+            time.sleep(0.05)
+        self.assertEqual(order, [0, 1])          # two places: the third and fourth wait
+        release.set()
+        for t in threads:
+            t.join(2)
+        self.assertEqual(order, [0, 1, 2, 3])    # in the order they asked
+        self.assertEqual(Turn(0).places, 1)      # never less than one place
+
+    def test_a_claim_keeps_one_file_to_one_worker(self):
+        import threading
+        import time
+        from subsync.worker import Turn
+        turn, spans, lock = Turn(2), {}, threading.Lock()
+
+        def work(key, i):
+            with turn.claim(key):
+                t0 = time.time()
+                time.sleep(0.1)
+                with lock:
+                    spans.setdefault(key, []).append((t0, time.time()))
+        threads = [threading.Thread(target=work, args=(key, i)) for i, key in enumerate(("a", "a", "b"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(2)
+        (a0, a1), (b0, b1) = sorted(spans["a"])
+        self.assertLessEqual(a1, b0)             # the same file one after the other
+        self.assertEqual(turn._claims, set())    # nothing left claimed
+
+    def test_two_places_work_on_two_files_at_once_but_never_the_same_file(self):
+        import threading
+        import time
+        from subsync.worker import Job, Safety, Turn, Worker
+        turn, spans, lock = Turn(2), [], threading.Lock()
+
+        class Recording(Worker):
+            def process(self, job):
+                t0 = time.time()
+                time.sleep(0.15)
+                with lock:
+                    spans.append((job.alias, t0, time.time()))
+        jobs = (("tt1", "same.mkv"), ("tt2", "other.mkv"), ("tt1", "same.mkv"))
+        for video_id, name in jobs:      # three people: two play the same file
+            w = Recording(self.settings(), self.store, ListingAios(), Safety(), turn=turn)
+            self.workers.append(w)
+            w.submit(Job("movie", video_id, {"filename": name, "videoSize": 1}))
+        for w in self.workers:
+            w.start()
+        self.assertTrue(wait_until(lambda: len(spans) == 3))
+        same = sorted((t0, t1) for alias, t0, t1 in spans if "same" in alias)
+        self.assertLessEqual(same[0][1], same[1][0])
+        other = [(t0, t1) for alias, t0, t1 in spans if "other" in alias][0]
+        self.assertTrue(other[0] < same[0][1] and same[0][0] < other[1])   # two different files overlapped
+
+    def test_two_people_on_one_torrent_file_read_it_once(self):
+        """Different file names, the same torrent file: the second waits for the first and then reads nothing."""
+        from helpers import FIXTURES, RangeServer, TempDir
+        from subsync.store import Store
+        from subsync.worker import Job, Safety, Turn, Worker
+        size = os.path.getsize(os.path.join(FIXTURES, "tiny.mkv"))
+
+        def run(names):
+            """The requests the file server saw and the bytes read, with one person per file name."""
+            srv, tmp = RangeServer(FIXTURES), TempDir()
+            folder = tmp.__enter__()
+            workers = []
+            try:
+                store = Store(folder)
+                row = {"url": srv.url("tiny.mkv"), "streamData": {"torrent": {"infoHash": HASH, "fileIdx": 2}}}
+                subs = [{"id": "os-1", "url": srv.url("tiny.srt"), "lang": "eng", "release": "", "hash": "",
+                         "hash_match": False, "ai": False}]
+                turn = Turn(2)
+                settings = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_PUBLIC_BASE": "http://x.test",
+                                     "SUBSYNC_LANGUAGES": "eng"})
+                for name in names:
+                    w = Worker(settings, store, ListingAios(row, subs), Safety(), turn=turn)
+                    workers.append(w)
+                    w.submit(Job("movie", "tt1", {"filename": name, "videoSize": size}))
+                for w in workers:
+                    w.start()
+                self.assertTrue(wait_until(lambda: all(not w.jobs and w.current is None for w in workers), 20))
+                self.assertIsNotNone(store.resolve(f"bt:{HASH}:2"))
+                return len(srv.log), store.bytes_today("read")
+            finally:
+                for w in workers:
+                    w.stop()
+                srv.close()
+                tmp.__exit__(None, None, None)
+        one = run(["tiny.mkv"])
+        self.assertGreater(one[1], 0)
+        self.assertEqual(run(["tiny.mkv", "tiny-renamed.mkv"]), one)
+
     def test_a_full_queue_queues_nothing(self):
         from subsync.worker import Job, Safety, Worker
         w = Worker(self.settings(), self.store, ListingAios(), Safety(), limits=StubLimits(queue=1))
@@ -421,7 +588,18 @@ class PoolTest(unittest.TestCase):
     def test_workers_share_one_turn(self):
         a, b = self.pool.app(self.tokens[0]), self.pool.app(self.tokens[1])
         self.assertIs(a.worker.turn, b.worker.turn)
+        self.assertEqual(a.worker.turn.places, 1)
         self.assertIsNotNone(a.worker.limits)
+
+    def test_the_turn_has_as_many_places_as_files_at_once(self):
+        from subsync.public import Pool
+        env = dict(self.env, SUBSYNC_SYNCS_AT_ONCE="2")
+        pool = Pool(Settings(env), env, self.store, self.users, clock=self.clock)
+        try:
+            self.assertEqual(pool.turn.places, 2)
+            self.assertIs(pool.app(self.tokens[0]).worker.turn, pool.turn)
+        finally:
+            pool.close()
 
     def test_idle_workers_stop_and_restart(self):
         a = self.pool.app(self.tokens[0])
@@ -550,11 +728,37 @@ class PublicTextsTest(unittest.TestCase):
         used.discard("password")   # its explanation is named by help=
         self.assertEqual(used - set(explain.PUBLIC_FIELDS), set())
 
+    def test_each_check_state_has_a_title_and_one_plain_text(self):
+        import re
+        from subsync import explain
+        note = re.compile(r"\b(?:AD\d{1,3}|S4-\d+|P-S4-[A-Z0-9-]+)\b")
+        self.assertEqual(set(explain.PUBLIC_STATES), {"sync_gone", "main_gone", "password_refused", "cannot_rebuild",
+                                                      "reads_refused", "unreachable"})
+        for state, (title, text, action) in explain.PUBLIC_STATES.items():
+            with self.subTest(state=state):
+                self.assertFalse(title.endswith("."))
+                self.assertNotIn("\n", text)
+                self.assertTrue(text.endswith("."), text[-30:])
+                self.assertIsNone(note.search(title + text))
+                self.assertLessEqual(len(text.split()), 60)
+                self.assertIsInstance(action, bool)
+        self.assertFalse(explain.PUBLIC_STATES["unreachable"][2])      # a note only: nothing for the person to do
+
+    def test_no_public_text_is_written_for_one_small_server(self):
+        from subsync import explain
+        public = [text for name, text in explain.RULES if name.startswith("Public mode")]
+        public += [text for name, (_, text) in explain.SETTINGS.items() if text.startswith("Public mode only")]
+        public += list(explain.PUBLIC_FIELDS.values()) + list(explain.PUBLIC_TEXTS.values())
+        for text in public:
+            with self.subTest(text=text[:40]):
+                self.assertNotIn("small server", text)
+                self.assertNotIn("one file at a time", text)
+
     def test_public_rules_are_listed(self):
         from subsync import explain
         names = [name for name, _ in explain.RULES]
         for rule in ("Public mode: your AIOStreams password is used once", "Public mode: Real-Debrid is left out",
-                     "Public mode: one file at a time", "Public mode: limits per person",
+                     "Public mode: a few files at once", "Public mode: limits per person",
                      "Public mode: what is kept, and for how long"):
             with self.subTest(rule=rule):
                 self.assertIn(rule, names)

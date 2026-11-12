@@ -3,7 +3,8 @@
 Each person who signed up has an encrypted record (users.py) that opens only with their personal link's token. While
 their requests come in, they get their own copy of the self-hosted service: an App and a Worker with their languages,
 working through the sync config the sign-up made on their AIOStreams. Everyone shares one result store, so a copy made
-for one person serves everyone playing the same file, and one turn, so the service works on one file at a time.
+for one person serves everyone playing the same file, and one turn, so the service works on SUBSYNC_SYNCS_AT_ONCE files
+at a time and never on the same file twice at once.
 
 A worker with nothing to do for a while stops, and its opened record leaves memory; the next request opens it again.
 """
@@ -18,7 +19,9 @@ from . import pages
 from .addon import App, Handler
 from .aiosconfig import parse_languages
 from .settings import Settings
-from .signup import SignupError, SignupGate, delete, form_languages, public_api, refresh, set_languages, signup
+from .recheck import Checker
+from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh, set_languages,
+                     signup)
 from .sources import Aios
 from .users import day_of
 from .worker import OverLimit, Safety, Turn, Worker
@@ -90,7 +93,7 @@ class Pool:
     def __init__(self, settings, env, store, users, clock=time.time, start_workers=True):
         self.s, self.env, self.store, self.users, self.clock = settings, dict(env), store, users, clock
         self.start_workers = start_workers
-        self.turn = Turn()
+        self.turn = Turn(settings.syncs_at_once or 1)
         # One set of built-in sources for everyone: answers, pauses and the sites' limits are shared
         from .extra import make_sources
         self.extra = make_sources(settings)
@@ -106,7 +109,7 @@ class Pool:
         worker = Worker(s, self.store, aios, safety, extra=self.extra, turn=self.turn, limits=limits)
         if start:
             worker.start()
-        return App(s, self.store, worker, safety)
+        return App(s, self.store, worker, safety, state=record.get("state"), detail=record.get("state_detail"))
 
     def app(self, token):
         """The person's App (their worker started on first use), or None for a token nobody signed up with. Past
@@ -138,6 +141,12 @@ class Pool:
     def active(self):
         with self.lock:
             return len(self.entries)
+
+    def live_app(self, token):
+        """The person's running App, without opening their record or starting anything; None when there is none."""
+        with self.lock:
+            entry = self.entries.get(self.users.user_id(token))
+        return entry["app"] if entry else None
 
     def stop(self, token):
         """Stops the person's worker (refresh, delete); the next request opens their record again."""
@@ -215,6 +224,10 @@ class PublicService:
         self.s, self.env, self.store, self.users, self.pool = settings, env, store, users, pool
         self.api_factory, self.timeout, self.clock = api_factory, timeout, clock
         self.gate = SignupGate(settings, users.count, clock=clock)
+        # each person's AIOStreams checked again about once a day while they use the service; a change restarts their
+        # worker with the new record
+        self.checker = Checker(settings, users, on_change=pool.stop, api_factory=api_factory, clock=clock,
+                               timeout=timeout)
         # the routes everyone shares (synced files, health) need no person's service: an App that never works
         self.shared = App(settings, store, Worker(settings, store, Aios(""), Safety(), limits=StoreOnly()), Safety())
 
@@ -312,6 +325,7 @@ class PublicHandler(Handler):
             app = svc.pool.app(token)
             if app is None:
                 return self._not_found()
+            svc.checker.maybe_start(token)   # in the background, at most once per SUBSYNC_RECHECK_HOURS
             return self.dispatch(app, rest, True)
         except (BrokenPipeError, ConnectionResetError):
             return None
@@ -343,9 +357,12 @@ class PublicHandler(Handler):
 
         def page(code=200, message=None, error=None, notice=None, field=None):
             current = svc.users.open(token) or record
+            live = svc.pool.live_app(token)
+            refused = live is not None and live.action() == "reads_refused"
             return self._html(code, pages.settings_page(svc.s, current, svc.users.usage(token), manifest_url,
                                                         message=message, error=error, notice=notice,
-                                                        now=svc.clock(), field=field), personal=True)
+                                                        now=svc.clock(), field=field,
+                                                        state="reads_refused" if refused else None), personal=True)
         if method == "GET":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             message, notice = pages.done_message((query.get("done") or [None])[0], record)
@@ -364,17 +381,25 @@ class PublicHandler(Handler):
                 return self._see("languages")
             if action == "refresh":
                 try:
-                    result = refresh(svc.s, svc.users, token, {"password": form.get("password"), "add_addon": "on"},
+                    result = refresh(svc.s, svc.users, token,
+                                     {"password": form.get("password"), "add_addon": "on", "link": form.get("link"),
+                                      "keep_password": form.get("keep_password")},
                                      api_factory=svc.api_factory, timeout=svc.timeout)
-                except SignupError as e:      # the password field is called "refresh" on this page
-                    return page(e.code, error=e.message, field="refresh" if e.field == "password" else e.field)
+                except SignupError as e:      # the password field is called "refresh" on this page, the link "new_link"
+                    return page(e.code, error=e.message,
+                                field={"password": "refresh", "link": "new_link"}.get(e.field, e.field))
                 svc.pool.stop(token)
+                svc.checker.forget(token)
                 return self._see("refreshed-manual" if result.manual else "refreshed-rd" if result.warning
                                  else "refreshed")
+            if action == "forget-password":
+                forget_password(svc.users, token)
+                return self._see("forgot")
             if action == "delete-confirm":
                 return self._html(200, pages.delete_confirm_page(), personal=True)
             if action == "delete":
                 svc.pool.stop(token)
+                svc.checker.forget(token)
                 try:
                     outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
                                      api_factory=svc.api_factory, timeout=svc.timeout)

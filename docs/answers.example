@@ -32,10 +32,18 @@ LANGUAGES=English
 # Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, unless
 # you often watch such files; most files have a track. Off: those files keep their original subtitles, and subsync
 # reads about 1 MB of each file. On: after you pick such a file's "<Language> (Subsync)" entry, subsync reads short
-# audio parts of it, up to 1 GB per file (counted in the daily limit and in your debrid service's traffic), and the
-# copy is there the next time you open the file; files with too high a bitrate (most 4K remuxes) keep their
-# originals.
+# audio parts of it, up to the limit you choose next (1 GB recommended; counted in the daily limit and in your
+# debrid service's traffic), and the copy is there the next time you open the file; files with too high a bitrate
+# for that limit keep their originals.
 AUDIO=no
+
+# Asked only with the audio route on: the most it reads of one file, through your debrid service: 0.5, 1, 2 or 4 GB.
+# Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, re-encodes); remuxes
+# usually carry image subtitles and need no audio. Higher: very high-quality files such as 4K remuxes get synced
+# too, but each can cost that much data and take longer than the 14 seconds an app waits, so the copy comes the next
+# time you open the file. Lower: less data on a metered connection; more high-bitrate files keep their originals.
+# Smaller files are read only as far as needed. A change makes subsync judge again the files it kept as originals.
+AUDIO_BUDGET=1
 
 # Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, which
 # often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't asked.
