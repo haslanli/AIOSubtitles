@@ -24,13 +24,15 @@ import hmac
 import json
 import logging
 import re
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import srclimits
 from .langs import name as lang_name
 from .sources import parse_extras
-from .subs import is_ass, parse, to_srt
+from .subs import apply_recipe, is_ass, parse, to_srt
 from .worker import Job
 
 log = logging.getLogger("subsync.addon")
@@ -73,6 +75,31 @@ class App:
     def __init__(self, settings, store, worker, safety):
         self.s, self.store, self.worker, self.safety = settings, store, worker, safety
         self.subtitle_requests, self.last_subtitle_request = 0, None   # the installer's self-test reads these
+        self.texts, self.texts_lock = {}, threading.Lock()   # public mode: this person's rebuilt copies, for an hour
+
+    def text_of(self, key):
+        """A synced copy's text: from the store, or in public mode rebuilt from the original this person's own
+        list gives, with the stored timings; kept here an hour, for this person only. None when there is none."""
+        if not key:
+            return None
+        if self.store.keep_texts:
+            return self.store.body(key)
+        now = time.time()
+        with self.texts_lock:
+            got = self.texts.get(key)
+        if got and now - got[0] < srclimits.TEXT_KEEP_S:
+            return got[1]
+        recipe, result = self.store.recipe(key), self.store.get(key)
+        if not recipe or not result:
+            return None
+        original = self.worker.original_text(result, recipe.get("fp"))
+        text = apply_recipe(original, recipe) if original is not None else None
+        if text is not None:
+            with self.texts_lock:
+                self.texts[key] = (now, text)
+                while len(self.texts) > srclimits.TEXT_KEEP_ENTRIES:
+                    self.texts.pop(next(iter(self.texts)))
+        return text
 
     def route(self, path):
         """(path without the base path and key, keyed) for a request path."""
@@ -245,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
             m = FILE_ROUTE.match(path)
             if m:
                 key = key_of(m.group(1))
-                body = app.store.body(key)
+                body = app.text_of(key)
                 if body is None:
                     return self._send(404, b"")
                 app.store.served(key)
@@ -260,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     return self._send(404, b"")
                 key, original = app.worker.wait_for(alias, m.group(2), app.s.pending_wait)
-                body = app.store.body(key) if key else None
+                body = app.text_of(key)
                 if body is not None:
                     app.store.served(key)
                     return self._send(200, to_srt(parse(body)) if is_ass(body) else body,
@@ -288,7 +315,7 @@ class Handler(BaseHTTPRequestHandler):
                 good = app.store.last_good(file_key, lang) if file_key else None
                 # While best fit still judges, the best slot is empty but the first pass is published
                 key = good["key"] if good else app.worker.published(alias, lang)
-                body = app.store.body(key) if key else None
+                body = app.text_of(key)
                 if body is not None:
                     app.store.served(key)
                     return self._send(200, to_srt(parse(body)) if is_ass(body) else body,

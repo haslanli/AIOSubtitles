@@ -117,12 +117,16 @@ class Fake:
 
 class ExtraSourcesTest(unittest.TestCase):
     def setUp(self):
+        from helpers import local_network_only
+        self.guard = local_network_only()
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
         self.fake = Fake()
         u = self.fake.url
         self.env = {"SUBSYNC_LANGUAGES": "eng,rus", "SUBSYNC_TSDB_URL": f"{u}/tsdb", "SUBSYNC_CINEMETA_URL": f"{u}/cinemeta",
                     "SUBSYNC_GESTDOWN_URL": f"{u}/gestdown", "SUBSYNC_SUBDL_URL": f"{u}/subdl",
                     "SUBSYNC_SUBDL_DOWNLOAD_URL": f"{u}/subdl-dl", "SUBSYNC_WYZIE_URL": f"{u}/wyzie",
-                    "SUBSYNC_OSV3PLUS_URL": f"{u}/osv3"}
+                    "SUBSYNC_OSV3PLUS_URL": f"{u}/osv3", "SUBSYNC_OSV3_URL": f"{u}/stremio-osv3"}
 
     def tearDown(self):
         self.fake.close()
@@ -132,7 +136,7 @@ class ExtraSourcesTest(unittest.TestCase):
 
     def test_defaults(self):
         s = Settings({})
-        self.assertEqual(s.extra_sources, ["tsdb", "gestdown", "osv3plus"])   # the keyless ones
+        self.assertEqual(s.extra_sources, ["osv3", "osv3plus", "tsdb", "gestdown"])   # the keyless ones
         self.assertEqual(s.osv3plus_url, "https://opensubtitles.stremio.homes")   # AIOStreams' own preset address
         self.assertEqual((s.subdl_key, s.wyzie_key), ("", ""))
         self.assertEqual(s.gate_tries, 20)

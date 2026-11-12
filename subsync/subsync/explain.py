@@ -4,8 +4,8 @@ state/subsync.env. Tests fail when a setting has no explanation or a documented 
 
 Each text says what the setting does, what to choose and why, what changes either way (what you see, what is read or
 downloaded, what gets faster or slower) and what it costs. Nothing in AIOSubtitles is shared between installs, so every
-setting changes only the subtitles of the install it is set on; in public mode (one service for many people) synced
-copies are shared between everyone who plays the same file.
+setting changes only the subtitles of the install it is set on; in public mode (one service for many people) how each
+copy was synced (its timing, never its text) is shared between everyone who plays the same file.
 
 No packages besides the standard library, so ./setup imports this module too.
 """
@@ -79,22 +79,53 @@ RULES = [
      "before, and your AIOStreams still searches it when you browse."),
     ("Public mode: one file at a time",
      "The service works on one file at a time for everyone, in the order people asked, because it runs on a small "
-     "server; a file's subtitle track is about 1 MB and is synced in seconds. Copies already in the shared store are "
+     "server; a file's subtitle track is about 1 MB and is synced in seconds. Files already synced for someone are "
      "served at once. When many people play new files together, the synced copy can come after your app has picked a "
      "subtitle; the next time you open the file, it is there."),
     ("Public mode: limits per person",
      "Each person can have a few files waiting and read a set number of new files and megabytes a day (UTC), by "
-     "default 3 waiting, 40 files and 500 MB, and the whole service reads at most its own daily total; copies already "
-     "in the shared store don't count. Past a limit, you get only copies already synced for someone until the next "
+     "default 3 waiting, 40 files and 500 MB, and the whole service reads at most its own daily total; files already "
+     "synced for someone don't count. Past a limit, you get only copies already synced for someone until the next "
      "day, and nobody else is affected. Sign-up attempts are limited per internet address, and the service takes a "
      "set number of people. Your settings page shows today's use."),
     ("Public mode: what is kept, and for how long",
      "AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: "
      "the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password, and "
-     "their languages, plus how much was read for them each day. Your AIOStreams password is never kept. Synced "
-     "subtitles, with the names and sizes of the files they fit, are shared and kept 180 days after last use, without "
-     "who played them; logs name the titles synced, never who asked. Your record is deleted when you delete it on your "
+     "their languages, plus how much was read for them each day. Your AIOStreams password is never kept. For each "
+     "synced subtitle only its new timing (never its text), with the names and sizes of the files it fits, is shared "
+     "and kept 180 days after last use, without who played them; logs name the titles synced, never who asked. Your record is deleted when you delete it on your "
      "settings page, or 180 days after your last request."),
+    ("Public mode: the timing is shared, not the subtitles",
+     "When someone already synced a subtitle for the file you play, AIOSubtitles reuses that work: it keeps only how "
+     "the subtitle was re-timed, never its text. Your copy is made from the original subtitle, downloaded again for you "
+     "from its site, with that timing, so no new check is needed. This follows the subtitle sites' rules, which don't "
+     "allow one person's stored copy to be handed to others, and costs one small download. If the site changed or "
+     "removed the subtitle since, you don't get that copy."),
+    ("The same subtitle counts once",
+     "When the same subtitle comes from two places, for example from an addon in your config and from a site "
+     "AIOSubtitles searches itself, it is checked and listed once. Same means the same words at the same times: "
+     "another text encoding, line ending or a credit line such as a site's address at the start or end doesn't make it "
+     "a different subtitle, while another timing does. The copy kept is the first one tried, which is the one that "
+     "knows most about your release. This saves time and keeps your subtitle list free of repeats."),
+    ("Which subtitles are tried first",
+     "For each language, AIOSubtitles tries first the subtitle your config lists first, then the ones made for your "
+     "exact file (matched by its fingerprint or torrent, or with as many lines as the file's own track), then those "
+     "of your release, then the rest. Among equally likely ones, your config's addons come first, then OpenSubtitles, "
+     "TheSubtitleDB, SubDL, SubSource, Gestdown and Wyzie. With no subtitle addon in your config, no subtitle has a "
+     "place of its own as your first."),
+    ("A failing subtitle site is paused",
+     "A site AIOSubtitles searches itself that fails three times within ten minutes (no answer, or an error) is skipped "
+     "for ten minutes, then tried with one request: if it answers, it is used again; if not, it waits another ten "
+     "minutes. A site that asks AIOSubtitles to slow down waits as long as it asks, at most an hour. A site that simply "
+     "has no subtitles for a title isn't failing. Your other sources keep working meanwhile, so a broken site can't make "
+     "your subtitles late."),
+    ("Sites with limits give each file only a few subtitles",
+     "Some sites allow only so many requests or downloads: SubDL 300 downloads a day for each internet address and "
+     "2,000 searches a day for each key, SubSource 7,200 requests a day, Wyzie 1,000. AIOSubtitles counts them and takes "
+     "at most three subtitles per file and language from SubDL, four from SubSource and two from Wyzie, the likeliest "
+     "first. Near a site's limit, only subtitles made for your exact file or release are taken from it; at the limit "
+     "it rests until its count starts again. On a service many people use, someone who already had their share of a "
+     "site gets it only for those likeliest subtitles, so one person can't use up a site for everyone."),
 ]
 
 # ------------------------------------------------------------------------------------------- ./setup's questions
@@ -105,7 +136,7 @@ QUESTIONS = {
         "",
         "Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins "
         "that container's Docker network and finds files through it, so the wrong one means it finds none of the files "
-        "you play. Pick the one whose address your Stremio or Jellyfin app uses."),
+        "you play. Pick the one whose address your apps use."),
     "AIOS_URL": (
         "http://127.0.0.1:3000",
         "Asked only when ./setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' "
@@ -114,8 +145,8 @@ QUESTIONS = {
     "AIOS_CONFIG_ID": (
         "",
         "The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page "
-        "when you save or load the config, and part of your Stremio link (…/stremio/<ID>/…). You can paste the whole "
-        "Stremio link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this "
+        "when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole "
+        "install link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this "
         "config, and subsync's own config is made from it."),
     "AIOS_CONFIG_PASSWORD": (
         "",
@@ -141,14 +172,14 @@ QUESTIONS = {
         "",
         "Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, "
         "which often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't "
-        "asked. Cost: one SubDL search for each file you play, plus a download per subtitle tried, counted against your "
-        "key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user."),
+        "asked. Cost: one SubDL search for each file you play, plus a download per subtitle tried (at most three per "
+        "file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user."),
     "WYZIE_KEY": (
         "",
         "Optional: your free Wyzie Subs API key, from https://wyzie.io. With it, subsync also searches Wyzie Subs, "
         "which often has subtitles the other sources don't, so a copy that fits is more likely. Without it, Wyzie Subs "
-        "isn't asked. Cost: one search per language for each file you play, plus a download per subtitle tried, counted "
-        "against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, "
+        "isn't asked. Cost: one search per language for each file you play, plus a download per subtitle tried (at "
+        "most two per file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, "
         "readable only by your user."),
     "ADD_OPENSUBTITLES": (
         "yes",
@@ -313,16 +344,40 @@ GROUPS = [
     }),
     ("Which subtitles are tried", {
         "SUBSYNC_EXTRA_SOURCES": (
-            "tsdb,gestdown,osv3plus",
-            "Subtitle sources subsync searches itself, beside your AIOStreams config's: tsdb (TheSubtitleDB), gestdown "
-            "(Gestdown, series only) and osv3plus (OpenSubtitles V3+); none needs a key. Recommended: all three: they "
-            "often have subtitles taken from the very release, which fit best. Each search sends the title's IMDb id, "
-            "and OpenSubtitles V3+ also gets the file's hash, size and name; remove a source to stop asking it."),
+            "osv3,osv3plus,tsdb,gestdown",
+            "Subtitle sites AIOSubtitles searches itself, beside the subtitle addons in your AIOStreams config: osv3 "
+            "(OpenSubtitles through Stremio's own addon), osv3plus (OpenSubtitles V3+), tsdb (TheSubtitleDB) and "
+            "gestdown (Gestdown, series only); none needs a key. Recommended: all four: they often have a subtitle made "
+            "from your exact release, which fits best. Remove one to stop asking it. Each search sends the title's IMDb "
+            "id, season and episode and your languages; the OpenSubtitles ones also get the file's fingerprint (hash), "
+            "size and name, as your player sends them, and TheSubtitleDB the torrent's hash and the file's name. A site "
+            "that is already an addon in your config isn't asked twice."),
         "SUBSYNC_SOURCE_TIMEOUT_S": (
-            "10",
-            "How long subsync waits for each source it searches itself, in seconds; a slower source is left out for "
-            "that file and the others still count. Recommended: 10. Longer: slow sources count more often, and your "
-            "copy can take that much longer."),
+            "5",
+            "How long AIOSubtitles waits for each subtitle site it searches itself, in seconds. A site that answers later "
+            "is left out for this play and its answer is kept for the next one, so a slow site never makes your first "
+            "subtitle late. Recommended: 5. Longer: slow sites count more often, but your first subtitle can come later. "
+            "A site that fails three times in ten minutes is paused for ten minutes, then tried again."),
+        "SUBSYNC_SKIP_CONFIG_SOURCES": (
+            "on",
+            "On: a subtitle site that is already an addon in your AIOStreams config (for example OpenSubtitles or "
+            "SubDL) is searched only once, through your config and with your settings for it. Recommended: on: half the "
+            "requests to that site and no repeated subtitles. Off: AIOSubtitles also asks it itself, with its own "
+            "settings, which can find subtitles your settings for it leave out, at the cost of a second search."),
+        "SUBSYNC_SUBSOURCE_KEY": (
+            "",
+            "Optional: a free SubSource API key (create one under API in your account on subsource.net). With it, "
+            "AIOSubtitles also searches SubSource, which has many subtitles the other sites don't, so a copy that fits "
+            "is more likely. Without it, SubSource isn't asked. Cost: two requests per title and one per subtitle "
+            "tried, counted against the key's limit (60 a minute, 7,200 a day for a free key); at most four subtitles "
+            "per file and language come from it. The search sends the title's IMDb id and season. The key is sent in a "
+            "header, never shown or logged."),
+        "SUBSYNC_TSDB_KEY": (
+            "",
+            "Optional: a free TheSubtitleDB key (sign up on thesubtitledb.org). Searching TheSubtitleDB needs no key; "
+            "the key raises its downloads from 1,000 an hour to 100,000 a day. Recommended: leave it empty for your own "
+            "install, which never comes near that limit; set it for a service many people use. The key is sent in a "
+            "header, never in an address, and is never shown or logged."),
         "SUBSYNC_SKIP_AI": (
             "on",
             "On: subtitles marked as AI-made, machine-translated or forced (covering only foreign-language parts) are "
@@ -518,6 +573,13 @@ GROUPS = [
         "SUBSYNC_OSV3PLUS_URL": (
             "https://opensubtitles.stremio.homes",
             "The address of OpenSubtitles V3+, a source subsync searches itself. Change it only if the service moves."),
+        "SUBSYNC_OSV3_URL": (
+            "https://opensubtitles-v3.strem.io",
+            "The address of Stremio's own OpenSubtitles addon, a source AIOSubtitles searches itself. Change it only if "
+            "it moves."),
+        "SUBSYNC_SUBSOURCE_URL": (
+            "https://api.subsource.net/api/v1",
+            "The address of SubSource's API, used only with a SubSource key. Change it only if the service moves."),
         "SUBSYNC_SUBDL_URL": (
             "https://api.subdl.com",
             "The address of SubDL's search API, used only with a SubDL key. Change it only if the service moves."),
@@ -536,8 +598,8 @@ GROUPS = [
             "web page with their AIOStreams link and password and gets a personal addon link; subsync then works "
             "through a separate sync config it makes on their AIOStreams. Leave it off for your own install: ./setup "
             "doesn't use it. On, the service needs SUBSYNC_SECRET_KEY and SUBSYNC_PUBLIC_BASE, keeps the audio route "
-            "off, and shares synced copies between everyone who plays the same file, so the more people use it, the "
-            "more files already have a copy when someone presses play. It holds other people's links, so it needs a "
+            "off, and shares how each copy was synced (its timing, never its text) between everyone who plays the same "
+            "file, so the more people use it, the more files are ready when someone presses play. It holds other people's links, so it needs a "
             "server you keep up to date and backed up."),
         "SUBSYNC_SECRET_KEY": (
             "",
@@ -645,10 +707,13 @@ PUBLIC_FIELDS = {
         "Adds AIOSubtitles to your AIOStreams config, before your other subtitle sources, so your apps show its "
         "synced subtitles first (many apps show only a few per language). Recommended. Unchecked, nothing in your own "
         "config changes and you add the link yourself as a custom addon."),
-    "add_opensubtitles": (
-        "Only if your AIOStreams has no subtitle source at all: also adds Stremio's official OpenSubtitles, which "
-        "needs no account, so you see subtitles and AIOSubtitles has more to sync. Recommended; unchecked, "
-        "AIOSubtitles syncs only subtitles from the sources it searches itself."),
+    "clean_up": (
+        "Takes out of your AIOStreams config the subtitle addons AIOSubtitles now searches itself: OpenSubtitles, "
+        "OpenSubtitles V3+, SubDL and SubSource. You then get their subtitles once, through AIOSubtitles: synced where "
+        "one fits, the original otherwise, instead of the same ones twice. Your other subtitle addons stay. The cost: "
+        "while AIOSubtitles is down, these subtitles are missing too, until it is back. Unchecked, your config keeps "
+        "them and nothing is removed. It works only together with adding AIOSubtitles; to undo it, add the addons "
+        "again on AIOStreams' configure page."),
     "invite": "The code you were given. AIOSubtitles is open only to invited people for now.",
     "refresh": (
         "Your AIOStreams password, used once, now, to read your config again and rebuild AIOSubtitles' own config from "
@@ -658,7 +723,7 @@ PUBLIC_FIELDS = {
         "Deletes everything AIOSubtitles keeps about you and removes its own config from your AIOStreams; your "
         "personal link stops working at once. Optional: with your AIOStreams password it also takes itself out of "
         "your AIOStreams config; without it, remove the AIOSubtitles addon there yourself. The password is used once "
-        "and not stored. Synced subtitles stay in the shared store: they belong to files, not to you."),
+        "and not stored. How subtitles were synced stays in the shared store: it belongs to files, not to you."),
 }
 
 # the other texts of the public pages
@@ -666,8 +731,9 @@ PUBLIC_TEXTS = {
     "intro": (
         "AIOSubtitles gives you subtitles that are in sync with the file you play. It works through your AIOStreams: "
         "for each file you play, it reads that file's own subtitle track (about 1 MB) through a separate config it "
-        "makes on your AIOStreams, and offers your usual subtitles re-timed to fit. A copy synced once is shared with "
-        "everyone who plays the same file, so many files have one ready before you press play."),
+        "makes on your AIOStreams, and offers subtitles from your addons and the sites it searches itself, re-timed to "
+        "fit. A file synced once is ready for everyone who plays it: its timing is kept and applied to the subtitle, "
+        "downloaded fresh for each person."),
     "signed_up": (
         "Keep this link: it is the only key to your settings, and nobody, AIOSubtitles included, can recover it. If you "
         "lose it, sign up again. Keep it private too: anyone with it can change your settings or delete your data."),
@@ -692,13 +758,17 @@ PUBLIC_TEXTS = {
 PRIVACY_PARTS = (
     ("What is read", "What is read:",
      "your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, its subtitle track "
-     "(about 1 MB) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your AIOStreams."),
+     "(about 1 MB) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your AIOStreams. "
+     "AIOSubtitles also searches subtitle sites itself (OpenSubtitles, TheSubtitleDB, Gestdown, SubDL, SubSource): they "
+     "get the title's IMDb id, season and episode, the languages, and the file's name, size and hashes, from "
+     "AIOSubtitles' server, never your internet address."),
     ("What is stored", "What is stored:",
      "one record, encrypted so that it opens only with your personal link (your AIOStreams address, AIOSubtitles' own "
      "config there and its password, your config's id, your languages), and how much was read for you each day. "
      "AIOSubtitles' own config holds your debrid keys, as your own config does, and the service can open it while your "
-     "requests come in. Your AIOStreams password is never stored. Synced subtitles, with the names and sizes of the "
-     "files they fit, are shared and kept 180 days after last use, without who played them. Logs name the titles "
+     "requests come in. Your AIOStreams password is never stored. For each synced subtitle only its new timing "
+     "(never its text), with the names and sizes of the files it fits, is shared and kept 180 days after last use, "
+     "without who played them. Logs name the titles "
      "synced, never who asked."),
     ("Who else sees your requests", "",
      "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address and the "

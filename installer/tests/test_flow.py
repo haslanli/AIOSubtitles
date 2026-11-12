@@ -335,7 +335,7 @@ class Flow(unittest.TestCase):
         code, out = self.run_interactive(['?', self.LINK, PASSWORD])
         self.assertEqual(code, 0, out)
         flat = ' '.join(out.split())
-        self.assertEqual(flat.count('part of your Stremio link (…/stremio/<ID>/…)'), 2)     # shown, then shown again
+        self.assertEqual(flat.count('part of its install link (…/stremio/<ID>/…)'), 2)     # shown, then shown again
         self.assertIn('Each extra language adds those downloads', flat)
 
     def test_the_test_read_defaults_to_no(self):

@@ -44,6 +44,8 @@ class UserLimits:
 
     def __init__(self, settings, users, token):
         self.s, self.users, self.token = settings, users, token
+        # the sources' fair shares count per person under this opaque key (not the token, never logged)
+        self.who = (users.user_id(token) or "")[:16] or None
 
     def may_queue(self, queued):
         return queued < self.s.user_queue
@@ -89,6 +91,9 @@ class Pool:
         self.s, self.env, self.store, self.users, self.clock = settings, dict(env), store, users, clock
         self.start_workers = start_workers
         self.turn = Turn()
+        # One set of built-in sources for everyone: answers, pauses and the sites' limits are shared
+        from .extra import make_sources
+        self.extra = make_sources(settings)
         self.entries = {}          # user id -> {"app", "last", "day"}
         self.lock = threading.Lock()
         self.expired_day = None
@@ -98,11 +103,7 @@ class Pool:
         aios = Aios(s.source_manifest, own_bases=(self.s.public_base,), skip_addons=s.skip_addons,
                     size_slack=s.size_slack, password=s.source_password)
         safety = Safety(backoff_s=s.backoff_s)
-        extra = None
-        if s.extra_sources or s.subdl_key or s.wyzie_key:
-            from .extra import ExtraSources
-            extra = ExtraSources(s)
-        worker = Worker(s, self.store, aios, safety, extra=extra, turn=self.turn, limits=limits)
+        worker = Worker(s, self.store, aios, safety, extra=self.extra, turn=self.turn, limits=limits)
         if start:
             worker.start()
         return App(s, self.store, worker, safety)

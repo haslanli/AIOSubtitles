@@ -3,7 +3,10 @@
 ASS keeps its header, styles and every field but Start/End; songs and signs are told apart from dialogue by
 style name (they move with their segment but are not part of the dialogue measure).
 """
+import hashlib
 import re
+
+from . import srclimits
 
 TIME = re.compile(r"(\d+):(\d{2}):(\d{2})[.,](\d{1,3})|(\d{1,2}):(\d{2})[.,](\d{3})")
 
@@ -149,3 +152,79 @@ def timing_srt(starts_durations):
     for i, (s, d) in enumerate(sorted(starts_durations), 1):
         out.append(f"{i}\n{ts(s)} --> {ts(s + max(d, 0.5))}\nx\n")
     return "\n".join(out)
+
+
+# a credit or advertising line a site or an uploader adds at the start or the end of a subtitle
+CREDIT = re.compile(r"(?i)https?://|www\.|\.(com|org|net|info|tv|ru)\b|subtitles? (by|from)|downloaded from|"
+                    r"sync(ed|hronized)? (and corrected )?by|corrected by|ripped by|translated by|opensubtitles|"
+                    r"subdl|subsource|addic7ed|advertise")
+
+
+def _plain(text):
+    text = re.sub(r"\{[^}]*\}|<[^>]*>", "", text or "").replace("\\N", " ").replace("\\n", " ").replace("\\h", " ")
+    return " ".join(text.split()).lower()
+
+
+WEBVTT_NOTE = re.compile(r"(?im)^NOTE\b[ \t]*")
+
+
+def fingerprint(text):
+    """What makes two subtitles the same one: their dialogue lines' words and start times to a tenth of a
+    second, once credit lines at the start and the end (at most three each) are left out, and for a subtitle of more
+    than 20 lines its first and last three lines too: OpenSubtitles V3+ adds a notice line first and marks the first
+    cue's lines with WebVTT's "NOTE". Another encoding, line ending, byte-order mark, format (SRT or WebVTT) or
+    notice doesn't change it; another timing or text does."""
+    lines = [l for l in parse(text) if l["kind"] == "dialogue"]
+    for _ in range(3):
+        if lines and CREDIT.search(_plain(lines[0]["text"])):
+            lines = lines[1:]
+    for _ in range(3):
+        if lines and CREDIT.search(_plain(lines[-1]["text"])):
+            lines = lines[:-1]
+    if len(lines) > 20:
+        lines = lines[srclimits.FINGERPRINT_EDGE:-srclimits.FINGERPRINT_EDGE]
+    body = "\n".join(f"{round(l['s'], 1):.1f}|{_plain(WEBVTT_NOTE.sub('', l['text']))}" for l in lines)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _srt_text(text):
+    """A line's text as to_srt writes it and parse reads it back (for matching a copy's lines to its original's)."""
+    body = re.sub(r"\{[^}]*\}", "", text).replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ").strip()
+    return "\n".join(x for x in body.split("\n") if x.strip())
+
+
+def timing_recipe(original, body):
+    """How `body` was made from `original`: each original line's new start and end in milliseconds, or None
+    for a line left out; {"same": True} when the copy is the original as it is. No text. None when `body` isn't a
+    re-timing of `original` that apply_recipe rebuilds exactly."""
+    if body == original:
+        return {"v": 1, "same": True}
+    src, out = parse(original), parse(body)
+    ass = is_ass(original)
+    norm = (lambda t: t) if ass else _srt_text
+    times, j = [], 0
+    for line in src:
+        if j < len(out) and norm(line["text"]) == (out[j]["text"] if ass else _srt_text(out[j]["text"])):
+            times.append([int(round(out[j]["s"] * 1000)), int(round(out[j]["e"] * 1000))])
+            j += 1
+        else:
+            times.append(None)
+    if j != len(out):
+        return None
+    recipe = {"v": 1, "times": times}
+    return recipe if apply_recipe(original, recipe) == body else None
+
+
+def apply_recipe(original, recipe):
+    """The copy a timing recipe makes from its original, or None when the original doesn't fit it (another number
+    of lines)."""
+    if not isinstance(recipe, dict):
+        return None
+    if recipe.get("same"):
+        return original
+    times = recipe.get("times")
+    src = parse(original)
+    if not isinstance(times, list) or len(times) != len(src):
+        return None
+    lines = [dict(l, s=t[0] / 1000, e=t[1] / 1000) if t else dict(l, drop=True) for l, t in zip(src, times)]
+    return write_like(original, lines)

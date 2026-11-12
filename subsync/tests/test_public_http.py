@@ -97,7 +97,7 @@ class Base(unittest.TestCase):
     def sign_up(self, **extra):
         uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
         fields = dict(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", password=PASSWORD,
-                      languages="English", add_addon="on", add_opensubtitles="on")
+                      languages="English", add_addon="on")
         fields.update(extra)
         code, body, headers = http(self.base + "/signup", form(**fields))
         token = None

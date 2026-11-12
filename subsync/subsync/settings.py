@@ -47,12 +47,20 @@ class Settings:
         self.alternatives = max(1, int(g("SUBSYNC_MAIN_ALTERNATIVES", "3")))
         self.skip_ai = _on(g("SUBSYNC_SKIP_AI", "on"))                     # AI-made, machine-translated, forced: never tried
         self.prefer_plain = _on(g("SUBSYNC_PREFER_PLAIN_TRACK", "on"))     # the plain track as the reference, not the SDH one
-        # Sources subsync searches itself (extra.py); SubDL and Wyzie only with the user's key
-        self.extra_sources = [x.strip().lower() for x in g("SUBSYNC_EXTRA_SOURCES", "tsdb,gestdown,osv3plus").split(",")
+        # Sources subsync searches itself (extra.py): the keyless ones by default; SubDL,
+        # SubSource and Wyzie only with a key (in public mode the service's keys, and never Wyzie); TheSubtitleDB's key
+        # only raises its download limit
+        self.extra_sources = [x.strip().lower() for x in g("SUBSYNC_EXTRA_SOURCES", "osv3,osv3plus,tsdb,gestdown").split(",")
                               if x.strip()]
         self.subdl_key = g("SUBSYNC_SUBDL_KEY", "").strip()
+        self.subsource_key = g("SUBSYNC_SUBSOURCE_KEY", "").strip()
+        self.tsdb_key = g("SUBSYNC_TSDB_KEY", "").strip()
         self.wyzie_key = g("SUBSYNC_WYZIE_KEY", "").strip()
-        self.source_timeout = float(g("SUBSYNC_SOURCE_TIMEOUT_S", "10"))
+        self.source_timeout = float(g("SUBSYNC_SOURCE_TIMEOUT_S", "5"))
+        # a source the AIOStreams config already has as a subtitle addon is asked once, through the config
+        self.skip_config_sources = _on(g("SUBSYNC_SKIP_CONFIG_SOURCES", "on"))
+        self.osv3_url = g("SUBSYNC_OSV3_URL", "https://opensubtitles-v3.strem.io").rstrip("/")
+        self.subsource_url = g("SUBSYNC_SUBSOURCE_URL", "https://api.subsource.net/api/v1").rstrip("/")
         self.tsdb_url = g("SUBSYNC_TSDB_URL", "https://api.thesubtitledb.org").rstrip("/")
         self.cinemeta_url = g("SUBSYNC_CINEMETA_URL", "https://v3-cinemeta.strem.io").rstrip("/")
         self.gestdown_url = g("SUBSYNC_GESTDOWN_URL", "https://api.gestdown.info").rstrip("/")
@@ -159,6 +167,10 @@ class Settings:
 
     def conflicts(self):
         """Settings that can't go together, in plain sentences (empty: none)."""
+        out = []
         if self.public and self.audio_route:
-            return ["The audio route is off in public mode: set SUBSYNC_AUDIO_ROUTE=off or turn public mode off."]
-        return []
+            out.append("The audio route is off in public mode: set SUBSYNC_AUDIO_ROUTE=off or turn public mode off.")
+        if self.public and self.wyzie_key:
+            out.append("Wyzie Subs isn't used in public mode (one free key per network, paused when used from servers): "
+                       "remove SUBSYNC_WYZIE_KEY or turn public mode off.")
+        return out

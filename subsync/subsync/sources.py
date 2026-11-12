@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import realdebrid
+from . import realdebrid, srclimits
 from .langs import lang3
 
 log = logging.getLogger("subsync.sources")
@@ -148,6 +148,7 @@ class Aios:
         self.own = tuple(b.rstrip("/") for b in own_bases if b)
         self.timeout = timeout
         self.password = password         # of the config behind the link, to read it for the Real-Debrid check
+        self.config_sources = set()      # built-in sources the config has as subtitle addons (srclimits.config_sources)
 
     CONFIG_RETRY_MAX_S = 5   # AIOStreams' user API answers 429 past a few calls in 5 s: one wait and a second try
 
@@ -186,6 +187,8 @@ class Aios:
         else:
             _, ways = realdebrid.without_real_debrid(config)
             if not ways:
+                # The built-in sources this config already has as subtitle addons are asked once, through it
+                self.config_sources = srclimits.config_sources(config)
                 return
             log.warning("Real-Debrid check: subsync's config could reach Real-Debrid (%s); nothing is listed or read "
                         "through it until ./setup is run again", "; ".join(ways))
@@ -291,13 +294,13 @@ def _wait_429(err, attempt):
     return min(max(wait, 1.5 * attempt), 5.0)
 
 
-def fetch_subtitle(url, timeout=30):
-    """A subtitle's bytes. Gzip is unpacked; a zip (SubDL) gives its subtitle file, the one named for the episode
-    when the link ends in #SxxEyy."""
+def fetch_subtitle(url, timeout=30, headers=None):
+    """A subtitle's bytes. Gzip is unpacked; a zip (SubDL, SubSource) gives its subtitle file, the one named for the
+    episode when the link ends in #SxxEyy. `headers`: what the source needs besides (a key, never in the address)."""
     url, _, frag = url.partition("#")
     gate = _gate((urllib.parse.urlsplit(url).hostname or "").lower())
     for attempt in range(1, RETRIES_429 + 2):
-        req = urllib.request.Request(url, headers={"user-agent": USER_AGENT, "Connection": "close"})
+        req = urllib.request.Request(url, headers={"user-agent": USER_AGENT, "Connection": "close", **(headers or {})})
         try:
             if gate:
                 gate.acquire()

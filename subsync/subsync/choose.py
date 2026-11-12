@@ -64,31 +64,38 @@ def source_kind(text):
     return None
 
 
+def _tier(rank, c, gs, kind, fh, ref_cues, viewer_first):
+    if rank == 0 and viewer_first:
+        return 0
+    if c.get("ai"):
+        return 9
+    rel = " " + _norm(c.get("release")) + " "
+    if (fh and c.get("hash") == fh) or c.get("hash_match"):   # hash_match: the source matched this file's hash
+        return 1
+    if ref_cues and c.get("cues") and abs(c["cues"] - ref_cues) <= 0.02 * ref_cues:
+        return 1   # as many lines as the release's own track: most likely made from this release
+    if c.get("release_match") or (gs and any(f" {g} " in rel for g in gs)):
+        return 2   # found by the file's release name (TheSubtitleDB), or it names the file's release group
+    if kind and source_kind(c.get("release")) == kind:
+        return 3
+    return 4
+
+
+def tier_of(rank, c, filename=None, file_hash=None, ref_cues=None, viewer_first=True):
+    """How likely a candidate is to fit the file as it is: 0 the viewer's first, 1 a hash or line-count match, 2 its
+    release (by name or group), 3 the same kind of source, 4 the rest, 9 machine-translated."""
+    return _tier(rank, c, groups(filename), source_kind(filename), (file_hash or "").lower(), ref_cues, viewer_first)
+
+
 def order(candidates, filename=None, file_hash=None, skip=False, ref_cues=None, viewer_first=True):
-    """candidates: in the viewer's order, each with optional `release`, `hash`, `hash_match`, `ai`. Returns [(viewer rank, cand)]
-    in the order to try them; with viewer_first off the viewer's first has no place of its own."""
+    """candidates: in the viewer's order, each with optional `release`, `hash`, `hash_match`, `release_match`, `ai`.
+    Returns [(viewer rank, cand)] in the order to try them; with viewer_first off the viewer's first has no place of its
+    own. Ties keep the list's order: the config's subtitles first, then the built-in sources (srclimits.SOURCE_ORDER)."""
     gs = groups(filename)
     kind = source_kind(filename)
     fh = (file_hash or "").lower()
-
-    def tier(rank, c):
-        if rank == 0 and viewer_first:
-            return 0
-        if c.get("ai"):
-            return 9
-        rel = " " + _norm(c.get("release")) + " "
-        if (fh and c.get("hash") == fh) or c.get("hash_match"):   # hash_match: the addon matched this file's hash
-            return 1
-        if ref_cues and c.get("cues") and abs(c["cues"] - ref_cues) <= 0.02 * ref_cues:
-            return 1   # as many lines as the release's own track: most likely made from this release
-        if gs and any(f" {g} " in rel for g in gs):
-            return 2
-        if kind and source_kind(c.get("release")) == kind:
-            return 3
-        return 4
-
     ranked = [(r, c) for r, c in enumerate(candidates) if not (skip and unwanted(c))]
-    return sorted(ranked, key=lambda rc: (tier(*rc), rc[0]))
+    return sorted(ranked, key=lambda rc: (_tier(rc[0], rc[1], gs, kind, fh, ref_cues, viewer_first), rc[0]))
 
 
 def best_guess(candidates, filename=None, file_hash=None, skip=False):

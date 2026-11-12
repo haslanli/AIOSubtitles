@@ -31,7 +31,8 @@ def readme_section():
     out = [START, '',
            'Every setting affects only your own install: nothing is shared between AIOSubtitles installs, so no '
            'setting here helps or costs anyone else. The last group, public mode, is for running one service for '
-           'many people; there synced copies are shared between everyone who plays the same file.', '',
+           'many people; there how each copy was synced (its timing, never its text) is shared between everyone who '
+           'plays the same file.', '',
            '### The questions ./setup asks', '',
            'Each question shows its explanation as it is asked. In an answers file (`./setup --answers FILE`) each one '
            'is a line `KEY=value`; see `docs/answers.example`.', '']

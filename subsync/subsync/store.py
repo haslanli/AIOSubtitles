@@ -14,17 +14,26 @@ budget     bytes received per UTC day
 pickable   files that wait for the viewer's pick before the audio route may start (kept across a restart)
 originals  per file hint: the original subtitle per language (the pick entries' fallback, kept across a restart)
 
+In public mode (keep_texts=False) no subtitle text is kept: a synced row stores how its copy was made from the
+original (subs.timing_recipe: new timings only) under recipes/, and each person's copy is rebuilt from the original their
+own list gives (addon.App.text_of), because the subtitle sites' terms don't allow serving one person's stored copy to
+others.
+
 Lifetimes: synced/in_sync rows live 180 days after last served; keep_original is retried after 30 days
 (or when ALGO_VERSION changes, which changes the key); read_failed backs off 1 h / 6 h / 24 h, then stops.
 """
 import gzip
 import json
+import logging
 import os
 import sqlite3
 import threading
 import time
 
 from . import ALGO_VERSION
+from .subs import fingerprint, timing_recipe
+
+log = logging.getLogger("subsync.store")
 
 DAY = 86400
 KEEP_SERVED_S = 180 * DAY
@@ -67,8 +76,8 @@ def day_of(t=None):
 
 
 class Store:
-    def __init__(self, root, cap_bytes=2 * 1024 ** 3, clock=time.time):
-        self.root, self.cap, self.clock = root, cap_bytes, clock
+    def __init__(self, root, cap_bytes=2 * 1024 ** 3, clock=time.time, keep_texts=True):
+        self.root, self.cap, self.clock, self.keep_texts = root, cap_bytes, clock, keep_texts
         os.makedirs(os.path.join(root, "bodies"), exist_ok=True)
         self.db = sqlite3.connect(os.path.join(root, "subsync.sqlite3"), check_same_thread=False,
                                   isolation_level=None)
@@ -81,12 +90,50 @@ class Store:
         name = key.replace(":", "_")
         return os.path.join(self.root, "bodies", name[-2:], name + ".gz")
 
+    def _recipe_path(self, key):
+        name = key.replace(":", "_")
+        return os.path.join(self.root, "recipes", name[-2:], name + ".json.gz")
+
+    def _copy_path(self, key):
+        return self._body_path(key) if self.keep_texts else self._recipe_path(key)
+
     def body(self, key):
+        """A synced copy's text; never in public mode (keep_texts off), where only its recipe is kept."""
+        if not self.keep_texts:
+            return None
         try:
             with gzip.open(self._body_path(key), "rt", encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
             return None
+
+    def recipe(self, key):
+        """Public mode: how a synced copy is made from its original (subs.apply_recipe), or None."""
+        try:
+            with gzip.open(self._recipe_path(key), "rt", encoding="utf-8") as f:
+                return json.loads(f.read())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def drop_texts(self):
+        """Public mode, at start: copies kept as text by an earlier version are dropped with their rows, so they are
+        judged again and kept as recipes. Returns how many rows went."""
+        with self.lock:
+            texts = sum(len(names) for _, _, names in os.walk(os.path.join(self.root, "bodies")))
+            keys = [k for (k,) in self.db.execute("SELECT key FROM results WHERE body_bytes>0")
+                    if not os.path.exists(self._recipe_path(k))]
+            for key in keys:
+                file_key = self.db.execute("SELECT file_key FROM results WHERE key=?", (key,)).fetchone()
+                self._drop(key)
+                if file_key:   # judged again on the next play, so the copy comes back as a recipe
+                    self.db.execute("DELETE FROM judged WHERE file_key=?", file_key)
+            for root, _, names in os.walk(os.path.join(self.root, "bodies")):
+                for n in names:
+                    os.remove(os.path.join(root, n))
+        if keys or texts:   # counted before anything was removed ('s start said 0 texts for 21)
+            log.info("public mode: %d stored subtitle text%s dropped (%d row%s to judge again)", texts,
+                     "" if texts == 1 else "s", len(keys), "" if len(keys) == 1 else "s")
+        return len(keys)
 
     # -- results -----------------------------------------------------------------------------------------------
     def get(self, key):
@@ -114,19 +161,29 @@ class Store:
         return None
 
     def put(self, file_key, sub_sha, lang, rank, outcome, reason=None, route=None, detail=None, fmt=None, body=None,
-            candidate_id=None, offer=True):
-        """offer=False (best fit): the result is stored but what is offered is left to set_offers."""
+            candidate_id=None, offer=True, original=None):
+        """offer=False (best fit): the result is stored but what is offered is left to set_offers. Public mode keeps
+        the copy's recipe from `original` (the original's text) instead of `body`; with no recipe it isn't offered."""
         key = result_key(file_key, sub_sha)
         now = self.clock()
         body_bytes = 0
         if outcome == "synced" and body is not None:
-            path = self._body_path(key)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + ".tmp"
-            with gzip.open(tmp, "wt", encoding="utf-8") as f:
-                f.write(body)
-            os.replace(tmp, path)
-            body_bytes = os.path.getsize(path)
+            content = body
+            if not self.keep_texts:
+                recipe = timing_recipe(original, body) if original is not None else None
+                if recipe is not None:   # the original is recognised by its words and timings if its bytes change
+                    recipe["fp"] = fingerprint(original)
+                content = json.dumps(recipe) if recipe is not None else None
+                if content is None:
+                    log.info("public mode: a copy that isn't a re-timing of its original is not kept")
+            if content is not None:
+                path = self._copy_path(key)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp = path + ".tmp"
+                with gzip.open(tmp, "wt", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp, path)
+                body_bytes = os.path.getsize(path)
         retry = None
         if outcome == "keep_original":
             retry = now + RETRY_KEEP_ORIGINAL_S
@@ -176,7 +233,7 @@ class Store:
                 keys = [lg["key"]] if lg else []
             for key in keys[:n]:
                 r = self.get(key)
-                if r and r["outcome"] == "synced" and os.path.exists(self._body_path(r["key"])):
+                if r and r["outcome"] == "synced" and os.path.exists(self._copy_path(r["key"])):
                     out.append(r)
         return out
 
@@ -283,10 +340,11 @@ class Store:
         return bodies + db
 
     def _drop(self, key):
-        try:
-            os.remove(self._body_path(key))
-        except FileNotFoundError:
-            pass
+        for path in (self._body_path(key), self._recipe_path(key)):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
         self.db.execute("DELETE FROM results WHERE key=?", (key,))
         self.db.execute("DELETE FROM last_good WHERE key=?", (key,))
         self.db.execute("DELETE FROM offers WHERE key=?", (key,))

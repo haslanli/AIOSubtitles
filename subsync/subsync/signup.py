@@ -17,8 +17,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (AiosApi, AiosError, is_subsync_preset, new_key, parse_languages, subtitle_sources,
-                         sync_config, sync_config_problems, viewer_change, without_subsync)
+from .aiosconfig import (AiosApi, AiosError, is_subsync_preset, new_key, parse_languages, sync_config,
+                         sync_config_problems, viewer_change, without_builtin_twins, without_subsync)
 from .users import new_token
 
 log = logging.getLogger("subsync.signup")
@@ -204,10 +204,10 @@ def _sync_for(viewer, manifest_url):
     return sync, warning
 
 
-def _add_addon(api, uuid, password, viewer, manifest_url, metadata, add_opensubtitles):
-    """(changes, added, manual): AIOSubtitles placed in the person's own config and read back."""
-    offer = add_opensubtitles and not subtitle_sources(viewer, manifest_url)
-    new, changes = viewer_change(viewer, manifest_url, metadata, offer, name=ADDON_NAME)
+def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=False):
+    """(changes, added, manual): AIOSubtitles placed in the person's own config and read back; with `clean_up`
+ the subtitle addons it asks itself are taken out of that config."""
+    new, changes = viewer_change(viewer, manifest_url, metadata, name=ADDON_NAME, clean_up=clean_up)
     if not changes:
         return [], True, False
     try:
@@ -227,7 +227,10 @@ def signup(settings, users, form, api_factory=public_api, timeout=30):
     viewer, metadata = _read_viewer(api, uuid, password)
     token = new_token()
     manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
-    sync, warning = _sync_for(viewer, manifest_url)
+    # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles' own config
+    # then lacks those addons too, so it asks their sites itself
+    clean_up = form.get("add_addon") == "on" and form.get("clean_up") == "on"
+    sync, warning = _sync_for(without_builtin_twins(viewer)[0] if clean_up else viewer, manifest_url)
     sync_password = new_key(24)
     try:
         sync_uuid, sync_encrypted = api.create_config(sync, sync_password)
@@ -257,8 +260,7 @@ def signup(settings, users, form, api_factory=public_api, timeout=30):
         raise
     changes, added, manual = [], False, False
     if form.get("add_addon") == "on":
-        changes, added, manual = _add_addon(api, uuid, password, viewer, manifest_url, metadata,
-                                            form.get("add_opensubtitles") == "on")
+        changes, added, manual = _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up)
     log.info("signed up: %d language%s%s", len(langs), "" if len(langs) == 1 else "s",
              ", Real-Debrid left out" if warning else "")
     return SignupResult(token, manifest_url, changes, warning, added, manual, langs)

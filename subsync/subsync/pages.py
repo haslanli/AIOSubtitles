@@ -402,7 +402,7 @@ def signup_page(settings, error=None, field=None, order=None):
     parts.append(_languages_fieldset(number + 1, order, error if field == "languages" else None))
     parts.append(f"<fieldset><legend><span class=\"no\">{number + 2:02d}</span>Your AIOStreams config</legend>"
                  + _check("add_addon", "Add AIOSubtitles to my AIOStreams config")
-                 + _check("add_opensubtitles", "Also add OpenSubtitles if my AIOStreams has no subtitle source")
+                 + _check("clean_up", "Remove the subtitle addons AIOSubtitles now searches itself", checked=False)
                  + "</fieldset>")
     before = "".join(f"<li><span>{e(line)}</span></li>" for line in explain.PUBLIC_BEFORE)
     tries = explain.PUBLIC_TEXTS["tries"].format(n=settings.signups_per_hour)

@@ -35,8 +35,8 @@ def main():
         from .vad import SileroVad
         return SileroVad()
 
-    from .extra import ExtraSources
-    extra = ExtraSources(s) if (s.extra_sources or s.subdl_key or s.wyzie_key) else None
+    from .extra import make_sources
+    extra = make_sources(s)
     worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra)
     worker.start()
     server = serve(App(s, store, worker, safety), s.port)
@@ -58,7 +58,9 @@ def main_public(s):
     from .public import Pool, PublicService, serve_public
     from .users import Users
     net.configure(public_only=True)
-    store = Store(s.data, s.cap_bytes)
+    # The shared store keeps how each copy was made, never a subtitle's text; texts an earlier version kept go
+    store = Store(s.data, s.cap_bytes, keep_texts=False)
+    store.drop_texts()
     users = Users(os.path.join(s.data, "users.sqlite3"), s.secret_bytes())
     env = dict(os.environ)
     pool = Pool(s, env, store, users)

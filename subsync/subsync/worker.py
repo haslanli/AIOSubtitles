@@ -13,14 +13,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import choose, pipeline
+from . import choose, pipeline, srclimits
 from .langs import lang3
 from .mkv import MkvIndex, NotMatroska  # noqa: F401
 from .mp4 import open_index
 from .reader import RangeReader, ReadFailed, Refused, Stopped
 from .sources import bt_alias, expected_size, fetch_subtitle, same_hash
 from .store import JUDGED_FOR_S, result_key
-from .subs import decode, is_ass, parse
+from .subs import decode, fingerprint, is_ass, parse
 
 log = logging.getLogger("subsync.worker")
 UNLISTED_S = 3600
@@ -153,6 +153,8 @@ class Worker(threading.Thread):
         self.turn = turn if turn is not None else contextlib.nullcontext()
         self.limits = limits
         self.extra = extra          # extra.ExtraSources: sources subsync searches itself
+        # public mode: an opaque key of this person for the sources' fair shares (sourcestate.Ledger), never logged
+        self.who = getattr(limits, "who", None)
         self.vad_factory = vad_factory
         self._vad = None
         self.queue, self.jobs = [], {}   # jobs in arrival order; alias -> queued job
@@ -164,6 +166,7 @@ class Worker(threading.Thread):
         self.originals = {}       # alias -> {lang: {"url", "id"} of the original subtitle}, the pending entries' fallback
         self.provisional = {}     # alias -> {lang: body}: a waiting file's other languages, anchored to the main guess
         self.lists = {}           # alias -> (time, candidates): a text pass's subtitle list, for the audio job that follows
+        self.by_id = {}           # (candidate id, language) -> candidate, from this person's lists (public mode's recipes)
         self.fetched_subs = {}    # subtitle url -> (time, bytes): downloads shared by a file's text pass and audio job
         self.unlisted = {}        # alias -> when a file was last not found in the listing
         self.pickable = {}        # alias -> job of a file that needs the audio route and waits for the viewer's pick
@@ -527,12 +530,17 @@ class Worker(threading.Thread):
                 self.unlisted.pop(next(iter(self.unlisted)))
             return
         bt = bt_alias(row)
+        if bt:   # the listed torrent: TheSubtitleDB finds subtitles made for its very video by its hash
+            _, info_hash, file_idx = bt.split(":")
+            hints.update(infoHash=info_hash, fileIdx=int(file_idx))
         known = self.store.resolve(bt) if bt else None
         if known and self.store.judged_all(known, self.s.languages, self.s.rule_id, time.time() - JUDGED_FOR_S):
             # the same file of the same torrent, judged for every language here lately (read through someone else's
             # listing, in public mode): nothing to read
             self.store.alias(job.alias, known)
             log.info("known file %s: nothing to read", job.label)
+            if not self.store.keep_texts:   # this person's copies are made from their own list's originals
+                self._candidates(job, hints)
             return
         if self.limits is not None and not self.limits.may_start_file():
             raise OverLimit("files per day")
@@ -609,12 +617,24 @@ class Worker(threading.Thread):
         if job.audio and got and now - got[0] < self.LIST_TTL_S:
             return [dict(c) for c in got[1]]
         candidates = self.aios.subtitles(job.type, job.video_id, hints)
+        for c in candidates:   # the config's subtitles, tagged with the source they come from when it is a known one
+            c["source"] = srclimits.source_of_url(c.get("url")) or "config"
+            c["from_config"] = True
         if self.extra is not None:
-            seen = {c["url"] for c in candidates}
+            # A source the config already has is asked once, through the config; a subtitle the config lists
+            # (same address, or the same source's same id) isn't added twice
+            skip = set(getattr(self.aios, "config_sources", None) or ()) if self.s.skip_config_sources else set()
+            seen = {c["url"] for c in candidates} | {(c["source"], c["id"]) for c in candidates}
             try:
-                candidates += [c for c in self.extra.search(job.type, job.video_id, hints=hints) if c["url"] not in seen]
+                found = self.extra.search(job.type, job.video_id, langs=self.s.languages, hints=hints, skip=skip)
+                candidates += [c for c in found if c["url"] not in seen and (c["source"], c["id"]) not in seen]
             except Exception as e:  # never let the extra sources stop the file
                 log.info("extra sources failed %s: %s", job.label, type(e).__name__)
+        with self.cv:
+            for c in candidates:   # a stored recipe's original is found again by its id and language
+                self.by_id[(c["id"], c["lang"])] = dict(c)
+            while len(self.by_id) > srclimits.BY_ID_ENTRIES:
+                self.by_id.pop(next(iter(self.by_id)))
         if candidates:
             with self.cv:
                 self.lists[job.alias] = (now, [dict(c) for c in candidates])
@@ -652,9 +672,11 @@ class Worker(threading.Thread):
                 if lang == main:
                     want[lang] = [(r, c) for r, c in enumerate(cands) if c["id"] == guess][:1]
                 else:
-                    order = choose.order(cands, filename, oshash, skip=self.s.skip_ai) if self.s.rank_by_release \
+                    order = choose.order(cands, filename, oshash, skip=self.s.skip_ai,
+                                         viewer_first=self.viewer_first(cands)) if self.s.rank_by_release \
                         else list(enumerate(cands))
-                    want[lang] = order[: self.s.gate_tries]
+                    want[lang] = self._within_limits(order, filename, oshash, None,
+                                                     self.viewer_first(cands))[: self.s.gate_tries]
             for lang, tries in want.items():
                 got = self._fetch_all(job, lang, tries)
                 job.fetched[lang] = [(cand, decode(raw, lang)) for _, cand, raw in got]
@@ -734,10 +756,12 @@ class Worker(threading.Thread):
         ref = pipeline.choose_reference(index, 0, lang, False, self.s.prefer_plain, self.s.fallback_reference) \
             if hasattr(index, "text_tracks") else None
         ref_cues = len(ref["cues"]) if ref else None
+        first = self.viewer_first(candidates)
         if self.s.rank_by_release:
-            tries = choose.order(candidates, filename, oshash, skip=self.s.skip_ai, ref_cues=ref_cues)
+            tries = choose.order(candidates, filename, oshash, skip=self.s.skip_ai, ref_cues=ref_cues, viewer_first=first)
         else:
             tries = [(r, c) for r, c in enumerate(candidates) if not (self.s.skip_ai and choose.unwanted(c))]
+        tries = self._within_limits(tries, filename, oshash, ref_cues, first)
         # best fit with the fast path: the originals of up to SUBSYNC_GATE_TRIES are checked (cheap); alass runs on at
         # most SUBSYNC_MAX_TRIES of them
         tries = tries[: max(self.s.max_tries, self.s.gate_tries) if best_fit and self.s.fast_path else self.s.max_tries]
@@ -749,6 +773,23 @@ class Worker(threading.Thread):
             return {"rank": rank, "cand": cand, "raw": raw, "sha": sha, "got": self.fresh(result_key(file_key, sha))}
 
         streamed = best_fit and self.s.fast_path   # each download judged as it ends (below)
+        fingerprints = set()
+
+        def duplicate(e):
+            """The same subtitle (same words and timing; another encoding, line ending or credit line doesn't
+            count) already came from another source for this file and language: judged and listed once, as the first."""
+            if e["sha"] in fingerprints:
+                return True
+            try:
+                e["text"] = decode(e["raw"], lang)   # kept: the judging below reads it again
+                fp = fingerprint(e["text"])
+            except Exception:   # unreadable: judged on its own, as before
+                return False
+            if fp in fingerprints:
+                log.info("sync %s %s rank %d: the same subtitle as one already judged, left out", job.label, lang, e["rank"])
+                return True
+            fingerprints.update((fp, e["sha"]))
+            return False
         if streamed:
             entries = []
         elif self.s.fast_path:   # every try at once, so the originals can be checked first
@@ -766,7 +807,7 @@ class Worker(threading.Thread):
                                f"in sync as it is (viewer's #{e['rank'] + 1}): listed unchanged", got.get("route"),
                                dict(got.get("detail") or {}, unchanged=True,
                                     stacked=round(pipeline.stacked_share(parse(text)), 3)), "ass" if is_ass(text) else "srt", text,
-                               e["cand"]["id"], offer=not best_fit)
+                               e["cand"]["id"], offer=not best_fit, original=text)
                 outcome = "synced"
             ok = outcome in ("synced", "in_sync")
             if ok and best_fit and outcome == "synced":
@@ -791,7 +832,8 @@ class Worker(threading.Thread):
             detail["release"] = (e["cand"].get("release") or "")[:120]
             detail["stacked"] = round(pipeline.stacked_share(parse(e.get("text") or decode(e["raw"], lang))), 3)
             key = self.store.put(file_key, e["sha"], lang, e["rank"], r["outcome"], r.get("reason"), r.get("route"), detail,
-                                 e["ext"], r.get("body"), e["cand"]["id"], offer=not best_fit)
+                                 e["ext"], r.get("body"), e["cand"]["id"], offer=not best_fit,
+                                 original=e.get("text") or decode(e["raw"], lang))
             log.info("sync %s %s rank %d: %s (%s)", job.label, lang, e["rank"], r["outcome"], r.get("reason"))
             if best_fit and r["outcome"] == "synced":
                 offer(key)
@@ -812,7 +854,7 @@ class Worker(threading.Thread):
         def check_one(e):
             """The fast path for one download: its original against the release track (a gate, no alass). In sync?"""
             t0 = time.time()
-            e["text"] = decode(e["raw"], lang)
+            e.setdefault("text", decode(e["raw"], lang))
             e["ext"] = "ass" if is_ass(e["text"]) else "srt"
             chk = pipeline.check_original(index, e["text"], lang, splits=self.s.gate_splits, image_ref=self.s.image_ref,
                                           prefer_plain=self.s.prefer_plain,
@@ -846,6 +888,8 @@ class Worker(threading.Thread):
             position = {rank: i for i, (rank, _) in enumerate(tries)}
             for f in self._fetch_stream(job, lang, tries):
                 e = entry(*f)
+                if duplicate(e):
+                    continue
                 entries.append(e)
                 if e["got"]:
                     done = listed_cached(e) or done
@@ -874,6 +918,8 @@ class Worker(threading.Thread):
         if not done:
             fitted, shas = 0, set()
             for e in entries:
+                if not streamed and duplicate(e):
+                    continue
                 if e["got"]:
                     if not self.s.fast_path and listed_cached(e) and not best_fit:
                         break
@@ -917,6 +963,64 @@ class Worker(threading.Thread):
         lg = self.store.last_good(file_key, lang)
         return lg["key"] if lg else None
 
+    @staticmethod
+    def viewer_first(candidates):
+        """Is the first candidate the viewer's own first subtitle (from their config)? With no subtitle addon in the
+        config the list starts with a built-in source's, which has no place of its own."""
+        return bool(candidates) and candidates[0].get("from_config", True)
+
+    def original_text(self, result, fp=None):
+        """Public mode: the original a stored result was made from, downloaded again from the source this
+        person's own list gives for it, or None when their list has no such subtitle or it changed since (its bytes,
+        and the words and timings it is recognised by, differ)."""
+        key = (result.get("candidate_id"), result.get("lang"))
+        with self.cv:
+            cand = self.by_id.get(key)
+            seen = list(self.seen.items())
+        if cand is None:   # not listed lately: the list of a file this person opened that has this result
+            for alias, (type_, video_id, hints) in reversed(seen):
+                if self.store.resolve(alias) == result.get("file_key"):
+                    self._candidates(Job(type_, video_id, hints), dict(hints))
+                    with self.cv:
+                        cand = self.by_id.get(key)
+                    break
+        if cand is None:
+            return None
+        got = self._fetch_one(Job("original", str(result.get("file_key"))), result["lang"], 0, cand)
+        if got is None:
+            return None
+        raw = got[2]
+        text = decode(raw, result["lang"])
+        if hashlib.sha256(raw).hexdigest() != result.get("sub_sha") and not (fp and fingerprint(text) == fp):
+            log.info("the original of a stored copy changed at its source: not served")
+            return None
+        return text
+
+    def _within_limits(self, tries, filename, oshash, ref_cues, viewer_first=None):
+        """A site with a tight limit (srclimits.PER_FILE_DOWNLOADS) gives a file and language only its first
+        few subtitles in the try order; near its limit (sourcestate.Ledger.tight; in public mode for a person who had
+        their share) only the likeliest (srclimits.TOP_TIER); at its limit none."""
+        ledger = getattr(self.extra, "ledger", None) if self.extra is not None else None
+        if viewer_first is None:
+            viewer_first = any(rank == 0 and cand.get("from_config", True) for rank, cand in tries)
+        taken, out = {}, []
+        for rank, cand in tries:
+            source = cand.get("source")
+            cap = srclimits.PER_FILE_DOWNLOADS.get(source)
+            kind = srclimits.DOWNLOAD_KIND.get(source, "download")
+            if ledger is not None and source and ledger.limits(source, kind):
+                if ledger.exhausted(source, kind):
+                    continue
+                if ledger.tight(source, kind, who=self.who) and \
+                        choose.tier_of(rank, cand, filename, oshash, ref_cues, viewer_first) > srclimits.TOP_TIER:
+                    continue
+            if cap is not None:
+                if taken.get(source, 0) >= cap:
+                    continue
+                taken[source] = taken.get(source, 0) + 1
+            out.append((rank, cand))
+        return out
+
     def _fetch_one(self, job, lang, rank, cand):
         url, now = cand["url"], time.time()
         with self.cv:
@@ -924,7 +1028,12 @@ class Worker(threading.Thread):
         if got and now - got[0] < self.LIST_TTL_S:
             return rank, cand, got[1]
         try:
-            raw = fetch_subtitle(url)
+            source = cand.get("source")
+            ledger = getattr(self.extra, "ledger", None) if self.extra is not None else None
+            if ledger is not None and source:
+                ledger.count(source, srclimits.DOWNLOAD_KIND.get(source, "download"), who=self.who)
+            headers = self.extra.headers_for(cand) if self.extra is not None else None
+            raw = fetch_subtitle(url, headers=headers) if headers else fetch_subtitle(url)
             with self.cv:
                 self.fetched_subs[url] = (now, raw)
                 while len(self.fetched_subs) > 1 and sum(len(r) for _, r in self.fetched_subs.values()) > FETCHED_CAP:

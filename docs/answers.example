@@ -3,7 +3,7 @@
 
 # Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins that
 # container's Docker network and finds files through it, so the wrong one means it finds none of the files you play.
-# Pick the one whose address your Stremio or Jellyfin app uses.
+# Pick the one whose address your apps use.
 AIOS_CONTAINER=
 
 # Asked only when ./setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams'
@@ -12,9 +12,9 @@ AIOS_CONTAINER=
 AIOS_URL=http://127.0.0.1:3000
 
 # The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page
-# when you save or load the config, and part of your Stremio link (…/stremio/<ID>/…). You can paste the whole
-# Stremio link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this config,
-# and subsync's own config is made from it.
+# when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole install
+# link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this config, and
+# subsync's own config is made from it.
 AIOS_CONFIG_ID=
 
 # The password you chose when you saved that config. ./setup uses it to read the config and save the change, and
@@ -39,15 +39,16 @@ AUDIO=no
 
 # Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, which
 # often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't asked.
-# Cost: one SubDL search for each file you play, plus a download per subtitle tried, counted against your key's own
-# limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user.
+# Cost: one SubDL search for each file you play, plus a download per subtitle tried (at most three per file and
+# language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this machine,
+# in state/, readable only by your user.
 SUBDL_KEY=
 
 # Optional: your free Wyzie Subs API key, from https://wyzie.io. With it, subsync also searches Wyzie Subs, which
 # often has subtitles the other sources don't, so a copy that fits is more likely. Without it, Wyzie Subs isn't
-# asked. Cost: one search per language for each file you play, plus a download per subtitle tried, counted against
-# your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by
-# your user.
+# asked. Cost: one search per language for each file you play, plus a download per subtitle tried (at most two per
+# file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this
+# machine, in state/, readable only by your user.
 WYZIE_KEY=
 
 # Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds

@@ -69,7 +69,7 @@ class SignupTest(unittest.TestCase):
 
     def form(self, uuid, **extra):
         return dict({"link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "password": PASSWORD,
-                     "languages": "English", "add_addon": "on", "add_opensubtitles": "on"}, **extra)
+                     "languages": "English", "add_addon": "on"}, **extra)
 
     def run_signup(self, config, timeout=10, **extra):
         uuid = self.fake.add(config, PASSWORD)
@@ -199,12 +199,25 @@ class SignupTest(unittest.TestCase):
         self.assertNotIn(("PUT", "/api/v1/user"), self.fake.requests)
         self.assertEqual(self.fake.configs[uuid]["config"], viewer())
 
-    def test_opensubtitles_offered_without_subtitle_sources(self):
+    def test_opensubtitles_is_no_longer_added(self):
+        # AIOSubtitles searches OpenSubtitles itself, so a config without subtitle sources gets nothing more
         uuid, result = self.run_signup(viewer(presets=(TORRENTIO,)))
         types = [p["type"] for p in self.fake.configs[uuid]["config"]["presets"]]
-        self.assertEqual(types, ["torrentio", "custom", "opensubtitles"])
-        uuid, result = self.run_signup(viewer(presets=(TORRENTIO,)), add_opensubtitles="")
-        self.assertEqual([p["type"] for p in self.fake.configs[uuid]["config"]["presets"]], ["torrentio", "custom"])
+        self.assertEqual(types, ["torrentio", "custom"])
+
+    def test_clean_up_takes_out_the_addons_aiosubtitles_searches_itself(self):
+        uuid, result = self.run_signup(viewer(), clean_up="on")
+        main = self.fake.configs[uuid]["config"]
+        self.assertEqual([p["type"] for p in main["presets"]], ["torrentio", "newznab", "custom"])   # no subtitle addon left
+        self.assertTrue(any("removes 1 subtitle addon" in c and "OpenSubtitles V3+" in c for c in result.changes))
+        record = self.users.open(result.token)
+        self.assertEqual([p["type"] for p in self.sync_config(record)["presets"]], ["torrentio"])   # it asks them itself
+
+    def test_clean_up_needs_aiosubtitles_added(self):
+        uuid, result = self.run_signup(viewer(), add_addon="", clean_up="on")
+        self.assertEqual(self.fake.configs[uuid]["config"], viewer())       # alone it would leave fewer subtitles
+        record = self.users.open(result.token)
+        self.assertEqual([p["type"] for p in self.sync_config(record)["presets"]], ["torrentio", "opensubtitles-v3-plus"])
 
     def test_a_hanging_aiostreams_fails_plainly(self):
         self.fake.fault = "hang"
