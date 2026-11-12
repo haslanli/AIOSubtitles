@@ -74,6 +74,21 @@ def row_hints(stream):
             "videoHash": bh.get("videoHash")}
 
 
+_INFO_HASH = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def bt_alias(row):
+    """A listed row's torrent hash and file index as a file alias ("bt:<hash>:<index>"), so a file read through one
+    person's listing is known by the same torrent in another's without being read again. None without both."""
+    torrent = (row.get("streamData") or {}).get("torrent") or {}
+    info_hash, index = torrent.get("infoHash"), torrent.get("fileIdx")
+    if not isinstance(info_hash, str) or not _INFO_HASH.match(info_hash):
+        return None
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        return None
+    return f"bt:{info_hash.lower()}:{index}"
+
+
 MIN_VIDEO_BYTES = 10_000_000   # a listed size under this is no video file's: a listing error (Torrentio: 1,679 bytes)
 
 

@@ -1092,6 +1092,15 @@ class LangTest(unittest.TestCase):
         self.assertEqual(langs.lang3("fra"), "fre")
         self.assertEqual(langs.name("rus"), "Russian")
 
+    def test_every_sign_up_language_has_its_name(self):
+        # Entry labels in players read "<name> (synced)": a language offered at sign-up must never show as its code.
+        from subsync import aiosconfig
+        for name, two, three in aiosconfig.LANGUAGES:
+            with self.subTest(three=three):
+                self.assertEqual(langs.name(three), name)
+                self.assertEqual(langs.lang3(name), three)
+                self.assertEqual(langs.lang3(two), three)
+
 
 class VadRuleTest(unittest.TestCase):
     def test_timestamps_min_speech_and_silence(self):

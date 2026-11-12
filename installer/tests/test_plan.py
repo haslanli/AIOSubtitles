@@ -27,6 +27,18 @@ VIEWER = {
 URL = 'http://aiosubtitles-subsync:8790/KEY/manifest.json'
 
 
+class SharedRules(unittest.TestCase):
+    def test_the_rules_live_in_subsync(self):
+        from installer import aios
+        from subsync import aiosconfig
+        for name in ('sync_config', 'sync_config_problems', 'viewer_change', 'without_subsync', 'is_subsync_preset',
+                     'is_subtitle_preset', 'parse_languages', 'config_id_from', 'SYNC_SETTINGS', 'LANGUAGES'):
+            with self.subTest(name=name):
+                self.assertIs(getattr(plan, name), getattr(aiosconfig, name))
+        self.assertIs(aios.Aios, aiosconfig.AiosApi)
+        self.assertIs(aios.AiosError, aiosconfig.AiosError)
+
+
 class Languages(unittest.TestCase):
     def test_names_and_codes(self):
         langs, error = plan.parse_languages('English, ru; German')

@@ -6,6 +6,7 @@ Reads count toward a daily budget (default 50 GB, bytes received). Any HTTP 403/
 (15 min, doubling to 6 h), since the refusal is most likely per account. Every connection is closed after its read
 (reader.py).
 """
+import contextlib
 import hashlib
 import logging
 import threading
@@ -17,8 +18,8 @@ from .langs import lang3
 from .mkv import MkvIndex, NotMatroska  # noqa: F401
 from .mp4 import open_index
 from .reader import RangeReader, ReadFailed, Refused, Stopped
-from .sources import expected_size, fetch_subtitle, same_hash
-from .store import result_key
+from .sources import bt_alias, expected_size, fetch_subtitle, same_hash
+from .store import JUDGED_FOR_S, result_key
 from .subs import decode, is_ass, parse
 
 log = logging.getLogger("subsync.worker")
@@ -50,12 +51,41 @@ class Safety:
         return self.clock() < self.refused_until
 
 
-class JobGuard:
-    """Checked before every read of a job: the back-off, the day's budget and the job's own byte cap."""
+class OverLimit(Exception):
+    """A person's own limit is reached (public mode): the job is dropped, not tried again later."""
 
-    def __init__(self, safety, store, daily_budget, file_cap=None):
+
+class Turn:
+    """One holder at a time, in the order they asked: in public mode every person's worker shares one, so the service
+    works on one file at a time for everyone."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._next = 0
+        self._serving = 0
+
+    def __enter__(self):
+        with self._cv:
+            ticket = self._next
+            self._next += 1
+            while ticket != self._serving:
+                self._cv.wait()
+        return self
+
+    def __exit__(self, *exc):
+        with self._cv:
+            self._serving += 1
+            self._cv.notify_all()
+        return False
+
+
+class JobGuard:
+    """Checked before every read of a job: the back-off, the day's budget, the job's own byte cap and (public mode) the
+    person's own limits."""
+
+    def __init__(self, safety, store, daily_budget, file_cap=None, limits=None):
         self.safety, self.store = safety, store
-        self.daily_budget, self.file_cap = daily_budget, file_cap
+        self.daily_budget, self.file_cap, self.limits = daily_budget, file_cap, limits
         self.bytes = 0
         self._lock = threading.Lock()   # audio windows are read in parallel
 
@@ -66,11 +96,15 @@ class JobGuard:
             raise Stopped("daily budget spent")
         if self.file_cap and self.bytes + length > self.file_cap:
             raise Stopped("file byte cap")
+        if self.limits is not None:
+            self.limits.before_read(length)
 
     def after_read(self, n):
         with self._lock:
             self.bytes += n
         self.store.add_bytes("read", n)
+        if self.limits is not None:
+            self.limits.after_read(n)
         if n:
             self.safety.read_ok()
 
@@ -111,9 +145,13 @@ def rewrite(url, rules):
 
 
 class Worker(threading.Thread):
-    def __init__(self, settings, store, aios, safety, vad_factory=None, extra=None):
+    def __init__(self, settings, store, aios, safety, vad_factory=None, extra=None, turn=None, limits=None):
         super().__init__(daemon=True, name="subsync-worker")
         self.s, self.store, self.aios, self.safety = settings, store, aios, safety
+        # public mode: the turn every person's worker shares, and this person's limits (may_queue, may_start_file,
+        # file_started, before_read, after_read)
+        self.turn = turn if turn is not None else contextlib.nullcontext()
+        self.limits = limits
         self.extra = extra          # extra.ExtraSources: sources subsync searches itself
         self.vad_factory = vad_factory
         self._vad = None
@@ -149,6 +187,8 @@ class Worker(threading.Thread):
             running = self._running(job.alias)
             if running is not None and (running.audio or not job.audio):
                 return running
+            if self.limits is not None and not self.limits.may_queue(len(self.jobs)):
+                return None   # this person's queue is full: the answer comes from the store only
             self.jobs[job.alias] = job
             self.queue.append(job)
             self.judged.pop(job.alias, None)   # a pick waits for this job's results, not an earlier job's
@@ -400,8 +440,16 @@ class Worker(threading.Thread):
     # -- the loop ----------------------------------------------------------------------------------------------
     def start(self):
         super().start()
+        if self.s.public:   # public mode has no audio route, so no audio lane
+            return
         self.audio_worker = threading.Thread(target=self._loop, args=("audio",), daemon=True, name="subsync-audio")
         self.audio_worker.start()
+
+    def stop(self):
+        """Ends the loop once the job it runs (if any) is done."""
+        with self.cv:
+            self.stop_flag = True
+            self.cv.notify_all()
 
     def run(self):
         self._loop("main")
@@ -412,7 +460,11 @@ class Worker(threading.Thread):
             if job is None:
                 break
             try:
-                self.process(job)
+                with self.turn:
+                    if not self.stop_flag:
+                        self.process(job)
+            except OverLimit as e:
+                log.info("over the limit %s: %s", job.label, e)
             except Stopped as e:
                 log.info("stopped %s: %s", job.label, e)
                 job.not_before = time.time() + self.s.retry_stopped_s
@@ -474,6 +526,16 @@ class Worker(threading.Thread):
             while len(self.unlisted) > 5000:
                 self.unlisted.pop(next(iter(self.unlisted)))
             return
+        bt = bt_alias(row)
+        known = self.store.resolve(bt) if bt else None
+        if known and self.store.judged_all(known, self.s.languages, self.s.rule_id, time.time() - JUDGED_FOR_S):
+            # the same file of the same torrent, judged for every language here lately (read through someone else's
+            # listing, in public mode): nothing to read
+            self.store.alias(job.alias, known)
+            log.info("known file %s: nothing to read", job.label)
+            return
+        if self.limits is not None and not self.limits.may_start_file():
+            raise OverLimit("files per day")
         url = row["url"]
         if self.store.file_blocked(job.alias):
             log.info("file backing off after read failures %s", job.label)
@@ -490,9 +552,11 @@ class Worker(threading.Thread):
             log.info("no subtitles to sync %s", job.label)   # nothing is read
             return
         guard = JobGuard(self.safety, self.store, self.s.daily_budget,
-                         self.s.file_cap if self.audio_allowed(job) else self.s.index_cap)
+                         self.s.file_cap if self.audio_allowed(job) else self.s.index_cap, limits=self.limits)
         reader = RangeReader(rewrite(url, self.s.url_rewrite), job.label, guard, timeout=self.s.read_timeout,
                              size=expected_size(hints, row), size_tolerance=0.0005, size_slack=self.s.size_slack)
+        if self.limits is not None:
+            self.limits.file_started()
         try:
             index = open_index(reader)
             oshash = index.read_hash()
@@ -515,7 +579,7 @@ class Worker(threading.Thread):
         if not hints.get("videoHash"):   # the file's own hash is known now: a subtitle made for it is the better guess
             self._set_originals(job.alias, candidates, hints.get("filename"), oshash)
         file_key = f"{oshash}-{index.size}"
-        for a in {job.alias, f"hash:{oshash}|{index.size}",
+        for a in {job.alias, f"hash:{oshash}|{index.size}", bt,
                   f"name:{hints.get('filename')}|{hints.get('videoSize')}" if hints.get("filename") else None} - {None}:
             self.store.alias(a, file_key)
         tracks = index.text_tracks()
@@ -531,6 +595,7 @@ class Worker(threading.Thread):
             return
         self._sync_all(job, per_lang, lambda lang, cands: self._sync_language(job, index, file_key, lang, cands, oshash,
                                                                               hints.get("filename")))
+        self.store.judged_put(file_key, self.s.languages, self.s.rule_id)
         log.info("done %s file=%s bytes=%d requests=%d", job.label, file_key, reader.bytes, reader.requests)
 
     LIST_TTL_S = 600       # a text pass's subtitle list and downloads, reused by the audio job that follows a pick

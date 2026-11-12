@@ -20,6 +20,8 @@ import re
 import urllib.parse
 import urllib.request
 
+from . import net
+
 log = logging.getLogger("subsync.realdebrid")
 
 SERVICE = "realdebrid"
@@ -66,18 +68,22 @@ class GuardedRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         try:
             check(newurl)
-        except Blocked:
+            net.check_url(newurl)
+        except OSError:
             fp.close()
             raise
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(GuardedRedirects)
+_OPENER = net.build_opener()
 
 
 def urlopen(request, timeout):
-    """urllib.request.urlopen with the check on the address and on every redirect."""
-    check(request.full_url if isinstance(request, urllib.request.Request) else request)
+    """urllib.request.urlopen with the checks on the address and on every redirect (and, in public mode, net.py's
+    public-address check on every connection)."""
+    url = request.full_url if isinstance(request, urllib.request.Request) else request
+    check(url)
+    net.check_scheme(url)
     return _OPENER.open(request, timeout=timeout)
 
 

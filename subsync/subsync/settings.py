@@ -1,4 +1,6 @@
 """Settings from the environment. The source config's address and the addon key are secrets and are never logged."""
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -105,6 +107,30 @@ class Settings:
         self.base_path = "/" + base if base else ""
         # rows of these addons (comma-separated names) are never read (empty by default)
         self.skip_addons = tuple(n.strip() for n in g("SUBSYNC_SKIP_ADDONS", "").split(",") if n.strip())
+        # public mode: one service for many people, each signed up with their own AIOStreams (public.py)
+        self.public = _on(g("SUBSYNC_PUBLIC", "off"))
+        self.secret_key = g("SUBSYNC_SECRET_KEY", "").strip()                  # encrypts users' records; never logged
+        self.invite = g("SUBSYNC_PUBLIC_INVITE", "").strip()
+        self.max_users = int(g("SUBSYNC_MAX_USERS", "200"))
+        self.signups_per_hour = int(g("SUBSYNC_SIGNUPS_PER_HOUR", "5"))      # per address
+        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "40"))
+        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "500")) * 1024 * 1024)
+        self.user_queue = int(g("SUBSYNC_USER_QUEUE", "3"))
+        self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS", "30"))
+        self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN", "30")) * 60
+        self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS", "180"))
+        self.trusted_proxy = tuple(a.strip() for a in g("SUBSYNC_TRUSTED_PROXY", "127.0.0.1").split(",") if a.strip())
+        self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS", "64"))
+
+    def secret_bytes(self):
+        """The public mode's secret: base64url of at least 32 random bytes. ValueError otherwise."""
+        try:
+            raw = base64.b64decode(self.secret_key + "=" * (-len(self.secret_key) % 4), altchars=b"-_", validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("SUBSYNC_SECRET_KEY is not base64url") from None
+        if len(raw) < 32:
+            raise ValueError("SUBSYNC_SECRET_KEY is shorter than 32 bytes")
+        return raw
 
     @property
     def rule_id(self):
@@ -117,7 +143,22 @@ class Settings:
         return hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdigest()[:12]
 
     def missing(self):
-        """What must be set before the service can work."""
+        """What must be set before the service can work. In public mode each user's record holds their sync config's
+        link and password, so the service needs its secret and its address instead."""
+        if self.public:
+            try:
+                self.secret_bytes()
+                secret_ok = True
+            except ValueError:
+                secret_ok = False
+            return [name for name, ok in (("SUBSYNC_SECRET_KEY", secret_ok),
+                                          ("SUBSYNC_PUBLIC_BASE", bool(self.public_base))) if not ok]
         return [name for name, value in (("SUBSYNC_SOURCE_MANIFEST", self.source_manifest),
                                          ("SUBSYNC_SOURCE_PASSWORD", self.source_password),
                                          ("SUBSYNC_PUBLIC_BASE", self.public_base)) if not value]
+
+    def conflicts(self):
+        """Settings that can't go together, in plain sentences (empty: none)."""
+        if self.public and self.audio_route:
+            return ["The audio route is off in public mode: set SUBSYNC_AUDIO_ROUTE=off or turn public mode off."]
+        return []

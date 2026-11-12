@@ -5,6 +5,9 @@ last_good  per (file, language): the synced result a viewer is offered; a new or
            only when it passes; an original that passes as it is clears it (nothing to offer). With best fit
            the worker sets it from its ranking instead (set_offers).
 offers     per (file, language): the offered results, best fit first (last_good is the first)
+judged     per (file, language): when every subtitle of that language was last judged for the file, and under which
+           pass rule; a language with no subtitle at all counts as judged. With many people of different languages
+           sharing the store (public mode), a file read for one language is read again for another.
 files      per file: served size, hash, whether it has a usable text track, read failures and back-off
 aliases    file hints (AIOS videoHash, or file name + size) -> file key, so a listing finds a file read earlier
 budget     bytes received per UTC day
@@ -28,6 +31,7 @@ KEEP_SERVED_S = 180 * DAY
 RETRY_KEEP_ORIGINAL_S = 30 * DAY
 READ_FAILED_BACKOFF_S = (3600, 6 * 3600, 24 * 3600)
 KEEP_PICKABLE_S = 7 * DAY
+JUDGED_FOR_S = DAY            # a file judged for every language asked within this long is not read again
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -49,6 +53,8 @@ CREATE TABLE IF NOT EXISTS pickable (alias TEXT PRIMARY KEY, type TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS originals (alias TEXT PRIMARY KEY, langs TEXT NOT NULL, updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS offers (file_key TEXT NOT NULL, lang TEXT NOT NULL, pos INTEGER NOT NULL, key TEXT NOT NULL,
   updated REAL NOT NULL, PRIMARY KEY (file_key, lang, pos));
+CREATE TABLE IF NOT EXISTS judged (file_key TEXT NOT NULL, lang TEXT NOT NULL, rule TEXT NOT NULL, at REAL NOT NULL,
+  PRIMARY KEY (file_key, lang));
 """
 
 
@@ -214,6 +220,23 @@ class Store:
             row = self.db.execute("SELECT retry_at FROM files WHERE file_key=? AND fails>0", (alias,)).fetchone()
         return bool(row and row[0] is not None and row[0] > self.clock())
 
+    # -- which languages were judged for a file -------------------------------------------------------------------
+    def judged_put(self, file_key, langs, rule):
+        now = self.clock()
+        with self.lock:
+            for lang in langs:
+                self.db.execute("INSERT OR REPLACE INTO judged VALUES (?,?,?,?)", (file_key, lang, rule, now))
+
+    def judged_all(self, file_key, langs, rule, since):
+        """Whether every one of langs was judged for the file under this rule at `since` or later. None: the file has
+        no judged rows at all (stored before this memory existed; the file's read time decides, as before)."""
+        with self.lock:
+            rows = dict((lang, (r, at)) for lang, r, at in self.db.execute(
+                "SELECT lang, rule, at FROM judged WHERE file_key=?", (file_key,)))
+        if not rows:
+            return None
+        return all(lang in rows and rows[lang][0] == rule and rows[lang][1] >= since for lang in langs)
+
     # -- files waiting for a pick, and their original subtitles ---------------------------------------------------
     def pickable_put(self, alias, type_, video_id, hints):
         with self.lock:
@@ -288,6 +311,7 @@ class Store:
             self.db.execute("DELETE FROM budget WHERE day < ?", (day_of(now - 40 * DAY),))
             self.db.execute("DELETE FROM pickable WHERE created < ?", (now - KEEP_PICKABLE_S,))
             self.db.execute("DELETE FROM originals WHERE updated < ?", (now - KEEP_PICKABLE_S,))
+            self.db.execute("DELETE FROM judged WHERE at < ?", (now - 2 * JUDGED_FOR_S,))
         return len(old)
 
     def stats(self):

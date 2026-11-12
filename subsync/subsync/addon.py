@@ -159,6 +159,9 @@ class App:
             rule = json.loads(row[1] or "{}").get("rule") if row else None
             if recent and rule is not None and rule != self.s.rule_id:
                 recent = False   # read under another pass rule: judge its subtitles again now
+            if recent and self.store.judged_all(file_key, self.s.languages, self.s.rule_id,
+                                                time.time() - REPROCESS_S) is False:
+                recent = False   # read lately, but not for every language asked here (another person's, in public mode)
         if not recent and not self.worker.recently_unlisted(job.alias):
             job = self.worker.submit(job) or job
         if not self.worker.busy_with(job.alias):
@@ -213,6 +216,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         app = self.app
         path, keyed = app.route(urllib.parse.urlsplit(self.path).path)
+        self.dispatch(app, path, keyed)
+
+    def dispatch(self, app, path, keyed):
+        """Answers `path` (base path and key already taken off) for `app`: the self-hosted service has one; in public
+        mode the router hands each person's requests to their own."""
         try:
             if path == "/health":
                 return self._send(200, "ok", "text/plain")

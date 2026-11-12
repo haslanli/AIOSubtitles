@@ -7,7 +7,11 @@ TWO = {"en": "eng", "ru": "rus", "ja": "jpn", "fr": "fre", "de": "ger", "es": "s
 TERMINOLOGIC = {"deu": "ger", "fra": "fre", "nld": "dut", "ell": "gre", "ron": "rum", "ces": "cze", "zho": "chi",
                 "fas": "per", "pob": "por"}
 NAMES = {"eng": "English", "rus": "Russian", "jpn": "Japanese", "fre": "French", "ger": "German", "spa": "Spanish",
-         "ita": "Italian", "por": "Portuguese", "kor": "Korean", "chi": "Chinese", "ukr": "Ukrainian", "pol": "Polish"}
+         "ita": "Italian", "por": "Portuguese", "kor": "Korean", "chi": "Chinese", "ukr": "Ukrainian", "pol": "Polish",
+         "dut": "Dutch", "swe": "Swedish", "nor": "Norwegian", "dan": "Danish", "fin": "Finnish", "cze": "Czech",
+         "hun": "Hungarian", "rum": "Romanian", "bul": "Bulgarian", "hrv": "Croatian", "srp": "Serbian", "gre": "Greek",
+         "tur": "Turkish", "ara": "Arabic", "heb": "Hebrew", "per": "Persian", "hin": "Hindi", "ind": "Indonesian",
+         "tha": "Thai", "vie": "Vietnamese"}
 BY_NAME = {v.lower(): k for k, v in NAMES.items()}
 
 
