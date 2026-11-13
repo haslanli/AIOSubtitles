@@ -22,6 +22,15 @@ shorter than MIN_W, the original is kept without reading any audio, and a window
 On real releases subtitle lines start a steady ~190 ms before Silero's detected speech, so the bar is
 applied after removing that lead: onsets are moved `lead` seconds earlier before fitting and gating (the release's
 own offset when known, else a measured default; 0 on the synthetic corpus, whose speech onsets are exact).
+
+D3, D5. Speech-run ends: a subtitle's line ends trail the speech by its author's own habit (reading time,
+minimum display), unknown in advance, so an end can't move a whole fit; but where the fit changes shift, the line after
+which it changes is chosen by onsets and ends alike, each end measured against the subtitle's own lag (the median of its
+ends against speech-run ends under the fit; END_WEIGHT an end). The held-out check counts onsets only. Close
+calls: when the first verdict keeps the original with held-out numbers within CLOSE of's, or passes on fewer than
+CLOSE_MATCHED matched lines, or a shift change rests on fewer than 2 fit windows, up to `extra` more windows (two
+thirds held-out, a third fit windows, in the largest gaps between the windows read) are read, 4 at a time, as many as
+the audio budget leaves, and the file is judged again on all of them; that verdict is the result.
 """
 import bisect
 import statistics
@@ -42,6 +51,9 @@ PLANNED = 4         # windows a fit reads beyond its K + V (a confirmation, bise
 MIN_WINDOW_LINES = 5  # a window whose usual place holds fewer of the subtitle's lines is moved to where they are
 COST = 1.25         # a window's read costs about 1.25 x its length at the average byte rate (Cues, interleaving)
 PARALLEL_READS = 4  # planned windows read at once (AudioFit.prefetch)
+END_WEIGHT = 0.5    # a line end that lands counts half an onset where a shift change is placed
+CLOSE = 0.2         # a verdict within 20 % of's numbers is a close call
+CLOSE_MATCHED = 40  # a pass on fewer matched lines is a close call
 
 
 class AudioBudget(Exception):
@@ -50,11 +62,12 @@ class AudioBudget(Exception):
 
 class AudioFit:
     def __init__(self, index, lines, vad=None, k=8, w=30.0, v=4, lead=0.0, ffmpeg="ffmpeg", better=None, budget=None,
-                 track=None):
+                 track=None, extra=0):
         self.index, self.allines = index, lines
         self.track = track          # an audio track index (ffmpeg 0:a:N); None = the file's default track
         self.better = better
         self.budget = budget
+        self.extra = extra          # windows a close call may add (D5)
         self.lines = [l for l in lines if l["kind"] == "dialogue"]
         self.vad = vad or SileroVad()
         self.K, self.W, self.V, self.lead, self.ffmpeg = k, w, v, lead, ffmpeg
@@ -150,7 +163,8 @@ class AudioFit:
         for a, b in merged:
             mask[a:b] = True
         onsets = np.array([start + a / 100 - self.lead for a, _ in merged])
-        return {"start": start, "len": length, "mask": mask, "onsets": onsets}
+        offsets = np.array([start + b / 100 for _, b in merged])
+        return {"start": start, "len": length, "mask": mask, "onsets": onsets, "offsets": offsets}
 
     # -- correlation -------------------------------------------------------------------------------------------
     @staticmethod
@@ -182,12 +196,14 @@ class AudioFit:
         return float(vals[int(np.argmin(np.abs(offs - o)))]) / len(w["mask"][::5])
 
     @staticmethod
-    def onset_errors(starts, windows):
-        """Signed (onset - start) per mapped start inside a read window, matched one-to-one; None = no onset."""
+    def onset_errors(starts, windows, key="onsets"):
+        """Signed (onset - start) per mapped start inside a read window, matched one-to-one; None = no onset. With
+        key="offsets", speech-run ends against line ends."""
         errs = []
         for w in windows:
             inside = [s for s in starts if w["start"] + 0.5 <= s <= w["start"] + w["len"] - 0.5]
-            pairs = sorted((abs(o - s), i, j) for i, s in enumerate(inside) for j, o in enumerate(w["onsets"])
+            marks = w.get(key, ())
+            pairs = sorted((abs(o - s), i, j) for i, s in enumerate(inside) for j, o in enumerate(marks)
                            if abs(o - s) <= 1.0)
             used_l, used_o, got = set(), set(), {}
             for _, i, j in pairs:
@@ -195,7 +211,7 @@ class AudioFit:
                     continue
                 used_l.add(i)
                 used_o.add(j)
-                got[i] = float(w["onsets"][j] - inside[i])
+                got[i] = float(marks[j] - inside[i])
             errs += [got.get(i) for i in range(len(inside))]
         return errs
 
@@ -221,6 +237,25 @@ class AudioFit:
         return (g["matched"] >= b["matched"] and g["miss"] <= b["miss"] and g["median_ms"] <= b["median_ms"]
                 and g["within200"] >= b["within"])
 
+    def end_lag(self, c, o, windows):
+        """The subtitle's own lag of line ends behind speech-run ends (median, s), from the lines whose start lands on a
+        speech onset within 200 ms under the fit (so a part of the film with another shift doesn't count); None on fewer
+        than 10."""
+        errs = []
+        for w in windows:
+            on, off = np.asarray(w.get("onsets", ())), np.asarray(w.get("offsets", ()))
+            if not len(on) or not len(off):
+                continue
+            for l in self.lines:
+                s, e = l["s"] * c + o, l["e"] * c + o
+                if s < w["start"] + 0.5 or e > w["start"] + w["len"] - 0.5 or np.min(np.abs(on - s)) > 0.2:
+                    continue
+                d = off - e
+                k = int(np.argmin(np.abs(d)))
+                if abs(d[k]) <= 1.0:
+                    errs.append(float(d[k]))
+        return float(np.median(errs)) if len(errs) >= 10 else None
+
     def clearly_better(self, g_new, moved):
         return self.meets_better(g_new) and moved >= self.better["min_shift_s"]
 
@@ -236,10 +271,74 @@ class AudioFit:
                         "why": f"the file's bitrate is too high for the audio budget ({self.budget / 1e6:.0f} MB)"}
             self.W = min(self.W, round(w, 1))
         try:
-            return self._run()
+            first = self._run()
         except AudioBudget:
             return {"decision": "keep_original", "windows": self.windows_read, "audio_s": self.audio_s,
                     "why": f"audio budget reached ({self.budget / 1e6:.0f} MB)"}
+        return self.close_call_again(first)
+
+    def close_call(self, r):
+        """Why a first verdict is a close call (D5), or None."""
+        if not r.get("plan"):
+            return None
+        b = self.better or {"matched": 25, "miss": 0.30, "median_ms": 150.0, "within": 0.55}
+
+        def near(g):
+            return bool(g) and g.get("median_ms") is not None and g["matched"] >= (1 - CLOSE) * b["matched"] \
+                and g["miss"] <= (1 + CLOSE) * b["miss"] and g["median_ms"] <= (1 + CLOSE) * b["median_ms"] \
+                and g["within200"] >= (1 - CLOSE) * b["within"]
+        if r["decision"] == "keep_original":
+            return "close to the bar" if near(r.get("gate_new")) or near(r.get("gate_old")) else None
+        g = r.get("gate_new") if r["decision"] == "synced" else r.get("gate_old")
+        if (g or {}).get("matched", 0) < CLOSE_MATCHED:
+            return "passed on few lines"
+        offsets = r.get("segment_offsets") or []
+        if len(offsets) > 1 and any(sum(abs(lab - o) <= 0.5 for _, lab in r.get("seq", [])) < 2 for o in offsets):
+            return "a shift change rests on few windows"
+        return None
+
+    def gaps(self, taken, n, lo, hi):
+        """Up to n window starts in the middle of the largest gaps between windows already taken, in [lo, hi - W]."""
+        W, out = self.W, []
+        taken = sorted(taken)
+        for _ in range(n):
+            edges = [lo - W] + sorted(taken + out) + [hi]
+            best = max(zip(edges, edges[1:]), key=lambda ab: ab[1] - ab[0])
+            if best[1] - best[0] < 3 * W:
+                break
+            out.append(round((best[0] + W + best[1]) / 2 - W / 2, 2))
+        return out
+
+    def close_call_again(self, first):
+        """A close call judged again with up to `extra` more windows, as many as the audio budget leaves."""
+        why = self.close_call(first) if self.extra else None
+        if not why:
+            return first
+        plan, D = first["plan"], self.index.duration()
+        margin = 0.03 * D
+        n_check = round(self.extra * 2 / 3)
+        n_fit = self.extra - n_check
+        read = [k[0] for k in self.cache if k[1:] == self._key(0.0, self.W)[1:]]   # fit, held-out and the rest
+        fit_more = self.gaps(read, n_fit, margin, D - margin)       # never over a held-out window
+        check_more = self.gaps(read + fit_more, n_check, margin, D - margin)
+        more = check_more + fit_more
+        if self.budget and self.rate():
+            left = self.budget - getattr(self.index, "audio_bytes", 0)
+            more = more[:max(0, int(left // (COST * self.W * self.rate())))]
+        if not more:
+            return dict(first, close_call={"why": why, "windows": 0})
+        before = self.windows_read
+        try:
+            second = self._run(sorted(plan["fit"] + [x for x in fit_more if x in more]),
+                               sorted(plan["check"] + [x for x in check_more if x in more]))
+        except AudioBudget:
+            return dict(first, close_call={"why": why, "windows": self.windows_read - before, "stopped": "audio budget"})
+        second["close_call"] = {"why": why, "windows": self.windows_read - before,
+                                "first": {"decision": first["decision"], "why": first.get("why"),
+                                          "gate_new": first.get("gate_new")}}
+        second["windows"] = self.windows_read
+        second["audio_s"] = self.audio_s
+        return second
 
     def place(self, usual, lo, hi, avoid=()):
         """A window's start: its usual place when the subtitle has at least MIN_WINDOW_LINES lines there; else, in
@@ -284,13 +383,16 @@ class AudioFit:
             plans[key] = {"fit": fit, "check": check, "window_s": self.W}
         return plans[key]
 
-    def _run(self):
+    def _run(self, fit_starts=None, check_starts=None):
         K, W, V = self.K, self.W, self.V
         allines, lines = self.allines, self.lines
         D = self.index.duration()
         margin = 0.03 * D
         span = (D - 2 * margin) / K
         plan = self.plan(D, margin, span)
+        if fit_starts is not None:      # a close call judged again with more windows
+            plan = {"fit": list(fit_starts), "check": list(check_starts), "window_s": W}
+            K = len(plan["fit"])
         self.prefetch(plan["fit"] + plan["check"], W)   # every first fit reads both: at once, not one by one
         windows = [self.read_window(start, W) for start in plan["fit"]]
         n = int((max(l["e"] for l in allines) * 1.1 + 60) / DT)
@@ -352,6 +454,7 @@ class AudioFit:
                     hi = mid
             bounds.append((lo, hi, oa, ob))
         order = sorted(range(len(allines)), key=lambda k: allines[k]["s"])
+        lag = self.end_lag(c, o_glob, windows) if bounds else None
         cuts = []
         for lo, hi, oa, ob in bounds:
             best_k, best_score = None, -1
@@ -364,6 +467,11 @@ class AudioFit:
                     continue
                 errs = self.onset_errors(before + after, windows)
                 score = sum(1 for e in errs if e is not None and abs(e) < 0.4)
+                if lag is not None:     # the line ends too, against the subtitle's own lag (D3)
+                    ends = [allines[order[i]]["e"] * c + oa for i in range(k)] + \
+                           [allines[order[i]]["e"] * c + ob for i in range(k, len(order))]
+                    score += END_WEIGHT * sum(1 for e in self.onset_errors(ends, windows, "offsets")
+                                              if e is not None and abs(e - lag) < 0.4)
                 if score > best_score:
                     best_k, best_score = k, score
             if best_k is not None:
@@ -422,6 +530,7 @@ class AudioFit:
         else:
             decision = "keep_original"
         return {"decision": decision, "why": why, "lines": new if decision == "synced" else None, "moved_s": round(moved, 2),
+                "seq": seq, "segment_offsets": sorted(set(seg_of)), "end_lag_ms": None if lag is None else round(lag * 1000),
                 "model": {"scale": round(c, 5), "offset": round(o_glob, 2), "lead_ms": round(self.lead * 1000),
                           "segments": [{"after_rank": k, "from": a, "to": b} for k, a, b in cuts],
                           "fine_ms": {str(k): round(v * 1000) for k, v in fine.items()}, "dropped": len(dropped)},

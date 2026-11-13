@@ -810,6 +810,7 @@ class Worker(threading.Thread):
         tries = tries[: max(self.s.max_tries, self.s.gate_tries) if best_fit and self.s.fast_path else self.s.max_tries]
         passed = []        # best fit: the keys of passing results
         best_so_far = []   # best fit: (fit rank, key) of the best pass published so far
+        settled = []       # D1: a subtitle of this language passed the main rule against its own language
         audio = self.audio_allowed(job)
         def entry(rank, cand, raw):
             sha = hashlib.sha256(raw).hexdigest()
@@ -853,6 +854,8 @@ class Worker(threading.Thread):
                                e["cand"]["id"], offer=not best_fit, original=text)
                 outcome = "synced"
             ok = outcome in ("synced", "in_sync")
+            if ok and pipeline.settles(dict(got, cross=(got.get("detail") or {}).get("cross"))):
+                settled.append(result_key(file_key, e["sha"]))
             if ok and best_fit and outcome == "synced":
                 offer(result_key(file_key, e["sha"]))
             return ok
@@ -869,7 +872,7 @@ class Worker(threading.Thread):
             detail = {k: r[k] for k in ("route", "reference", "gate_original", "gate_synced", "gate_snapped", "refined",
                                         "unchanged", "magnet", "shift", "model", "windows", "audio_s", "lines", "dialogue",
                                         "alass_error", "fast", "better", "audio_track", "shift_fit", "cross", "aligned",
-                                        "recentred_ms") if k in r}
+                                        "recentred_ms", "text", "text_original", "sections", "section_checks", "close_call") if k in r}
             detail["seconds"] = round(time.time() - t0, 2)
             detail["rule"] = self.s.rule_id
             detail["release"] = (e["cand"].get("release") or "")[:120]
@@ -878,6 +881,8 @@ class Worker(threading.Thread):
                                  e["ext"], r.get("body"), e["cand"]["id"], offer=not best_fit,
                                  original=e.get("text") or decode(e["raw"], lang))
             log.info("sync %s %s rank %d: %s (%s)", job.label, lang, e["rank"], r["outcome"], r.get("reason"))
+            if pipeline.settles(r):
+                settled.append(key)
             if best_fit and r["outcome"] == "synced":
                 offer(key)
             return r["outcome"] in ("synced", "in_sync")
@@ -902,7 +907,8 @@ class Worker(threading.Thread):
             chk = pipeline.check_original(index, e["text"], lang, splits=self.s.gate_splits, image_ref=self.s.image_ref,
                                           prefer_plain=self.s.prefer_plain,
                                           snap_within=self.s.snap_within if self.s.snap else None,
-                                          better=self.s.better, fallback=self.s.fallback_reference)
+                                          better=self.s.better, fallback=self.s.fallback_reference,
+                                          text_pairing=self.s.text_pairing)
             e["checked"] = chk is not None
             if chk and chk["in_sync"]:
                 record(e, in_sync_result(e, dict(chk, fast=True)), t0)
@@ -916,7 +922,8 @@ class Worker(threading.Thread):
             t0 = time.time()
             r = pipeline.shift_sync(index, e["text"], e["ext"], lang, snap=self.s.snap, snap_within=self.s.snap_within,
                                     splits=self.s.gate_splits, image_ref=self.s.image_ref, better=self.s.better,
-                                    prefer_plain=self.s.prefer_plain, fallback=self.s.fallback_reference)
+                                    prefer_plain=self.s.prefer_plain, fallback=self.s.fallback_reference,
+                                    text_pairing=self.s.text_pairing)
             if not (r and r["outcome"] == "synced"):
                 return False
             record(e, dict(r, fast=True), t0)
@@ -981,7 +988,9 @@ class Worker(threading.Thread):
                                            splits=self.s.gate_splits, image_ref=self.s.image_ref,
                                            audio_lock=self.audio_lock, better=self.s.better,
                                            audio_better=self.s.audio_better, audio_budget=self.s.audio_budget,
-                                           prefer_plain=self.s.prefer_plain, fallback=self.s.fallback_reference)
+                                           prefer_plain=self.s.prefer_plain, fallback=self.s.fallback_reference,
+                                           text_pairing=self.s.text_pairing, unsettled=not settled,
+                                           sectioned=self.s.sections, audio_extra=self.s.audio_extra)
                 if not audio and r.get("route") is None and r["outcome"] == "keep_original" \
                         and "audio route is off" in (r.get("reason") or ""):
                     if self.s.audio_route:

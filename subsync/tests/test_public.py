@@ -782,6 +782,30 @@ class PublicTextsTest(unittest.TestCase):
                  "Backups of the stored data are kept for up to 30 days.")
         self.assertIn("Logs name the titles synced, never who asked. " + added + " How long:", text)
 
+    def test_the_privacy_text_says_what_reading_a_track_of_pictures_means(self):
+        # Image subtitle tracks' words are read on the server, and such a track can take a few MB
+        from subsync import explain
+        self.assertIn("for each file you play, its subtitle track (about 1 MB; a few MB when the track's lines are "
+                      "pictures, whose words AIOSubtitles reads on its own server and doesn't keep) and the subtitles "
+                      "your AIOStreams lists", explain.PUBLIC_TEXTS["privacy"])
+
+    def test_the_other_read_sizes_say_the_same_with_the_same_words(self):
+        # The landing intro and the README's texts that give "about 1 MB" per file take the privacy sentence's
+        # approved words, nothing more
+        from subsync import explain
+        words = ("about 1 MB; a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its own "
+                 "server and doesn't keep")
+        self.assertIn(f"that file's own subtitle track ({words}) through a separate config",
+                      explain.PUBLIC_TEXTS["intro"])
+        notes = dict(explain.RULES)
+        self.assertIn(f"subtitle track is {words.replace('; ', ' (', 1)}) and is synced in seconds",
+                      notes["Public mode: a few files at once"])
+        settings = {name: entry[-1] for name, entry in explain.SETTINGS.items()}
+        self.assertIn("(about 1 MB per file, a few MB when the track's lines are pictures; up to 1 GB per file with "
+                      "the audio route)", settings["SUBSYNC_DAILY_BUDGET_GB"])
+        self.assertIn("Reading a file's subtitle track takes about 1 MB, a few MB when the track's lines are "
+                      "pictures, so this is room", settings["SUBSYNC_USER_DAILY_MB"])
+
 
 if __name__ == "__main__":
     unittest.main()

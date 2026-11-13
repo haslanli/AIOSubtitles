@@ -45,9 +45,12 @@ RULES = [
     ("A copy is offered only after it passes the check",
      "Each synced copy is checked against the file itself before it is offered: at least 90 % of its lines must start "
      "within 200 ms (a fifth of a second) of the file's own subtitle track, spread over the whole film (95 % when its "
-     "lines were snapped onto the track), or it must be clearly better than the original (SUBSYNC_BETTER). Files "
-     "without a subtitle track are checked against their speech instead (the audio route). A copy that fails is never "
-     "offered: you get the original subtitles, as without subsync."),
+     "lines were snapped onto the track), or it must be clearly better than the original (SUBSYNC_BETTER). Where the "
+     "track is in the subtitle's language and timing alone leaves doubt, the lines' words must agree too "
+     "(SUBSYNC_TEXT_PAIRING); a copy fitted in sections for another cut must pass in every section (SUBSYNC_SECTIONS). "
+     "Line ends are measured and recorded, but don't decide. Files without a subtitle track are checked against their "
+     "speech instead (the audio route). A copy that fails is never offered: you get the original subtitles, as without "
+     "subsync."),
     ("At most four languages",
      "./setup syncs up to four languages. Each one is a separate sync for every file you play, with its own subtitle "
      "downloads and a few seconds of work, though the video file is read only once."),
@@ -89,7 +92,9 @@ RULES = [
      "The service works on a set number of files at once for everyone (SUBSYNC_SYNCS_AT_ONCE), in the order people "
      "asked; two people playing the same file of a torrent never read it twice at once: the second gets the first "
      "one's work. A file's "
-     "subtitle track is about 1 MB and is synced in seconds. Files already synced for someone are served at once. When "
+     "subtitle track is about 1 MB (a few MB when the track's lines are pictures, whose words AIOSubtitles reads on "
+     "its own server and doesn't keep) and is synced in seconds. Files already synced for someone are served at once. "
+     "When "
      "many people play new files together, the synced copy can come after your app has picked a subtitle; the next "
      "time you open the file, it is there."),
     ("Public mode: limits per person",
@@ -320,8 +325,9 @@ GROUPS = [
         "SUBSYNC_DAILY_BUDGET_GB": (
             "50",
             "The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until "
-            "the next day and new files keep their original subtitles. 50 is far above normal use (about 1 MB per file; "
-            "up to 1 GB per file with the audio route), so it only catches something going wrong. Lower it if your "
+            "the next day and new files keep their original subtitles. 50 is far above normal use (about 1 MB per file, "
+            "a few MB when the track's lines are pictures; up to 1 GB per file with the audio route), so it only "
+            "catches something going wrong. Lower it if your "
             "debrid service or server has a tight traffic limit."),
         "SUBSYNC_INDEX_CAP_MB": (
             "16",
@@ -442,6 +448,22 @@ GROUPS = [
             "On: before full re-timing, subsync tries moving the whole subtitle by one steady amount, the common case "
             "of a film a second early or late. Recommended: on: fast and exact when it applies. Off: full re-timing "
             "every time, slower."),
+        "SUBSYNC_TEXT_PAIRING": (
+            "on",
+            "On: when your subtitle and the file's own subtitle track share a language and timing alone can't settle "
+            "it, subsync reads the words of up to 120 of the track's lines, once per file and language (up to 240 KB of "
+            "text; on an image track, with a reader installed for the language, each line's picture, up to 64 KB), and "
+            "pairs your subtitle's lines with those that say the same thing, even where lines are split or joined "
+            "differently. A copy whose words disagree with its timing isn't offered. Words are kept only while "
+            "the file is worked on. Recommended: on. Off: lines are paired by timing alone, nothing extra is read, and "
+            "a copy only words could refuse may be offered."),
+        "SUBSYNC_SECTIONS": (
+            "on",
+            "On: a subtitle made for a slightly different cut of the film (a few seconds added or cut here and there, "
+            "other ads or recaps) is fitted in up to 8 sections, each moved by its own amount and each checked on its "
+            "own; a copy is offered only when every section passes and the whole copy does too, and a subtitle that "
+            "lacks a scene of your file is still never offered. Recommended: on. Off: the whole film is moved by one "
+            "amount, then by the general re-timing. Nothing extra is read either way."),
         "SUBSYNC_SNAP": (
             "on",
             "On: after re-timing, each line moves to start exactly where the file's own matching line starts, wherever "
@@ -538,6 +560,14 @@ GROUPS = [
             "Audio route: in good releases a subtitle appears about 190 ms before the speech starts, so copies timed "
             "from speech are moved this much earlier. Recommended: 190. 0: lines appear exactly as speech starts, a "
             "little late to the eye."),
+        "SUBSYNC_AUDIO_EXTRA_WINDOWS": (
+            "12",
+            "Audio route: when the first check against the speech is a close call (just short of the bar, or passing on "
+            "few lines), up to this many more 30-second pieces of the sound are read to decide, within your audio "
+            "limit (each piece is about half a percent of a two-hour film's file: about 10 MB of a 2 GB film), and the "
+            "file is judged again on all of them. Recommended: 12. 0: the first check decides and nothing more is read. "
+            "More: surer verdicts on quiet or long films, more data read on those films only, and their copies take "
+            "a few seconds longer."),
         "SUBSYNC_AUDIO_BETTER": (
             "on",
             "Audio route: on, a copy that misses the standard bar against the speech is still offered when it is "
@@ -656,7 +686,8 @@ GROUPS = [
         "SUBSYNC_USER_DAILY_MB": (
             "500",
             "Public mode only: megabytes read per person per day (UTC) through their own sync config. Reading a "
-            "file's subtitle track takes about 1 MB, so this is room for hundreds of files; it stops someone whose "
+            "file's subtitle track takes about 1 MB, a few MB when the track's lines are pictures, so this is room for "
+            "hundreds of files; it stops someone whose "
             "files have unusual layouts from using most of the service's daily total (SUBSYNC_DAILY_BUDGET_GB). Past "
             "it, that person gets only copies already in the store until the next day."),
         "SUBSYNC_USER_QUEUE": (
@@ -787,7 +818,8 @@ PUBLIC_FIELDS = {
 PUBLIC_TEXTS = {
     "intro": (
         "AIOSubtitles gives you subtitles that are in sync with the file you play. It works through your AIOStreams: "
-        "for each file you play, it reads that file's own subtitle track (about 1 MB) through a separate config it "
+        "for each file you play, it reads that file's own subtitle track (about 1 MB; a few MB when the track's lines "
+        "are pictures, whose words AIOSubtitles reads on its own server and doesn't keep) through a separate config it "
         "makes on your AIOStreams, and offers subtitles from your addons and the sites it searches itself, re-timed to "
         "fit. A file synced once is ready for everyone who plays it: its timing is kept and applied to the subtitle, "
         "downloaded fresh for each person."),
@@ -815,7 +847,8 @@ PUBLIC_TEXTS = {
 PRIVACY_PARTS = (
     ("What is read", "What is read:",
      "your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, its subtitle track "
-     "(about 1 MB) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your AIOStreams. "
+     "(about 1 MB; a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its own server and "
+     "doesn't keep) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your AIOStreams. "
      "AIOSubtitles also searches subtitle sites itself (OpenSubtitles, TheSubtitleDB, Gestdown, SubDL, SubSource): they "
      "get the title's IMDb id, season and episode, the languages, and the file's name, size and hashes, from "
      "AIOSubtitles' server, never your internet address."),

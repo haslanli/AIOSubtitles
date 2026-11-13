@@ -162,6 +162,10 @@ class Settings:
         self.image_ref = _on(g("SUBSYNC_IMAGE_REF", "on"))                   # image subtitles' cue times as the reference
         self.fast_path = _on(g("SUBSYNC_FAST_PATH", "on"))                   # originals checked first, in-sync listed at once
         self.shift_path = _on(g("SUBSYNC_SHIFT_PATH", "on"))                 # then one steady offset (shift.py), alass after
+        # Lines paired by their words where timing hasn't settled a language (textpair.py; D1, D2)
+        self.text_pairing = _on(g("SUBSYNC_TEXT_PAIRING", "on"))
+        self.sections = _on(g("SUBSYNC_SECTIONS", "on"))                    # D4: other cuts fitted in sections
+        self.audio_extra = max(0, int(g("SUBSYNC_AUDIO_EXTRA_WINDOWS", "12")))   # D5: windows a close call may add
         self.parallel_languages = _on(g("SUBSYNC_PARALLEL_LANGUAGES", "on")) # languages at the same time
         # a private path key for the routes that start work or show status (manifest, subtitles, status), so a published
         # port or a reverse-proxy route can't be used to make subsync read files; the synced files and /health stay
@@ -219,7 +223,8 @@ class Settings:
         rule = {"algo": ALGO_VERSION, "revision": RULE_REVISION, "better": self.better, "audio_better": self.audio_better, "snap": self.snap,
                 "snap_within": self.snap_within, "gate_splits": self.gate_splits, "image_ref": self.image_ref,
                 "audio_lead": self.audio_lead, "audio_budget": self.audio_budget, "prefer_plain": self.prefer_plain,
-                "shift_path": self.shift_path, "fallback_reference": self.fallback_reference}
+                "shift_path": self.shift_path, "fallback_reference": self.fallback_reference,
+                "text_pairing": self.text_pairing, "sections": self.sections, "audio_extra": self.audio_extra}
         return hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdigest()[:12]
 
     def missing(self):

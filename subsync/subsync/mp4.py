@@ -11,7 +11,10 @@ Fragmented files (`moof`) are not supported.
 import struct
 import subprocess
 
-from .mkv import HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, NotMatroska, add_audio_bytes, oshash
+import bisect
+
+from .mkv import (HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, WORD_READ, LineReads, NotMatroska, add_audio_bytes,
+                  add_words_bytes, oshash, read_lines)
 
 MAX_MOOV = 64 * 1024 * 1024
 TEXT_SAMPLE_ENTRIES = {b"tx3g": 2, b"text": 2, b"wvtt": 8}   # codec -> largest size of an empty sample
@@ -197,7 +200,8 @@ class Mp4Index:
     def _size(self, t, i):
         return t["const"] or t["sizes"][i]
 
-    def _lines(self, t):
+    def _lines(self, t, samples=False):
+        """The text track's lines as (start, duration); with samples, (start, duration, sample index)."""
         empty = TEXT_SAMPLE_ENTRIES[t["codec"]]
         shift, scale, out, at, i = self._shift(t), t["scale"], [], 0, 0
         n = t["count"]
@@ -206,10 +210,38 @@ class Mp4Index:
                 if i >= n:
                     break
                 if self._size(t, i) > empty and delta > 0:
-                    out.append((at / scale + shift, delta / scale))
+                    out.append((at / scale + shift, delta / scale, i) if samples else (at / scale + shift, delta / scale))
                 at += delta
                 i += 1
         return out
+
+    def line_words(self, track, starts):
+        """D1: the text of the lines of text track `track` that start at `starts`, each sample read where the
+        sample tables put it (at most WORD_READ bytes; WORD_READS_AT_ONCE at once). Returns {start: text}; reads stop as
+        mkv.LineReads says."""
+        t = next((x for x in self.tracks if x["id"] == track and x["codec"] in TEXT_SAMPLE_ENTRIES), None)
+        if t is None:
+            return {}
+        lines = self._lines(t, samples=True)
+        times = [x[0] for x in lines]
+        offsets = self._sample_offsets(t)
+        want = []
+        for s in starts:
+            k = bisect.bisect_left(times, s - 0.0015)
+            if k < len(lines) and abs(lines[k][0] - s) <= 0.0015 and lines[k][2] < len(offsets):
+                i = lines[k][2]
+                want.append((s, offsets[i], min(self._size(t, i), WORD_READ)))
+
+        reads = LineReads(self.r)
+
+        def one(item):
+            s, at, size = item
+            data = reads.get(at, size)
+            if data is None:
+                return s, None
+            add_words_bytes(self, len(data))
+            return s, sample_text(t["codec"], data)
+        return read_lines(want, one)
 
     # -- what the pipeline asks ---------------------------------------------------------------------------------
     def text_tracks(self):
@@ -312,6 +344,24 @@ class Mp4Index:
                               "-t", f"{length:.3f}", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
                              input=stream, capture_output=True, timeout=300)
         return out.stdout
+
+
+def sample_text(codec, data):
+    """A text sample's text: tx3g/text a 16-bit length then UTF-8; WebVTT (wvtt) the `payl` boxes of its `vttc` cues."""
+    if codec in (b"tx3g", b"text"):
+        if len(data) < 2:
+            return None
+        n = struct.unpack_from(">H", data, 0)[0]
+        return data[2:2 + n].decode("utf-8", "replace")
+    if codec == b"wvtt":
+        out = []
+        for kind, q, f in boxes(data, 0, len(data)):
+            if kind == b"vttc":
+                for k2, q2, f2 in boxes(data, q, f):
+                    if k2 == b"payl":
+                        out.append(data[q2:f2].decode("utf-8", "replace"))
+        return "\n".join(out) or None
+    return None
 
 
 def _audio_specific_config(entry):

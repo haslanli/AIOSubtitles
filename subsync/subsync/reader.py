@@ -1,7 +1,13 @@
 """Bounded HTTP range reads of one release file.
 
 Every read is one bounded `Range: bytes=a-b` request with `Connection: close`, read to its length and closed, so no
-connection outlives its read. One info log line per read, naming the job's label, never the URL. A refusal
+connection outlives its read. One info log line per read, naming the job's label, never the URL. The file's link (an
+AIOStreams playback address, which redirects to the debrid service's download address) is followed once: later
+reads go straight to the address it pointed to, kept in memory for this reader only, so a hundred small reads are not a
+hundred calls to AIOStreams; when that address stops answering, the link is asked once more, and a 429 there is a
+refusal like any other. Once the link has redirected, this reader asks it at most 1 + MAX_RE_RESOLVE times in all
+: after that a read the address can't answer fails without asking AIOStreams again (a connection fault
+at the download address had made 50 calls). The Real-Debrid guard checks every address, that one too. A refusal
 (HTTP 403, most likely a debrid per-account download limit) raises Refused so the worker can back off; a
 reply whose total size differs from the file's raises ReadFailed. Before each read the guard
 (budget, pause) may stop the job.
@@ -19,8 +25,15 @@ log = logging.getLogger("subsync.read")
 USER_AGENT = "subsync/1"
 
 
+MAX_RE_RESOLVE = 3     # look-ups of a redirecting link per reader after its first
+
+
 class ReadFailed(Exception):
     """The file can't be read as asked (HTTP error, wrong size, short reply)."""
+
+
+class LinkUsedUp(ReadFailed):
+    """This read would have to ask a link that was asked 1 + MAX_RE_RESOLVE times already; no request made."""
 
 
 class Refused(ReadFailed):
@@ -43,6 +56,62 @@ class RangeReader:
         self.requests = 0
         self._lock = threading.Lock()   # audio windows are read up to 4 at once (audiofit.AudioFit.prefetch)
         self.open = opener or realdebrid.urlopen   # refuses Real-Debrid addresses, redirects included
+        self.resolved = None          # the address the link pointed to: never logged, never stored
+        self.lookups = 0              # requests to the link itself (the first one and any after)
+        self.redirects = False        # the link has redirected once: its look-ups are then counted
+        self._resolving = threading.Lock()   # parallel first reads wait for one look-up of the link
+
+    def _request(self, url, start, length):
+        return urllib.request.Request(url, headers={
+            "Range": f"bytes={start}-{start + length - 1}", "Connection": "close", "User-Agent": USER_AGENT})
+
+    def _open(self, start, length):
+        """The response to one range request and its start time: to the address the link pointed to last time,
+        else to the link, which is then followed and the address it pointed to kept; reads started together wait for one
+        look-up. When that address doesn't answer (an error status other than 429, no connection), it is dropped and
+        the link asked once more, while look-ups are left (`used_up`); a 429 there, or a failure when none are left,
+        reaches the caller like the link's own errors (urllib.error.HTTPError, OSError), so the worker backs off."""
+        resolved = self.resolved
+        if resolved:
+            t0 = time.time()
+            try:
+                return self.open(self._request(resolved, start, length), timeout=self.timeout), t0
+            except realdebrid.Blocked:
+                raise
+            except urllib.error.HTTPError as e:
+                # 429 is the debrid service slowing us down, and an address that keeps failing after fresh look-ups is
+                # a refusal too: raised as such, so the worker backs off instead of asking the link again and again
+                if e.code == 429 or self.used_up():
+                    raise
+                code = e.code
+                e.close()
+            except (OSError, ValueError) as e:
+                if self.used_up():
+                    raise
+                code = type(e).__name__
+            self._count(requests=1)
+            self._log(start, length, 0, code, t0, "at the address the link pointed to: asking the link again")
+            with self._lock:
+                if self.resolved == resolved:
+                    self.resolved = None
+        with self._resolving:     # one look-up at a time: reads started together use the first one's answer
+            if self.resolved:
+                t0 = time.time()
+                return self.open(self._request(self.resolved, start, length), timeout=self.timeout), t0
+            if self.used_up():
+                self._log(start, length, 0, None, time.time(), "the link was asked too often: not asked again")
+                raise LinkUsedUp("the link was asked too often")
+            t0 = time.time()
+            self.lookups += 1
+            r = self.open(self._request(self.url, start, length), timeout=self.timeout)
+            final = r.geturl() if hasattr(r, "geturl") else None
+            if final and final != self.url:
+                self.resolved, self.redirects = final, True
+            return r, t0
+
+    def used_up(self):
+        """The link has redirected and been asked 1 + MAX_RE_RESOLVE times: it isn't asked again."""
+        return self.redirects and self.lookups > MAX_RE_RESOLVE
 
     def get(self, start, length):
         if length <= 0:
@@ -53,12 +122,11 @@ class RangeReader:
             length = min(length, self.size - start)
         if self.guard:
             self.guard.before_read(length)
-        req = urllib.request.Request(self.url, headers={
-            "Range": f"bytes={start}-{start + length - 1}", "Connection": "close", "User-Agent": USER_AGENT})
         t0 = time.time()
-        data, status, total = b"", 0, None
+        data, status, total, sent = b"", 0, None, True
         try:
-            with self.open(req, timeout=self.timeout) as r:
+            r, t0 = self._open(start, length)
+            with r:
                 status = getattr(r, "status", 200)
                 content_range = r.headers.get("Content-Range") or ""
                 if "/" in content_range and content_range.rsplit("/", 1)[1].strip().isdigit():
@@ -75,6 +143,9 @@ class RangeReader:
                     chunks.append(chunk)
                     left -= len(chunk)
                 data = b"".join(chunks)
+        except LinkUsedUp:
+            sent = False
+            raise
         except urllib.error.HTTPError as e:
             status = e.code
             e.close()
@@ -82,7 +153,8 @@ class RangeReader:
             self._log(start, length, 0, status, t0, type(e).__name__)
             raise ReadFailed(type(e).__name__) from None
         finally:
-            self._count(requests=1)
+            if sent:
+                self._count(requests=1)
         self._count(got=len(data))
         if self.guard:
             self.guard.after_read(len(data))
@@ -116,11 +188,9 @@ class RangeReader:
             length = min(length, self.size - start)
         if self.guard:
             self.guard.before_read(length)
-        req = urllib.request.Request(self.url, headers={
-            "Range": f"bytes={start}-{start + length - 1}", "Connection": "close", "User-Agent": USER_AGENT})
         t0 = time.time()
         try:
-            r = self.open(req, timeout=self.timeout)
+            r, t0 = self._open(start, length)
         except urllib.error.HTTPError as e:
             self._count(requests=1)
             e.close()

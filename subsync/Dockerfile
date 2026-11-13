@@ -1,7 +1,10 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # subsync: a Stremio subtitles addon for an AIOStreams custom addon, and the worker that syncs subtitles.
-# alass-cli 2.0.0 (GPL-3.0) is built from crates.io and run as a separate program; Silero VAD 6.2.3 (MIT) runs on
-# onnxruntime (no torch); ffmpeg (Debian) decodes the audio windows. The build stops unless the project's tests pass
-# (including alass and ffmpeg ones). Base images pinned by digest on 2026-11-09.
+# alass-cli 2.0.0 (GPL-3.0) is built from crates.io and run as a separate program; Silero VAD 6.2.3 (MIT) and PP-OCRv5
+# line recognition (Apache-2.0) run on onnxruntime (no torch); ffmpeg (Debian) decodes the audio windows. The build
+# stops unless the project's tests pass (including alass and ffmpeg ones). The first line pins the Dockerfile syntax
+# (1.7, by digest) that ADD --checksum below needs, whatever BuildKit the machine's Docker has (Compose v2 always builds
+# with BuildKit). Base images pinned by digest on 2026-11-09.
 # An image built for another processor under emulation (QEMU runs these tests hours slower) can leave them out with
 # --build-arg SUBSYNC_TESTS=skip; then run them on the machine the image is for, from the image, before using it.
 # alass is compiled on the machine that builds, for the processor the image is for: an image for another processor
@@ -28,7 +31,19 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --no-deps --require-hashes -r /tmp/requirements.txt && rm /tmp/requirements.txt
 COPY --from=alass /out/bin/alass-cli /usr/local/bin/alass
 WORKDIR /opt/subsync
+# onnxruntime (Silero VAD, the OCR models) sends usage events to Microsoft unless this is set before it loads;
+# disable_telemetry_events alone doesn't stop its connection. Set before the tests run, too.
+ENV ORT_DISABLE_TELEMETRY=1
 COPY subsync ./subsync
+# PP-OCRv5 mobile line recognition (PaddlePaddle, Apache-2.0), Latin and Eastern Slavic: reads image subtitle
+# lines' words (imagetext.py); fetched from PaddlePaddle's own publication at pinned revisions, the build stops unless
+# each file has its pinned SHA-256; their character lists are in subsync/ocr/
+ADD --chmod=644 --checksum=sha256:7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498 \
+    https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.onnx \
+    ./subsync/ocr/latin_rec.onnx
+ADD --chmod=644 --checksum=sha256:b3018ef2b09a0250b6e0c8e871c927098363e5fd4df890cc68e8358eb0aaf1bd \
+    https://huggingface.co/PaddlePaddle/eslav_PP-OCRv5_mobile_rec_onnx/resolve/9a32171fc5718746875e1a261818884517975013/inference.onnx \
+    ./subsync/ocr/eslav_rec.onnx
 COPY tests /tmp/tests
 ARG SUBSYNC_TESTS=run
 RUN if [ "$SUBSYNC_TESTS" = skip ]; then echo "tests left out of this build: run them on the machine the image is for"; \

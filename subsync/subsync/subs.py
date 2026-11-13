@@ -86,6 +86,11 @@ def dialogue_starts(lines):
     return [l["s"] for l in lines if l["kind"] == "dialogue"]
 
 
+def dialogue_ends(lines):
+    """The dialogue lines' ends, in dialogue_starts' order."""
+    return [l["e"] for l in lines if l["kind"] == "dialogue"]
+
+
 def ts(t):
     ms = max(0, int(round(t * 1000)))
     return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"

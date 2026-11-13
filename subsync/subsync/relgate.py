@@ -32,6 +32,7 @@ TENTH_MIN_LINES = 5
 TENTH_MIN_SHARE = 0.5
 SPLIT_INTO_S = 0.2
 LOOSE_MS = 500
+END_MS = 300       # recorded: the share of line ends within this of the release's
 MISSING_LINES = 20
 MISSING_S = 150.0
 BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5, "cross_median_ms": 300.0, "cross_paired": 0.75}
@@ -80,17 +81,34 @@ def span_share(ref, cand):
     return max(0.0, hi - lo) / (ref[-1] - ref[0]) if ref[-1] > ref[0] else 0.0
 
 
-def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHARE, min_span=None, ref_recall=1.0):
+def end_errors(err_pairs, ref, dur, cend):
+    """Recorded, never part of the pass (D3): how far the paired lines' ends are from their release lines' ends,
+    where the release line's duration is known. {} when none is."""
+    e = [cend[i] - (ref[k] + dur[k]) for i, k in err_pairs if dur[k] and dur[k] > 0]
+    if not e:
+        return {}
+    a = sorted(abs(x) * 1000 for x in e)
+    return {"end_n": len(e), "end_median_ms": round(statistics.median(a), 1),
+            "end_signed_median_ms": round(statistics.median(e) * 1000, 1),
+            "end_within300": round(sum(x <= END_MS for x in a) / len(a), 3)}
+
+
+def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHARE, min_span=None, ref_recall=1.0,
+            cand_ends=None):
     """ref_durations: the reference lines' durations, in ref_starts' order; given, split lines count as paired.
     min_span: the share of the release's span the candidate must cover; a subtitle for half the film
     (a CD2 file) or another cut can pass on the part it has, so it fails here.
     ref_recall: an image-subtitle reference keeps only the line starts it is sure of, so even a
     perfect candidate pairs only about that share of its lines: the paired and per-tenth minimums are scaled by it
-    (<= 1). The error bar itself (median, share within 200 ms) is unchanged."""
+    (<= 1). The error bar itself (median, share within 200 ms) is unchanged.
+    cand_ends: the candidate lines' ends, in cand_starts' order; given with ref_durations, the end errors are recorded
+    (end_*), never part of the pass."""
     order = sorted(range(len(ref_starts)), key=lambda x: ref_starts[x])
     ref = [ref_starts[x] for x in order]
     dur = [ref_durations[x] for x in order] if ref_durations is not None else None
-    cand = sorted(cand_starts)
+    corder = sorted(range(len(cand_starts)), key=lambda x: cand_starts[x])
+    cand = [cand_starts[x] for x in corder]
+    cend = [cand_ends[x] for x in corder] if cand_ends is not None and len(cand_ends) == len(cand_starts) else None
     n = len(cand)
     recall = max(0.0, min(1.0, ref_recall))
     if not n or not ref:
@@ -150,6 +168,8 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
            "missing_scene": cut, "span": round(span, 3), "pass": ok}
     if dur is not None:
         out["splits"] = len(split)
+        if cend is not None:
+            out.update(end_errors(sorted(m.items()), ref, dur, cend))
     if within_share != WITHIN_SHARE:
         out["within_needed"] = within_share
     if recall < 1.0:

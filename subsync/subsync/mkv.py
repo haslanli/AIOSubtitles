@@ -5,9 +5,13 @@ comes from the Cues without reading any cluster. An audio window is read as the 
 planned from the Cues, prefixed with a minimal header (EBML + Segment of unknown size + Info + Tracks, no
 attachments), and decoded from a pipe.
 """
+import bisect
+import logging
 import struct
 import subprocess
 import threading
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 AUDIO_BYTES_LOCK = threading.Lock()
 
@@ -16,6 +20,12 @@ def add_audio_bytes(index, n):
     """Bytes of audio windows read for this file (its audio budget); windows may be read in parallel."""
     with AUDIO_BYTES_LOCK:
         index.audio_bytes = getattr(index, "audio_bytes", 0) + n
+
+
+def add_words_bytes(index, n):
+    """Bytes read for track lines' words (D1); lines are read in parallel."""
+    with AUDIO_BYTES_LOCK:
+        index.__dict__["words_bytes"] = index.__dict__.get("words_bytes", 0) + n
 
 
 HEAD_BYTES = 256 * 1024
@@ -29,8 +39,125 @@ TEXT_CODECS = ("S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT", "S_TE
 NOT_DIALOGUE = ("forced", "sign", "song", "karaoke", "commentary")
 
 
+WORD_READ = 2048                   # bytes read for one line's words (D1)
+IMAGE_READ = 64 * 1024             # an image line's block, at most: 2 KB first, the rest only when needed
+WORD_READS_AT_ONCE = 4
+MAX_FAILED_IN_A_ROW = 3            # a track's line reads stop after this many failed reads in a row
+
+log = logging.getLogger("subsync.read")
+
+
 class NotMatroska(Exception):
     pass
+
+
+def block_payload(buf, track):
+    """The payload of the SimpleBlock or BlockGroup's Block of `track` that starts within the first 8 bytes of buf (the
+    Cluster's header is 5 to 12 bytes, so a block's place is known only to that), or None. The Cluster's size bytes can
+    look like a block too: a payload found at two places that differ is no answer."""
+    found = {_block_at(buf, o, track) for o in range(8)} - {None}
+    return found.pop() if len(found) == 1 else None
+
+
+def block_extent(buf, track):
+    """(payload start, payload end) of the one block of `track` starting within buf's first 8 bytes; the end may lie
+    past the buffer (the rest of the block not read yet). None when there is none, or more than one place fits."""
+    found = {_block_extent(buf, o, track) for o in range(8)} - {None}
+    return found.pop() if len(found) == 1 else None
+
+
+def _block_extent(buf, o, track):
+    try:
+        eid, n = vint(buf, o, strip=False)
+        if eid not in (0xA3, 0xA0):
+            return None
+        size, m = vint(buf, o + n)
+        p = o + n + m
+        if eid == 0xA0:
+            cid, n2 = vint(buf, p, strip=False)
+            if cid != 0xA1:
+                return None
+            size, m2 = vint(buf, p + n2)
+            p += n2 + m2
+        tn, k = vint(buf, p)
+        if tn != track or size < k + 3 or size > MAX_ELEMENT:
+            return None
+        return p + k + 3, p + size
+    except (IndexError, NotMatroska):
+        return None
+
+
+def _block_at(buf, o, track):
+    """The payload of a block of `track` starting at buf[o], or None."""
+    ext = _block_extent(buf, o, track)
+    return None if ext is None else bytes(buf[ext[0]:ext[1]])
+
+
+def uncompressed(payload, comp):
+    """A block payload with the track's ContentCompression undone (zlib, or header stripping); None when it can't be."""
+    if payload is None or not comp:
+        return payload
+    if comp["algo"] == 3:
+        return comp["settings"] + payload
+    if comp["algo"] == 0:
+        try:
+            return zlib.decompressobj().decompress(payload)
+        except zlib.error:
+            return None
+    return None
+
+
+def read_lines(want, one):
+    """D1,: `one(item)` -> (start, a line's text or block payload, or None) for each item, WORD_READS_AT_ONCE
+    at once; {start: value}. A refused read or a stopped job ends every read not started yet and is raised (`one`
+    raises it and sets `stop` itself)."""
+    from .reader import Refused, Stopped
+    out = {}
+    with ThreadPoolExecutor(max_workers=WORD_READS_AT_ONCE, thread_name_prefix="subsync-words") as pool:
+        futures = [pool.submit(one, item) for item in want]
+        for fut in futures:
+            try:
+                s, value = fut.result()
+            except (Refused, Stopped):   # the host refused, or the guard stopped the job: no further read
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            if value:
+                out[s] = value
+    return out
+
+
+class LineReads:
+    """One track's line reads through `reader`, which stop for good once a read is refused or the job stops
+    (both raised) or once MAX_FAILED_IN_A_ROW reads in a row have failed: a host that doesn't answer isn't asked for
+    every line (a dead download address made 50 reads, each a call to the AIOStreams link). A read that works
+    starts the count again, so a failure now and then stops nothing."""
+
+    def __init__(self, reader):
+        self.r = reader
+        self.stop = threading.Event()
+        self._lock = threading.Lock()
+        self._failed = 0
+
+    def get(self, at, n):
+        """reader.get(at, n), or None when it failed or the reads have stopped."""
+        from .reader import ReadFailed, Refused, Stopped
+        if self.stop.is_set():
+            return None
+        try:
+            buf = self.r.get(at, n)
+        except (Refused, Stopped):
+            self.stop.set()
+            raise
+        except ReadFailed:
+            with self._lock:
+                self._failed += 1
+                if self._failed >= MAX_FAILED_IN_A_ROW and not self.stop.is_set():
+                    self.stop.set()
+                    log.info("line reads %s stopped: %d failed in a row", getattr(self.r, "label", "-"), self._failed)
+            return None
+        with self._lock:
+            self._failed = 0
+        return buf
 
 
 def pipe_until(cmd, head, chunks, need, timeout=300):
@@ -129,6 +256,7 @@ class MkvIndex:
         self.positions = {}
         self.cue_points = []     # (time s, absolute cluster position), any track
         self.track_cues = {}     # track number -> [(start s, duration s)]
+        self.track_places = {}   # track number -> [(start s, cluster position, place in the cluster or None)]
         self.cues_at = None
         self.first_cluster = None
         self.ebml = self.info = self.tracks_raw = b""
@@ -220,6 +348,20 @@ class MkvIndex:
                         t["forced"] = uint(v)
                     elif cid == 0x88:
                         t["default"] = uint(v)
+                    elif cid == 0x63A2:   # CodecPrivate: VobSub's palette (the .idx header), ASS's header
+                        t["private"] = bytes(v)
+                    elif cid == 0x6D80:   # ContentEncodings: the compression of each block's payload
+                        for _, _, ep, esz in elements(buf, cp, cp + csz):
+                            for kid, _, kp, ksz in elements(buf, ep, ep + esz):
+                                if kid != 0x5034:
+                                    continue
+                                comp = {"algo": 0, "settings": b""}
+                                for zid, _, zp, zsz in elements(buf, kp, kp + ksz):
+                                    if zid == 0x4254:
+                                        comp["algo"] = uint(buf[zp:zp + zsz])
+                                    elif zid == 0x4255:
+                                        comp["settings"] = bytes(buf[zp:zp + zsz])
+                                t["compression"] = comp
                 if t.get("number"):
                     self.tracks.append(t)
 
@@ -243,7 +385,7 @@ class MkvIndex:
                 if cid == 0xB3:
                     t = uint(body[cp:cp + csz]) * self.scale / 1e9
                 elif cid == 0xB7 and t is not None:
-                    trk = dur = None
+                    trk = dur = cpos = rel = None
                     for gid, _, gp, gsz in elements(body, cp, cp + csz):
                         if gid == 0xF1:
                             cpos = self.seg_data + uint(body[gp:gp + gsz])
@@ -254,11 +396,16 @@ class MkvIndex:
                             trk = uint(body[gp:gp + gsz])
                         elif gid == 0xB2:
                             dur = uint(body[gp:gp + gsz]) * self.scale / 1e9
+                        elif gid == 0xF0:
+                            rel = uint(body[gp:gp + gsz])
                     if trk is not None:
                         self.track_cues.setdefault(trk, []).append((t, dur or 0.0))
+                        self.track_places.setdefault(trk, []).append((t, cpos, rel))
         self.cue_points.sort(key=lambda x: x[1])
         for lst in self.track_cues.values():
             lst.sort()
+        for lst in self.track_places.values():
+            lst.sort(key=lambda x: x[0])
         return self
 
     def read_hash(self):
@@ -279,6 +426,86 @@ class MkvIndex:
                         "forced": bool(t.get("forced")) or any(w in name for w in NOT_DIALOGUE),
                         "cues": self.track_cues.get(t["number"], [])})
         return out
+
+    def line_words(self, track, starts):
+        """D1: the text of the lines of text track `track` that start at `starts` (seconds), each read from its
+        block's place in the Cues (one read of WORD_READ bytes; WORD_READS_AT_ONCE at once). Returns {start: text} for
+        those it could read; a line whose cue has no place in its cluster, or whose block doesn't parse, is left out. A
+        refused read (Refused) or a stopped job (Stopped) is raised; after MAX_FAILED_IN_A_ROW failed reads in a row no
+        further line is read (LineReads)."""
+        meta = next((t for t in self.tracks if t.get("number") == track), {})
+        comp = meta.get("compression")
+        want = self._places(track, starts)
+        reads = LineReads(self.r)
+
+        def one(item):
+            s, at = item
+            if self.size is not None and at >= self.size:
+                return s, None
+            buf = reads.get(at, WORD_READ)
+            if buf is None:
+                return s, None
+            add_words_bytes(self, len(buf))
+            payload = uncompressed(block_payload(buf, track), comp)
+            if payload is None:
+                return s, None
+            text = payload.decode("utf-8", "replace")
+            if text.count("\ufffd") > 0.1 * max(1, len(text)):
+                return s, None
+            if meta.get("codec", "").startswith(("S_TEXT/ASS", "S_TEXT/SSA")):
+                from .textpair import ass_text
+                text = ass_text(text)
+            return s, text
+        return read_lines(want, one)
+
+    def _places(self, track, starts):
+        """[(start, the byte where its block's search begins)] for the starts whose cue has a place in its cluster: the
+        Cluster's data start is 5 to 12 bytes after its position (block_extent looks at all eight)."""
+        places = self.track_places.get(track, [])
+        times = [p[0] for p in places]
+        want = []
+        for s in starts:
+            k = bisect.bisect_left(times, s - 0.0015)
+            if k < len(places) and abs(places[k][0] - s) <= 0.0015 and places[k][1] is not None \
+                    and places[k][2] is not None:
+                want.append((s, places[k][1] + 5 + places[k][2]))
+        return want
+
+    def codec_private(self, track):
+        """A track's CodecPrivate (VobSub: the .idx header with its palette), b"" when it has none."""
+        return next((t.get("private", b"") for t in self.tracks if t.get("number") == track), b"")
+
+    def line_images(self, track, starts):
+        """The block payloads (uncompressed) of the lines of image track `track` that start at `starts`: a first
+        read of WORD_READ bytes, then the rest of the block when it is longer, never a block over IMAGE_READ bytes;
+        WORD_READS_AT_ONCE lines at once. Returns {start: payload}. A refused read (Refused) or a stopped job (Stopped)
+        is raised; after MAX_FAILED_IN_A_ROW failed reads in a row no further line is read (LineReads)."""
+        meta = next((t for t in self.tracks if t.get("number") == track), {})
+        comp = meta.get("compression")
+        want = self._places(track, starts)
+        reads = LineReads(self.r)
+
+        def get(at, n):
+            buf = reads.get(at, n)
+            if buf is not None:
+                add_words_bytes(self, len(buf))
+            return buf
+
+        def one(item):
+            s, at = item
+            if self.size is not None and at >= self.size:
+                return s, None
+            buf = get(at, min(WORD_READ, IMAGE_READ))
+            ext = block_extent(buf, track) if buf else None
+            if ext is None or ext[1] > IMAGE_READ:
+                return s, None
+            if ext[1] > len(buf):
+                more = get(at + len(buf), ext[1] - len(buf))
+                if more is None or len(more) < ext[1] - len(buf):
+                    return s, None
+                buf = buf + more
+            return s, uncompressed(bytes(buf[ext[0]:ext[1]]), comp)
+        return read_lines(want, one)
 
     def image_tracks(self):
         """Image subtitle tracks (PGS, VobSub) with their cue timings; forced/sign tracks marked."""
