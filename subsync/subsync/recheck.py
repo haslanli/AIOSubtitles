@@ -8,13 +8,15 @@ the person can fix, for their settings page and one "action needed" entry in the
 the box that lets AIOSubtitles keep their password also gets AIOSubtitles' config rebuilt from theirs, saved only when it
 changed, and made again when it is gone; Real-Debrid and Usenet stay out each time, and their own config is never
 changed. One check at a time per AIOStreams address, so an AIOStreams many people share gets at most a few calls at once.
+A record for stored copies only (Real-Debrid is their only debrid service) has no sync config to check: it is
+checked only when the person let AIOSubtitles keep their password, and the rebuild then moves them both ways.
 """
 import logging
 import threading
 import time
 
 from .aiosconfig import AiosError
-from .signup import WRONG_PASSWORD_CODES, SignupError, all_clear, drop_sync, public_api, rebuild
+from .signup import STORED, WRONG_PASSWORD_CODES, SignupError, all_clear, drop_sync, public_api, rebuild, store_only
 
 log = logging.getLogger("subsync.recheck")
 HOUR = 3600
@@ -46,7 +48,9 @@ class Checker:
             record = self.users.open(token)
             if record is None:
                 return False
-            due = record.get("next_check") or 0
+            # stored copies only and no kept password: nothing to check until a refresh (which forgets this)
+            due = float("inf") if store_only(record) and not record.get("auto_password") else \
+                record.get("next_check") or 0
             with self.lock:
                 self.next[uid] = due
         if self.clock() < due:
@@ -93,10 +97,11 @@ class Checker:
             current = self.users.open(token)
             if current is None:
                 return None
-            if any(current.get(k) != record.get(k) for k in ("instance", "main_uuid", "sync_uuid")):
+            dropped = None
+            if any(current.get(k) != record.get(k) for k in ("instance", "main_uuid", "sync_uuid", "store_only")):
                 state = current.get("state")   # a refresh came in meanwhile: what this check saw is about the old configs
                 fields = found.get("fields")
-                if fields and fields[0] != record["sync_uuid"]:   # a config this check made: not used, so removed
+                if fields and fields[0] and fields[0] != record.get("sync_uuid"):   # made by this check, not used: removed
                     drop_sync(self.api_factory(record["instance"], self.timeout), fields)
             else:
                 before = (current.get("state"), current.get("sync_link"), current.get("sync_uuid"))
@@ -104,6 +109,9 @@ class Checker:
                 state = current.get("state")
                 changed = (state, current.get("sync_link"), current.get("sync_uuid")) != before
                 self.users.update(token, current)
+                dropped = found.get("dropped") if store_only(current) else None
+            if dropped:     # the sync config of a config that became Real-Debrid-only, once the record says so
+                drop_sync(self.api_factory(record["instance"], self.timeout), dropped)
             with self.lock:
                 self.next[self.users.user_id(token)] = current.get("next_check") or 0
         log.info("checked a person's AIOStreams: %s", state or "all well")
@@ -119,25 +127,32 @@ class Checker:
         """What the person's AIOStreams says now; nothing is written to the record here."""
         found = {"sync": None, "main": None, "rebuilt": None, "problem": None}
         api = self.api_factory(record["instance"], self.timeout)
+        stored = store_only(record)
         with self._instance(record["instance"]):
-            try:
-                _, encrypted = api.get_config(record["sync_uuid"], record["sync_password"])
-                found["sync"], found["encrypted"], found["checked"] = "ok", encrypted, record["sync_uuid"]
-            except AiosError as e:
-                found["sync"] = "gone" if str(e.code) in WRONG_PASSWORD_CODES else \
-                    "unreachable" if "Can't reach" in e.message else "error"
-            if found["sync"] == "unreachable":
-                return found
+            if not stored:          # stored copies only: there is no sync config of theirs to look at
+                try:
+                    _, encrypted = api.get_config(record["sync_uuid"], record["sync_password"])
+                    found["sync"], found["encrypted"], found["checked"] = "ok", encrypted, record["sync_uuid"]
+                except AiosError as e:
+                    found["sync"] = "gone" if str(e.code) in WRONG_PASSWORD_CODES else \
+                        "unreachable" if "Can't reach" in e.message else "error"
+                if found["sync"] == "unreachable":
+                    return found
             try:
                 found["main"] = api.config_exists(record["main_uuid"])
             except AiosError:
                 found["main"] = None
             password = record.get("auto_password")
-            if password and found["main"] is not False and found["sync"] in ("ok", "gone"):
+            if password and found["main"] is not False and (stored or found["sync"] in ("ok", "gone")):
                 copy = dict(record)
                 try:
-                    found["rebuilt"] = rebuild(self.s, copy, token, api, password, force=found["sync"] == "gone")
-                    found["fields"] = (copy["sync_uuid"], copy["sync_link"], copy["sync_password"], copy["sync_fp"])
+                    rebuilt = rebuild(self.s, copy, token, api, password, force=found["sync"] == "gone")
+                    if rebuilt is STORED:          # their config became Real-Debrid-only
+                        found["to_store_only"], found["dropped"] = True, copy.get("dropped")
+                    else:
+                        found["rebuilt"] = rebuilt
+                        found["fields"] = (copy.get("sync_uuid"), copy.get("sync_link"), copy.get("sync_password"),
+                                           copy.get("sync_fp"))
                 except SignupError as e:
                     found["problem"] = ("password" if e.field == "password" else
                                         "unreachable" if e.field == "link" else "rebuild", e.message)
@@ -178,10 +193,17 @@ class Checker:
         if kind == "rebuild":    # their config can no longer be used (only Real-Debrid, no readable source)
             record["state"], record["state_detail"] = "cannot_rebuild", detail
             return
+        if found.get("to_store_only"):   # stored copies only from now on; check() removes the old sync config
+            for name in ("sync_uuid", "sync_link", "sync_password", "sync_fp", "synced_at"):
+                record.pop(name, None)
+            record["store_only"] = True
+            all_clear(self.s, record, now)
+            return
         if found.get("fields"):        # rebuilt from their config with the kept password (or nothing to change)
             if found["rebuilt"] is not None:
                 record["sync_uuid"], record["sync_link"], record["sync_password"], record["sync_fp"] = found["fields"]
                 record["synced_at"] = now
+                record.pop("store_only", None)
             all_clear(self.s, record, now)
         elif found["sync"] == "gone":
             record["state"] = "sync_gone"
@@ -194,7 +216,7 @@ class Checker:
     @staticmethod
     def _repair_link(record, found):
         """A sync config that opened: its link as its AIOStreams gives it now. True when it opened."""
-        if found["sync"] != "ok" or found.get("checked") != record["sync_uuid"]:
+        if found["sync"] != "ok" or found.get("checked") != record.get("sync_uuid"):
             return False
         link = f"{record['instance']}/stremio/{record['sync_uuid']}/{found['encrypted']}/manifest.json"
         if found["encrypted"] and link != record["sync_link"]:

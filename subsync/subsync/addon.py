@@ -9,7 +9,8 @@ GET  /subtitles/<type>/<id>[/<extras>].json   extras = videoHash, videoSize, fil
         SUBSYNC_PENDING_WAIT_MS for the job and a pending "(synced)" entry is listed.
 GET  /file/<id>.<srt|ass>                      a synced copy
 GET  /pending/<token>/<lang>.srt               a pending entry
-GET  /pick/<token>/<lang>.srt                  a "<Language> (Subsync)" entry: the synced copy when there is one (waiting
+GET  /pick/<token>/<lang>.srt                  a "<Language> (Subsync)" entry ("(AIOSubtitles)" in public mode):
+     the synced copy when there is one (waiting
      up to SUBSYNC_PICK_WAIT_MS for a job working on the file), else a redirect to the original; for a language that
      has no subtitle at all a one-line note; 503 while the file's subtitle list is still unknown. With the audio
      route on (pick mode) the download also starts the audio route for a file that needs it.
@@ -38,6 +39,10 @@ from .subs import apply_recipe, is_ass, parse, to_srt
 from .worker import Job
 
 log = logging.getLogger("subsync.addon")
+
+# The pick entry's name in subtitle lists: "<Language> (Subsync)" self-hosted, "<Language> (AIOSubtitles)" on the public
+# service.
+PICK_NAME = {False: "Subsync", True: "AIOSubtitles"}
 
 MANIFEST = {
     "id": "org.aiosubtitles.subsync",
@@ -195,7 +200,7 @@ class App:
             if lang in have or (originals is not None and not original):
                 continue
             out.append({"id": f"subsync-pick-{lang}", "url": f"{self.s.public_base}/pick/{tok}/{lang}.srt",
-                        "lang": lang, "label": f"{lang_name(lang)} (Subsync)",
+                        "lang": lang, "label": f"{lang_name(lang)} ({PICK_NAME[self.s.public]})",
                         "variantOf": original["id"] if original else "original"})
         return out
 

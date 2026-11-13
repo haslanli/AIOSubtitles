@@ -15,13 +15,13 @@ import time
 import urllib.parse
 from http.server import ThreadingHTTPServer
 
-from . import pages
+from . import pages, ui
 from .addon import App, Handler
 from .aiosconfig import parse_languages
 from .settings import Settings
 from .recheck import Checker
 from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh, set_languages,
-                     signup)
+                     signup, store_only)
 from .sources import Aios
 from .users import day_of
 from .worker import OverLimit, Safety, Turn, Worker
@@ -30,12 +30,13 @@ log = logging.getLogger("subsync.public")
 
 
 def user_settings(env, record, token):
-    """A person's own settings: the service's, with their languages, their sync config and their own address."""
+    """A person's own settings: the service's, with their languages, their sync config and their own address. A record
+    for stored copies only has no sync config: nothing to read through."""
     base = Settings(env).public_base
     own = dict(env)
     own.update({"SUBSYNC_LANGUAGES": ",".join(record["languages"]),
-                "SUBSYNC_SOURCE_MANIFEST": record["sync_link"],
-                "SUBSYNC_SOURCE_PASSWORD": record["sync_password"],
+                "SUBSYNC_SOURCE_MANIFEST": record.get("sync_link") or "",
+                "SUBSYNC_SOURCE_PASSWORD": record.get("sync_password") or "",
                 "SUBSYNC_PUBLIC_BASE": f"{base}/u/{token}",
                 "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
     return Settings(own)
@@ -128,6 +129,8 @@ class Pool:
         if record is None:
             return None
         self.users.touch(token)
+        if store_only(record):     # answered from the shared store only, never a worker or a read of theirs
+            return self._build(token, record, StoreOnly(), start=False)
         with self.lock:
             entry = self.entries.get(uid)
             if entry is not None:          # another request opened it meanwhile
@@ -188,13 +191,18 @@ class Pool:
 # ------------------------------------------------------------------------------------------- the router
 
 PAGE_HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; "
-                               "base-uri 'none'; frame-ancestors 'none'",
+    # only this service's own script, stylesheet and two typefaces, nothing inline
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+                               "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff",
     "Cache-Control": "no-store"}
 PERSONAL_HEADERS = dict(PAGE_HEADERS, **{"X-Robots-Tag": "noindex"})   # pages under a personal link
 SCRIPT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600",
                   "Referrer-Policy": "no-referrer"}
+# the typefaces never change under their names (a new version would get a new name)
+FONT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=31536000, immutable",
+                "Referrer-Policy": "no-referrer"}
+FONT_PATH = re.compile(r"^/static/fonts/([A-Za-z0-9-]+\.ttf)$")
 MAX_FORM = 8192
 MAX_FIELDS = 50          # the sign-up form with every language chip ticked fits
 USER_PATH = re.compile(r"^/u/([A-Za-z0-9_-]{43})(/.*)?$")
@@ -258,6 +266,13 @@ class PublicHandler(Handler):
     def _html(self, code, text, personal=False):
         self._send(code, text, "text/html; charset=utf-8", PERSONAL_HEADERS if personal else PAGE_HEADERS)
 
+    def _font(self, name):
+        """One of the two typefaces, as the image build put them in; 404 otherwise."""
+        found = ui.font_path(name)
+        if found is None:
+            return self._send(404, b"")
+        return self._send(200, ui.font_bytes(found), "font/ttf", FONT_HEADERS)
+
     def _not_found(self):
         """404: a short page for a browser, nothing for an app. The same for any unknown address, a personal link
         nobody signed up with included, so the answer tells nothing about which links exist."""
@@ -305,7 +320,12 @@ class PublicHandler(Handler):
             if path == "/privacy" and method == "GET":
                 return self._html(200, pages.privacy_page(svc.s))
             if path == "/static/app.js" and method == "GET":
-                return self._send(200, pages.APP_JS, "text/javascript; charset=utf-8", SCRIPT_HEADERS)
+                return self._send(200, ui.APP_JS, "text/javascript; charset=utf-8", SCRIPT_HEADERS)
+            if path == "/static/app.css" and method == "GET":
+                return self._send(200, ui.APP_CSS, "text/css; charset=utf-8", SCRIPT_HEADERS)
+            font = FONT_PATH.match(path)
+            if font and method == "GET":
+                return self._font(font.group(1))
             if path == "/health" or path.startswith("/file/"):
                 return self.dispatch(svc.shared, path, False) if method == "GET" else self._send(405, b"")
             m = USER_PATH.match(path)
@@ -345,7 +365,7 @@ class PublicHandler(Handler):
             result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout)
         except SignupError as e:
             return self._html(e.code, pages.signup_page(svc.s, error=e.message, field=e.field,
-                                                        order=_chosen(form)))
+                                                        order=_chosen(form, svc.s.max_languages)))
         return self._html(200, pages.result_page(result), personal=True)
 
     def _configure(self, token, method):
@@ -376,7 +396,7 @@ class PublicHandler(Handler):
         action = form.get("action")
         try:
             if action == "languages":
-                set_languages(svc.users, token, form_languages(form))
+                set_languages(svc.users, token, form_languages(form), svc.s.max_languages)
                 svc.pool.stop(token)          # the next request opens the record with the new languages
                 return self._see("languages")
             if action == "refresh":
@@ -390,13 +410,16 @@ class PublicHandler(Handler):
                                 field={"password": "refresh", "link": "new_link"}.get(e.field, e.field))
                 svc.pool.stop(token)
                 svc.checker.forget(token)
+                if result.store_only:          # stored copies only: moved there by this refresh, or still
+                    done = ("to-stored" if result.to_store_only else "stored") + ("-manual" if result.manual else "")
+                    return self._see(done)
                 return self._see("refreshed-manual" if result.manual else "refreshed-rd" if result.warning
                                  else "refreshed")
             if action == "forget-password":
                 forget_password(svc.users, token)
                 return self._see("forgot")
             if action == "delete-confirm":
-                return self._html(200, pages.delete_confirm_page(), personal=True)
+                return self._html(200, pages.delete_confirm_page(stored=store_only(record)), personal=True)
             if action == "delete":
                 svc.pool.stop(token)
                 svc.checker.forget(token)
@@ -405,20 +428,22 @@ class PublicHandler(Handler):
                                      api_factory=svc.api_factory, timeout=svc.timeout)
                 except SignupError as e:      # back to the delete step, not the settings page
                     return self._html(e.code, pages.delete_confirm_page(
-                        error=e.message, field="delete" if e.field == "password" else e.field), personal=True)
+                        error=e.message, field="delete" if e.field == "password" else e.field,
+                        stored=store_only(record)), personal=True)
                 return self._html(200, pages.deleted_page(outcome), personal=True)
         except SignupError as e:
             return page(e.code, error=e.message, field=e.field)
         return page(400, error="Choose one of the buttons on this page.")
 
 
-def _chosen(form):
-    """The languages a form chose, as codes in order, to show them again after a problem (never anything else)."""
+def _chosen(form, limit=4):
+    """The languages a form chose, as codes in order, to show them again after a problem (never anything else); None
+    when they can't be shown (more than the instance's limit, or a name it doesn't know)."""
     try:
         text = form_languages(form)
     except SignupError:
         return []                 # none chosen: show none ticked, as sent
-    langs, problem = parse_languages(text or "")
+    langs, problem = parse_languages(text or "", limit)
     return None if problem else [three for _, _, three in langs]
 
 

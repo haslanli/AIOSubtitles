@@ -69,6 +69,12 @@ def _places(value):
     return int(value) if value.isdigit() and int(value) >= 1 else None
 
 
+def _language_limit(value):
+    """SUBSYNC_MAX_LANGUAGES: a whole number from 1 to 4 (the pages name four places at most); None otherwise."""
+    value = str(value).strip()
+    return int(value) if value.isdigit() and 1 <= int(value) <= 4 else None
+
+
 class Settings:
     def __init__(self, env=None):
         e = env if env is not None else os.environ
@@ -184,6 +190,8 @@ class Settings:
         self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "40"))
         self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "500")) * 1024 * 1024)
         self.user_queue = int(g("SUBSYNC_USER_QUEUE", "3"))
+        # the most languages a person may choose on the sign-up and settings pages
+        self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES", "4"))
         self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS", "30"))
         self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN", "30")) * 60
         self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS", "180"))
@@ -252,6 +260,8 @@ class Settings:
                        "remove SUBSYNC_WYZIE_KEY or turn public mode off.")
         if self.syncs_at_once is None:
             out.append("SUBSYNC_SYNCS_AT_ONCE must be a whole number from 1, or auto.")
+        if self.max_languages is None:
+            out.append("SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.")
         if self.public and self.gateway_missing:
             out.append("SUBSYNC_TRUSTED_PROXY says gateway, but this machine has no default gateway to trust: give your "
                        "web server's address instead.")

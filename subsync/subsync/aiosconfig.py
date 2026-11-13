@@ -64,8 +64,12 @@ _BY.update({'deu': _BY['de'], 'fra': _BY['fr'], 'nld': _BY['nl'], 'ces': _BY['cs
 UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)
 
 
-def parse_languages(text):
-    """'English, ru' -> ([('English','en','eng'), ('Russian','ru','rus')], None) or ([], 'what is wrong')."""
+LIMIT_WORDS = {1: 'One', 2: 'Two', 3: 'Three', 4: 'Four'}
+
+
+def parse_languages(text, limit=4):
+    """'English, ru' -> ([('English','en','eng'), ('Russian','ru','rus')], None) or ([], 'what is wrong'). At most
+    `limit` languages (1 to 4: the public instance's SUBSYNC_MAX_LANGUAGES; the setup keeps 4)."""
     found, unknown = [], []
     for part in re.split(r'[,;/\s]+', text or ''):
         if not part:
@@ -79,8 +83,10 @@ def parse_languages(text):
         return [], f'Not a language I know: {", ".join(unknown)}. Use names like English, Spanish, Russian.'
     if not found:
         return [], 'Name at least one language.'
-    if len(found) > 4:
-        return [], 'Four languages at most (each one is a separate sync for every file).'
+    if len(found) > limit:
+        if limit == 1:
+            return [], 'One language at most.'
+        return [], f'{LIMIT_WORDS[limit]} languages at most (each one is a separate sync for every file).'
     return found, None
 
 

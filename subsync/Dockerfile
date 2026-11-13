@@ -35,6 +35,20 @@ WORKDIR /opt/subsync
 # disable_telemetry_events alone doesn't stop its connection. Set before the tests run, too.
 ENV ORT_DISABLE_TELEMETRY=1
 COPY subsync ./subsync
+# The pages' two typefaces, Atkinson Hyperlegible Next and Mono (SIL Open Font Licence 1.1, its text beside them),
+# served by subsync itself so the pages load nothing from elsewhere; fetched from github.com/google/fonts at a pinned
+# revision, the build stops unless each file has its pinned SHA-256. The folder is made first: a folder ADD makes takes
+# the files' mode, 644, and the service's user then can't open it (a test instance answered the fonts with 404)
+RUN mkdir -m 755 ./subsync/static/fonts
+ADD --chmod=644 --checksum=sha256:5a455d1cfa099b601ab70751bb9673e8fe1854dc4500c80e1a220d0d75e31745 \
+    https://raw.githubusercontent.com/google/fonts/35e77c3854970a550d9894a85aba21420813a019/ofl/atkinsonhyperlegiblenext/AtkinsonHyperlegibleNext%5Bwght%5D.ttf \
+    ./subsync/static/fonts/AtkinsonHyperlegibleNext-wght.ttf
+ADD --chmod=644 --checksum=sha256:5ce8b1698d1ded7dff2178c1a3ad159470085a58ea239e8b2cb88f4fb4a6f646 \
+    https://raw.githubusercontent.com/google/fonts/35e77c3854970a550d9894a85aba21420813a019/ofl/atkinsonhyperlegiblemono/AtkinsonHyperlegibleMono%5Bwght%5D.ttf \
+    ./subsync/static/fonts/AtkinsonHyperlegibleMono-wght.ttf
+ADD --chmod=644 --checksum=sha256:aca6a428580965d2297d1b718042dd427c2a9443ece3b0d02d758e161e0c4030 \
+    https://raw.githubusercontent.com/google/fonts/35e77c3854970a550d9894a85aba21420813a019/ofl/atkinsonhyperlegiblenext/OFL.txt \
+    ./subsync/static/fonts/OFL.txt
 # PP-OCRv5 mobile line recognition (PaddlePaddle, Apache-2.0), Latin and Eastern Slavic: reads image subtitle
 # lines' words (imagetext.py); fetched from PaddlePaddle's own publication at pinned revisions, the build stops unless
 # each file has its pinned SHA-256; their character lists are in subsync/ocr/
@@ -50,7 +64,8 @@ RUN if [ "$SUBSYNC_TESTS" = skip ]; then echo "tests left out of this build: run
     else python -m unittest discover -s /tmp/tests -t /tmp/tests -v > /tmp/tests.log 2>&1; rc=$?; \
       if [ "$rc" -ne 0 ]; then tail -60 /tmp/tests.log; exit "$rc"; fi; tail -5 /tmp/tests.log; fi \
  && rm -rf /tmp/tests /tmp/tests.log && find /opt/subsync -name __pycache__ -prune -exec rm -rf {} + \
- && useradd --system --uid 10001 --no-create-home subsync && mkdir /data && chown subsync /data
+ && useradd --system --uid 10001 --no-create-home subsync && mkdir /data && chown subsync /data \
+ && runuser -u subsync -- python -c "from subsync import ui; [ui.font_bytes(ui.font_path(n)) for n in ui.FONT_FILES]"
 USER subsync
 ENV SUBSYNC_DATA=/data
 EXPOSE 8790

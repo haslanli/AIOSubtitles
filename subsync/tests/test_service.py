@@ -382,6 +382,14 @@ class PickTest(AddonTest):
         self.assertLess(time.time() - t0, 1.0)             # AIOStreams orders addons by who answers first
         self.assertEqual([s["label"] for s in subs], ["English (Subsync)"])
 
+    def test_public_mode_names_the_entry_aiosubtitles_and_self_hosted_keeps_subsync(self):
+        self.s.public = True                                   # the public service's own name
+        subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
+        self.assertEqual([s["label"] for s in subs], ["English (AIOSubtitles)"])
+        self.s.public = False
+        self.assertEqual([s["label"] for s in json.loads(http(self.base + self.URL)[1])["subtitles"]],
+                         ["English (Subsync)"])
+
     def test_the_first_answer_already_has_the_entry_for_every_language_and_the_download_waits_for_the_list(self):
         self.s.pick_wait = 3.0
         self.s.languages = type(self.s.languages)(["eng", "rus"])

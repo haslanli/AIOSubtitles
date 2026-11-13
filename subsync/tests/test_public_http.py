@@ -165,8 +165,8 @@ class PublicHttpTest(Base):
         _, _, _, _, other = self.sign_up()
         code, body, _ = http(f"{self.base}/u/{token}/subtitles/movie/tt1/filename=a.mkv&videoSize=1000.json")
         self.assertEqual(code, 200)
-        entries = json.loads(body)["subtitles"]                       # the "(Subsync)" entry of a file being worked on
-        self.assertEqual([e["label"] for e in entries], ["English (Subsync)"])
+        entries = json.loads(body)["subtitles"]       # the pick entry of a file being worked on, named for the public
+        self.assertEqual([e["label"] for e in entries], ["English (AIOSubtitles)"])   # service
         self.assertTrue(entries[0]["url"].startswith(f"https://subs.test/u/{token}/pick/"))
         self.assertEqual(len(self.pool.app(token).worker.jobs), 1)
         self.assertEqual(len(self.pool.app(other).worker.jobs), 0)

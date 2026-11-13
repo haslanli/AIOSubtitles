@@ -1,5 +1,6 @@
 """Public mode's sign-up, refresh and delete, against a stand-in AIOStreams on this machine. The password is used once
-and never stored or logged; Real-Debrid is warned about and left out, or stops the sign-up when it is the only service."""
+and never stored or logged; Real-Debrid is warned about and left out, or, when it is the only service, the sign-up is
+for stored copies only."""
 import logging
 import os
 import sys
@@ -118,13 +119,11 @@ class SignupTest(unittest.TestCase):
         sync = self.sync_config(self.users.open(result.token))
         self.assertEqual([s["id"] for s in sync["services"]], ["torbox"])
 
-    def test_real_debrid_only_stops_and_creates_nothing(self):
-        from subsync import realdebrid
-        with self.assertRaises(self.signup.SignupError) as e:
-            self.run_signup(viewer(services=(REALDEBRID,)))
-        self.assertEqual(e.exception.message, realdebrid.REAL_DEBRID_ONLY)
+    def test_real_debrid_only_signs_up_for_stored_copies_and_creates_nothing(self):
+        _, result = self.run_signup(viewer(services=(REALDEBRID,)), add_addon="")   # more in test_stored_copies
+        self.assertTrue(result.store_only)
         self.assertEqual(self.fake.writes(), [])
-        self.assertEqual(self.users.count(), 0)
+        self.assertEqual(self.users.count(), 1)
 
     def test_usenet_only_stops(self):
         with self.assertRaises(self.signup.SignupError) as e:

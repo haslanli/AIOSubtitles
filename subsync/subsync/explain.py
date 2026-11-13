@@ -86,7 +86,8 @@ RULES = [
      f"If your AIOStreams uses Real-Debrid, AIOSubtitles leaves it out of its own config and never reads a Real-Debrid "
      f"file, because {REASON}. It syncs only files from your other services: a file you play from Real-Debrid gets a "
      "synced copy when another of your services has the same file ready. With Real-Debrid as your only debrid service, "
-     "sign-up stops, because AIOSubtitles would have nothing to read. Your own config and apps keep Real-Debrid as "
+     "AIOSubtitles reads nothing for you: you get only the copies already synced for someone else who played the same "
+     "release. Your own config and apps keep Real-Debrid as "
      "before, and your AIOStreams still searches it when you browse."),
     ("Public mode: a few files at once",
      "The service works on a set number of files at once for everyone (SUBSYNC_SYNCS_AT_ONCE), in the order people "
@@ -690,6 +691,11 @@ GROUPS = [
             "hundreds of files; it stops someone whose "
             "files have unusual layouts from using most of the service's daily total (SUBSYNC_DAILY_BUDGET_GB). Past "
             "it, that person gets only copies already in the store until the next day."),
+        "SUBSYNC_MAX_LANGUAGES": (
+            "4",
+            "Public mode only: how many languages each person may choose, from 1 to 4. Each language is a separate sync "
+            "for every file they play, so a lower number means less work for the service. 4 is the most the pages "
+            "offer."),
         "SUBSYNC_USER_QUEUE": (
             "3",
             "Public mode only: files one person may have waiting at once. A request past it is answered with what the "
@@ -754,6 +760,14 @@ PUBLIC_REAL_DEBRID_WARNING = (
     "services, so a file you play from Real-Debrid gets a synced copy only when another of your services has the "
     "same file ready.")
 
+# A setup whose only debrid service is Real-Debrid: stored copies only.
+PUBLIC_STORE_ONLY = (
+    "Stored copies only",
+    f"Real-Debrid is the only debrid service in your AIOStreams config, and AIOSubtitles never uses it, because {REASON}. "
+    "So it reads none of your files: for each file you play, it offers the synced copies already made for someone who "
+    "played the same release, when there are any. To get your own synced copies, add another service, such as TorBox, "
+    "to your config, then press Refresh on your settings page.")
+
 PUBLIC_PASSWORD_TEXT = (
     "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams config (if you leave the "
     "box below checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, Usenet or "
@@ -813,6 +827,20 @@ PUBLIC_FIELDS = {
         "your AIOStreams config; without it, remove the AIOSubtitles addon there yourself. The password is used once "
         "and not stored. How subtitles were synced stays in the shared store: it belongs to files, not to you."),
 }
+
+NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four"}
+LANGUAGES_ONE = (
+    "The language you want synced subtitles in, like English. It gets up to three synced choices for every file you "
+    "play. You can change it later; a change applies from the next file you play.")
+
+
+def languages_help(limit):
+    """The languages explanation for an instance's language limit (SUBSYNC_MAX_LANGUAGES, 1 to 4): today's text with
+    its number, and its own text for one language."""
+    if limit == 1:
+        return LANGUAGES_ONE
+    return PUBLIC_FIELDS["languages"].replace("up to four,", f"up to {NUMBER_WORDS[limit]},")
+
 
 # the other texts of the public pages
 PUBLIC_TEXTS = {
@@ -904,13 +932,14 @@ PUBLIC_NOTICE_DONE = "AIOSubtitles: nothing needs doing any more. This entry goe
 
 PUBLIC_TEXTS["privacy"] = " ".join(f"{lead} {text}".strip() for _, lead, text in PRIVACY_PARTS)
 
-# The sign-up page's heading, with the words the hand-drawn mark goes under.
+# The sign-up page's heading in three parts, for its deliberate line breaks on desktop and phones (pages._headline).
 PUBLIC_HEADLINE = ("Subtitles,", "in sync", "with the file you play.")
 
 # What to have ready before signing up; the last line takes the attempts allowed per hour.
 PUBLIC_BEFORE = (
     "The install link of your AIOStreams config and its password, both from AIOStreams' configure page.",
-    "A debrid service in that config other than Real-Debrid, such as TorBox.",
+    "A debrid service in that config other than Real-Debrid, such as TorBox. With Real-Debrid alone, you get only the "
+    "copies already synced for someone else.",
     "An AIOStreams that opens from the internet over https.",
 )
 
@@ -952,12 +981,12 @@ PUBLIC_TEXTS.update({
     "limit_reached": "Until 00:00 UTC you get only copies already synced for someone; nobody else is affected.",
     "languages_saved": "Languages saved: {names}. They apply from the next file you play.",
     "refreshed": "Refreshed: AIOSubtitles' config on your AIOStreams now matches yours.",
+    "to_stored": ("Refreshed: Real-Debrid is now the only debrid service in your config, so AIOSubtitles removed its own "
+                  "config from your AIOStreams and offers stored copies only."),
     "refresh_manual": ("AIOSubtitles' config on your AIOStreams now matches yours, but AIOSubtitles couldn't put itself "
                        "back in your own config."),
     "undone": "This can't be undone.",
     "not_found": ("If this was your personal link, its data may have been deleted, or the link was cut short: copy the "
                   "whole link again."),
-    "strip": ("An illustration: your subtitles slide along the file's own subtitle track until their lines land on "
-              "it."),
 })
 

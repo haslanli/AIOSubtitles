@@ -54,6 +54,8 @@ class SignupResult:
     added: bool = False
     manual: bool = False
     languages: list = field(default_factory=list)
+    store_only: bool = False      # Real-Debrid is their only debrid service: stored copies only
+    to_store_only: bool = False   # a refresh that moved them to stored copies only
 
 
 def public_api(instance, timeout):
@@ -96,10 +98,11 @@ def _password(form):
     return password
 
 
-def _languages(text):
+def _languages(text, limit=4):
+    """The chosen languages as codes, at most `limit` (the instance's SUBSYNC_MAX_LANGUAGES); English when none."""
     if not (text or "").strip():
         text = "English"
-    langs, problem = parse_languages(text)
+    langs, problem = parse_languages(text, limit or 4)
     if problem:
         raise SignupError(problem, field="languages")
     return [three for _, _, three in langs]
@@ -196,7 +199,24 @@ def _field_of(e):
     return None
 
 
+def store_only(record):
+    """A record of a setup whose only debrid service is Real-Debrid: no sync config, nothing read."""
+    return record.get("store_only") is True
+
+
+def _to_store_only(record):
+    """The record's sync config fields, taken out of it as they were (None when it had none): the record is now for
+    stored copies only, and the caller removes that sync config once the record is saved."""
+    fields = (record.get("sync_uuid"), record.get("sync_link"), record.get("sync_password"))
+    for name in ("sync_uuid", "sync_link", "sync_password", "sync_fp", "synced_at"):
+        record.pop(name, None)
+    record["store_only"] = True
+    return fields if fields[0] else None
+
+
 def _sync_for(viewer, manifest_url):
+    """The sync config for a viewer config that has a debrid service AIOSubtitles may use (Real-Debrid-only setups
+    are found first, with realdebrid.real_debrid_only, and get none)."""
     if realdebrid.real_debrid_only(viewer):
         raise SignupError(realdebrid.REAL_DEBRID_ONLY)
     warning = explain.PUBLIC_REAL_DEBRID_WARNING if realdebrid.SERVICE in realdebrid.debrid_in_use(viewer) else None
@@ -285,23 +305,37 @@ def _synced(settings, record, sync, fields, now):
     all_clear(settings, record, now)
 
 
+STORED = "stored copies only"   # rebuild's answer when a config became Real-Debrid-only
+
+
 def rebuild(settings, record, token, api, password, force=False):
     """With the password a person let AIOSubtitles keep: AIOSubtitles' config made again from theirs, saved only when
     it changed (or `force`: when it is gone). Returns the new sync config, or None when nothing changed; the record's
-    sync fields are updated. Raises SignupError (field "password" when the password is refused). Their own config is
-    never changed."""
+    sync fields are updated. Both ways: a stored-copies-only record whose config now has another debrid
+    service gets a sync config; a config that became Real-Debrid-only returns STORED, the record's sync fields taken
+    out (the caller removes that sync config once the record is saved, and finds its fields in record["dropped"]).
+    Raises SignupError (field "password" when the password is refused). Their own config is never changed."""
     viewer, _ = _read_viewer(api, record["main_uuid"], password)
+    if realdebrid.real_debrid_only(viewer):
+        if store_only(record):
+            return None
+        record["dropped"] = _to_store_only(record)
+        return STORED
     sync, _ = _sync_for(viewer, f"{settings.public_base}/u/{token}/manifest.json")
-    if not force and sync_fingerprint(sync) == record.get("sync_fp"):
+    if store_only(record):
+        fields = _new_sync(api, record["instance"], sync)
+        record.pop("store_only", None)
+    elif not force and sync_fingerprint(sync) == record.get("sync_fp"):
         return None
-    fields = _put_sync(api, record, sync, gone=force)
+    else:
+        fields = _put_sync(api, record, sync, gone=force)
     record["sync_uuid"], record["sync_link"], record["sync_password"] = fields
     record["sync_fp"] = sync_fingerprint(sync)
     return sync
 
 
 def signup(settings, users, form, api_factory=public_api, timeout=30):
-    langs = _languages(form.get("languages"))
+    langs = _languages(form.get("languages"), settings.max_languages)
     instance, uuid = parse_link(form.get("link"))
     password = _password(form)
     api = api_factory(instance, timeout)
@@ -311,26 +345,35 @@ def signup(settings, users, form, api_factory=public_api, timeout=30):
     # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles' own config
     # then lacks those addons too, so it asks their sites itself
     clean_up = form.get("add_addon") == "on" and form.get("clean_up") == "on"
-    sync, warning = _sync_for(without_builtin_twins(viewer)[0] if clean_up else viewer, manifest_url)
-    sync_uuid, sync_link, sync_password = _new_sync(api, instance, sync)
     record = {"instance": instance, "main_uuid": uuid, "languages": langs, "version": 1}
-    _synced(settings, record, sync, (sync_uuid, sync_link, sync_password), users.clock())
+    # with Real-Debrid as the only debrid service, stored copies only: no sync config, nothing of theirs read;
+    # the clean-up is left out, since AIOSubtitles then asks no subtitle site for them
+    stored = realdebrid.real_debrid_only(viewer)
+    if stored:
+        clean_up, warning, sync_uuid = False, None, None
+        _to_store_only(record)
+        all_clear(settings, record, users.clock())
+    else:
+        sync, warning = _sync_for(without_builtin_twins(viewer)[0] if clean_up else viewer, manifest_url)
+        sync_uuid, sync_link, sync_password = _new_sync(api, instance, sync)
+        _synced(settings, record, sync, (sync_uuid, sync_link, sync_password), users.clock())
     if form.get("keep_password") == "on":    # the person chose it (unticked by default): AIOSubtitles refreshes by itself
         record["auto_password"] = password
     try:   # the record first: the person's own config gets the link only once the link works
         users.create(token, record)
     except Exception:
-        try:
-            api.delete_config(sync_uuid, sync_password)
-        except AiosError:
-            pass
+        if sync_uuid is not None:
+            try:
+                api.delete_config(sync_uuid, sync_password)
+            except AiosError:
+                pass
         raise
     changes, added, manual = [], False, False
     if form.get("add_addon") == "on":
         changes, added, manual = _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up)
     log.info("signed up: %d language%s%s", len(langs), "" if len(langs) == 1 else "s",
-             ", Real-Debrid left out" if warning else "")
-    return SignupResult(token, manifest_url, changes, warning, added, manual, langs)
+             ", stored copies only" if stored else ", Real-Debrid left out" if warning else "")
+    return SignupResult(token, manifest_url, changes, warning, added, manual, langs, store_only=stored)
 
 
 def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
@@ -345,18 +388,28 @@ def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
         link = (form.get("link") or "").strip()
         instance, main_uuid = parse_link(link) if link else (record["instance"], record["main_uuid"])
         password = _password(form)
-        languages = _languages(form.get("languages")) if (form.get("languages") or "").strip() else None
+        languages = (_languages(form.get("languages"), settings.max_languages)
+                     if (form.get("languages") or "").strip() else None)
         api = api_factory(instance, timeout)
         viewer, metadata = _read_viewer(api, main_uuid, password)
         manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
-        sync, warning = _sync_for(viewer, manifest_url)
-        old = None
-        if instance != record["instance"]:
-            fields = _new_sync(api, instance, sync)
-            old = (record["instance"], record["sync_uuid"], record["sync_password"])
+        was_stored = store_only(record)
+        stored = realdebrid.real_debrid_only(viewer)       # stored copies, both ways at Refresh
+        old = sync = warning = fields = None
+        made = False
+        if stored:
+            if not was_stored:                             # the sync config they had goes once the record is saved
+                old = (record["instance"], record["sync_uuid"], record["sync_password"])
         else:
-            fields = _put_sync(api, record, sync)
-        made = fields[0] != record["sync_uuid"]
+            sync, warning = _sync_for(viewer, manifest_url)
+            if was_stored:
+                fields = _new_sync(api, instance, sync)
+            elif instance != record["instance"]:
+                fields = _new_sync(api, instance, sync)
+                old = (record["instance"], record["sync_uuid"], record["sync_password"])
+            else:
+                fields = _put_sync(api, record, sync)
+            made = fields[0] != record.get("sync_uuid")
         try:
             record["instance"], record["main_uuid"] = instance, main_uuid
             changes, added, manual = [], False, False
@@ -364,7 +417,12 @@ def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
                 changes, added, manual = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata, False)
             if languages:
                 record["languages"] = languages
-            _synced(settings, record, sync, fields, users.clock())
+            if stored:
+                _to_store_only(record)
+                all_clear(settings, record, users.clock())
+            else:
+                record.pop("store_only", None)
+                _synced(settings, record, sync, fields, users.clock())
             if form.get("keep_password") == "on":
                 record["auto_password"] = password
             else:
@@ -374,14 +432,15 @@ def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
             if made:           # a config made here and not recorded: removed, so nothing holds their keys unused
                 drop_sync(api, fields)
             raise
-    if old is not None:   # the sync config on the AIOStreams they left: removed, if that one still answers
+    if old is not None:   # the sync config they no longer use (another AIOStreams, or stored copies only): removed
         try:
             api_factory(old[0], timeout).delete_config(old[1], old[2])
         except AiosError:
             pass
-    log.info("refreshed a sync config%s%s", ", Real-Debrid left out" if warning else "",
-             ", on another AIOStreams" if old else "")
-    return SignupResult(token, manifest_url, changes, warning, added, manual, record["languages"])
+    log.info("refreshed a sync config%s%s", ", stored copies only" if stored else
+             ", Real-Debrid left out" if warning else "", ", on another AIOStreams" if old and not stored else "")
+    return SignupResult(token, manifest_url, changes, warning, added, manual, record["languages"], store_only=stored,
+                        to_store_only=stored and not was_stored)
 
 
 def forget_password(users, token):
@@ -395,12 +454,14 @@ def forget_password(users, token):
     log.info("a kept password was deleted")
 
 
-def set_languages(users, token, text):
+def set_languages(users, token, text, limit=4):
+    """Saves a person's languages, at most `limit` (the instance's SUBSYNC_MAX_LANGUAGES). A record holding more from
+    before a lowered limit keeps them until this save."""
     with users.locked(token):
         record = users.open(token)
         if record is None:
             raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
-        record["languages"] = _languages(text)
+        record["languages"] = _languages(text, limit)
         users.update(token, record)
     return record["languages"]
 
@@ -423,11 +484,14 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=30):
                               field=_field_of(e)) from None
         if not isinstance(viewer, dict):
             raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Nothing was deleted.")
-    try:
-        api.delete_config(record["sync_uuid"], record["sync_password"])
+    if store_only(record):       # no sync config was ever made for them
         outcome["sync_removed"] = True
-    except AiosError:
-        pass
+    else:
+        try:
+            api.delete_config(record["sync_uuid"], record["sync_password"])
+            outcome["sync_removed"] = True
+        except AiosError:
+            pass
     if viewer is not None:
         manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
         try:

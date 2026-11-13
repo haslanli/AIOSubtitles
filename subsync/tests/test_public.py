@@ -772,7 +772,8 @@ class PublicTextsTest(unittest.TestCase):
                               (5 * 1024 * 1024, " 5.0 MB of"), (12 * 1024 * 1024, " 12 MB of")):
             with self.subTest(nbytes=nbytes):
                 html = pages.settings_page(s, record, {"files": 1, "bytes": nbytes}, "https://x.test/u/t/manifest.json")
-                self.assertRegex(html, r"(?<![\d.])" + re.escape(shown.strip()))   # the number whole, not a tail
+                text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))      # the value and its unit are two spans
+                self.assertRegex(text, r"(?<![\d.])" + re.escape(shown.strip()))   # the number whole, not a tail
 
     def test_the_privacy_text_names_cloudflare_and_the_backups_before_how_long(self):
         from subsync import explain

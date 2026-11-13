@@ -297,9 +297,9 @@ class RecheckTest(Base):
 
     def test_a_config_that_can_no_longer_be_used_says_why(self):
         uuid, token = self.sign_up(keep=True)
-        self.fake.configs[uuid]["config"]["services"] = [dict(REALDEBRID)]
-        self.assertEqual(self.checker().check(token), "cannot_rebuild")
-        self.assertIn("Real-Debrid", self.record(token)["state_detail"])
+        self.fake.configs[uuid]["config"]["services"] = []      # nothing left to read through (Real-Debrid alone now
+        self.assertEqual(self.checker().check(token), "cannot_rebuild")   # means stored copies: test_stored_copies)
+        self.assertIn("can't find any file", self.record(token)["state_detail"])
 
     def test_the_kept_password_is_never_in_clear_on_disk_or_in_the_log(self):
         uuid, token = self.sign_up(keep=True)
