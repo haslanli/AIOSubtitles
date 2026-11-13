@@ -21,7 +21,7 @@ copy that doesn't fit is never offered: you get the originals as before.
 
 ## Install
 
-On the machine that runs AIOStreams:
+On the machine that runs AIOStreams, or for a public instance, the machine its web address reaches:
 
 ```bash
 git clone https://github.com/haslanli/AIOSubtitles.git
@@ -35,10 +35,18 @@ cd AIOSubtitles
 ./setup
 ```
 
-It takes about 2 minutes of questions, then a few minutes the first time while subsync builds (about 3 on a 4-core
-server). It asks where AIOStreams is (it looks on this machine first), which config your apps use, which languages to
-sync, whether to use the audio route, and where your apps reach subsync. Each question shows what it does and has a
-default: press Enter to accept it. Every question, with its explanation, is also under [Settings](#settings).
+Setup runs in your browser. `./setup` prints the address to open on this machine. On a server you reach over ssh, it
+also prints one `ssh -L` line: run it on your own computer first, then open the same address there. The page stops
+when you finish, after 60 minutes without use, or with Ctrl-C.
+
+The first screen asks how you want to use it. **Install it for yourself**: this adds it to the AIOStreams you already
+run. **Host a public instance**: runs here with its own sign-up page, so other people can use it with their own
+AIOStreams. Each step says what it does and what it changes. Nothing in your AIOStreams changes until you confirm, and
+a copy of your config is saved first. Every question, with its explanation, is also under [Settings](#settings). The
+first build takes a few minutes (about 3 on a 4-core server).
+
+To set it up without the page, give the answers in a file: `./setup --answers FILE --yes` (see
+`docs/answers.example`).
 
 ## What it changes
 
@@ -86,19 +94,24 @@ subsync reads only files your apps ask subtitles for:
 ## Update
 
 ```bash
-cd AIOSubtitles
-```
-
-```bash
-git pull
-```
-
-```bash
 ./setup
 ```
 
-`./setup` keeps your answers, rebuilds subsync with the new version and restarts it. Your config and subsync's stored
-copies stay.
+The page after setup shows the version this machine runs and, when there is one, the version that is ready, with an
+Update button. From the terminal:
+
+```bash
+./setup --update
+```
+
+Updating builds subsync again from the new version and restarts it; your answers, keys and stored copies stay. On a
+public instance: updating builds AIOSubtitles again from the new version and restarts it; your answers, keys, sign-ups
+and stored copies stay, and a copy of its databases is saved first. Nothing looks for a new version by itself: setup
+asks git only when you open the page after setup or run `./setup --update`. The old version keeps running until the new
+one is built and answers; if the build fails, the folder goes back to the old version.
+
+This folder wasn't downloaded with git? Then it can't fetch a new version: download the new version, copy this folder's
+state/ into it, and run ./setup there.
 
 ## Everyday commands
 
@@ -106,13 +119,20 @@ copies stay.
 ./setup
 ```
 
-Change languages or options. Your answers are kept unless you change them.
+Where it is set up, the page after setup: its status, updates, your answers (Change your answers opens the steps again,
+filled in) and removing it.
 
 ```bash
 ./setup --status
 ```
 
 Shows whether subsync is running and what it has done today.
+
+```bash
+./setup --update
+```
+
+Updates to the newest version, if there is one.
 
 ```bash
 ./setup --uninstall
@@ -132,9 +152,6 @@ docker logs aiosubtitles-subsync
 ```
 
 subsync's log. It contains no links and no keys.
-
-To answer the questions from a file instead, use `./setup --answers FILE`, and add `--yes` to ask nothing. See
-`docs/answers.example`.
 
 ## How the sync works
 
@@ -164,23 +181,25 @@ Every setting affects only your own install: nothing is shared between AIOSubtit
 
 Each question shows its explanation as it is asked. In an answers file (`./setup --answers FILE`) each one is a line `KEY=value`; see `docs/answers.example`.
 
+- **`ROUTE`**: Install it for yourself (yourself, the default). This adds it to the AIOStreams you already run. Host a public instance (host). Runs here with its own sign-up page, so other people can use it with their own AIOStreams.
 - **`AIOS_CONTAINER`**: Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins that container's Docker network and finds files through it, so the wrong one means it finds none of the files you play. Pick the one whose address your apps use.
-- **`AIOS_URL`**: Asked only when ./setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to AIOStreams at this address, so it must work from this machine.
-- **`AIOS_CONFIG_ID`**: The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole install link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this config, and subsync's own config is made from it.
-- **`AIOS_CONFIG_PASSWORD`**: The password you chose when you saved that config. ./setup uses it to read the config and save the change, and doesn't store it; subsync gets its own config with its own random password. While setting up, Enter with nothing typed goes back to give a different ID; ./setup --restore and --uninstall need it to change the config. If you put it in an answers file, keep that file private.
-- **`LANGUAGES`**: The subtitle languages to sync, by name or code, separated by commas: English, Spanish, ru; up to four, default English. For each language and each file you play, subsync downloads that language's subtitles from your subtitle sources and the ones it searches itself, and checks them against the file. Each extra language adds those downloads and a few seconds of work per file; the video file is still read only once.
+- **`AIOS_URL`**: Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to AIOStreams at this address, so it must work from this machine.
+- **`AIOS_CONFIG_ID`**: The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole install link: setup takes the ID out of it and checks that the config exists. subsync is added to this config, and subsync's own config is made from it.
+- **`AIOS_CONFIG_PASSWORD`**: The password you chose when you saved that config. Setup uses it to read the config and save the change, and doesn't store it; subsync gets its own config with its own random password. Removing subsync and restoring a saved copy ask for it again. If you put it in an answers file, keep that file private.
+- **`LANGUAGES`**: The subtitle languages to sync, up to four, the first one first; English if you choose none. In an answers file, names or codes separated by commas, like English, Spanish, ru. For each language and each file you play, subsync downloads that language's subtitles from your subtitle sources and the ones it searches itself, and checks them against the file. Each extra language adds those downloads and a few seconds of work per file; the video file is still read only once.
 - **`AUDIO`**: Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, unless you often watch such files; most files have a track. Off: those files keep their original subtitles, and subsync reads about 1 MB of each file. On: after you pick such a file's "<Language> (Subsync)" entry, subsync reads short audio parts of it, up to the limit you choose next (1 GB recommended; counted in the daily limit and in your debrid service's traffic), and the copy is there the next time you open the file; files with too high a bitrate for that limit keep their originals.
 - **`AUDIO_BUDGET`**: Asked only with the audio route on: the most it reads of one file, through your debrid service: 0.5, 1, 2 or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, re-encodes); remuxes usually carry image subtitles and need no audio. Higher: very high-quality files such as 4K remuxes get synced too, but each can cost that much data and take longer than the 14 seconds an app waits, so the copy comes the next time you open the file. Lower: less data on a metered connection; more high-bitrate files keep their originals. Smaller files are read only as far as needed. A change makes subsync judge again the files it kept as originals.
 - **`SUBDL_KEY`**: Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, which often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't asked. Cost: one SubDL search for each file you play, plus a download per subtitle tried (at most three per file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user.
 - **`WYZIE_KEY`**: Optional: your free Wyzie Subs API key, from https://wyzie.io. With it, subsync also searches Wyzie Subs, which often has subtitles the other sources don't, so a copy that fits is more likely. Without it, Wyzie Subs isn't asked. Cost: one search per language for each file you play, plus a download per subtitle tried (at most two per file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user.
 - **`ADD_OPENSUBTITLES`**: Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds Stremio's official OpenSubtitles addon to your config: free, no account, it lists every language, and subsync syncs only the ones you picked. Recommended: yes. No: subsync works only from the sources it searches itself, and your apps get no original subtitles through AIOStreams. In Stremio, install your addon link once more afterwards so it starts asking for subtitles.
-- **`PUBLIC_ADDRESS`**: The address your apps download synced subtitle files from. The suggestion sits behind the same web address as AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (./setup shows it); on a home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every device you watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced files and a health check are open at that address.
+- **`PUBLIC_ADDRESS`**: The address your apps download synced subtitle files from. The suggestion sits behind the same web address as AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (setup shows it); on a home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every device you watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced files and a health check are open at that address.
 - **`CACHE`**: AIOStreams keeps every subtitle answer for 5 minutes. Yes turns that off for subsync only, so a copy made while you watch shows the next time you open the file instead of up to 5 minutes later; other subtitle sources keep their cache. It needs AIOStreams' admin sign-in and changes that one setting on your AIOStreams server. Recommended: yes if you have the admin sign-in. Cost: AIOStreams asks subsync every time, a few milliseconds.
 - **`AIOS_USERNAME`**: Your AIOStreams sign-in (the account of its web page), asked only when this AIOStreams needs one to save configs, or for the subtitle cache setting (then an admin account). Used during setup and not stored.
 - **`AIOS_PASSWORD`**: The password of that AIOStreams account. Used during setup and not stored. If you put it in an answers file, keep that file private.
-- **`CONFIRM`**: Save the changes ./setup just showed: subsync added to your config (after a backup copy) and subsync's own config created or updated. Default yes. No: nothing is changed; run ./setup again any time. ./setup --restore and --uninstall ask the same before they change anything, and there the default is no.
+- **`CONFIRM`**: Saves the changes shown here: subsync added to your config (after a backup copy) and subsync's own config created or updated. Until then nothing is changed: go back to change an answer, or leave and run ./setup again any time. Removing subsync and restoring a saved copy also ask before they change anything.
 - **`TEST_READ`**: A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as it does for every file you play. Yes: you see now that reading works and whether that file has its own subtitle track; your debrid service opens the file, so it may show in your debrid account's list. No (default): the first file you play is the first read.
-- **`REMOVE_OPENSUBTITLES`**: Asked by ./setup --uninstall when ./setup had added OpenSubtitles to your config. Yes takes it out again, leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.
+- **`HOST_ADDRESS`**: The web address of your public instance, with https, like https://subtitles.example.com: people open it to sign up, and their apps download synced files from it. Your web server sends it to this machine; setup shows the one rule it needs. It goes into every personal link, so choose one you will keep: changing it later breaks the links people already added to their AIOStreams.
+- **`REMOVE_OPENSUBTITLES`**: Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.
 
 ### subsync's settings
 
@@ -282,22 +301,22 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 
 #### Public mode (one service for many people)
 
-- **`SUBSYNC_PUBLIC`** (default `off`): Public mode: one AIOSubtitles service for many people, like aiosubtitles.com. Each person signs up on its web page with their AIOStreams link and password and gets a personal addon link; subsync then works through a separate sync config it makes on their AIOStreams. Leave it off for your own install: ./setup doesn't use it. On, the service needs SUBSYNC_SECRET_KEY and SUBSYNC_PUBLIC_BASE, keeps the audio route off, and shares how each copy was synced (its timing, never its text) between everyone who plays the same file, so the more people use it, the more files are ready when someone presses play. It holds other people's links, so it needs a server you keep up to date and backed up.
-- **`SUBSYNC_SECRET_KEY`** (default: empty): Public mode only: the service's secret, at least 32 random bytes written as base64url, for example what python3 -c "import secrets; print(secrets.token_urlsafe(32))" prints. It encrypts each person's record together with their personal link, so neither the database nor this secret alone opens a record. Required in public mode; never logged. Keep it in a private file and in your backups: if it is lost or changed, everyone has to sign up again.
-- **`SUBSYNC_PUBLIC_INVITE`** (default: empty): Public mode only: when set, the sign-up page asks for this code, so only people you gave it to can sign up, for example while you and your testers try the service. Empty lets anyone sign up. It doesn't affect people who already signed up. Recommended while testing; remove it to open the service.
-- **`SUBSYNC_MAX_USERS`** (default `200`): Public mode only: how many people can be signed up at once; past it the sign-up page says the service is full. Each person costs a little disk and, while they play, a worker, so the limit keeps the server within what it can carry. Raise it only after watching memory, processor use and the daily read total for a while.
-- **`SUBSYNC_SIGNUPS_PER_HOUR`** (default `5`): Public mode only: sign-up attempts allowed per internet address per hour, counted before anything is fetched. Each attempt makes the service contact that person's AIOStreams several times, so this stops one address from flooding the service or someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is stricter, higher helps many people behind one shared address.
-- **`SUBSYNC_USER_FILES_PER_DAY`** (default `40`): Public mode only: new files read per person per day (UTC). Files already in the shared store don't count, and neither does serving a copy. Past it, that person gets only copies the store already has until the next day; nobody else is affected. 40 is several days of watching in one; it keeps one person, or a leaked link, from using up the service's daily reads.
-- **`SUBSYNC_USER_DAILY_MB`** (default `500`): Public mode only: megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes about 1 MB, a few MB when the track's lines are pictures, so this is room for hundreds of files; it stops someone whose files have unusual layouts from using most of the service's daily total (SUBSYNC_DAILY_BUDGET_GB). Past it, that person gets only copies already in the store until the next day.
-- **`SUBSYNC_MAX_LANGUAGES`** (default `4`): Public mode only: how many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they play, so a lower number means less work for the service. 4 is the most the pages offer.
-- **`SUBSYNC_USER_QUEUE`** (default `3`): Public mode only: files one person may have waiting at once. A request past it is answered with what the shared store already has and starts nothing. Everyone's files wait for the same few places (SUBSYNC_SYNCS_AT_ONCE), so a longer queue for one person delays everyone else; 3 covers someone opening a few episodes in a row.
-- **`SUBSYNC_ACTIVE_WORKERS`** (default `30`): Public mode only: how many people can have a worker (the part that finds and syncs their files) running at once. A worker with nothing to do for SUBSYNC_WORKER_IDLE_MIN stops. Past the limit, a person's requests get only copies already in the shared store until a worker frees up. Each worker costs a few megabytes of memory; keep the limit within what the server's memory allows.
-- **`SUBSYNC_WORKER_IDLE_MIN`** (default `30`): Public mode only: minutes without a request before a person's worker stops and their opened record leaves memory. Shorter frees memory sooner and keeps opened records in memory for less time; longer saves reopening the record when someone pauses between episodes. Reopening is quick, so 30 is a fair middle.
-- **`SUBSYNC_USER_KEEP_DAYS`** (default `180`): Public mode only: days without a single request before a person's record is deleted. Their sync config can't be removed from their AIOStreams then, because opening the record needs their personal link; the privacy page says so. Shorter keeps less data about people who left; longer spares people who come back after a long break from signing up again.
-- **`SUBSYNC_TRUSTED_PROXY`** (default `127.0.0.1`): Public mode only: the addresses of the web server in front of subsync, comma-separated. Only requests from these may say, in their X-Forwarded-For header, which address they came from, and the sign-up limit per address counts that one. Set it to your web server's address as subsync sees it, or to gateway when the web server reaches subsync through a port Docker publishes: subsync then trusts its Docker network's gateway, found at start, with no fixed network to set up. A wrong value makes every visitor count as one address, or lets visitors choose their own.
-- **`SUBSYNC_MAX_CONNECTIONS`** (default `64`): Public mode only: requests handled at once. Each one takes a thread and some memory, so past it the service answers "busy, try again" (HTTP 503) at once instead of running out of memory. Apps ask for subtitles again on their own. Raise it together with the memory the service may use.
-- **`SUBSYNC_RECHECK_HOURS`** (default `24`): Public mode only: how often, at most, each person's AIOStreams is checked again while they use the service, in hours; 0 turns the check off. A check asks their AIOStreams two things (does their config still exist, does AIOSubtitles' own config there still open), repairs a changed link, and tells the person on their settings page and in their subtitle lists what only they can fix; for people who let AIOSubtitles keep their password it also rebuilds AIOSubtitles' config from theirs. Shorter notices changes sooner, at more calls to every AIOStreams; people who don't use the service aren't checked.
-- **`SUBSYNC_SYNCS_AT_ONCE`** (default `1`): Public mode only: how many files the service works on at once for everyone, or auto for as many as the processors it may use. More lets people who play new files at the same time wait less, at more processor use and more requests to each AIOStreams at once; one public AIOStreams shared by many people limits how many requests one address may make, so 2 suits a server with 2 processors. A torrent's file is never read twice at once: whoever plays it second waits for the first one's work and reads nothing.
+- **`SUBSYNC_PUBLIC`** (default `off`): Public mode: one AIOSubtitles service for many people, like aiosubtitles.com. Each person signs up on its web page with their AIOStreams link and password and gets a personal addon link; subsync then works through a separate sync config it makes on their AIOStreams. Leave it off for your own install; setup turns it on when you host a public instance. On, the service needs SUBSYNC_SECRET_KEY and SUBSYNC_PUBLIC_BASE, keeps the audio route off, and shares how each copy was synced (its timing, never its text) between everyone who plays the same file, so the more people use it, the more files are ready when someone presses play. It holds other people's links, so it needs a server you keep up to date and backed up.
+- **`SUBSYNC_SECRET_KEY`** (default: empty): The service's secret, at least 32 random bytes written as base64url; setup makes one and keeps it in state/subsync.env, readable only by your user (by hand: what python3 -c "import secrets; print(secrets.token_urlsafe(32))" prints). It encrypts each person's record together with their personal link, so neither the database nor this secret alone opens a record. Required in public mode; never logged or shown. Keep that file in your backups: if the secret is lost or changed, everyone has to sign up again.
+- **`SUBSYNC_PUBLIC_INVITE`** (default: empty): When set, the sign-up page asks for this code, so only people you gave it to can sign up, for example while you and your testers try the service. Empty lets anyone sign up. It doesn't affect people who already signed up. Recommended while testing; remove it to open the service.
+- **`SUBSYNC_MAX_USERS`** (default `200`): How many people can be signed up at once; past it the sign-up page says the service is full. Each person costs a little disk and, while they play, a worker, so the limit keeps the server within what it can carry. Raise it only after watching memory, processor use and the daily read total for a while.
+- **`SUBSYNC_SIGNUPS_PER_HOUR`** (default `5`): Sign-up attempts allowed per internet address per hour, counted before anything is fetched. Each attempt makes the service contact that person's AIOStreams several times, so this stops one address from flooding the service or someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is stricter, higher helps many people behind one shared address.
+- **`SUBSYNC_USER_FILES_PER_DAY`** (default `60`): New files read per person per day (UTC). Files already in the shared store don't count, and neither does serving a copy. Past it, that person gets only copies the store already has until the next day; nobody else is affected. 60 is a long day of episodes; it keeps one person, or a leaked link, from using up the service's daily reads.
+- **`SUBSYNC_USER_DAILY_MB`** (default `1000`): Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes about 1 MB, a few MB when the track's lines are pictures; 1,000 is 60 files at the most one file's index may take (16 MB), so it never stops someone before the file limit, and it stops someone whose files have unusual layouts from using most of the service's daily total. Past it, that person gets only copies already in the store until the next day.
+- **`SUBSYNC_MAX_LANGUAGES`** (default `4`): How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they play: its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: 4, the most the pages offer; lower it only when the server can't keep up. A lower limit applies when people next save their languages; until then they keep the ones they have.
+- **`SUBSYNC_USER_QUEUE`** (default `3`): Files one person may have waiting at once. A request past it is answered with what the shared store already has and starts nothing. Everyone's files wait for the same few places (SUBSYNC_SYNCS_AT_ONCE), so a longer queue for one person delays everyone else; 3 covers someone opening a few episodes in a row.
+- **`SUBSYNC_ACTIVE_WORKERS`** (default `100`): How many people can have a worker (the part that finds and syncs their files) running at once. A worker with nothing to do stops after a while (30 minutes by default). Past the limit, a person's requests get only copies already in the shared store until a worker frees up. Each worker takes about 2.5 MB of memory, so 100 take about 250 MB; keep the limit within what the server's memory allows.
+- **`SUBSYNC_WORKER_IDLE_MIN`** (default `30`): Minutes without a request before a person's worker stops and their opened record leaves memory. Shorter frees memory sooner and keeps opened records in memory for less time; longer saves reopening the record when someone pauses between episodes. Reopening is quick, so 30 is a fair middle.
+- **`SUBSYNC_USER_KEEP_DAYS`** (default `180`): Days without a single request before a person's record is deleted. Their sync config can't be removed from their AIOStreams then, because opening the record needs their personal link; the privacy page says so. Shorter keeps less data about people who left; longer spares people who come back after a long break from signing up again.
+- **`SUBSYNC_TRUSTED_PROXY`** (default `127.0.0.1`): The addresses of the web server in front of subsync, comma-separated. Only requests from these may say, in their X-Forwarded-For header, which address they came from, and the sign-up limit per address counts that one. Set it to your web server's address as subsync sees it, or to gateway when the web server reaches subsync through a port Docker publishes: subsync then trusts its Docker network's gateway, found at start, with no fixed network to set up. A wrong value makes every visitor count as one address, or lets visitors choose their own.
+- **`SUBSYNC_MAX_CONNECTIONS`** (default `256`): Requests handled at once. Each one takes a thread and some memory, so past it the service answers "busy, try again" (HTTP 503) at once instead of running out of memory. Apps ask for subtitles again on their own. 256 leaves room for 200 people's apps asking at once; raise it together with the memory the service may use.
+- **`SUBSYNC_RECHECK_HOURS`** (default `24`): How often, at most, each person's AIOStreams is checked again while they use the service, in hours; 0 turns the check off. A check asks their AIOStreams two things (does their config still exist, does AIOSubtitles' own config there still open), repairs a changed link, and tells the person on their settings page and in their subtitle lists what only they can fix; for people who let AIOSubtitles keep their password it also rebuilds AIOSubtitles' config from theirs. Shorter notices changes sooner, at more calls to every AIOStreams; people who don't use the service aren't checked.
+- **`SUBSYNC_SYNCS_AT_ONCE`** (default `auto`): How many files the service works on at once for everyone, or auto for one per processor it may use. Recommended: auto, since one sync keeps about one processor busy. More lets people who play new files at the same time wait less, at more processor use and more requests to each AIOStreams at once; one public AIOStreams shared by many people limits how many requests one address may make, so give a number when the processors are many and that AIOStreams is shared. A torrent's file is never read twice at once: whoever plays it second waits for the first one's work and reads nothing.
 
 ### Fixed rules
 
@@ -317,7 +336,7 @@ These are not settings: AIOSubtitles always works this way.
 - **Public mode: your AIOStreams is checked about once a day.** While you use AIOSubtitles, it checks your AIOStreams at most once a day, in the background: whether your config still exists (a question that needs no password) and whether its own config there still opens. It repairs a changed link by itself and tells you what only you can fix, on your settings page and with one "AIOSubtitles: action needed" entry in your subtitle lists. Without a kept password it can't see services or addons you add or remove, so press Refresh after such a change; with one, it rebuilds its own config from yours by itself, leaving Real-Debrid and Usenet out, and never changes your config.
 - **Public mode: Real-Debrid is left out.** If your AIOStreams uses Real-Debrid, AIOSubtitles leaves it out of its own config and never reads a Real-Debrid file, because it reads parts of each file you watch from the machine it runs on, and Real-Debrid's terms forbid using an account from a server, VPS or cloud service unless you pay extra for "Remote Traffic"; Real-Debrid records every connection and suspends accounts that break its terms. It syncs only files from your other services: a file you play from Real-Debrid gets a synced copy when another of your services has the same file ready. With Real-Debrid as your only debrid service, AIOSubtitles reads nothing for you: you get only the copies already synced for someone else who played the same release. Your own config and apps keep Real-Debrid as before, and your AIOStreams still searches it when you browse.
 - **Public mode: a few files at once.** The service works on a set number of files at once for everyone (SUBSYNC_SYNCS_AT_ONCE), in the order people asked; two people playing the same file of a torrent never read it twice at once: the second gets the first one's work. A file's subtitle track is about 1 MB (a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its own server and doesn't keep) and is synced in seconds. Files already synced for someone are served at once. When many people play new files together, the synced copy can come after your app has picked a subtitle; the next time you open the file, it is there.
-- **Public mode: limits per person.** Each person can have a few files waiting and read a set number of new files and megabytes a day (UTC), by default 3 waiting, 40 files and 500 MB, and the whole service reads at most its own daily total; files already synced for someone don't count. Past a limit, you get only copies already synced for someone until the next day, and nobody else is affected. Sign-up attempts are limited per internet address, and the service takes a set number of people. Your settings page shows today's use.
+- **Public mode: limits per person.** Each person can have a few files waiting and read a set number of new files and megabytes a day (UTC), by default 3 waiting, 60 files and 1,000 MB, and the whole service reads at most its own daily total; files already synced for someone don't count. Past a limit, you get only copies already synced for someone until the next day, and nobody else is affected. Sign-up attempts are limited per internet address, and the service takes a set number of people. Your settings page shows today's use.
 - **Public mode: what is kept, and for how long.** AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password, and their languages, plus how much was read for them each day. Your AIOStreams password is never kept. For each synced subtitle only its new timing (never its text), with the names and sizes of the files it fits, is shared and kept 180 days after last use, without who played them; logs name the titles synced, never who asked. Your record is deleted when you delete it on your settings page, or 180 days after your last request.
 - **Public mode: the timing is shared, not the subtitles.** When someone already synced a subtitle for the file you play, AIOSubtitles reuses that work: it keeps only how the subtitle was re-timed, never its text. Your copy is made from the original subtitle, downloaded again for you from its site, with that timing, so no new check is needed. This follows the subtitle sites' rules, which don't allow one person's stored copy to be handed to others, and costs one small download. If the site changed or removed the subtitle since, you don't get that copy.
 - **The same subtitle counts once.** When the same subtitle comes from two places, for example from an addon in your config and from a site AIOSubtitles searches itself, it is checked and listed once. Same means the same words at the same times: another text encoding, line ending or a credit line such as a site's address at the start or end doesn't make it a different subtitle, while another timing does. The copy kept is the first one tried, which is the one that knows most about your release. This saves time and keeps your subtitle list free of repeats.

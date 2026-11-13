@@ -16,8 +16,11 @@ try:
 except ImportError:
     HAVE_CRYPTOGRAPHY = False
 
-T1 = ("Public mode only: how many languages each person may choose, from 1 to 4. Each language is a separate sync for "
-      "every file they play, so a lower number means less work for the service. 4 is the most the pages offer.")
+# T1 rewritten with the installer plan (T3)
+T1 = ("How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they "
+      "play: its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: 4, "
+      "the most the pages offer; lower it only when the server can't keep up. A lower limit applies when people next "
+      "save their languages; until then they keep the ones they have.")
 TODAY = explain.PUBLIC_FIELDS["languages"]
 ONE = ("The language you want synced subtitles in, like English. It gets up to three synced choices for every file you "
        "play. You can change it later; a change applies from the next file you play.")

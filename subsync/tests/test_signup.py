@@ -1,6 +1,7 @@
 """Public mode's sign-up, refresh and delete, against a stand-in AIOStreams on this machine. The password is used once
 and never stored or logged; Real-Debrid is warned about and left out, or, when it is the only service, the sign-up is
 for stored copies only."""
+import copy
 import logging
 import os
 import sys
@@ -27,6 +28,11 @@ OSV3 = {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
 NEWZNAB = {"type": "newznab", "instanceId": "nzb", "enabled": True, "options": {"name": "Indexer"}}
 TORBOX = {"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}
 REALDEBRID = {"id": "realdebrid", "enabled": True, "credentials": {"apiKey": "rd-key"}}
+AIOS_USENET = {"id": "aiostreams", "enabled": True, "credentials": {}}   # AIOStreams' built-in Usenet engine
+PROWLARR = {"type": "prowlarr", "instanceId": "prw", "enabled": True,   # its own Services choice names that engine
+            "options": {"name": "Prowlarr", "services": ["torbox", "aiostreams"]}}
+TESTER_ERROR = ("You have specified AIOStreams in your configuration for Prowlarr, but it is not enabled or has "
+                "missing credentials")   # what AIOStreams told a tester at sign-up
 
 
 def viewer(services=(TORBOX,), presets=(TORRENTIO, OSV3, NEWZNAB)):
@@ -247,7 +253,23 @@ class SignupTest(unittest.TestCase):
         with self.assertRaises(self.signup.SignupError):
             self.signup.set_languages(self.users, result.token, "Klingon")
 
+    def test_signup_with_prowlarr_naming_the_usenet_engine(self):   # refused before the fix
+        _, result = self.run_signup(viewer(services=(TORBOX, AIOS_USENET),
+                                           presets=(TORRENTIO, PROWLARR, OSV3, NEWZNAB)))
+        sync = self.sync_config(self.users.open(result.token))
+        self.assertEqual([s["id"] for s in sync["services"]], ["torbox"])
+        self.assertEqual([p["options"]["services"] for p in sync["presets"] if p["type"] == "prowlarr"], [["torbox"]])
+
     # -- refresh and delete ----------------------------------------------------------------------------------------
+    def test_refresh_after_adding_prowlarr_naming_the_usenet_engine(self):   # the same at Refresh
+        uuid, result = self.run_signup(viewer())
+        main = self.fake.configs[uuid]["config"]
+        main["services"].append(dict(AIOS_USENET))
+        main["presets"].insert(0, copy.deepcopy(PROWLARR))
+        self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD}, api_factory=self.api)
+        sync = self.sync_config(self.users.open(result.token))
+        self.assertEqual([p["options"]["services"] for p in sync["presets"] if p["type"] == "prowlarr"], [["torbox"]])
+
     def test_refresh_rebuilds_the_sync_config_and_keeps_the_addon(self):
         uuid, result = self.run_signup(viewer())
         main = self.fake.configs[uuid]["config"]
@@ -302,6 +324,34 @@ class SignupTest(unittest.TestCase):
         self.assertEqual(outcome, {"sync_removed": True, "addon_removed": True})
         self.assertNotIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
         self.assertEqual(self.users.count(), 0)
+
+
+class UsenetServicesInAddonsTest(unittest.TestCase):
+    """An addon's own Services choice can name a Usenet service that the sync config leaves out, and AIOStreams
+    refuses a config whose addon names a service it doesn't have. No sign-up store needed, so these run
+    without the cryptography package too."""
+
+    def setUp(self):
+        from subsync.aiosconfig import AiosApi
+        self.fake = FakeAiostreams()
+        self.api = AiosApi(self.fake.url, timeout=10, max_timeout=10, retry_wait_cap=5)
+
+    def tearDown(self):
+        self.fake.close()
+
+    def test_the_stand_in_refuses_what_aiostreams_refused_for_the_tester(self):
+        from subsync.aiosconfig import AiosError
+        with self.assertRaises(AiosError) as e:
+            self.api.create_config(viewer(services=(TORBOX,), presets=(TORRENTIO, PROWLARR)), "pw")
+        self.assertEqual(e.exception.message, "Creating the sync config: AIOStreams refused the config: " + TESTER_ERROR)
+
+    def test_the_sync_config_of_a_config_with_prowlarr_naming_the_usenet_engine_is_accepted(self):
+        from subsync.aiosconfig import sync_config
+        sync = sync_config(viewer(services=(TORBOX, AIOS_USENET), presets=(TORRENTIO, PROWLARR, OSV3, NEWZNAB)))
+        uuid, _ = self.api.create_config(sync, "pw")
+        made = self.fake.configs[uuid]["config"]
+        self.assertEqual([s["id"] for s in made["services"]], ["torbox"])
+        self.assertEqual([p["options"]["services"] for p in made["presets"] if p["type"] == "prowlarr"], [["torbox"]])
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")

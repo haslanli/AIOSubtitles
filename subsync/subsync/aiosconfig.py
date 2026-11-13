@@ -241,15 +241,36 @@ def without_subsync(config, manifest_url=None, names=(SUBSYNC_PRESET_NAME,)):
     return new, before - len(new['presets'])
 
 
+def _within_services(config):
+    """The config's addons, each addon's own Services choice cut down to the services still on the config's list, and
+    an addon left with none left out. AIOStreams refuses a config whose addon names a service it doesn't have, and an
+    empty choice too; the sync config leaves services out (Usenet, Real-Debrid), so their names come out of
+    each addon as well. An addon whose choice names only services that are there is left as it is."""
+    have = {s.get('id') for s in config.get('services') or []}
+    kept = []
+    for preset in config.get('presets') or []:
+        chosen = (preset.get('options') or {}).get('services')
+        if isinstance(chosen, list):
+            rest = [s for s in chosen if s in have]
+            if rest != chosen:
+                if not rest:
+                    continue
+                preset['options']['services'] = rest
+        kept.append(preset)
+    return kept
+
+
 def sync_config(viewer, manifest_url=None, names=(SUBSYNC_PRESET_NAME,)):
     """The config subsync finds files through: the viewer's sources (so it finds the file being watched) and subtitle
     sources (so it syncs what the viewer sees), without subsync itself, without Usenet, without any way to Real-Debrid
-    (realdebrid.without_real_debrid), and with nothing that resolves or queues in the background."""
+    (realdebrid.without_real_debrid), with no addon naming a service it left out (_within_services), and with nothing
+    that resolves or queues in the background."""
     new = copy.deepcopy(viewer)
     new['presets'] = [p for p in new.get('presets') or []
                       if not is_subsync_preset(p, manifest_url, names) and p.get('type') not in USENET_PRESETS]
     new['services'] = [s for s in new.get('services') or [] if s.get('id') not in USENET_SERVICES]
     new, _ = realdebrid.without_real_debrid(new)
+    new['presets'] = _within_services(new)
     for key, value in SYNC_SETTINGS.items():
         if isinstance(value, dict):
             new[key] = {**(new.get(key) or {}), **value}

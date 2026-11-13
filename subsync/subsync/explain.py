@@ -100,10 +100,10 @@ RULES = [
      "time you open the file, it is there."),
     ("Public mode: limits per person",
      "Each person can have a few files waiting and read a set number of new files and megabytes a day (UTC), by "
-     "default 3 waiting, 40 files and 500 MB, and the whole service reads at most its own daily total; files already "
-     "synced for someone don't count. Past a limit, you get only copies already synced for someone until the next "
-     "day, and nobody else is affected. Sign-up attempts are limited per internet address, and the service takes a "
-     "set number of people. Your settings page shows today's use."),
+     "default 3 waiting, 60 files and 1,000 MB, and the whole service reads at most its own daily total; files already "
+     "synced for someone don't count. Past a limit, you get only copies already synced for someone until the next day, "
+     "and nobody else is affected. Sign-up attempts are limited per internet address, and the service takes a set "
+     "number of people. Your settings page shows today's use."),
     ("Public mode: what is kept, and for how long",
      "AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: "
      "the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password, and "
@@ -148,6 +148,11 @@ RULES = [
 # answers-file key -> (example value for docs/answers.example, explanation), in the order ./setup asks them
 
 QUESTIONS = {
+    "ROUTE": (
+        "yourself",
+        "Install it for yourself (yourself, the default). This adds it to the AIOStreams you already run. Host a "
+        "public instance (host). Runs here with its own sign-up page, so other people can use it with their own "
+        "AIOStreams."),
     "AIOS_CONTAINER": (
         "",
         "Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins "
@@ -155,27 +160,27 @@ QUESTIONS = {
         "you play. Pick the one whose address your apps use."),
     "AIOS_URL": (
         "http://127.0.0.1:3000",
-        "Asked only when ./setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' "
+        "Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' "
         "configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to "
         "AIOStreams at this address, so it must work from this machine."),
     "AIOS_CONFIG_ID": (
         "",
-        "The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page "
-        "when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole "
-        "install link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this "
+        "The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure "
+        "page when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the "
+        "whole install link: setup takes the ID out of it and checks that the config exists. subsync is added to this "
         "config, and subsync's own config is made from it."),
     "AIOS_CONFIG_PASSWORD": (
         "",
-        "The password you chose when you saved that config. ./setup uses it to read the config and save the change, and "
-        "doesn't store it; subsync gets its own config with its own random password. While setting up, Enter with "
-        "nothing typed goes back to give a different ID; ./setup --restore and --uninstall need it to change the config. "
-        "If you put it in an answers file, keep that file private."),
+        "The password you chose when you saved that config. Setup uses it to read the config and save the change, and "
+        "doesn't store it; subsync gets its own config with its own random password. Removing subsync and restoring a "
+        "saved copy ask for it again. If you put it in an answers file, keep that file private."),
     "LANGUAGES": (
         "English",
-        "The subtitle languages to sync, by name or code, separated by commas: English, Spanish, ru; up to four, "
-        "default English. For each language and each file you play, subsync downloads that language's subtitles from "
-        "your subtitle sources and the ones it searches itself, and checks them against the file. Each extra language "
-        "adds those downloads and a few seconds of work per file; the video file is still read only once."),
+        "The subtitle languages to sync, up to four, the first one first; English if you choose none. In an answers "
+        "file, names or codes separated by commas, like English, Spanish, ru. For each language and each file you "
+        "play, subsync downloads that language's subtitles from your subtitle sources and the ones it searches itself, "
+        "and checks them against the file. Each extra language adds those downloads and a few seconds of work per "
+        "file; the video file is still read only once."),
     "AUDIO": (
         "no",
         "Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, "
@@ -216,10 +221,10 @@ QUESTIONS = {
     "PUBLIC_ADDRESS": (
         "",
         "The address your apps download synced subtitle files from. The suggestion sits behind the same web address as "
-        "AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (./setup shows it); "
-        "on a home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every device "
-        "you watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced "
-        "files and a health check are open at that address."),
+        "AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (setup shows it); "
+        "on a home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every "
+        "device you watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only "
+        "synced files and a health check are open at that address."),
     "CACHE": (
         "no",
         "AIOStreams keeps every subtitle answer for 5 minutes. Yes turns that off for subsync only, so a copy made "
@@ -236,20 +241,25 @@ QUESTIONS = {
         "keep that file private."),
     "CONFIRM": (
         "yes",
-        "Save the changes ./setup just showed: subsync added to your config (after a backup copy) and subsync's own "
-        "config created or updated. Default yes. No: nothing is changed; run ./setup again any time. ./setup --restore "
-        "and --uninstall ask the same before they change anything, and there the default is no."),
+        "Saves the changes shown here: subsync added to your config (after a backup copy) and subsync's own config "
+        "created or updated. Until then nothing is changed: go back to change an answer, or leave and run ./setup "
+        "again any time. Removing subsync and restoring a saved copy also ask before they change anything."),
     "TEST_READ": (
         "no",
         "A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as "
         "it does for every file you play. Yes: you see now that reading works and whether that file has its own "
         "subtitle track; your debrid service opens the file, so it may show in your debrid account's list. No "
         "(default): the first file you play is the first read."),
+    "HOST_ADDRESS": (
+        "",
+        "The web address of your public instance, with https, like https://subtitles.example.com: people open it to "
+        "sign up, and their apps download synced files from it. Your web server sends it to this machine; setup shows "
+        "the one rule it needs. It goes into every personal link, so choose one you will keep: changing it later "
+        "breaks the links people already added to their AIOStreams."),
     "REMOVE_OPENSUBTITLES": (
         "yes",
-        "Asked by ./setup --uninstall when ./setup had added OpenSubtitles to your config. Yes takes it out again, "
-        "leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' "
-        "subtitles."),
+        "Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, "
+        "leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles."),
 }
 
 # ------------------------------------------------------------------------------------------- subsync's settings
@@ -649,104 +659,106 @@ GROUPS = [
             "off",
             "Public mode: one AIOSubtitles service for many people, like aiosubtitles.com. Each person signs up on its "
             "web page with their AIOStreams link and password and gets a personal addon link; subsync then works "
-            "through a separate sync config it makes on their AIOStreams. Leave it off for your own install: ./setup "
-            "doesn't use it. On, the service needs SUBSYNC_SECRET_KEY and SUBSYNC_PUBLIC_BASE, keeps the audio route "
-            "off, and shares how each copy was synced (its timing, never its text) between everyone who plays the same "
-            "file, so the more people use it, the more files are ready when someone presses play. It holds other people's links, so it needs a "
-            "server you keep up to date and backed up."),
+            "through a separate sync config it makes on their AIOStreams. Leave it off for your own install; setup "
+            "turns it on when you host a public instance. On, the service needs SUBSYNC_SECRET_KEY and "
+            "SUBSYNC_PUBLIC_BASE, keeps the audio route off, and shares how each copy was synced (its timing, never "
+            "its text) between everyone who plays the same file, so the more people use it, the more files are ready "
+            "when someone presses play. It holds other people's links, so it needs a server you keep up to date and "
+            "backed up."),
         "SUBSYNC_SECRET_KEY": (
             "",
-            "Public mode only: the service's secret, at least 32 random bytes written as base64url, for example what "
-            "python3 -c \"import secrets; print(secrets.token_urlsafe(32))\" prints. It encrypts each person's record "
-            "together with their personal link, so neither the database nor this secret alone opens a record. "
-            "Required in public mode; never logged. Keep it in a private file and in your backups: if it is lost or "
-            "changed, everyone has to sign up again."),
+            "The service's secret, at least 32 random bytes written as base64url; setup makes one and keeps it in "
+            "state/subsync.env, readable only by your user (by hand: what python3 -c \"import secrets; "
+            "print(secrets.token_urlsafe(32))\" prints). It encrypts each person's record together with their personal "
+            "link, so neither the database nor this secret alone opens a record. Required in public mode; never logged "
+            "or shown. Keep that file in your backups: if the secret is lost or changed, everyone has to sign up again."),
         "SUBSYNC_PUBLIC_INVITE": (
             "",
-            "Public mode only: when set, the sign-up page asks for this code, so only people you gave it to can sign "
-            "up, for example while you and your testers try the service. Empty lets anyone sign up. It doesn't affect "
-            "people who already signed up. Recommended while testing; remove it to open the service."),
+            "When set, the sign-up page asks for this code, so only people you gave it to can sign up, for example "
+            "while you and your testers try the service. Empty lets anyone sign up. It doesn't affect people who "
+            "already signed up. Recommended while testing; remove it to open the service."),
         "SUBSYNC_MAX_USERS": (
             "200",
-            "Public mode only: how many people can be signed up at once; past it the sign-up page says the service is "
-            "full. Each person costs a little disk and, while they play, a worker, so the limit keeps the server "
-            "within what it can carry. Raise it only after watching memory, processor use and the daily read total "
-            "for a while."),
+            "How many people can be signed up at once; past it the sign-up page says the service is full. Each person "
+            "costs a little disk and, while they play, a worker, so the limit keeps the server within what it can "
+            "carry. Raise it only after watching memory, processor use and the daily read total for a while."),
         "SUBSYNC_SIGNUPS_PER_HOUR": (
             "5",
-            "Public mode only: sign-up attempts allowed per internet address per hour, counted before anything is "
-            "fetched. Each attempt makes the service contact that person's AIOStreams several times, so this stops one "
-            "address from flooding the service or someone else's AIOStreams. 5 is plenty for someone who mistypes a "
-            "password; lower is stricter, higher helps many people behind one shared address."),
+            "Sign-up attempts allowed per internet address per hour, counted before anything is fetched. Each attempt "
+            "makes the service contact that person's AIOStreams several times, so this stops one address from flooding "
+            "the service or someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is "
+            "stricter, higher helps many people behind one shared address."),
         "SUBSYNC_USER_FILES_PER_DAY": (
-            "40",
-            "Public mode only: new files read per person per day (UTC). Files already in the shared store don't count, "
-            "and neither does serving a copy. Past it, that person gets only copies the store already has until the "
-            "next day; nobody else is affected. 40 is several days of watching in one; it keeps one person, or a "
-            "leaked link, from using up the service's daily reads."),
+            "60",
+            "New files read per person per day (UTC). Files already in the shared store don't count, and neither does "
+            "serving a copy. Past it, that person gets only copies the store already has until the next day; nobody "
+            "else is affected. 60 is a long day of episodes; it keeps one person, or a leaked link, from using up the "
+            "service's daily reads."),
         "SUBSYNC_USER_DAILY_MB": (
-            "500",
-            "Public mode only: megabytes read per person per day (UTC) through their own sync config. Reading a "
-            "file's subtitle track takes about 1 MB, a few MB when the track's lines are pictures, so this is room for "
-            "hundreds of files; it stops someone whose "
-            "files have unusual layouts from using most of the service's daily total (SUBSYNC_DAILY_BUDGET_GB). Past "
-            "it, that person gets only copies already in the store until the next day."),
+            "1000",
+            "Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track "
+            "takes about 1 MB, a few MB when the track's lines are pictures; 1,000 is 60 files at the most one file's "
+            "index may take (16 MB), so it never stops someone before the file limit, and it stops someone whose files "
+            "have unusual layouts from using most of the service's daily total. Past it, that person gets only copies "
+            "already in the store until the next day."),
         "SUBSYNC_MAX_LANGUAGES": (
             "4",
-            "Public mode only: how many languages each person may choose, from 1 to 4. Each language is a separate sync "
-            "for every file they play, so a lower number means less work for the service. 4 is the most the pages "
-            "offer."),
+            "How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file "
+            "they play: its own subtitle downloads and a few seconds of work, while the file itself is read once. "
+            "Recommended: 4, the most the pages offer; lower it only when the server can't keep up. A lower limit "
+            "applies when people next save their languages; until then they keep the ones they have."),
         "SUBSYNC_USER_QUEUE": (
             "3",
-            "Public mode only: files one person may have waiting at once. A request past it is answered with what the "
-            "shared store already has and starts nothing. Everyone's files wait for the same few places "
-            "(SUBSYNC_SYNCS_AT_ONCE), so a longer queue for one person delays everyone else; 3 covers someone opening "
-            "a few episodes in a row."),
+            "Files one person may have waiting at once. A request past it is answered with what the shared store "
+            "already has and starts nothing. Everyone's files wait for the same few places (SUBSYNC_SYNCS_AT_ONCE), so "
+            "a longer queue for one person delays everyone else; 3 covers someone opening a few episodes in a row."),
         "SUBSYNC_ACTIVE_WORKERS": (
-            "30",
-            "Public mode only: how many people can have a worker (the part that finds and syncs their files) running "
-            "at once. A worker with nothing to do for SUBSYNC_WORKER_IDLE_MIN stops. Past the limit, a person's "
-            "requests get only copies already in the shared store until a worker frees up. Each worker costs a few "
-            "megabytes of memory; keep the limit within what the server's memory allows."),
+            "100",
+            "How many people can have a worker (the part that finds and syncs their files) running at once. A worker "
+            "with nothing to do stops after a while (30 minutes by default). Past the limit, a person's requests get "
+            "only copies already in the shared store until a worker frees up. Each worker takes about 2.5 MB of "
+            "memory, so 100 take about 250 MB; keep the limit within what the server's memory allows."),
         "SUBSYNC_WORKER_IDLE_MIN": (
             "30",
-            "Public mode only: minutes without a request before a person's worker stops and their opened record "
-            "leaves memory. Shorter frees memory sooner and keeps opened records in memory for less time; longer saves "
-            "reopening the record when someone pauses between episodes. Reopening is quick, so 30 is a fair middle."),
+            "Minutes without a request before a person's worker stops and their opened record leaves memory. Shorter "
+            "frees memory sooner and keeps opened records in memory for less time; longer saves reopening the record "
+            "when someone pauses between episodes. Reopening is quick, so 30 is a fair middle."),
         "SUBSYNC_USER_KEEP_DAYS": (
             "180",
-            "Public mode only: days without a single request before a person's record is deleted. Their sync config "
-            "can't be removed from their AIOStreams then, because opening the record needs their personal link; the "
-            "privacy page says so. Shorter keeps less data about people who left; longer spares people who come back "
-            "after a long break from signing up again."),
+            "Days without a single request before a person's record is deleted. Their sync config can't be removed "
+            "from their AIOStreams then, because opening the record needs their personal link; the privacy page says "
+            "so. Shorter keeps less data about people who left; longer spares people who come back after a long break "
+            "from signing up again."),
         "SUBSYNC_TRUSTED_PROXY": (
             "127.0.0.1",
-            "Public mode only: the addresses of the web server in front of subsync, comma-separated. Only requests "
-            "from these may say, in their X-Forwarded-For header, which address they came from, and the sign-up limit "
-            "per address counts that one. Set it to your web server's address as subsync sees it, or to gateway when "
-            "the web server reaches subsync through a port Docker publishes: subsync then trusts its Docker network's "
-            "gateway, found at start, with no fixed network to set up. A wrong value makes every visitor count as one "
-            "address, or lets visitors choose their own."),
+            "The addresses of the web server in front of subsync, comma-separated. Only requests from these may say, "
+            "in their X-Forwarded-For header, which address they came from, and the sign-up limit per address counts "
+            "that one. Set it to your web server's address as subsync sees it, or to gateway when the web server "
+            "reaches subsync through a port Docker publishes: subsync then trusts its Docker network's gateway, found "
+            "at start, with no fixed network to set up. A wrong value makes every visitor count as one address, or "
+            "lets visitors choose their own."),
         "SUBSYNC_MAX_CONNECTIONS": (
-            "64",
-            "Public mode only: requests handled at once. Each one takes a thread and some memory, so past it the "
-            "service answers \"busy, try again\" (HTTP 503) at once instead of running out of memory. Apps ask for "
-            "subtitles again on their own. Raise it together with the memory the service may use."),
+            "256",
+            "Requests handled at once. Each one takes a thread and some memory, so past it the service answers \"busy, "
+            "try again\" (HTTP 503) at once instead of running out of memory. Apps ask for subtitles again on their "
+            "own. 256 leaves room for 200 people's apps asking at once; raise it together with the memory the service "
+            "may use."),
         "SUBSYNC_RECHECK_HOURS": (
             "24",
-            "Public mode only: how often, at most, each person's AIOStreams is checked again while they use the service, "
-            "in hours; 0 turns the check off. A check asks their AIOStreams two things (does their config still exist, "
-            "does AIOSubtitles' own config there still open), repairs a changed link, and tells the person on their "
+            "How often, at most, each person's AIOStreams is checked again while they use the service, in hours; 0 "
+            "turns the check off. A check asks their AIOStreams two things (does their config still exist, does "
+            "AIOSubtitles' own config there still open), repairs a changed link, and tells the person on their "
             "settings page and in their subtitle lists what only they can fix; for people who let AIOSubtitles keep "
-            "their password it also rebuilds AIOSubtitles' config from theirs. Shorter notices changes sooner, at "
-            "more calls to every AIOStreams; people who don't use the service aren't checked."),
+            "their password it also rebuilds AIOSubtitles' config from theirs. Shorter notices changes sooner, at more "
+            "calls to every AIOStreams; people who don't use the service aren't checked."),
         "SUBSYNC_SYNCS_AT_ONCE": (
-            "1",
-            "Public mode only: how many files the service works on at once for everyone, or auto for as many as the "
-            "processors it may use. More lets people who play new files at the same time wait less, at more processor "
-            "use and more requests to each AIOStreams at once; one public AIOStreams shared by many people limits how "
-            "many requests one address may make, so 2 suits a server with 2 processors. A torrent's file is never "
-            "read twice at once: whoever plays it second waits for the first one's work and reads nothing."),
+            "auto",
+            "How many files the service works on at once for everyone, or auto for one per processor it may use. "
+            "Recommended: auto, since one sync keeps about one processor busy. More lets people who play new files at "
+            "the same time wait less, at more processor use and more requests to each AIOStreams at once; one public "
+            "AIOStreams shared by many people limits how many requests one address may make, so give a number when the "
+            "processors are many and that AIOStreams is shared. A torrent's file is never read twice at once: whoever "
+            "plays it second waits for the first one's work and reads nothing."),
     }),
 ]
 

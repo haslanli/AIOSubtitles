@@ -445,8 +445,8 @@ class SettingsPageTest(unittest.TestCase):
 
     def test_usage_and_the_reset_time(self):
         text = Tree(self.page(now=86400 * 5 + 3600)).text()
-        self.assertIn("3 of 40", text)
-        self.assertIn("0.3 MB of 500 MB", text)
+        self.assertIn("3 of 60", text)
+        self.assertIn("0.3 MB of 1000 MB", text)
         self.assertIn("Resets at 00:00 UTC, in 23 h.", text)
 
     def test_the_reset_time_reads_plainly(self):
@@ -456,7 +456,7 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual(reset_in(86400 - 3600 * 7 - 60 * 12), "in 7 h 12 min")
 
     def test_a_reached_limit_is_called_out_and_its_bar_turns_red(self):
-        text = self.page(usage={"files": 40, "bytes": 0})
+        text = self.page(usage={"files": 60, "bytes": 0})
         self.assertIn("Today's limit is reached", Tree(text).text())
         self.assertIn('class="gauge full"', text)
 

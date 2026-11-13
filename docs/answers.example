@@ -1,32 +1,36 @@
 # Answers for ./setup --answers FILE (add --yes to ask nothing). Leave a line out to be asked, or to keep the current
 # value on a re-run. A " #" starts a comment. Keep this file private if it holds a password.
 
+# Install it for yourself (yourself, the default). This adds it to the AIOStreams you already run. Host a public
+# instance (host). Runs here with its own sign-up page, so other people can use it with their own AIOStreams.
+ROUTE=yourself
+
 # Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins that
 # container's Docker network and finds files through it, so the wrong one means it finds none of the files you play.
 # Pick the one whose address your apps use.
 AIOS_CONTAINER=
 
-# Asked only when ./setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams'
+# Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams'
 # configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to
 # AIOStreams at this address, so it must work from this machine.
 AIOS_URL=http://127.0.0.1:3000
 
 # The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page
 # when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole install
-# link: ./setup takes the ID out of it and checks that the config exists. subsync is added to this config, and
+# link: setup takes the ID out of it and checks that the config exists. subsync is added to this config, and
 # subsync's own config is made from it.
 AIOS_CONFIG_ID=
 
-# The password you chose when you saved that config. ./setup uses it to read the config and save the change, and
-# doesn't store it; subsync gets its own config with its own random password. While setting up, Enter with nothing
-# typed goes back to give a different ID; ./setup --restore and --uninstall need it to change the config. If you put
-# it in an answers file, keep that file private.
+# The password you chose when you saved that config. Setup uses it to read the config and save the change, and
+# doesn't store it; subsync gets its own config with its own random password. Removing subsync and restoring a saved
+# copy ask for it again. If you put it in an answers file, keep that file private.
 AIOS_CONFIG_PASSWORD=
 
-# The subtitle languages to sync, by name or code, separated by commas: English, Spanish, ru; up to four, default
-# English. For each language and each file you play, subsync downloads that language's subtitles from your subtitle
-# sources and the ones it searches itself, and checks them against the file. Each extra language adds those
-# downloads and a few seconds of work per file; the video file is still read only once.
+# The subtitle languages to sync, up to four, the first one first; English if you choose none. In an answers file,
+# names or codes separated by commas, like English, Spanish, ru. For each language and each file you play, subsync
+# downloads that language's subtitles from your subtitle sources and the ones it searches itself, and checks them
+# against the file. Each extra language adds those downloads and a few seconds of work per file; the video file is
+# still read only once.
 LANGUAGES=English
 
 # Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, unless
@@ -67,7 +71,7 @@ WYZIE_KEY=
 ADD_OPENSUBTITLES=yes
 
 # The address your apps download synced subtitle files from. The suggestion sits behind the same web address as
-# AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (./setup shows it); on a
+# AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (setup shows it); on a
 # home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every device you
 # watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced files and
 # a health check are open at that address.
@@ -87,9 +91,9 @@ AIOS_USERNAME=
 # that file private.
 AIOS_PASSWORD=
 
-# Save the changes ./setup just showed: subsync added to your config (after a backup copy) and subsync's own config
-# created or updated. Default yes. No: nothing is changed; run ./setup again any time. ./setup --restore and
-# --uninstall ask the same before they change anything, and there the default is no.
+# Saves the changes shown here: subsync added to your config (after a backup copy) and subsync's own config created
+# or updated. Until then nothing is changed: go back to change an answer, or leave and run ./setup again any time.
+# Removing subsync and restoring a saved copy also ask before they change anything.
 CONFIRM=yes
 
 # A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as it
@@ -98,6 +102,12 @@ CONFIRM=yes
 # file you play is the first read.
 TEST_READ=no
 
-# Asked by ./setup --uninstall when ./setup had added OpenSubtitles to your config. Yes takes it out again, leaving
+# The web address of your public instance, with https, like https://subtitles.example.com: people open it to sign
+# up, and their apps download synced files from it. Your web server sends it to this machine; setup shows the one
+# rule it needs. It goes into every personal link, so choose one you will keep: changing it later breaks the links
+# people already added to their AIOStreams.
+HOST_ADDRESS=
+
+# Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, leaving
 # your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.
 REMOVE_OPENSUBTITLES=yes

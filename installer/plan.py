@@ -158,10 +158,12 @@ def parse_env(text):
     return out
 
 
-def merge_env(written, current):
-    """state/subsync.env: ./setup's lines (`written`: the settings it owns, explain.WRITTEN_BY_SETUP), then every other
-    line of the current file as the user wrote it. Returns (values, names kept from the current file)."""
-    kept = [k for k in current if k not in explain.WRITTEN_BY_SETUP]
+def merge_env(written, current, owned=()):
+    """state/subsync.env: ./setup's lines (`written`: the settings it owns, explain.WRITTEN_BY_SETUP, and the limits it
+    asked, `owned`), then every other line of the current file as the user wrote it. A limit it asked whose answer is
+    subsync's default has no line, so a later default applies. Returns (values, names kept from the current file)."""
+    owned = set(explain.WRITTEN_BY_SETUP) | set(owned)
+    kept = [k for k in current if k not in owned]
     return {**written, **{k: current[k] for k in kept}}, kept
 
 

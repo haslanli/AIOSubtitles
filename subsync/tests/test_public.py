@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from subsync.settings import Settings  # noqa: E402
+from subsync.settings import Settings, available_cpus  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 
@@ -21,15 +21,15 @@ class PublicSettingsTest(unittest.TestCase):
         self.assertEqual(s.invite, "")
         self.assertEqual(s.max_users, 200)
         self.assertEqual(s.signups_per_hour, 5)
-        self.assertEqual(s.user_files_per_day, 40)
-        self.assertEqual(s.user_daily_bytes, 500 * 1024 * 1024)
+        self.assertEqual(s.user_files_per_day, 60)
+        self.assertEqual(s.user_daily_bytes, 1000 * 1024 * 1024)
         self.assertEqual(s.user_queue, 3)
-        self.assertEqual(s.active_workers, 30)
+        self.assertEqual(s.active_workers, 100)
         self.assertEqual(s.worker_idle_s, 1800)
         self.assertEqual(s.user_keep_days, 180)
         self.assertEqual(s.trusted_proxy, ("127.0.0.1",))
-        self.assertEqual(s.max_connections, 64)
-        self.assertEqual(s.syncs_at_once, 1)
+        self.assertEqual(s.max_connections, 256)
+        self.assertEqual(s.syncs_at_once, available_cpus())   # auto
 
     def test_trusted_proxy_is_a_list(self):
         self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "127.0.0.1, ::1"}).trusted_proxy, ("127.0.0.1", "::1"))
@@ -588,7 +588,7 @@ class PoolTest(unittest.TestCase):
     def test_workers_share_one_turn(self):
         a, b = self.pool.app(self.tokens[0]), self.pool.app(self.tokens[1])
         self.assertIs(a.worker.turn, b.worker.turn)
-        self.assertEqual(a.worker.turn.places, 1)
+        self.assertEqual(a.worker.turn.places, self.settings.syncs_at_once)
         self.assertIsNotNone(a.worker.limits)
 
     def test_the_turn_has_as_many_places_as_files_at_once(self):
@@ -636,14 +636,14 @@ class PoolTest(unittest.TestCase):
         from subsync.public import UserLimits
         from subsync.worker import OverLimit
         limits = UserLimits(self.settings, self.users, self.tokens[0])
-        for _ in range(40):
+        for _ in range(60):
             self.assertTrue(limits.may_start_file())
             limits.file_started()
-        self.assertFalse(limits.may_start_file())                 # the 41st file of the day
-        limits.after_read(500 * 1024 * 1024 - 10)
+        self.assertFalse(limits.may_start_file())                 # the 61st file of the day
+        limits.after_read(1000 * 1024 * 1024 - 10)
         limits.before_read(10)
         with self.assertRaises(OverLimit):
-            limits.before_read(11)                                 # past 500 MB
+            limits.before_read(11)                                 # past 1,000 MB
         self.assertTrue(limits.may_queue(2))
         self.assertFalse(limits.may_queue(3))
         other = UserLimits(self.settings, self.users, self.tokens[1])
@@ -768,7 +768,7 @@ class PublicTextsTest(unittest.TestCase):
         from subsync import pages
         s = Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY, "SUBSYNC_PUBLIC_BASE": "https://x.test"})
         record = {"languages": ["eng"]}
-        for nbytes, shown in ((0, " 0 MB of 500 MB read"), (20 * 1024, " 0.1 MB of"), (351 * 1024, " 0.3 MB of"),
+        for nbytes, shown in ((0, " 0 MB of 1000 MB read"), (20 * 1024, " 0.1 MB of"), (351 * 1024, " 0.3 MB of"),
                               (5 * 1024 * 1024, " 5.0 MB of"), (12 * 1024 * 1024, " 12 MB of")):
             with self.subTest(nbytes=nbytes):
                 html = pages.settings_page(s, record, {"files": 1, "bytes": nbytes}, "https://x.test/u/t/manifest.json")
@@ -805,7 +805,7 @@ class PublicTextsTest(unittest.TestCase):
         self.assertIn("(about 1 MB per file, a few MB when the track's lines are pictures; up to 1 GB per file with "
                       "the audio route)", settings["SUBSYNC_DAILY_BUDGET_GB"])
         self.assertIn("Reading a file's subtitle track takes about 1 MB, a few MB when the track's lines are "
-                      "pictures, so this is room", settings["SUBSYNC_USER_DAILY_MB"])
+                      "pictures; 1,000 is 60 files", settings["SUBSYNC_USER_DAILY_MB"])
 
 
 if __name__ == "__main__":

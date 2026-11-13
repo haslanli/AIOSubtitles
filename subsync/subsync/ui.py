@@ -67,23 +67,26 @@ MARK = _svg('<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/>'
 
 # ------------------------------------------------------------------------------------------- the page frame
 
-def page(title, body, kind, personal=False, body_attrs="", opened=False):
+def page(title, body, kind, personal=False, body_attrs="", opened=False, refresh=None):
     """A whole page around `body` (which starts with top()). `kind` names the layout: start, done, settings, letter.
     Personal pages ask not to be indexed. `body_attrs`: more attributes of <body> (escaped by the caller); `opened`:
-    the sign-up layer comes back open (after a problem)."""
+    the sign-up layer comes back open (after a problem); `refresh`: seconds after which the page loads itself again
+    (the installer's progress, without the script)."""
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             + ("<meta name=\"robots\" content=\"noindex\">" if personal else "")
+            + (f"<meta http-equiv=\"refresh\" content=\"{int(refresh)}\">" if refresh else "")
             + f"<title>{e(title)}</title><link rel=\"preload\" href=\"/static/fonts/{FONT_FILES[0]}\" as=\"font\" "
             f"type=\"font/ttf\" crossorigin><link rel=\"stylesheet\" href=\"{CSS_URL}\">"
             f"<script src=\"{JS_URL}\" defer></script></head><body class=\"p-{e(kind)}{' open' if opened else ''}\"{body_attrs}>"
             f"{body}</body></html>")
 
 
-def top(contact, start="/"):
+def top(contact, start="/", privacy=True):
+    """The page's header: the name, Privacy (the site only) and Questions."""
     return (f"<header class=\"top\"><a class=\"wordmark\" href=\"{e(start)}\">AIOSubtitles</a>"
-            f"<nav class=\"links\" aria-label=\"AIOSubtitles\"><a href=\"/privacy\">Privacy</a>"
-            f"<a href=\"{e(contact)}\">Questions</a></nav></header>")
+            f"<nav class=\"links\" aria-label=\"AIOSubtitles\">" + ("<a href=\"/privacy\">Privacy</a>" if privacy else "")
+            + f"<a href=\"{e(contact)}\">Questions</a></nav></header>")
 
 
 # ------------------------------------------------------------------------------------------- buttons
@@ -223,7 +226,8 @@ def radio_group(legend, rows):
 
 def step_frame(steps, current, content, rail_label, done=False, back=True):
     """The installer's frame: a step list on the left on desktop; on phones and tablets, segments on top with the back
-    arrow, and the step's Continue in thumb reach. `current`: the index of the step shown; `done`: every step done."""
+    arrow, and the step's Continue in thumb reach. `current`: the index of the step shown; `done`: every step done;
+    `back`: the back arrow, a link when it is an address (the installer's pages work without the script)."""
     rail, segs = [], []
     for i, name in enumerate(steps):
         is_done, is_now = done or i < current, not done and i == current
@@ -231,7 +235,10 @@ def step_frame(steps, current, content, rail_label, done=False, back=True):
         here = " aria-current=\"step\"" if is_now else ""
         rail.append(f"<li{state}{here}><span class=\"dot\">{TICK_BOLD if is_done else ''}</span>{e(name)}</li>")
         segs.append(f"<li{state}{here}></li>")
-    back_html = (f"<button class=\"icon-btn\" type=\"button\" data-back aria-label=\"Back\">{BACK}</button>" if back else "")
+    if isinstance(back, str):
+        back_html = f"<a class=\"icon-btn\" href=\"{e(back)}\" aria-label=\"Back\">{BACK}</a>"
+    else:
+        back_html = (f"<button class=\"icon-btn\" type=\"button\" data-back aria-label=\"Back\">{BACK}</button>" if back else "")
     return (f"<div class=\"frame\"><ol class=\"rail\" aria-label=\"{e(rail_label)}\">{''.join(rail)}</ol>"
             f"<main class=\"steparea\"><div class=\"fbar\">{back_html}<ol class=\"segs\" aria-hidden=\"true\">"
             f"{''.join(segs)}</ol></div>{content}</main></div>")
@@ -303,4 +310,9 @@ def update_panel(heading, about, running_html, ready, action, hid="up-h"):
     lines = f"<p>{running_html}</p>" + (f"<p class=\"new\">{e(ready)}</p>" if ready else "")
     return (f"<section class=\"grid12 row\" aria-labelledby=\"{e(hid)}\"><div class=\"about\"><h2 id=\"{e(hid)}\">"
             f"{e(heading)}</h2><p class=\"help\">{e(about)}</p></div><div class=\"controls\"><div class=\"version\">{lines}"
-            "</div>" + (f"<div class=\"actions\">{button(action)}</div>" if ready else "") + "</div></section>")
+            "</div>" + (f"<div class=\"actions\">{button(action, type='submit')}</div>" if ready else "") + "</div></section>")
+
+
+def code_lines(lines):
+    """Lines to copy as they are (a command, a web server's rule), in the mono face (the installer's pages)."""
+    return "<pre class=\"code\">" + "\n".join(e(line) for line in lines) + "</pre>"

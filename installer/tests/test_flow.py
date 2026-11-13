@@ -14,12 +14,37 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, wizard
+from installer import dockerenv, engine, wizard
 from subsync import explain, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
 PASSWORD = 'viewer-secret-password'
 PUBLIC = 'https://aio.example.com'
+
+
+SERVICE_NAMES = {'aiostreams': 'AIOStreams', 'nzbdav': 'NzbDAV', 'altmount': 'AltMount', 'torbox': 'TorBox',
+                 'stremio_nntp': 'Stremio NNTP', 'stremthru_newz': 'StremThru Newz', 'easynews': 'Easynews',
+                 'realdebrid': 'Real-Debrid'}
+
+
+def refusal(config):
+    """Why AIOStreams refuses a config when it is created or saved (None: it doesn't), as far as its check of each
+    addon's own services goes (Preset.getUsableServices, v2.35.8; the rule of subsync/tests/helpers.py): every service
+    an enabled addon names must be on the config's list, enabled, with credentials; an empty choice leaves it none."""
+    services = {s.get('id'): s for s in (config or {}).get('services') or [] if isinstance(s, dict)}
+    for preset in (config or {}).get('presets') or []:
+        chosen = (preset.get('options') or {}).get('services')
+        if not preset.get('enabled') or not isinstance(chosen, list):
+            continue
+        name = (preset.get('options') or {}).get('name') or preset.get('type')
+        for service in chosen:
+            found = services.get(service)
+            if not found or not found.get('enabled') or found.get('credentials') is None:
+                return (f'You have specified {SERVICE_NAMES.get(service, service)} in your configuration for {name}, '
+                        'but it is not enabled or has missing credentials')
+        if not chosen:
+            return f'{name} requires at least one usable service, but none were found.'
+    return None
 
 
 class FakeAios:
@@ -126,6 +151,9 @@ class FakeAios:
                     return self._json(401, {'success': False, 'error': {'code': 'USER_INVALID_DETAILS'}})
                 if outer.gated and not self.headers.get('Cookie'):
                     return self._json(403, {'success': False, 'error': {'code': 'FORBIDDEN', 'message': 'not allowed'}})
+                refused = refusal(body['config'])
+                if refused:
+                    return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_CONFIG', 'message': refused}})
                 if not outer.manifests_ok(body['config']):
                     return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_CONFIG',
                                                                         'message': 'Failed to fetch manifest for subsync: fetch failed'}})
@@ -141,6 +169,9 @@ class FakeAios:
                     return self._json(200 if ok else 401, {'success': ok, 'data': {'isAdmin': True}, '_cookie': ok})
                 if outer.gated and not self.headers.get('Cookie'):
                     return self._json(403, {'success': False, 'error': {'code': 'FORBIDDEN', 'message': 'not allowed'}})
+                refused = refusal(body['config'])
+                if refused:
+                    return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_CONFIG', 'message': refused}})
                 if not outer.manifests_ok(body['config']):
                     return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_CONFIG', 'message': 'fetch failed'}})
                 uuid = f'9{len(outer.users)}aaaaaa-1234-4abc-8def-0123456789ab'
@@ -170,7 +201,9 @@ class FakeAios:
         self.server.server_close()
 
 
-class Flow(unittest.TestCase):
+class FlowFixture(unittest.TestCase):
+    """A stand-in AIOStreams with Docker stubbed out (no tests here: test_web.py drives the page on it too)."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.state = Path(self.tmp.name) / 'state'
@@ -190,8 +223,8 @@ class Flow(unittest.TestCase):
             return 0, json.dumps({'subtitle_requests': getattr(self.aios, 'subtitle_calls', 0)}), ''
 
         self.patches = [
-            mock.patch.object(wizard, 'STATE', self.state),
-            mock.patch.object(wizard, 'REPO', Path(self.tmp.name)),
+            mock.patch.object(engine, 'STATE', self.state),
+            mock.patch.object(engine, 'REPO', Path(self.tmp.name)),
             mock.patch.object(dockerenv, 'docker_problem', lambda: None),
             mock.patch.object(dockerenv, 'free_gb', lambda p='/': 100.0),
             mock.patch.object(dockerenv, 'aios_containers', lambda: [container]),
@@ -202,7 +235,7 @@ class Flow(unittest.TestCase):
             mock.patch.object(dockerenv, 'compose', self._compose),
             mock.patch.object(dockerenv, 'run', lambda *a, **k: (0, '["sha256:built"]' if self.built else '', '')),
             mock.patch.object(dockerenv, 'exec_in', exec_in),
-            mock.patch.object(wizard.Aios, 'call', self._call_public_health(wizard.Aios.call, self.aios)),
+            mock.patch.object(engine.Aios, 'call', self._call_public_health(engine.Aios.call, self.aios)),
         ]
         for p in self.patches:
             p.start()
@@ -210,6 +243,7 @@ class Flow(unittest.TestCase):
     def _compose(self, state, *args, **kw):
         if 'build' in args:
             self.built = True
+            self.built_count = getattr(self, 'built_count', 0) + 1
         if 'up' in args:
             self.aios.subsync_up = True
         if 'down' in args:
@@ -223,21 +257,6 @@ class Flow(unittest.TestCase):
                 return (200, b'ok') if aios.subsync_up else (502, b'')
             return real(self, method, path, *a, **k)
         return call
-
-    def run_interactive(self, inputs, *extra, enters=12):
-        """A run where the user types the answers, then presses Enter at most `enters` times (accepting defaults);
-        after that the input ends (EOFError), so a question asked over and over stops the run instead of looping."""
-        answers = iter(list(inputs) + [''] * enters)
-
-        def typed(prompt=''):
-            try:
-                return next(answers)
-            except StopIteration:
-                raise EOFError from None
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch('builtins.input', typed):
-            code = wizard.main(list(extra))
-        return code, out.getvalue()
 
     def tearDown(self):
         for p in self.patches:
@@ -258,6 +277,9 @@ class Flow(unittest.TestCase):
     LINK = f'{PUBLIC}/stremio/{UUID}/ENC/manifest.json'
 
 
+class Flow(FlowFixture):
+
+
     def test_install_rerun_uninstall(self):
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
@@ -265,20 +287,20 @@ class Flow(unittest.TestCase):
         viewer = self.aios.users[UUID]['config']
         ours = [p for p in viewer['presets'] if p['type'] == 'custom']
         self.assertEqual(len(ours), 1)
-        key = (wizard.read_kv(self.state / 'secrets.env'))['ADDON_KEY']
+        key = (engine.read_kv(self.state / 'secrets.env'))['ADDON_KEY']
         self.assertEqual(ours[0]['options']['manifestUrl'], f'http://aiosubtitles-subsync:8790/{key}/manifest.json')
         self.assertTrue(any(p['type'] == 'opensubtitles' for p in viewer['presets']))   # had no subtitle source
-        sync_id = wizard.read_kv(self.state / 'secrets.env')['SYNC_UUID']
+        sync_id = engine.read_kv(self.state / 'secrets.env')['SYNC_UUID']
         sync = self.aios.users[sync_id]['config']
         self.assertEqual([p['type'] for p in sync['presets']], ['zilean', 'opensubtitles'])
         self.assertEqual([s['id'] for s in sync['services']], ['torbox'])
         self.assertIs(sync['failover']['enabled'], False)
-        env = wizard.read_kv(self.state / 'subsync.env')
+        env = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual(env['SUBSYNC_SOURCE_MANIFEST'], f'http://aiostreams:3000/stremio/{sync_id}/ENC-{sync_id[:4]}/manifest.json')
         self.assertEqual(env['SUBSYNC_URL_REWRITE'], f'{PUBLIC}=http://aiostreams:3000')
         self.assertEqual(env['SUBSYNC_PUBLIC_BASE'], f'{PUBLIC}/subsync')
         self.assertEqual(env['SUBSYNC_LANGUAGES'], 'eng,rus')
-        self.assertEqual(env['SUBSYNC_SOURCE_PASSWORD'], wizard.read_kv(self.state / 'secrets.env')['SYNC_PASSWORD'])
+        self.assertEqual(env['SUBSYNC_SOURCE_PASSWORD'], engine.read_kv(self.state / 'secrets.env')['SYNC_PASSWORD'])
         env_text = ' '.join((self.state / 'subsync.env').read_text().replace('\n# ', ' ').split())
         self.assertIn(explain.SETTINGS['SUBSYNC_LANGUAGES'][1] + ' SUBSYNC_LANGUAGES=eng,rus', env_text)
         self.assertIn('ports: ["127.0.0.1:8790:8790"]', (self.state / 'compose.yaml').read_text())
@@ -300,9 +322,9 @@ class Flow(unittest.TestCase):
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
         self.assertEqual(code, 0, out)
         self.assertIn('no change (subsync is already in it)', out)
-        self.assertEqual(wizard.read_kv(self.state / 'secrets.env')['SYNC_UUID'], sync_id)
+        self.assertEqual(engine.read_kv(self.state / 'secrets.env')['SYNC_UUID'], sync_id)
         self.assertEqual(sum(1 for m, *_ in self.aios.log if m == 'PUT') - puts_before, 1)   # only the sync config
-        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_LANGUAGES'], 'eng,rus')
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_LANGUAGES'], 'eng,rus')
         self.assertEqual(len(list((self.state / 'backups').iterdir())), 1)
 
         # uninstall: subsync out of the viewer config, its own config deleted, state files gone
@@ -316,29 +338,29 @@ class Flow(unittest.TestCase):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
         self.assertNotIn('How much of each file', out)
-        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', wizard.read_kv(self.state / 'subsync.env'))
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', engine.read_kv(self.state / 'subsync.env'))
 
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
         self.assertEqual(code, 0, out)
         self.assertIn('How much of each file', out)
         self.assertIn(explain.QUESTIONS['AUDIO_BUDGET'][1][:60], ' '.join(out.split()))
-        env = wizard.read_kv(self.state / 'subsync.env')
+        env = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual(env['SUBSYNC_AUDIO_BUDGET_GB'], '1')          # the recommended default
         self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'on')
 
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO_BUDGET': '2'})
         self.assertEqual(code, 0, out)
-        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')
 
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps it
         self.assertEqual(code, 0, out)
-        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')
 
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'no'})
         self.assertEqual(code, 0, out)
-        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', wizard.read_kv(self.state / 'subsync.env'))
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', engine.read_kv(self.state / 'subsync.env'))
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
-        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')   # remembered
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')   # remembered
 
     def test_an_audio_limit_set_by_hand_is_kept_while_the_audio_route_is_off(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
@@ -349,7 +371,7 @@ class Flow(unittest.TestCase):
         self.assertEqual(code, 0, out)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
         self.assertEqual(code, 0, out)
-        self.assertEqual(wizard.read_kv(env_path)['SUBSYNC_AUDIO_BUDGET_GB'], '3')
+        self.assertEqual(engine.read_kv(env_path)['SUBSYNC_AUDIO_BUDGET_GB'], '3')
 
     def test_a_wrong_audio_limit_is_asked_again(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='yes', AUDIO_BUDGET='3'))
@@ -358,29 +380,16 @@ class Flow(unittest.TestCase):
 
     def test_an_unknown_config_id_is_caught_before_the_password(self):
         # test 13: a well-formed but unknown ID used to ask for the password forever
-        code, out = self.run_interactive(['00000000-0000-4000-8000-000000000000', self.LINK, PASSWORD])
-        self.assertEqual(code, 0, out)
+        code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_ID='00000000-0000-4000-8000-000000000000'))
+        self.assertEqual(code, 1, out)
         self.assertIn('There is no config with that ID on this AIOStreams', out)
-        self.assertEqual(out.count('Its password'), 1)
+        self.assertFalse([1 for m, p, _ in self.aios.log if m == 'GET' and p == '/api/v1/user'])   # never asked
 
     def test_without_the_head_check_the_id_is_taken_as_given(self):
         self.aios.head_check = False                                   # an AIOStreams without it: no false "unknown"
-        code, out = self.run_interactive([self.LINK, PASSWORD])
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
         self.assertNotIn('There is no config with that ID', out)
-
-    def test_an_empty_password_goes_back_to_the_config_id(self):
-        code, out = self.run_interactive([self.LINK, 'wrong-password', '', self.LINK, PASSWORD])
-        self.assertEqual(code, 0, out)
-        self.assertEqual(out.count('Config ID (or paste your Stremio link)'), 2)
-        self.assertNotIn('wrong-password', out)
-
-    def test_each_question_shows_its_explanation_and_again_on_a_question_mark(self):
-        code, out = self.run_interactive(['?', self.LINK, PASSWORD])
-        self.assertEqual(code, 0, out)
-        flat = ' '.join(out.split())
-        self.assertEqual(flat.count('part of its install link (…/stremio/<ID>/…)'), 2)     # shown, then shown again
-        self.assertIn('Each extra language adds those downloads', flat)
 
     def test_the_test_read_defaults_to_no(self):
         answers = dict(self.ANSWERS)
@@ -443,16 +452,16 @@ class Flow(unittest.TestCase):
         # SubDL and Wyzie are searched by subsync itself when the user gives a free key
         code, out = self.run_setup(dict(self.ANSWERS, SUBDL_KEY='subdl-secret-key', WYZIE_KEY='wyzie-secret-key'))
         self.assertEqual(code, 0, out)
-        env = wizard.read_kv(self.state / 'subsync.env')
+        env = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual((env['SUBSYNC_SUBDL_KEY'], env['SUBSYNC_WYZIE_KEY']), ('subdl-secret-key', 'wyzie-secret-key'))
         self.assertNotIn('subdl-secret-key', out)
         self.assertNotIn('wyzie-secret-key', out)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps them
-        self.assertEqual(wizard.read_kv(self.state / 'subsync.env')['SUBSYNC_SUBDL_KEY'], 'subdl-secret-key')
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_SUBDL_KEY'], 'subdl-secret-key')
 
     def test_without_keys_nothing_is_written(self):
         self.run_setup(self.ANSWERS)
-        env = wizard.read_kv(self.state / 'subsync.env')
+        env = engine.read_kv(self.state / 'subsync.env')
         self.assertNotIn('SUBSYNC_SUBDL_KEY', env)
         self.assertNotIn('SUBSYNC_WYZIE_KEY', env)
 
@@ -493,7 +502,7 @@ class Flow(unittest.TestCase):
             'name': 'Torrentio RD', 'manifestUrl': 'https://torrentio.example/realdebrid=KEY/manifest.json'}})
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
-        sync = self.aios.users[wizard.read_kv(self.state / 'secrets.env')['SYNC_UUID']]['config']
+        sync = self.aios.users[engine.read_kv(self.state / 'secrets.env')['SYNC_UUID']]['config']
         self.assertEqual([s['id'] for s in sync['services']], ['torbox'])
         self.assertNotIn('Torrentio RD', json.dumps(sync))
         self.assertIn('Real-Debrid is never used: subsync reads through TorBox only', out)
@@ -510,9 +519,9 @@ class Flow(unittest.TestCase):
 
     def test_the_self_test_never_takes_a_real_debrid_row(self):
         row = {'url': 'http://x', 'streamData': {'type': 'debrid', 'service': {'id': 'realdebrid', 'cached': True}}}
-        self.assertFalse(wizard.readable(row))
+        self.assertFalse(engine.readable(row))
         row['streamData']['service']['id'] = 'torbox'
-        self.assertTrue(wizard.readable(row))
+        self.assertTrue(engine.readable(row))
 
     def test_wrong_password_is_asked_again_then_stops(self):
         code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_PASSWORD='nope'))
@@ -529,6 +538,148 @@ class Flow(unittest.TestCase):
         self.assertNotIn('adminpw', out)
 
 
+    # ------------------------------------------------------------------ the engine as the setup page drives it
+
+    def page_engine(self, answers):
+        return engine.Engine(answers, page=True)
+
+    def test_the_stand_in_refuses_an_addon_naming_a_service_the_config_lacks(self):
+        config = {'services': [{'id': 'torbox', 'enabled': True, 'credentials': {}}],
+                  'presets': [{'type': 'prowlarr', 'enabled': True, 'options': {'name': 'Prowlarr',
+                                                                                'services': ['torbox', 'nzbdav']}}]}
+        self.assertIn('You have specified NzbDAV in your configuration for Prowlarr', refusal(config))
+        config['presets'][0]['options']['services'] = ['torbox']
+        self.assertIsNone(refusal(config))
+
+    def test_a_prowlarr_addon_naming_usenet_doesnt_stop_setup(self):
+        # the sync config leaves Usenet out, so each kept addon's own Services choice loses it too
+        self.aios.users[UUID]['config']['presets'].append(
+            {'type': 'prowlarr', 'instanceId': 'prw', 'enabled': True,
+             'options': {'name': 'Prowlarr', 'services': ['torbox', 'nzbdav']}})
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        sync = self.aios.users[engine.read_kv(self.state / 'secrets.env')['SYNC_UUID']]['config']
+        self.assertEqual([p['options']['services'] for p in sync['presets'] if p['type'] == 'prowlarr'], [['torbox']])
+
+    def test_a_1_0_0_install_opens_with_its_answers(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        env_path = self.state / 'subsync.env'
+        env_path.write_text(env_path.read_text() + 'SUBSYNC_DAILY_BUDGET_GB=20\nSUBSYNC_MAX_TRIES=9\n')
+        filled = self.page_engine({}).prefill()
+        self.assertTrue(filled['installed'])
+        self.assertEqual(filled['AIOS_CONFIG_ID'], UUID)
+        self.assertEqual(filled['LANGUAGES'], 'English, Russian')
+        self.assertEqual(filled['AUDIO'], 'no')
+        self.assertEqual(filled['PUBLIC_ADDRESS'], f'{PUBLIC}/subsync')
+        self.assertEqual(filled['SUBSYNC_DAILY_BUDGET_GB'], '20')
+        self.assertNotIn('AIOS_CONFIG_PASSWORD', filled)                 # never kept, never shown again
+
+    def test_the_daily_total_is_written_only_when_it_differs_from_the_default(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', SUBSYNC_DAILY_BUDGET_GB='20'))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_DAILY_BUDGET_GB'], '20')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})       # kept on a re-run
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_DAILY_BUDGET_GB'], '20')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no',
+                                    'SUBSYNC_DAILY_BUDGET_GB': '50'})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('SUBSYNC_DAILY_BUDGET_GB', engine.read_kv(self.state / 'subsync.env'))
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no',
+                                    'SUBSYNC_DAILY_BUDGET_GB': '0'})
+        self.assertEqual(code, 1, out)
+        self.assertIn('A number above 0, like 50.', out)
+
+    def test_each_step_returns_a_problem_at_its_field(self):
+        cases = [
+            ({'AIOS_CONFIG_ID': 'nope'}, 'read_viewer', 'AIOS_CONFIG_ID', 'That has no config ID in it'),
+            ({'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': 'wrong'}, 'read_viewer', 'AIOS_CONFIG_PASSWORD',
+             "don't match"),
+            ({'LANGUAGES': 'Klingon'}, 'choices', 'LANGUAGES', ''),
+            ({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': 'ftp://x'}, 'choices', 'PUBLIC_ADDRESS', ''),
+            ({'LANGUAGES': 'English', 'SUBSYNC_DAILY_BUDGET_GB': '0'}, 'limits', 'SUBSYNC_DAILY_BUDGET_GB',
+             'A number above 0, like 50.'),
+        ]
+        for answers, step, field, words in cases:
+            with self.subTest(field=field):
+                if step != 'read_viewer':
+                    answers = dict(answers, AIOS_CONFIG_ID=self.LINK, AIOS_CONFIG_PASSWORD=PASSWORD)
+                e = self.page_engine(dict(answers))
+                e.check_machine()
+                e.find_aios()
+                if step != 'read_viewer':
+                    e.read_viewer()
+                if step == 'limits':
+                    e.choices()
+                with self.assertRaises(engine.Problem) as caught:
+                    getattr(e, step)()
+                self.assertEqual(caught.exception.field, field)
+                self.assertIn(words, caught.exception.message)
+                self.assertFalse(caught.exception.missing)
+
+    def test_a_question_not_answered_yet_is_missing_not_wrong(self):
+        e = self.page_engine({})
+        e.check_machine()
+        e.find_aios()
+        with self.assertRaises(engine.Problem) as caught:
+            e.read_viewer()
+        self.assertEqual(caught.exception.field, 'AIOS_CONFIG_ID')
+        self.assertTrue(caught.exception.missing)
+
+    def test_an_address_question_when_aiostreams_isnt_found(self):
+        with mock.patch.object(dockerenv, 'aios_containers', lambda: []):
+            e = self.page_engine({})
+            e.check_machine()
+            with self.assertRaises(engine.Problem) as caught:
+                e.find_aios()
+            self.assertEqual((caught.exception.field, caught.exception.missing), ('AIOS_URL', True))
+            e = self.page_engine({'AIOS_URL': 'http://127.0.0.1:1'})
+            with self.assertRaises(engine.Problem) as caught:
+                e.find_aios()
+            self.assertEqual((caught.exception.field, caught.exception.missing), ('AIOS_URL', False))
+            e = self.page_engine({'AIOS_URL': self.aios.url})
+            e.find_aios()
+            self.assertIn(('ok', 'AIOStreams 2.37.0 answers there'), [tuple(r[:2]) for r in e.out.rows])
+
+    def test_the_real_debrid_stop_on_the_page_says_go_back(self):
+        self.aios.users[UUID]['config']['services'] = [{'id': 'realdebrid', 'enabled': True, 'credentials': {}}]
+        e = self.page_engine({'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD})
+        e.check_machine()
+        e.find_aios()
+        with self.assertRaises(engine.Stop) as caught:
+            e.read_viewer()
+        self.assertIn("AIOSubtitles can't work with Real-Debrid only", caught.exception.message)
+        self.assertEqual(caught.exception.page_fix,
+                         "After adding it on AIOStreams' configure page, go back one step and continue again.")
+
+    def test_the_status_as_the_page_after_setup_shows_it(self):
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        rows, details = self.page_engine({}).status_parts()
+        self.assertEqual(rows[0], ('ok', 'container aiosubtitles-subsync: running healthy', None))
+        self.assertEqual(dict(details)['AIOStreams'], PUBLIC)
+        self.assertEqual(dict(details)['languages'], 'eng, rus')
+        self.assertEqual(dict(details)['audio'], 'off')
+        self.assertEqual(dict(details)['config'], UUID[:8] + '…')
+        self.assertEqual(dict(details)['logs'], 'docker logs aiosubtitles-subsync')
+
+    def test_removing_on_the_page(self):
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        e = self.page_engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'})
+        e.remove()
+        self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
+        self.assertIn(('ok', 'Done.'), [tuple(r[:2]) for r in e.out.rows])
+        self.assertTrue(any('docker image rm aiosubtitles/subsync:' in line for line in e.stays))
+        self.assertFalse((self.state / 'settings.json').exists())
+
+    def test_removing_needs_the_config_password(self):
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        e = self.page_engine({'CONFIRM': 'yes'})
+        with self.assertRaises(engine.Problem) as caught:
+            e.remove()
+        self.assertEqual(caught.exception.field, 'AIOS_CONFIG_PASSWORD')
+        self.assertTrue((self.state / 'settings.json').exists())
+
+
 class RealDebridGate(unittest.TestCase):
     def setUp(self):
         real = socket.create_connection
@@ -543,8 +694,8 @@ class RealDebridGate(unittest.TestCase):
 
     def test_setup_never_sends_a_request_to_real_debrid(self):
         with self.assertLogs('subsync.realdebrid', 'WARNING'):
-            with self.assertRaises(wizard.AiosError) as caught:
-                wizard.Aios('https://api.real-debrid.com').call('GET', '/rest/1.0/user')
+            with self.assertRaises(engine.AiosError) as caught:
+                engine.Aios('https://api.real-debrid.com').call('GET', '/rest/1.0/user')
         self.assertIn('Real-Debrid', caught.exception.message)
 
     def test_setup_never_follows_a_redirect_to_real_debrid(self):
@@ -562,8 +713,8 @@ class RealDebridGate(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         with self.assertLogs('subsync.realdebrid', 'WARNING'):
-            with self.assertRaises(wizard.AiosError):
-                wizard.Aios(f'http://127.0.0.1:{server.server_address[1]}').call('GET', '/api/v1/status')
+            with self.assertRaises(engine.AiosError):
+                engine.Aios(f'http://127.0.0.1:{server.server_address[1]}').call('GET', '/api/v1/status')
 
 
 if __name__ == '__main__':

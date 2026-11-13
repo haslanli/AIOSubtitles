@@ -203,7 +203,7 @@ class PublicHttpTest(Base):
         code, body, headers = http(f"{self.base}/u/{token}/configure")
         text = body.decode()
         self.assertEqual(code, 200)
-        self.assertIn("3 of 40", text)
+        self.assertIn("3 of 60", text)
         self.assertEqual(headers["Cache-Control"], "no-store")
         code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="languages", languages="Russian, en"))
         self.assertEqual(code, 303)                      # saved, then the page again, so a reload sends nothing

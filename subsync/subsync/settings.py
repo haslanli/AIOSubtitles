@@ -187,12 +187,12 @@ class Settings:
         self.invite = g("SUBSYNC_PUBLIC_INVITE", "").strip()
         self.max_users = int(g("SUBSYNC_MAX_USERS", "200"))
         self.signups_per_hour = int(g("SUBSYNC_SIGNUPS_PER_HOUR", "5"))      # per address
-        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "40"))
-        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "500")) * 1024 * 1024)
+        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "60"))
+        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "1000")) * 1024 * 1024)
         self.user_queue = int(g("SUBSYNC_USER_QUEUE", "3"))
         # the most languages a person may choose on the sign-up and settings pages
         self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES", "4"))
-        self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS", "30"))
+        self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS", "100"))
         self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN", "30")) * 60
         self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS", "180"))
         # each person's AIOStreams checked again, at most this often, while they use the service (recheck.py); 0: never
@@ -210,9 +210,9 @@ class Settings:
             if proxy and proxy not in trusted:
                 trusted.append(proxy)
         self.trusted_proxy = tuple(trusted)
-        self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS", "64"))
+        self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS", "256"))
         # files worked on at once for everyone (each person's worker takes a place of one shared turn)
-        self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE", "1"))
+        self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE", "auto"))
 
     def secret_bytes(self):
         """The public mode's secret: base64url of at least 32 random bytes. ValueError otherwise."""

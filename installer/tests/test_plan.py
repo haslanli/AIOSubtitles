@@ -148,6 +148,38 @@ class SyncConfig(unittest.TestCase):
         usenet = {'services': [{'id': 'nzbdav', 'enabled': True}], 'presets': [VIEWER['presets'][1]]}
         self.assertEqual(len(plan.sync_config_problems(plan.sync_config(usenet))), 2)
 
+    # AIOStreams refuses a config whose addon names, in its own Services choice, a service the config doesn't have
+    #; the sync config leaves the Usenet services out, so their names come out of each addon too
+    def test_an_addon_keeps_only_the_services_the_sync_config_still_has(self):
+        cases = [('prowlarr', s) for s in sorted(plan.USENET_SERVICES)] + [
+            ('stremthruStore', 'stremthru_newz'), ('mediafusion', 'easynews'), ('library', 'nzbdav')]
+        for kind, usenet in cases:
+            with self.subTest(addon=kind, service=usenet):
+                viewer = copy.deepcopy(VIEWER)
+                if usenet not in [s['id'] for s in viewer['services']]:
+                    viewer['services'].append({'id': usenet, 'enabled': True, 'credentials': {}})
+                viewer['presets'].append({'type': kind, 'instanceId': 'add', 'enabled': True,
+                                          'options': {'name': kind, 'services': ['torbox', usenet]}})
+                sync = plan.sync_config(viewer, URL)
+                self.assertEqual([p['options']['services'] for p in sync['presets'] if p['instanceId'] == 'add'],
+                                 [['torbox']])
+                self.assertEqual(viewer['presets'][-1]['options']['services'], ['torbox', usenet])   # theirs as it was
+
+    def test_an_addon_left_with_no_service_is_left_out(self):
+        # an empty choice is refused too ("requires at least one usable service"), and the configure page reads it
+        # as "every enabled service"
+        viewer = copy.deepcopy(VIEWER)
+        viewer['presets'].append({'type': 'prowlarr', 'instanceId': 'prw', 'enabled': True,
+                                  'options': {'name': 'Prowlarr', 'services': ['aiostreams']}})
+        sync = plan.sync_config(viewer, URL)
+        self.assertEqual([p['type'] for p in sync['presets']], ['zilean', 'opensubtitles-v3-plus'])
+
+    def test_an_addon_without_its_own_services_choice_is_kept_as_it_is(self):
+        viewer = copy.deepcopy(VIEWER)
+        prowlarr = {'type': 'prowlarr', 'instanceId': 'prw', 'enabled': True, 'options': {'name': 'Prowlarr'}}
+        viewer['presets'].append(copy.deepcopy(prowlarr))
+        self.assertEqual(plan.sync_config(viewer, URL)['presets'][-1], prowlarr)
+
 
 class RealDebrid(unittest.TestCase):
     def test_the_sync_config_has_no_way_to_real_debrid(self):

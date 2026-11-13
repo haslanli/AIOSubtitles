@@ -195,6 +195,10 @@ class FakeAiostreams:
                             return self.answer(400, {"success": False, "error": {"code": "USER_INVALID_CONFIG",
                                                                                  "message": "bad config"}})
                         b = self.body()
+                        refused = outer.refusal(b["config"])
+                        if refused:
+                            return self.answer(400, {"success": False, "error": {"code": "USER_INVALID_CONFIG",
+                                                                                 "message": refused}})
                         new = str(uuidlib.uuid4())
                         outer.configs[new] = {"password": b["password"], "config": b["config"]}
                         return self.answer(201, {"success": True, "data": {"uuid": new,
@@ -211,7 +215,12 @@ class FakeAiostreams:
                     if self.command == "PUT":
                         if outer.fault == "refuse_save" or uuid in outer.refuse_save_for:
                             return self.answer(500, {"success": False, "error": {"code": "INTERNAL", "message": "boom"}})
-                        stored["config"] = self.body()["config"]
+                        config = self.body()["config"]
+                        refused = outer.refusal(config)
+                        if refused:
+                            return self.answer(400, {"success": False, "error": {"code": "USER_INVALID_CONFIG",
+                                                                                 "message": refused}})
+                        stored["config"] = config
                         return self.answer(200, {"success": True})
                     if self.command == "DELETE":
                         del outer.configs[uuid]
@@ -231,6 +240,32 @@ class FakeAiostreams:
 
     def enc(self, uuid):
         return self.encrypted.get(uuid, "ENC" + uuid[:8])
+
+    SERVICE_NAMES = {"aiostreams": "AIOStreams", "nzbdav": "NzbDAV", "altmount": "AltMount", "torbox": "TorBox",
+                     "stremio_nntp": "Stremio NNTP", "stremthru_newz": "StremThru Newz", "easynews": "Easynews",
+                     "realdebrid": "Real-Debrid"}
+    PRESET_NAMES = {"prowlarr": "Prowlarr", "stremthruStore": "StremThru Store", "mediafusion": "MediaFusion",
+                    "library": "Library", "comet": "Comet"}
+
+    @classmethod
+    def refusal(cls, config):
+        """Why AIOStreams would refuse this config when it is created or saved (None: it wouldn't), as far as its
+        check of each addon's own services goes (Preset.getUsableServices, v2.35.8): every service an enabled addon
+        names must be on the config's service list, enabled, with credentials; an empty choice leaves it none."""
+        services = {s.get("id"): s for s in (config or {}).get("services") or [] if isinstance(s, dict)}
+        for preset in (config or {}).get("presets") or []:
+            chosen = (preset.get("options") or {}).get("services")
+            if not preset.get("enabled") or not isinstance(chosen, list):
+                continue
+            name = cls.PRESET_NAMES.get(preset.get("type"), preset.get("type"))
+            for service in chosen:
+                found = services.get(service)
+                if not found or not found.get("enabled") or found.get("credentials") is None:
+                    return (f"You have specified {cls.SERVICE_NAMES.get(service, service)} in your configuration for "
+                            f"{name}, but it is not enabled or has missing credentials")
+            if not chosen:
+                return f"{name} requires at least one usable service, but none were found."
+        return None
 
     def add(self, config, password):
         import uuid as uuidlib

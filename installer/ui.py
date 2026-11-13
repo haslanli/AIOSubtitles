@@ -43,21 +43,22 @@ def note(text):
 class Stop(Exception):
     """Ends the run with a message and how to fix it; nothing after this point is changed."""
 
-    def __init__(self, message, fix=None):
+    def __init__(self, message, fix=None, page_fix=None):
         super().__init__(message)
         self.message, self.fix = message, fix
+        self.page_fix = page_fix or fix      # the way out as the setup page says it, when it differs
 
 
 def stop(message, fix=None):
     raise Stop(message, fix)
 
 
-STEPS = 7
+STEPS = 8
 
 
-def step(number, title):
+def step(number, title, total=None):
     say()
-    say(paint('1', f'Step {number} of {STEPS} · {title}'))
+    say(paint('1', f'Step {number} of {total or STEPS} · {title}'))
     say(paint('2', '─' * 60))
 
 
@@ -106,7 +107,7 @@ class Asker:
     def text(self, key, question, *, current=None, default=None, secret=False, optional=False, check=None,
              shown=None, skip_hint='Enter skips'):
         """One question. `check(value)` returns (good, message, value): a message is shown either way."""
-        explanation = explain.QUESTIONS[key][1]
+        explanation = (explain.QUESTIONS.get(key) or explain.SETTINGS[key])[1]   # a limit: its setting's text
         preset = self.answers.pop(key, None)
         while True:
             say()
