@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-"""AIOSubtitles setup: adds subsync to the AIOStreams you already run. Start it with ./setup.
-
-The work of each step is in installer/engine.py; this is the command line.
+"""AIOSubtitles setup: adds subsync to the AIOStreams you already run. Start it with ./setup, which runs it inside the
+AIOSubtitles image (`docker run... setup`); the work of each step is in installer/engine.py, this is the
+command line.
 
   ./setup                  the setup page: install, or change your answers, update, remove (safe to run again)
   ./setup --status         is it running, and what has it done
-  ./setup --update         update to the newest version, if there is one
+  ./setup --update         update to this setup's version, if it is newer
+  ./setup --rollback       back to the version before the last update
   ./setup --uninstall      take subsync out of your config and remove it
   ./setup --restore FILE   put a saved copy of your config back
   ./setup --answers FILE [--yes]   answers from KEY=value lines (see docs/answers.example)
+  ./setup --version        this setup's version
 """
 import argparse
 import json
 import os
 import sys
-import webbrowser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from installer import dockerenv, engine, fonts, plan, web  # noqa: E402
+from installer import dockerenv, engine, plan, web, where  # noqa: E402
 from installer.aios import Aios, AiosError  # noqa: E402
 from installer.ui import Asker, Stop, bad, note, ok, paint, say, stop, warn, wrap  # noqa: E402
 from installer.engine import backup, load_settings, read_kv, short, subsync_status  # noqa: E402,F401
@@ -70,16 +71,33 @@ def cmd_uninstall(args):
 # ------------------------------------------------------------------------------------------- main
 
 def open_page(args):
-    """The setup page. After an update's restart the same address goes on with the update's second half."""
-    resume = os.environ.pop('AIOSUBTITLES_SETUP_RESUME', None)
-    port = int(os.environ.pop('AIOSUBTITLES_SETUP_PORT', '0') or 0)
-    key = os.environ.pop('AIOSUBTITLES_SETUP_KEY', None)
-    app = web.App(port=port, fonts_dir=fonts.ensure(engine.STATE), resume=resume, no_browser=args.no_browser)
-    if key:
-        app.key = key
-    if resume:
-        app.start_resumed()
-    return web.serve(app, say=print, opener=None if args.no_browser else webbrowser.open)
+    """The setup page. Inside a container nothing opens a browser: the address is printed. On Docker's bridge network
+    the page listens inside the container, and the machine's port given in the docker run command reaches it."""
+    place = engine.PLACE
+    if place and place.network == 'bridge':
+        if not place.page_port:
+            say()
+            bad(where.NO_PAGE_PORT)
+            return 1
+        app = web.App(port=where.PAGE_PORT, bind='0.0.0.0', public_port=place.page_port, no_browser=True)
+    else:
+        app = web.App(port=0, no_browser=True)
+    return web.serve(app, say=print, opener=None)
+
+
+def in_image():
+    """Inside the image: the socket is there, and where setup runs is known (engine.PLACE). A message and 1 if not."""
+    if not os.path.exists(dockerenv.SOCKET):
+        say()
+        bad(where.NO_SOCKET)
+        return 1
+    try:
+        engine.PLACE = where.discover(engine.setup_version())
+    except RuntimeError as e:
+        say()
+        bad(str(e))
+        return 1
+    return 0
 
 
 def main(argv=None):
@@ -89,10 +107,18 @@ def main(argv=None):
     parser.add_argument('--status', action='store_true', help='is it running, and what has it done')
     parser.add_argument('--uninstall', action='store_true', help='take subsync out of your config and remove it')
     parser.add_argument('--restore', metavar='FILE', help='put a saved copy of your config back')
-    parser.add_argument('--update', action='store_true', help='update to the newest version, if there is one')
-    parser.add_argument('--update-finish', metavar='COMMIT', help=argparse.SUPPRESS)   # an update's second half
-    parser.add_argument('--no-browser', action='store_true', help="don't open the browser; just print the address")
+    parser.add_argument('--update', action='store_true', help="update to this setup's version, if it is newer")
+    parser.add_argument('--rollback', action='store_true', help='back to the version before the last update')
+    parser.add_argument('--restore-databases', action='store_true',
+                        help='with --rollback: also put back the databases from before that update')
+    parser.add_argument('--version', action='store_true', help="this setup's version")
+    parser.add_argument('--no-browser', action='store_true', help=argparse.SUPPRESS)   # kept: no browser opens now
     args = parser.parse_args(argv)
+    if args.version:
+        print(engine.setup_version())
+        return 0
+    if os.environ.get('AIOSUBTITLES_IN_IMAGE') and in_image():
+        return 1
     try:
         if args.status:
             return cmd_status()
@@ -101,10 +127,9 @@ def main(argv=None):
         if args.uninstall:
             return cmd_uninstall(args)
         if args.update:
-            engine.Engine({}).update()
-            return 0
-        if args.update_finish:
-            return 0 if engine.Engine({}).finish_update(args.update_finish) else 3
+            return 0 if engine.Engine({}).update() else 3
+        if args.rollback:
+            return 0 if engine.Engine({}).rollback(restore=args.restore_databases) else 3
         if not (args.answers or args.yes):
             return open_page(args)
         say()

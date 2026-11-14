@@ -1,13 +1,14 @@
 # The AIOSubtitles image for x86 (amd64) and ARM (arm64), built on GitHub's own machines of each kind. The image's
 # tests run inside its build, and the image is published to ghcr.io only when every test on both has passed:
-# :main for each push to main; :X.Y.Z, :X.Y and :latest (for the highest version) for each release tag vX.Y.Z.
+# :main for each push to main; :X.Y.Z, :X.Y and :latest (for the highest version) for each release tag vX.Y.Z;
+# only :X.Y.Z-rc.N for a release candidate's tag vX.Y.Z-rc.N, so it can be tested before :latest moves.
 # Pull requests are only built and tested. The architecture jobs are in image-build.yml.
 name: image
 
 on:
   push:
     branches: [main]
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+']
   pull_request:
     branches: [main]
 
@@ -45,15 +46,15 @@ jobs:
           fi
           case "$REF" in
             refs/tags/*)
-              # a release tag is v + the VERSION of its commit
-              if [ "$REF_NAME" != "v$version" ]; then
+              # a release tag is v + the VERSION of its commit; a release candidate's adds -rc.N
+              if [ "$REF_NAME" != "v$version" ] && ! [[ "$REF_NAME" =~ ^v${version//./\\.}-rc\.[0-9]+$ ]]; then
                 echo "::error::The tag doesn't match VERSION ($version)"; exit 1
               fi ;;
             refs/heads/main)
-              # the image is built from subsync/: a change there needs a new VERSION and its release tag
+              # the image is built from subsync/ and installer/: a change there needs a new VERSION and its release tag
               if [ "$EVENT" = push ] && git rev-parse -q --verify "refs/tags/v$version" > /dev/null \
-                 && ! git diff --quiet "v$version" HEAD -- subsync/; then
-                echo "::error::subsync/ changed since v$version: raise VERSION"; exit 1
+                 && ! git diff --quiet "v$version" HEAD -- subsync/ installer/ .dockerignore; then
+                echo "::error::The image's files changed since v$version: raise VERSION"; exit 1
               fi ;;
           esac
           echo "VERSION $version"

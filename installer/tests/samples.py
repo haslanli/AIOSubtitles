@@ -89,14 +89,13 @@ def every_state():
                                                                    "--status with a bug report.", None)],
                                              running=False))
     progress = [('done', "Created subsync's own config (5e6f7a8b…)", None),
-                ('now', 'Building subsync (the first time takes a few minutes) ...', None)]
+                ('now', engine.STARTING.format(name='subsync'), None)]
     add('install-running', screens.installing('yourself', progress, running=True), *[r[1] for r in progress])
     finished = [('done', "Created subsync's own config (5e6f7a8b…)", None),
-                ('ok', 'Built (its own tests passed during the build)', None),
                 ('ok', 'subsync is running (it restarts by itself after a reboot)', None),
                 ('ok', 'Your config now lists subsync', None)]
     add('install-done', screens.installing('yourself', finished, running=False), *[r[1] for r in finished])
-    failed = ('Building subsync failed.', 'error: no space left on device\n\nRun ./setup again after fixing the problem above.')
+    failed = ('Starting subsync failed.', 'Error response from daemon: driver failed programming external connectivity')
     add('install-failed', screens.installing('yourself', progress[:1], running=False, stop=failed),
         progress[0][1], *failed)
     rule = hosting.web_server_rule(ADDRESS, '127.0.0.1:8790')
@@ -148,34 +147,50 @@ def every_state():
     details = [('AIOStreams', PUBLIC), ('languages', 'eng, spa'), ('audio', 'off'), ('config', '1a2b3c4d…'),
                ("subsync's config", '5e6f7a8b…'), ('logs', 'docker logs aiosubtitles-subsync')]
     shown = [r[1] for r in status] + ['read today: 34.2 MB'] + [v for _, v in details]
-    ready = update.Ready('1.2.0', 'git', None)
+    ready = update.Ready('1.2.0', 'ready')
     add('after', screens.after_setup('yourself', status, details, '1.1.0', ready, offer_opensubtitles=True,
                                      config='1a2b3c4d…'),
         *shown, update.RUNNING.format(version='1.1.0'), update.READY.format(version='1.2.0'),
         'Password of your config 1a2b3c4d…')
-    for how in ('newest', 'not-git'):
-        add(f'after-{how}', screens.after_setup('yourself', status, details, '1.1.0', update.Ready(None, how, None),
-                                                config='1a2b3c4d…'),
-            *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…')
-    look_failed = update.LOOK_FAILED.format(reason='Could not resolve host: github.com')
-    add('after-error', screens.after_setup('yourself', status, details, '1.1.0',
-                                           update.Ready(None, 'error', 'Could not resolve host: github.com'),
-                                           config='1a2b3c4d…'),
-        *shown, update.RUNNING.format(version='1.1.0'), look_failed, 'Password of your config 1a2b3c4d…')
+    add('after-newest', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
+                                            config='1a2b3c4d…'),
+        *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…')
+    newer_here = update.NEWER_HERE.format(running='1.2.0', setup='1.1.0')
+    add('after-newer-here', screens.after_setup('yourself', status, details, '1.2.0', update.Ready('1.1.0', 'newer-here'),
+                                                config='1a2b3c4d…', rollback=('1.1.0', None)),
+        *shown, update.RUNNING.format(version='1.2.0'), newer_here, update.ROLLBACK.format(version='1.1.0'),
+        'Password of your config 1a2b3c4d…')
+    restore = update.RESTORE_QUESTION.format(version='1.1.0', name='databases-20261113-000000')
+    add('after-rollback', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
+                                              config='1a2b3c4d…', rollback=('1.0.0', 'databases-20261113-000000')),
+        *shown, update.RUNNING.format(version='1.1.0'), update.ROLLBACK.format(version='1.0.0'), restore,
+        'Password of your config 1a2b3c4d…')
     host_status = [('ok', 'container aiosubtitles-subsync: running healthy', None),
                    ('ok', 'people signed up: 3 of 200', 'read today: 0.0 GB of 50 GB')]
     add('after-host', screens.after_setup('host', host_status, [('logs', 'docker logs aiosubtitles-subsync')], '1.1.0',
                                           ready),
         *[r[1] for r in host_status], 'read today: 0.0 GB of 50 GB', 'docker logs aiosubtitles-subsync',
         update.RUNNING.format(version='1.1.0'), update.READY.format(version='1.2.0'))
-    updating = [('done', update.FETCHING.format(version='1.2.0'), None), ('now', update.RESTARTING, None)]
+    saved = update.SAVED_DATABASES.format(path='state/backups/databases-20261114-061500')
+    updating = [('ok', saved, None), ('done', update.CHECKING.format(version='1.2.0', old='1.1.0'), None),
+                ('ok', update.CHECKED, None), ('now', update.SWITCHING.format(version='1.2.0'), None)]
     add('updating', screens.working('Updates', updating, running=True), *[r[1] for r in updating])
-    gone = update.FAILED.format(reason='Building subsync failed', version='1.1.0')
-    add('update-failed', screens.working('Updates', updating[:1], running=False, stop=(gone, None)), updating[0][1], gone)
+    switched = [('ok', saved, None), ('ok', update.CHECKED, None),
+                ('ok', update.SWITCHED.format(version='1.2.0'),
+                 update.KEPT.format(version='1.1.0') + ' ' + update.OLD_IMAGES.format(
+                     image='3320f59e4ec8')),
+                ('ok', f'Your apps can reach subsync at {PUBLIC}/subsync', None)]
+    add('updated', screens.working('Updates', switched, running=False), *[r[1] for r in switched], switched[2][2])
+    gone = update.FAILED.format(reason='no answer within 90 seconds', version='1.1.0')
+    add('update-failed', screens.working('Updates', updating[:2], running=False, stop=(gone, None)),
+        *[r[1] for r in updating[:2]], gone)
+    back = update.ROLLED_BACK.format(new='1.2.0', old='1.1.0') + update.WITH_DATABASES
+    add('update-rolled-back', screens.working('Updates', updating[:3], running=False, stop=(back, None)),
+        *[r[1] for r in updating[:3]], back)
     gone_rows = [('ok', 'Your config no longer lists subsync (copy before: state/backups/viewer-1a2b3c4d-x.json)', None),
                  ('ok', "Deleted subsync's own config", None), ('ok', 'Removed the subsync container and its stored copies', None),
                  ('ok', 'Done.', None)]
-    stays = ['the subsync image (about 1 GB): docker image rm aiosubtitles/subsync:1.1.0',
+    stays = ['the subsync image (about 1 GB): docker image rm 3320f59e4ec8',
              'this folder, /home/me/aiosubtitles, with copies of your config in state/backups/ (./setup --restore FILE puts one back)']
     add('removed', screens.removed('Removing subsync', gone_rows, stays), *[r[1] for r in gone_rows], *stays)
     add('ended', screens.ended())

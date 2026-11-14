@@ -170,9 +170,9 @@ class Personal(FlowFixture):
         self.assertEqual(env['SUBSYNC_LANGUAGES'], 'eng,rus')
         self.assertTrue(self.app.finishing)
         self.assertFalse(any(PASSWORD in page for page in self.b.pages))                # never sent back
-        with mock.patch.object(update, 'look', lambda repo: update.Ready(None, 'newest', None)):
-            _, _, text = self.b.get('')                                                # the page after setup now
+        _, _, text = self.b.get('')                                                    # the page after setup now
         self.assertIn('AIOSubtitles · subsync status', text)
+        self.assertIn(update.NEWEST, text)
 
     def test_a_check_that_stops_still_leads_to_the_end(self):
         # a check that couldn't run once left no way to the done screen
@@ -192,7 +192,7 @@ class Personal(FlowFixture):
         b = Browser(app)
         tries = []
 
-        def first_fails(engine_self, restart=None):
+        def first_fails(engine_self):
             tries.append(1)
             if len(tries) == 1:
                 raise engine.Stop(update.NEWEST)
@@ -211,7 +211,7 @@ class Personal(FlowFixture):
         self.b.post('review', {'CONFIRM': 'yes'})
         created = [p for m, p, _ in self.aios.log if m == 'POST' and p == '/api/v1/user']
         self.assertEqual(len(created), 1)
-        self.assertEqual(self.built_count, 1)
+        self.assertEqual(self.started_count, 1)
         _, _, text = self.b.get('install')                                             # a reload shows the progress
         self.assertIn('subsync is running', text)
 
@@ -224,11 +224,14 @@ class Personal(FlowFixture):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8803)
         b = Browser(app)
-        with mock.patch.object(update, 'look', lambda repo: update.Ready('1.2.0', 'git', None)):
+        newer = self.place._replace(image='ghcr.io/haslanli/aiosubtitles:1.2.0@sha256:' + 'd' * 64)
+        with mock.patch.object(engine, 'PLACE', newer), mock.patch.object(engine, 'setup_version', lambda: '1.2.0'):
             _, _, text = b.get('')
         self.assertIn('AIOSubtitles · subsync status', text)
         self.assertIn('container aiosubtitles-subsync: running healthy', text)
         self.assertIn('Version 1.2.0 is ready.', text)
+        self.assertIn(update.ABOUT, text)
+        self.assertNotIn('action="rollback"', text)                                     # no earlier version yet
         self.assertIn(f'Password of your config {UUID[:8]}…', text)
         _, _, text = b.post('remove', {'AIOS_CONFIG_PASSWORD': 'wrong', 'CONFIRM': 'yes'})
         self.assertIn("don't match", text)
@@ -242,8 +245,7 @@ class Personal(FlowFixture):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8804)
         b = Browser(app)
-        with mock.patch.object(update, 'look', lambda repo: update.Ready(None, 'newest', None)):
-            b.get('')
+        b.get('')
         status, headers, _ = b.post('answers', {})
         self.assertEqual(status, 303)
         _, _, text = b.get('')
@@ -256,12 +258,18 @@ class Personal(FlowFixture):
 
 
 class Pieces(unittest.TestCase):
-    def test_the_restart_keeps_no_browser(self):
-        app = web.App(port=8807, no_browser=True)
-        with mock.patch.object(web.os, 'execv', side_effect=SystemExit) as execv, mock.patch.dict(web.os.environ, {}):
-            with self.assertRaises(SystemExit):
-                app.restart('abc')
-        self.assertIn('--no-browser', execv.call_args[0][1])
+    def test_on_dockers_bridge_the_page_listens_inside_and_answers_to_the_machines_port(self):
+        app = web.App(port=8789, bind='0.0.0.0', public_port=8899)
+        lines = []
+        with mock.patch.object(web, 'start', lambda a: setattr(a, 'finished', mock.Mock(wait=lambda: None))
+                               or mock.Mock()):
+            web.serve(app, say=lines.append)
+        self.assertIn(f'  http://127.0.0.1:8899/{app.key}/', lines)
+        self.assertTrue(any('ssh -L 8899:127.0.0.1:8899' in line for line in lines))
+        for host, status in (('127.0.0.1:8899', 200), ('localhost:8899', 200), ('127.0.0.1:8789', 404),
+                             ('evil.example:8899', 404)):
+            got = app.handle('GET', f'/{app.key}/', {'Host': host}, b'')[0]
+            self.assertEqual(got, status, host)
 
     def test_the_done_line_only_when_setup_finished(self):
         app = web.App()
@@ -327,3 +335,35 @@ class Hosting(RouteFixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Rollback(FlowFixture):
+    """The page after setup offers going back while an earlier version is recorded (Q5)."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        s = engine.load_settings()
+        s['previous'] = {'image': 'ghcr.io/haslanli/aiosubtitles:0.9.0@sha256:' + '9' * 64, 'version': '0.9.0',
+                         'local': False, 'databases': 'databases-20261113-000000'}
+        engine.save_settings(s)
+
+    def test_the_rollback_form_and_its_restore_choice(self):
+        (self.state / 'backups' / 'databases-20261113-000000').mkdir(parents=True)
+        b = Browser(web.App(port=8808))
+        _, _, text = b.get('')
+        self.assertIn('action="rollback"', text)
+        self.assertIn(update.ROLLBACK.format(version='0.9.0'), text)
+        self.assertIn('name="RESTORE_DATABASES"', text)
+        calls = []
+        with mock.patch.object(engine.Engine, 'rollback', lambda e, restore=False: calls.append(restore) or True):
+            status, headers, _ = b.post('rollback', {'RESTORE_DATABASES': 'yes'})
+            b.settle('updating')
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/updating'))
+        self.assertEqual(calls, [True])
+
+    def test_no_copy_no_restore_choice(self):
+        b = Browser(web.App(port=8809))
+        _, _, text = b.get('')
+        self.assertIn('action="rollback"', text)
+        self.assertNotIn('name="RESTORE_DATABASES"', text)

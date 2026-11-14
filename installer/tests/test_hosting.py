@@ -91,10 +91,12 @@ class Pieces(unittest.TestCase):
         self.assertNotIn('Audio per file', screens.limits('host', values, audio=False))
 
     def test_the_compose_file_listens_on_this_machine_only(self):
-        text = hosting.compose_yaml('1.1.0', 8790)
+        image = 'ghcr.io/haslanli/aiosubtitles:1.4.0@sha256:' + 'a' * 64
+        text = hosting.compose_yaml(image, 'id-1', 8790)
         self.assertIn('ports: ["127.0.0.1:8790:8790"]', text)
         self.assertNotIn('external: true', text)
-        self.assertIn('image: aiosubtitles/subsync:1.1.0', text)
+        self.assertIn(f'image: {image}\n', text)
+        self.assertIn('org.aiosubtitles.install: "id-1"', text)
 
     def test_the_web_server_rule_sends_the_whole_host_with_the_visitors_address(self):
         rule = hosting.web_server_rule(ADDRESS, '127.0.0.1:8790')
@@ -175,7 +177,7 @@ class Route(RouteFixture):
         self.assertIn('ports: ["127.0.0.1:8790:8790"]', (self.state / 'compose.yaml').read_text())
         self.assertIn(f'People can reach AIOSubtitles at {ADDRESS}', out)
         self.assertIn(f'The sign-up page loads at {ADDRESS}, with its security headers', out)
-        self.assertIn('Building AIOSubtitles (the first time takes a few minutes) ...', out)
+        self.assertIn('Starting AIOSubtitles', out)
         self.assertEqual(json.loads((self.state / 'settings.json').read_text())['route'], 'host')
 
         # a re-run keeps the secret and the invite code, and an emptied invite code opens sign-ups

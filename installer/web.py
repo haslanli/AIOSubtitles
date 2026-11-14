@@ -1,8 +1,9 @@
 """The setup page: a temporary web page on this machine, served by ./setup itself.
 
-It listens on 127.0.0.1 only, at a free port, and answers only under a one-time random key in the address and only to
-a Host of 127.0.0.1 or localhost at that port (a page elsewhere in the same browser can't guess it, and DNS rebinding
-gets nothing). Every page has the public site's security header and nothing inline. Passwords and keys typed in stay
+It listens on 127.0.0.1 only, at a free port (on Docker's bridge network: inside setup's container, which only the
+machine's 127.0.0.1 port given in the docker run command reaches), and answers only under a one-time random key in the
+address and only to a Host of 127.0.0.1 or localhost at the machine's port (a page elsewhere in the same browser can't
+guess it, and DNS rebinding gets nothing). Every page has the public site's security header and nothing inline. Passwords and keys typed in stay
 in this process's memory for the run and are never sent back in a page. The work of each step is installer/engine.py;
 long work (installing, checking, updating) runs in the background once, and its page loads itself again every 2
 seconds until it is done. The page stops when setup is done, after 60 minutes without a request, or with Ctrl-C.
@@ -117,24 +118,24 @@ class Session:
 
 
 class App:
-    def __init__(self, port=0, idle_s=IDLE_S, fonts_dir=None, resume=None, no_browser=False):
+    def __init__(self, port=0, idle_s=IDLE_S, fonts_dir=None, no_browser=False, bind='127.0.0.1', public_port=None):
         self.key = secrets.token_urlsafe(24)
         self.no_browser = no_browser
         self.port, self.idle_s, self.fonts_dir = port, idle_s, fonts_dir
+        self.bind, self.public_port = bind, public_port      # the machine's port for the page, when it differs
         self.last = time.monotonic()
         self.finished = threading.Event()
         self.finishing = None
         self.session = None
         self.after = None            # the page after setup's own engine and work (updating, removing)
         self.changing = False
-        self.ready = None            # what update.look found when the page after setup opened
-        self.resume = resume
 
     # ------------------------------------------------------------------------------------- HTTP
     def handle(self, method, path, headers, body):
         self.last = time.monotonic()
         host = headers.get('Host') or headers.get('host') or ''
-        if host not in (f'127.0.0.1:{self.port}', f'localhost:{self.port}'):
+        port = self.public_port or self.port
+        if host not in (f'127.0.0.1:{port}', f'localhost:{port}'):
             return 404, dict(PAGE_HEADERS, **{'Content-Type': 'text/plain'}), b''
         parsed = urllib.parse.urlsplit(path)
         if parsed.path.startswith('/static/'):
@@ -185,7 +186,7 @@ class App:
                 return self.go('machine')
             prev = engine.load_settings().get('route') or 'yourself'
             return self.page(screens.start(self.session.route if self.session else prev))
-        if name in ('update', 'updating', 'remove', 'answers'):
+        if name in ('update', 'updating', 'rollback', 'remove', 'answers'):
             return getattr(self, f'after_{name}')(method, one)
         s = self.session
         if not s or name not in s.ids + ('done',):
@@ -426,14 +427,18 @@ class App:
     def after_setup(self, problem=None):
         e = engine.Engine({}, page=True)
         rows, details = e.status_parts()
-        if self.ready is None:
-            self.ready = update.look(engine.REPO)        # only when this page opens
         prev = e.prev
+        ready = update.compare(prev, engine.PLACE.image if engine.PLACE else None, engine.setup_version())
+        rollback = None
+        if prev.get('previous'):
+            copy = prev['previous'].get('databases')
+            copy = copy if copy and (engine.STATE / 'backups' / copy).is_dir() else None
+            rollback = (prev['previous'].get('version'), copy)
         offer = bool(prev.get('added_opensubtitles'))
         return self.page(screens.after_setup(prev.get('route') or 'yourself', rows, details,
-                                             prev.get('version') or engine.current_version(), self.ready, problem,
+                                             prev.get('version') or engine.current_version(), ready, problem,
                                              offer_opensubtitles=offer,
-                                             config=engine.short(e.keys.get('VIEWER_UUID', ''))))
+                                             config=engine.short(e.keys.get('VIEWER_UUID', '')), rollback=rollback))
 
     def after_answers(self, method, one):
         if method == 'POST':
@@ -460,7 +465,14 @@ class App:
     def after_update(self, method, one):
         if method == 'POST' and (not self.after or not self.after.running('update')):   # again after a failure
             self.after = Session(engine.load_settings().get('route') or 'yourself', {})
-            self.after.start_job('update', lambda: self.after.e.update(restart=self.restart))
+            self.after.start_job('update', self.after.e.update)
+        return self.go('updating')
+
+    def after_rollback(self, method, one):
+        if method == 'POST' and (not self.after or not self.after.running('update')):
+            restore = one.get('RESTORE_DATABASES') == 'yes'
+            self.after = Session(engine.load_settings().get('route') or 'yourself', {})
+            self.after.start_job('update', lambda: self.after.e.rollback(restore=restore))
         return self.go('updating')
 
     def after_updating(self, method, one):
@@ -468,23 +480,6 @@ class App:
             return self.go('')
         running = self.after.running('update')
         return self.page(screens.working('Updates', self.after.live('update'), running, self.after.stops.get('update')))
-
-    def start_resumed(self):
-        """On the new code after an update's restart: the second half, shown on the same page."""
-        self.after = Session(engine.load_settings().get('route') or 'yourself', {})
-        out = self.after.e.out
-        out.rows += [['done', update.FETCHING.format(version=engine.current_version()), None],
-                     ['done', update.RESTARTING, None]]
-        self.after.start_job('update', lambda: self.after.e.finish_update(self.resume))
-
-    def restart(self, old):
-        """The update's restart: this process becomes setup on the new code, same port and key."""
-        os.environ.update(AIOSUBTITLES_SETUP_PORT=str(self.port), AIOSUBTITLES_SETUP_KEY=self.key,
-                          AIOSUBTITLES_SETUP_RESUME=old)
-        if getattr(self, 'server', None):
-            self.server.socket.close()
-        os.execv(sys.executable, [sys.executable, '-I', str(engine.REPO / 'installer' / 'wizard.py')]
-                 + (['--no-browser'] if self.no_browser else []))
 
     # ------------------------------------------------------------------------------------- stopping
     def finish_in(self, seconds):
@@ -527,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def start(app):
     """Starts the page's server in the background; it stops by itself when the app says so."""
-    server = ThreadingHTTPServer(('127.0.0.1', app.port), Handler)
+    server = ThreadingHTTPServer((app.bind, app.port), Handler)
     server.daemon_threads = True
     server.app, app.server = app, server
     app.port = server.server_address[1]
@@ -545,8 +540,9 @@ def start(app):
 def serve(app, say=print, opener=None):
     """./setup's page: prints where it is, opens the browser on a desktop, and waits until it stops."""
     server = start(app)
-    url = f'http://127.0.0.1:{app.port}/{app.key}/'
-    for line in terminal_lines(app.port, url):
+    port = app.public_port or app.port
+    url = f'http://127.0.0.1:{port}/{app.key}/'
+    for line in terminal_lines(port, url):
         say(line)
     if opener and (sys.platform == 'darwin' or os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
         try:

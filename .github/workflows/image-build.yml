@@ -50,7 +50,8 @@ jobs:
         if: ${{ !inputs.publish }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: subsync
+          context: .
+          file: subsync/Dockerfile
           platforms: linux/${{ inputs.arch }}
           load: true
           tags: aiosubtitles-check:${{ inputs.arch }}
@@ -92,7 +93,14 @@ jobs:
               || fail "The font $font doesn't load"
           done
           if docker logs aiosubtitles-check 2>&1 | grep -qF "$secret"; then fail "The secret is in the log"; fi
-          echo "Healthy; /health, the sign-up page's security header and both fonts answer"
+          # setup inside the image: its version, its plain message without Docker's socket, and the service's user
+          [ "$(docker run --rm "$IMAGE" setup --version)" = "$(tr -d '[:space:]' < VERSION)" ] \
+            || fail "setup --version isn't VERSION"
+          out="$(docker run --rm "$IMAGE" setup --status 2>&1 || true)"
+          grep -qF "Setup needs Docker's socket" <<< "$out" || fail "Setup without the socket didn't say what to add"
+          docker exec aiosubtitles-check grep -E '^Uid:\s+10001\s' /proc/1/status > /dev/null \
+            || fail "The service doesn't run as its own user (10001)"
+          echo "Healthy; /health, the sign-up page's security header, both fonts and setup's own checks answer"
       - name: Remove the check container
         if: ${{ always() && !inputs.publish }}
         run: docker rm -f aiosubtitles-check > /dev/null 2>&1 || true
@@ -124,7 +132,8 @@ jobs:
         if: inputs.publish
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: subsync
+          context: .
+          file: subsync/Dockerfile
           platforms: linux/${{ inputs.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ steps.name.outputs.image }},push-by-digest=true,name-canonical=true,push=true

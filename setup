@@ -1,14 +1,62 @@
 #!/usr/bin/env bash
-# AIOSubtitles setup: adds subsync to the AIOStreams you already run. ./setup --help lists the options.
-set -euo pipefail
+# AIOSubtitles setup from the source folder: builds the image here (its tests run in the build), then runs setup
+# inside it on this folder's state/. ./setup --help lists the options; ./setup --update first fetches a newer version
+# with git, builds it while the old version keeps running, and puts the folder back if the build fails.
+set -eu
 cd "$(dirname "$0")"
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Python 3 is needed (most Linux systems have it)."
-  echo "  Debian/Ubuntu: sudo apt install python3      Fedora: sudo dnf install python3"
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is not installed."
+  echo "      Install Docker (docs.docker.com/engine/install), then run ./setup again."
   exit 1
 fi
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; then
-  echo "Python 3.9 or newer is needed; this one is $(python3 --version 2>&1)."
+version=$(cat VERSION)
+old=
+if [ "${1:-}" = --update ]; then
+  # the words are setup's own (installer/update.py; a test keeps them equal)
+  if [ ! -d .git ]; then
+    echo "This folder wasn't downloaded with git, so it can't fetch a new version: download the new version, copy this folder's state/ into it, and run ./setup there."
+    exit 1
+  fi
+  reason() { printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | tail -n 1 | sed 's/[.[:space:]]*$//'; }
+  if ! upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>&1); then
+    echo "Couldn't look for a new version: $(reason "$upstream")."
+    exit 1
+  fi
+  if ! err=$(GIT_TERMINAL_PROMPT=0 git fetch --quiet "${upstream%%/*}" 2>&1 </dev/null); then
+    echo "Couldn't look for a new version: $(reason "$err")."
+    exit 1
+  fi
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse '@{u}')" ]; then
+    changed=$(git diff --name-only HEAD | sed -n 'H;${x;s/^\n//;s/\n/, /g;p;}')
+    if [ -n "$changed" ]; then
+      echo "This folder has changes of its own, so the update stopped before changing anything: $changed."
+      exit 1
+    fi
+    old=$(git rev-parse HEAD)
+    old_version=$version
+    git merge --ff-only --quiet '@{u}'
+    version=$(cat VERSION)
+  fi
+fi
+image="aiosubtitles:local-$version"
+echo "Building AIOSubtitles $version here (its tests run in the build; a few minutes the first time) ..."
+if ! docker build -f subsync/Dockerfile -t "$image" .; then
+  if [ -n "$old" ]; then
+    git reset --quiet --keep "$old"
+    echo "The update didn't go through: building version $version failed. Version $old_version keeps running."
+  fi
   exit 1
 fi
-exec python3 -I installer/wizard.py "$@"
+mkdir -p state
+# Linux: setup on this machine's network, as setup outside a container was (the page on 127.0.0.1, an AIOStreams
+# that listens on 127.0.0.1 only reachable). Elsewhere (Docker Desktop, Colima): the page on a published port.
+if [ "$(uname -s)" = Linux ]; then
+  net="--network host"
+else
+  net="-p 127.0.0.1:${AIOSUBTITLES_SETUP_PORT:-8789}:8789"
+fi
+t=
+if [ -t 0 ] && [ -t 1 ]; then t=-t; fi
+# shellcheck disable=SC2086  # $t and $net are options, split on purpose
+exec docker run --rm -i $t $net -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/state:/folder/state" \
+  -e AIOSUBTITLES_ROUTE=source "$image" setup "$@"

@@ -14,12 +14,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, wizard
+from installer import dockerenv, engine, where, wizard
 from subsync import explain, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
 PASSWORD = 'viewer-secret-password'
 PUBLIC = 'https://aio.example.com'
+IMAGE = 'ghcr.io/haslanli/aiosubtitles:1.0.0@sha256:' + 'c' * 64
 
 
 SERVICE_NAMES = {'aiostreams': 'AIOStreams', 'nzbdav': 'NzbDAV', 'altmount': 'AltMount', 'torbox': 'TorBox',
@@ -238,9 +239,13 @@ class FlowFixture(unittest.TestCase):
                 return (0 if self.selftest.get('ok') else 1), json.dumps(self.selftest) + '\n', ''
             return 0, json.dumps({'subtitle_requests': getattr(self.aios, 'subtitle_calls', 0)}), ''
 
+        self.place = where.Place('image', 'host', 'c0ffee', IMAGE, False, 'ghcr.io/haslanli/aiosubtitles:latest', None,
+                                 '/home/me/aiosubtitles', (os.getuid(), os.getgid()), '')
         self.patches = [
             mock.patch.object(engine, 'STATE', self.state),
             mock.patch.object(engine, 'REPO', Path(self.tmp.name)),
+            mock.patch.object(engine, 'PLACE', self.place),
+            mock.patch.object(dockerenv, 'foreign', lambda project, container, install_id: []),
             mock.patch.object(dockerenv, 'docker_problem', lambda: None),
             mock.patch.object(dockerenv, 'free_gb', lambda p='/': 100.0),
             mock.patch.object(dockerenv, 'aios_containers', lambda: [container]),
@@ -257,10 +262,9 @@ class FlowFixture(unittest.TestCase):
             p.start()
 
     def _compose(self, state, *args, **kw):
-        if 'build' in args:
-            self.built = True
-            self.built_count = getattr(self, 'built_count', 0) + 1
+        self.assertNotIn('build', args)                     # nothing is built: the image is setup's own
         if 'up' in args:
+            self.started_count = getattr(self, 'started_count', 0) + 1
             self.aios.subsync_up = True
         if 'down' in args:
             self.aios.subsync_up = False
@@ -445,14 +449,14 @@ class Flow(FlowFixture):
         self.assertNotIn(f'/stremio/{UUID}/ENC-', out)                 # no install links with the encrypted password
         self.assertIn('JELLYFIN_SUBTITLE_TTL', out)                    # AIOMetadata users are told
         self.assertIn('docker restart', out)
-        self.assertIn('a few minutes', out)                            # the build took 3, not 10
+        self.assertIn('Starting subsync', out)
+        self.assertNotIn('Building', out)                              # the image is setup's own
 
     def test_the_web_server_rule_is_shown_only_while_it_is_needed(self):
         code, out = self.run_setup(self.ANSWERS)
         self.assertIn('Your web server needs one rule', out)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
         self.assertEqual(code, 0, out)
-        self.assertNotIn('already built: a few seconds', out)          # an update rebuilds: minutes, not seconds
         self.assertNotIn('Your web server needs one rule', out)
         self.assertIn('already reaches subsync', out)
 
@@ -460,7 +464,8 @@ class Flow(FlowFixture):
         self.run_setup(self.ANSWERS)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
-        self.assertIn('docker image rm aiosubtitles/subsync:', out)
+        self.assertIn(f'docker image rm {IMAGE}', out)
+        self.assertIn('this folder, /home/me/aiosubtitles, ', out)        # its path on the machine
         self.assertIn('state/backups', out)
         self.assertIn('web server', out)
 
@@ -684,7 +689,7 @@ class Flow(FlowFixture):
         e.remove()
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
         self.assertIn(('ok', 'Done.'), [tuple(r[:2]) for r in e.out.rows])
-        self.assertTrue(any('docker image rm aiosubtitles/subsync:' in line for line in e.stays))
+        self.assertTrue(any(f'docker image rm {IMAGE}' in line for line in e.stays))
         self.assertFalse((self.state / 'settings.json').exists())
 
     def test_removing_needs_the_config_password(self):
@@ -735,3 +740,116 @@ class RealDebridGate(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Bridge(FlowFixture):
+    """Setup on Docker's bridge network (the image route): AIOStreams reached by joining its network or through the
+    gateway, the machine's ports and address asked of the helper, the guard, the folder's ./setup and file owners."""
+
+    def setUp(self):
+        super().setUp()
+        self.place = self.place._replace(network='bridge', gateway='172.17.0.1', page_port=8789)
+        self.joined, self.probed = [], []
+
+        def probe(image, checks):
+            self.probed.append((image, list(checks)))
+            return {'lan': '192.168.1.7', 'taken': [f'{h}:{p}' for h, p in checks if p == 8790]}
+        for p in (mock.patch.object(engine, 'PLACE', self.place),
+                  mock.patch.object(dockerenv, 'join', lambda net, c: self.joined.append((net, c)) or True),
+                  mock.patch.object(dockerenv, 'probe', probe)):
+            p.start()
+            self.patches.append(p)
+
+    def container(self, **kw):
+        return dict({'name': 'aiostreams', 'image': 'ghcr.io/viren070/aiostreams:latest', 'port': 3000, 'base_url': '',
+                     'host_network': False, 'networks': ['aio_default'], 'ips': ['172.18.0.2'], 'published': []}, **kw)
+
+    def test_setup_joins_aiostreams_network_and_asks_it_by_name(self):
+        urls = engine.Engine({}).aios_urls(self.container(base_url=PUBLIC))
+        self.assertEqual(urls, ['http://aiostreams:3000', PUBLIC])
+        self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
+
+    def test_aiostreams_on_the_machine_is_reached_through_the_gateway(self):
+        urls = engine.Engine({}).aios_urls(self.container(host_network=True, networks=[]))
+        self.assertEqual(urls, ['http://172.17.0.1:3000'])
+        published = self.container(networks=[], published=[('0.0.0.0', 3001), ('127.0.0.1', 3002)])
+        self.assertEqual(engine.Engine({}).aios_urls(published), ['http://172.17.0.1:3001'])   # never 127.0.0.1's
+
+    def test_an_aiostreams_on_this_machines_127_0_0_1_gets_the_plain_answer(self):
+        e = engine.Engine({})
+        tried = []
+
+        def status(aios):
+            tried.append(aios.base)
+            raise engine.AiosError('Nothing answers there.')
+        with mock.patch.object(engine.Aios, 'status', status):
+            good, message, _ = e._check_aios('http://127.0.0.1:3000')
+        self.assertFalse(good)
+        self.assertEqual(message, engine.CANT_REACH)
+        self.assertEqual(tried, ['http://172.17.0.1:3000'])                    # the machine, not setup's container
+
+    def test_the_machines_ports_and_address_come_from_the_helper(self):
+        self.assertTrue(engine.port_taken(8790, '127.0.0.1'))
+        self.assertFalse(engine.port_taken(8791, '0.0.0.0'))
+        self.assertEqual(engine.lan_address(), '192.168.1.7')
+        self.assertTrue(all(image == IMAGE for image, _ in self.probed))
+
+    def test_the_guard_stops_an_install_before_anything_is_written(self):
+        with mock.patch.object(dockerenv, 'foreign',
+                               lambda project, container, install_id: [('container', 'aiosubtitles-subsync')]), \
+                mock.patch.object(engine.Engine, 'aios_urls', lambda e, c: [self.aios.url]):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 1)
+        self.assertIn(engine.GUARD_STOP.format(kind='container', name='aiosubtitles-subsync'), ' '.join(out.split()))
+        self.assertFalse((self.state / 'compose.yaml').exists())
+        self.assertFalse(self.aios.subsync_up)
+
+    def test_the_guard_stops_at_the_first_step_before_anything_changes(self):
+        with mock.patch.object(dockerenv, 'foreign',
+                               lambda project, container, install_id: [('volume', 'aiosubtitles_subsync-data')]), \
+                mock.patch.object(engine.Engine, 'aios_urls', lambda e, c: [self.aios.url]):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 1)
+        self.assertNotIn('Step 2', out)                                    # stopped at "This machine"
+        self.assertFalse(self.state.exists() and any(self.state.iterdir()))
+        self.assertFalse([m for m, *_ in self.aios.log if m in ('POST', 'PUT', 'DELETE')])   # AIOStreams untouched
+
+    def test_the_install_writes_the_folders_setup_and_labels_its_compose(self):
+        with mock.patch.object(engine.Engine, 'aios_urls', lambda e, c: [self.aios.url]), \
+                mock.patch.object(dockerenv, 'probe', lambda image, checks: {'lan': '192.168.1.7', 'taken': []}):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        script = (self.state.parent / 'setup').read_text()
+        self.assertIn('ghcr.io/haslanli/aiosubtitles:latest setup "$@"', script)
+        compose = (self.state / 'compose.yaml').read_text()
+        install_id = engine.load_settings()['install_id']
+        self.assertIn(f'org.aiosubtitles.install: "{install_id}"', compose)
+        self.assertIn(f'    image: {IMAGE}\n', compose)
+        self.assertIn('ports: ["127.0.0.1:8790:8790"]', compose)
+
+    def test_files_belong_to_the_folders_owner(self):
+        owned = []
+        with mock.patch.object(engine.os, 'geteuid', lambda: 0), \
+                mock.patch.object(engine.os, 'chown', lambda path, uid, gid: owned.append((Path(path).name, uid, gid))):
+            engine.save_settings({'route': 'yourself'})
+        self.assertIn(('settings.json.tmp', *self.place.owner), owned)
+        self.assertIn(('state', *self.place.owner), owned)
+
+
+class ImageNames(FlowFixture):
+    """A pinned image's full name is one long word: what to remove is shown by its short ID (the 16-shape check)."""
+
+    def test_the_image_to_remove_is_named_by_its_short_id(self):
+        self.run_setup(self.ANSWERS)
+
+        def run(cmd, timeout=60, stdin=None):
+            if cmd[:3] == ['docker', 'image', 'inspect'] and cmd[-1] == IMAGE:
+                return 0, 'sha256:3320f59e4ec8' + '0' * 52 + '\n', ''
+            return 0, '', ''
+        with mock.patch.object(dockerenv, 'run', run):
+            code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
+        self.assertEqual(code, 0, out)
+        self.assertIn('the subsync image (about 1 GB): docker image rm 3320f59e4ec8\n', out)
+
+    def test_an_image_docker_doesnt_know_keeps_its_name(self):
+        self.assertEqual(engine.image_handle(IMAGE), IMAGE)

@@ -93,7 +93,7 @@ class WorkflowRules(unittest.TestCase):
         on = blocks(self.main, 'on')
         self.assertEqual(sorted(on), ['pull_request', 'push'])
         self.assertIn('branches: [main]', on['push'])
-        self.assertIn("tags: ['v[0-9]+.[0-9]+.[0-9]+']", on['push'])
+        self.assertIn("tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+']", on['push'])
         self.assertIn('branches: [main]', on['pull_request'])
         self.assertIn('on:\n  workflow_call:', self.build)
         for text in self.files.values():
@@ -173,6 +173,30 @@ class WorkflowRules(unittest.TestCase):
     def test_no_register_notes(self):
         for name, text in self.files.items():
             self.assertNotRegex(text, r'\bAD\d+|\bS4-\d+', name)
+
+
+    # -- the setup inside the image (§7) ------------------------------------------------------------
+    def test_the_image_builds_from_the_repository_root(self):
+        self.assertNotIn('context: subsync', self.build)
+        self.assertEqual(self.build.count('          context: .\n          file: subsync/Dockerfile\n'), 2)
+
+    def test_release_candidates_publish_only_their_own_tag(self):
+        rules = self.main.split('- name: Version rules', 1)[1].split('\n  test:', 1)[0]
+        self.assertIn(r'if [ "$REF_NAME" != "v$version" ] && ! [[ "$REF_NAME" =~ ^v${version//./\\.}-rc\.[0-9]+$ ]]; then',
+                      rules)
+        # {{major}}.{{minor}} and latest never come from a pre-release (docker/metadata-action; the newest check
+        # looks at plain vX.Y.Z tags only)
+        self.assertIn("grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$'", self.main)
+
+    def test_the_version_rule_covers_every_input_of_the_image(self):
+        self.assertIn('! git diff --quiet "v$version" HEAD -- subsync/ installer/ .dockerignore', self.main)
+
+    def test_the_start_check_runs_setups_own_checks(self):
+        check = self.build.split('- name: Start it once and check that it answers', 1)[1].split('\n      - name:', 1)[0]
+        self.assertIn('[ "$(docker run --rm "$IMAGE" setup --version)" = "$(tr -d \'[:space:]\' < VERSION)" ]', check)
+        self.assertIn('out="$(docker run --rm "$IMAGE" setup --status 2>&1 || true)"', check)
+        self.assertIn('grep -qF "Setup needs Docker\'s socket" <<< "$out"', check)
+        self.assertIn("docker exec aiosubtitles-check grep -E '^Uid:\\s+10001\\s' /proc/1/status", check)
 
 
 if __name__ == '__main__':

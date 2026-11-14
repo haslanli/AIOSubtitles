@@ -5,7 +5,8 @@ in and shows what comes back as rows, and an answers file (./setup --answers FIL
 and prints as the terminal setup did. Asking is `self.ask`: a question with no answer yet raises Problem(missing=True)
 for the page and stops an answers-file run; a wrong answer raises Problem at its field. Output is `self.out`.
 
-It installs one thing, the subsync service (in Docker, built on this machine), and makes two config changes in
+It installs one thing, the subsync service (in Docker, from the image setup itself runs from), and makes two config
+changes in
 AIOStreams, each shown first and saved only after a yes:
   1. your config gets one more subtitle source, subsync (a backup copy is saved first);
   2. a second config, made from yours, that subsync uses to find files (no Usenet, no Real-Debrid, nothing in the
@@ -17,20 +18,25 @@ import json
 import os
 import re
 import secrets
-import sys
 import textwrap
 import time
 import urllib.parse
 from pathlib import Path
 
-from installer import docs, dockerenv, hosting, limits, plan, ui, update
+from installer import docs, dockerenv, hosting, limits, plan, ui, update, where
 from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the client through here)
 from installer.ui import Asker, Stop, stop
 from subsync import explain, realdebrid
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parent.parent      # the code (/opt/aiosubtitles in the image)
 STATE = Path(os.environ.get('AIOSUBTITLES_STATE') or REPO / 'state')
-CONTAINER = 'aiosubtitles-subsync'
+CONTAINER = plan.container_name()
+PLACE = None       # where.Place: where this setup runs, read at start-up (installer/wizard.py)
+GUARD_STOP = ("Setup stopped without changing anything: Docker has a {kind} named {name} that this setup didn't make. "
+              "If it belongs to another AIOSubtitles, run that one's setup; if not, rename or remove it yourself.")
+CANT_REACH = ("Setup runs in a container, so it can't reach an AIOStreams that only listens on this machine's "
+              '127.0.0.1. Give its address on your network, or use the source route (README).')
+STARTING = 'Starting {name}'
 TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'The Matrix'),
                ('movie', 'tt0110912', 'Pulp Fiction')]
 # the Real-Debrid stop's way out: on the page and in a terminal
@@ -58,12 +64,33 @@ def read_kv(path):
     return out
 
 
+def own(path):
+    """Setup runs as root in its container: what it writes in the folder belongs to the folder's owner."""
+    if PLACE and os.geteuid() == 0:
+        try:
+            os.chown(path, *PLACE.owner)
+        except OSError:
+            pass
+
+
+def shown(path):
+    """A path in the folder as messages show it: state/backups/…."""
+    return str(Path(path).relative_to(STATE.parent))
+
+
+def host_folder():
+    """The folder's path on this machine."""
+    return (PLACE.host_folder if PLACE and PLACE.host_folder else None) or str(STATE.parent)
+
+
 def write_private(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
+    own(path.parent)
     tmp = path.with_name(path.name + '.tmp')
     tmp.write_text(text)
     tmp.chmod(0o600)
+    own(tmp)
     tmp.replace(path)
 
 
@@ -104,20 +131,73 @@ def backup(config, uuid, label='viewer'):
     path = STATE / 'backups' / f'{label}-{uuid[:8]}-{time.strftime("%Y%m%d-%H%M%S", time.gmtime())}.json'
     write_private(path, json.dumps({'uuid': uuid, 'config': config}, indent=2) + '\n')
     (STATE / 'backups').chmod(0o700)
+    own(STATE / 'backups')
     return path
 
 
-def current_version():
-    """The version of the code in this folder (its VERSION file)."""
+def setup_version():
+    """This setup's own version (its image's VERSION file)."""
     return update.running(REPO)
 
 
-def compose_for(s, version):
-    """state/compose.yaml for the setup saved in `s` (state/settings.json), with that version's image."""
+def current_version():
+    return setup_version()
+
+
+def compose_for(s):
+    """state/compose.yaml for the setup saved in `s` (state/settings.json): its image, pinned, and its install id."""
     if s.get('route') == 'host':
-        return hosting.compose_yaml(version, s['port'])
-    return plan.compose_yaml({'version': version, 'host_network': s.get('mode') == 'host', 'networks': s.get('networks'),
+        return hosting.compose_yaml(s['image'], s['install_id'], s['port'], local=s.get('local'))
+    return plan.compose_yaml({'image': s['image'], 'local': s.get('local'), 'install_id': s['install_id'],
+                              'host_network': s.get('mode') == 'host', 'networks': s.get('networks'),
                               'bind': s.get('bind'), 'port': s['port']})
+
+
+def write_compose(s):
+    path = STATE / 'compose.yaml'
+    path.write_text(compose_for(s))
+    own(path)
+
+
+def bridge():
+    """Setup on Docker's bridge network (the image route): the machine is reached through the helper and gateway."""
+    return bool(PLACE and PLACE.network == 'bridge')
+
+
+def port_taken(port, host):
+    if bridge():
+        found = dockerenv.probe(PLACE.image, [(host, port)])
+        return bool(found) and f'{host}:{port}' in found.get('taken', [])
+    return dockerenv.port_in_use(port, host)
+
+
+def lan_address():
+    if bridge():
+        return (dockerenv.probe(PLACE.image, []) or {}).get('lan', '')
+    return dockerenv.lan_address()
+
+
+def guard(install_id):
+    """Stops before any change when Docker has something under setup's names that this install didn't make."""
+    try:
+        found = dockerenv.foreign(plan.project(), CONTAINER, install_id)
+    except RuntimeError as e:
+        raise Stop(str(e)) from None
+    if found:
+        kind, name = found[0]
+        raise Stop(GUARD_STOP.format(kind=kind, name=name))
+
+
+def new_install_id():
+    return secrets.token_hex(8)
+
+
+def image_handle(image):
+    """How messages name an image to remove: its short ID (a pinned name is one long word that no page can wrap), or
+    the name when Docker doesn't know it."""
+    code, out, _ = dockerenv.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', image])
+    found = out.strip().split(':')[-1] if code == 0 else ''
+    return found[:12] if re.fullmatch(r'[0-9a-f]{64}', found) else image
 
 
 def short(uuid):
@@ -301,10 +381,11 @@ class Engine:
         problem = dockerenv.docker_problem()
         if problem:
             stop(*problem)
+        # before any question: nothing under setup's names that this install didn't make (OD18)
+        self.install_id = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
+        guard(self.install_id)
         self.out.ok('Docker and Docker Compose work')
-        free = dockerenv.free_gb(str(REPO))
-        if free is not None and free < 4 and not self.prev.get('installed'):
-            stop(f'Only {free:.1f} GB of disk space is free here.', 'subsync needs about 3 GB to build. Free some space and run ./setup again.')
+        free = dockerenv.free_gb(str(STATE.parent))
         if free is not None:
             self.out.ok(f'{free:.0f} GB of disk space free')
 
@@ -322,7 +403,7 @@ class Engine:
             container = found[0]
         url = None
         if container and 'AIOS_URL' not in self.answers:
-            for candidate in dockerenv.host_urls(container):
+            for candidate in self.aios_urls(container):
                 try:
                     status = Aios(candidate, timeout=8).status()
                 except AiosError:
@@ -335,8 +416,8 @@ class Engine:
             if container:
                 self.out.warn(f"The container \"{container['name']}\" looks like AIOStreams, but I can't reach it from here.")
             url = self.ask.text('AIOS_URL', 'What address do you open AIOStreams at?', current=self.prev.get('aios_url'),
-                                default=None if (self.prev.get('aios_url') or self.page) else 'http://127.0.0.1:3000',
-                                check=self._check_aios)
+                                default=None if (self.prev.get('aios_url') or self.page or bridge())
+                                else 'http://127.0.0.1:3000', check=self._check_aios)
         self.aios = Aios(url)
         settings = self.status['settings']
         public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
@@ -355,14 +436,36 @@ class Engine:
         elif self.s['mode'] == 'remote':
             self.out.note('It doesn\'t run in Docker on this machine, so subsync talks to it over the network.')
 
+    def aios_urls(self, c):
+        """Addresses setup can reach a container's AIOStreams at, best first. On the bridge network setup joins
+        AIOStreams' Docker network and asks it by name, or reaches the machine through the gateway."""
+        if not bridge():
+            return dockerenv.host_urls(c)
+        urls, gateway = [], PLACE.gateway
+        if c['networks'] and dockerenv.join(c['networks'][0], PLACE.container):
+            urls.append(f"http://{c['name']}:{c['port']}")
+        if c['host_network'] and gateway:
+            urls.append(f"http://{gateway}:{c['port']}")
+        urls += [f'http://{gateway}:{port}' for ip, port in c['published'] if ip in ('0.0.0.0', '::', '') and gateway]
+        if c['base_url']:
+            urls.append(c['base_url'])
+        seen = []
+        return [u for u in urls if not (u in seen or seen.append(u))]
+
     def _check_aios(self, value):
         value = value.strip().rstrip('/')
         if not re.match(r'^https?://', value):
             value = 'http://' + value
         value = re.sub(r'/(stremio|configure|jellyfin)(/.*)?$', '', value)
+        local = plan.is_local_host(plan.host_of(value))
+        if bridge() and local:    # 127.0.0.1 is setup's own container here: the machine is its gateway
+            parts = urllib.parse.urlsplit(value)
+            value = urllib.parse.urlunsplit(parts._replace(netloc=f'{PLACE.gateway}:{parts.port or 80}'))
         try:
             self.status = Aios(value, timeout=15).status()
         except AiosError as e:
+            if bridge() and local:
+                return False, CANT_REACH, value
             return False, e.message + (f' {e.fix}' if e.fix else ''), value
         return True, f"AIOStreams {self.status.get('version', '?')} answers there", value
 
@@ -466,7 +569,7 @@ class Engine:
                 self.keys[key] = value
 
     def public_address(self):
-        lan = dockerenv.lan_address()
+        lan = lan_address()
         kind, default = plan.public_default(self.s['aios_public'], lan)
         prev = self.prev.get('public_base')
         url = self.ask.text('PUBLIC_ADDRESS', 'subsync\'s address for your apps', current=prev, default=default,
@@ -481,7 +584,7 @@ class Engine:
             bind = '127.0.0.1'
         if self.s['mode'] == 'host':
             bind = None   # host network: subsync listens on the port itself
-        if port != self.prev.get('port') and dockerenv.port_in_use(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0') \
+        if port != self.prev.get('port') and port_taken(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0') \
                 and not dockerenv.container_state(CONTAINER):
             raise Problem('PUBLIC_ADDRESS', f'Port {port} on this machine is already in use.')
         self.s.update(public_base=url, public_kind=kind, port=port, bind=bind)
@@ -582,12 +685,12 @@ class Engine:
     def save_viewer(self):
         if self.changes:
             path = backup(self.viewer, self.uuid)
-            self.out.ok(f'Saved a copy of your config: {path.relative_to(REPO)}')
+            self.out.ok(f'Saved a copy of your config: {shown(path)}')
             self.with_sign_in(lambda: self.aios.save_config(self.uuid, self.password, self.new_viewer))
             check, _ = self.aios.get_config(self.uuid, self.password)
             if not any(plan.is_subsync_preset(p, self.manifest_url) for p in check.get('presets') or []):
                 stop('AIOStreams saved the config, but subsync is not in it when read back.',
-                     f'Your saved copy is {path.relative_to(REPO)}; ./setup --restore puts it back.')
+                     f'Your saved copy is {shown(path)}; ./setup --restore puts it back.')
             self.out.ok('Your config now lists subsync' + (' and OpenSubtitles' if self.add_os else ''))
             if self.add_os:   # remembered, so ./setup --uninstall can offer to take it out again
                 before = {p.get('instanceId') for p in self.viewer.get('presets') or []}
@@ -704,7 +807,9 @@ class Engine:
         write_env(STATE / 'subsync.env', env)
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
-        (STATE / 'compose.yaml').write_text(compose_for(self.s, current_version()))
+        self.own_image()
+        guard(self.s['install_id'])
+        write_compose(self.s)
         self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio, usenet=self.usenet,
                       audio_budget=self.audio_budget or getattr(self, 'audio_budget_kept', None),   # for when it's on again
                       manifest_url=self.manifest_url, installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
@@ -712,23 +817,29 @@ class Engine:
             self.s.setdefault(kept, self.prev.get(kept))
         save_settings(self.s)
         self.write_keys()
-        self.build_and_start('subsync', 'subsync is running (it restarts by itself after a reboot)')
+        self.start('subsync', 'subsync is running (it restarts by itself after a reboot)')
+        self.write_setup_script()
         self.save_viewer()
 
-    def build_and_start(self, name, running):
-        image = f'aiosubtitles/subsync:{current_version()}'
-        layers = ['docker', 'image', 'inspect', '--format', '{{json .RootFS.Layers}}', image]   # the ID changes on every build
-        before = dockerenv.run(layers)[1].strip()
-        built = bool(before)
+    def own_image(self):
+        """This install's id (kept from the last setup) and the image the service runs: setup's own, pinned."""
+        self.s['install_id'] = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
+        self.s['version'] = current_version()
+        if PLACE:
+            self.s.update(image=PLACE.image, local=PLACE.local)
+        else:
+            self.s.setdefault('image', self.prev.get('image') or f'aiosubtitles:local-{current_version()}')
+            self.s.setdefault('local', True)
+
+    def write_setup_script(self):
+        """The image route's folder gets its./setup."""
+        if PLACE and PLACE.route == 'image':
+            where.write_setup_script(PLACE, STATE.parent)
+
+    def start(self, name, running):
+        """The service from compose.yaml, up and answering. Nothing is built here: the image is setup's own."""
         self.out.say()
-        self.out.working(f'Building {name}' + (' (seconds if nothing changed, a few minutes after an update)' if built
-                                                else ' (the first time takes a few minutes)') + ' ...')
-        code, out, err = dockerenv.compose(STATE, 'build', timeout=3600)
-        if code != 0:
-            tail = '\n'.join((err or out).strip().splitlines()[-15:])
-            stop(f'Building {name} failed.', tail + '\n\nRun ./setup again after fixing the problem above.')
-        after = dockerenv.run(layers)[1].strip()
-        self.out.ok('Image up to date' if after and after == before else 'Built (its own tests passed during the build)')
+        self.out.working(STARTING.format(name=name))
         code, out, err = dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
         if code != 0:
             stop(f'Starting {name} failed.', '\n'.join((err or out).strip().splitlines()[-10:]))
@@ -965,7 +1076,7 @@ class Engine:
         self.trusted_proxy = self.ask.text('SUBSYNC_TRUSTED_PROXY', 'Trusted proxy',
                                            current=env.get('SUBSYNC_TRUSTED_PROXY'), default='gateway')
         port = int(self.prev.get('port') or hosting.PORT)
-        if port != self.prev.get('port') and dockerenv.port_in_use(port, '127.0.0.1') \
+        if port != self.prev.get('port') and port_taken(port, '127.0.0.1') \
                 and not dockerenv.container_state(CONTAINER):
             stop(f'Port {port} on this machine is already in use.')
         self.s.update(route='host', public_base=self.address, port=port, version=current_version())
@@ -1024,11 +1135,14 @@ class Engine:
         self.secret_new = False
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
-        (STATE / 'compose.yaml').write_text(compose_for(self.s, current_version()))
+        self.own_image()
+        guard(self.s['install_id'])
+        write_compose(self.s)
         self.s.update(installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
         save_settings(self.s)
         self.write_keys()
-        self.build_and_start('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
+        self.start('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
+        self.write_setup_script()
         self.web_server_rule = None
         if not self.public_health_at(self.address):
             self.web_server_rule = hosting.web_server_rule(self.address, f"127.0.0.1:{self.s['port']}")
@@ -1143,10 +1257,12 @@ class Engine:
                 removed += 1
         if not self.ask.yesno('CONFIRM', 'Remove subsync?', False):
             stop('Nothing was changed.')
+        if (STATE / 'compose.yaml').exists():
+            guard(s.get('install_id'))
         if removed:
             path = backup(self.viewer, uuid)
             aios.save_config(uuid, password, new)
-            self.out.ok(f'Your config no longer lists subsync (copy before: {path.relative_to(REPO)})')
+            self.out.ok(f'Your config no longer lists subsync (copy before: {shown(path)})')
         for kind, done in (('SYNC', 'Deleted subsync\'s own config'), ('USENET', "Deleted subsync's Usenet config")):
             if keys.get(f'{kind}_UUID'):
                 try:
@@ -1162,10 +1278,10 @@ class Engine:
         for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
             (STATE / name).unlink(missing_ok=True)
         self.out.ok('Done.')
-        self.stays = [f"the subsync image (about 1 GB): docker image rm aiosubtitles/subsync:{s.get('version') or current_version()}"]
+        self.stays = [f"the subsync image (about 1 GB): docker image rm {image_handle(s.get('image'))}"]
         if s.get('public_kind') == 'path':
             self.stays.append(f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server")
-        self.stays.append(f'this folder, {REPO}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)')
+        self.stays.append(f'this folder, {host_folder()}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)')
         self.out.say()
         self.out.say('  These stay, in case you set it up again; remove them when you no longer need them:')
         for line in self.stays:
@@ -1180,72 +1296,121 @@ class Engine:
         if not self.ask.yesno('CONFIRM', "Delete everyone's records and stored copies", False):
             raise Problem('CONFIRM', '', missing=True)
         if (STATE / 'compose.yaml').exists():
+            guard(s.get('install_id'))
             dockerenv.compose(STATE, 'down', '-v', timeout=300)
             self.out.ok('Removed the subsync container and its stored copies')
         for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
             (STATE / name).unlink(missing_ok=True)
         self.out.ok('Done.')
-        self.stays = [f"the subsync image (about 1 GB): docker image rm aiosubtitles/subsync:{s.get('version') or current_version()}",
+        self.stays = [f"the subsync image (about 1 GB): docker image rm {image_handle(s.get('image'))}",
                       f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server",
-                      f'this folder, {REPO}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)']
+                      f'this folder, {host_folder()}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)']
 
     # ------------------------------------------------------------------------------------- updates
-    def update(self, restart=None):
-        """The first half of an update, on the code running now: the new version ready, a public instance's
-        databases copied, the folder fast-forwarded; then setup starts again on the new code (`restart(old)`)."""
-        ready = update.look(REPO)
+    def update(self):
+        """The page's Update, or./setup --update: the service moves to this setup's own version (§5)."""
+        if not self.prev.get('installed'):
+            stop('subsync is not set up here yet.', 'Run ./setup')
+        ready = update.compare(self.prev, PLACE.image if PLACE else None, setup_version())
         if ready.how == 'newest':
             raise Stop(update.NEWEST)
-        if ready.how == 'not-git':
-            raise Stop(update.NOT_GIT)
-        if ready.how == 'error':
-            raise Stop(update.LOOK_FAILED.format(reason=ready.reason))
-        old_version = self.prev.get('version') or current_version()
-        if self.prev.get('route') == 'host':
-            self.copy_databases(old_version)
-        self.out.working(update.FETCHING.format(version=ready.version))
-        try:
-            old = update.fast_forward(REPO)
-        except update.UpdateStopped as e:
-            raise Stop(e.message) from None
-        self.out.working(update.RESTARTING)
-        (restart or self._restart)(old)
+        if ready.how == 'newer-here':
+            raise Stop(update.NEWER_HERE.format(running=self.prev.get('version'), setup=setup_version()))
+        return self.switch(PLACE.image, PLACE.local, setup_version())
 
-    @staticmethod
-    def _restart(old):
-        os.execv(sys.executable, [sys.executable, '-I', str(REPO / 'installer' / 'wizard.py'), '--update-finish', old])
+    def rollback(self, restore=False):
+        """./setup --rollback, and the page's button: back to the version before the last update, with the databases
+        from before that update when `restore`."""
+        prev = self.prev.get('previous')
+        if not prev:
+            raise Stop(update.NO_ROLLBACK)
+        copy = prev.get('databases') if restore else None
+        if copy and not (STATE / 'backups' / copy).is_dir():
+            raise Stop(update.FAILED.format(reason=f'{copy} is not in state/backups', version=self.prev.get('version')))
+        return self.switch(prev['image'], prev.get('local', False), prev['version'], back=True, restore=copy)
 
-    def finish_update(self, old):
-        """The second half, on the new code: build the new version while the old one keeps running, switch, check. A
-        failed build or start puts the folder and compose.yaml back and starts the old version as it was."""
-        self.s = s = load_settings()
-        new_version = current_version()
-        old_version = s.get('version') or update.version_at(REPO, old)
-        host = s.get('route') == 'host'
-        path = STATE / 'compose.yaml'
-        before = path.read_text()
-        try:
-            path.write_text(compose_for(s, new_version))
-            self.build_and_start('AIOSubtitles' if host else 'subsync',
-                                 'AIOSubtitles is running (it restarts by itself after a reboot)' if host else
-                                 'subsync is running (it restarts by itself after a reboot)')
-        except Stop as e:
-            update.put_back(REPO, old)
-            path.write_text(before)
-            dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
-            raise Stop(update.FAILED.format(reason=e.message.rstrip('.'), version=old_version)) from None
-        s['version'] = new_version
-        save_settings(s)
-        if host:
-            return hosting.check(s['public_base'], self.out)
+    def route_check(self, out=None):
+        """The route's own check from this machine: a public instance's address and sign-up page, or the address apps
+        use. Shown on `out`; silent without it."""
+        out = out or Rows()
+        if self.s.get('route') == 'host':
+            return hosting.check(self.s['public_base'], out)
         if self.public_health():
-            self.out.ok(f"Your apps can reach subsync at {s['public_base']}")
+            out.ok(f"Your apps can reach subsync at {self.s['public_base']}")
             return True
-        self.out.warn(f"{s['public_base']}/health doesn't answer from this machine.")
+        out.warn(f"{self.s['public_base']}/health doesn't answer from this machine.")
         return False
 
-    def copy_databases(self, old_version):
-        """A checked copy of a public instance's two databases, out of its container, the newest three kept."""
+    def switch(self, image, local, version, back=False, restore=None):
+        """Copy the databases; check `image` while the old version keeps running; switch; check again; put the old
+        version back (with the copy when it needs it) if the new one doesn't answer."""
+        s = self.s = dict(self.prev)
+        old = {'image': s.get('image'), 'local': bool(s.get('local')), 'version': s.get('version')}
+        guard(s.get('install_id'))
+        held = self.route_check()            # what held before: a check that failed already can't fail the update
+        needed = {(s.get('previous') or {}).get('databases'), restore} - {None}     # never pruned: a rollback needs them
+        copy = self.copy_databases(old['version'], keep=needed)
+        self.out.working(update.CHECKING.format(version=version, old=old['version']))
+        good, reason = dockerenv.check_image(image, plan.project(), s['install_id'])
+        if not good:
+            raise Stop(update.FAILED.format(reason=reason.rstrip('.'), version=old['version']))
+        self.out.ok(update.CHECKED)
+        self.out.working(update.SWITCHING.format(version=version))
+        s.update(image=image, local=bool(local), version=version)
+        write_compose(s)
+        answers = dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)[0] == 0 and self.wait_healthy() \
+            and self.databases_ok()
+        if answers and restore:
+            answers = self.databases_back(image, STATE / 'backups' / restore)
+        if answers and held and not self.route_check():
+            answers = False
+        if not answers:
+            self.go_back(old, copy, version)
+        if back:
+            s.pop('previous', None)
+        else:
+            s['previous'] = dict(old, databases=copy.name)
+        save_settings(s)
+        self.out.ok(update.SWITCHED.format(version=version))
+        if not back:
+            self.out.note(update.KEPT.format(version=old['version']))
+            self.out.note(update.OLD_IMAGES.format(image=image_handle(old['image'])))
+        return self.route_check(self.out)
+
+    def go_back(self, old, copy, new_version):
+        """The new version didn't answer: the old one again, on the data as it is, else on the copy. Always raises."""
+        write_compose(dict(self.s, **old))
+        dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
+        message = update.ROLLED_BACK.format(new=new_version, old=old['version'])
+        if self.wait_healthy() and self.databases_ok():
+            raise Stop(message)
+        if self.databases_back(old['image'], copy):
+            raise Stop(message + update.WITH_DATABASES)
+        raise Stop(update.STILL_DOWN.format(old=old['version'], container=CONTAINER))
+
+    def databases_back(self, image, folder):
+        """The databases of a copy in `folder` put back into the service's volume by `image`, with the service
+        stopped, then started again. True when it answers."""
+        folder = Path(folder)
+        files = {p.name: p.read_bytes() for p in folder.iterdir() if p.name in dockerenv.DATABASES} \
+            if folder.is_dir() else {}
+        dockerenv.compose(STATE, 'stop', timeout=120)
+        good, _ = dockerenv.restore_databases(image, f'{plan.project()}_subsync-data', files)
+        dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
+        return good and self.wait_healthy() and self.databases_ok()
+
+    def databases_ok(self):
+        """Whether the running service reads its databases (/health answers without them): its read-only status
+        command, which opens both."""
+        code, out, _ = dockerenv.exec_in(CONTAINER, ['python', '-m', 'subsync.hostcmd', 'status'], timeout=60)
+        try:
+            return code == 0 and isinstance(json.loads(out), dict)
+        except ValueError:
+            return False
+
+    def copy_databases(self, old_version, keep=()):
+        """A checked copy of the service's databases, out of its container, the newest three kept. Returns its folder."""
+        self.out.working(update.COPYING)
         stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
         inside = f'/data/before-update-{stamp}'
         code, out, err = dockerenv.exec_in(CONTAINER, ['python', '-m', 'subsync.hostcmd', 'copy-databases', inside],
@@ -1260,10 +1425,13 @@ class Engine:
             reason = ((err or out).strip().splitlines() or ['no answer'])[-1]
             raise Stop(update.FAILED.format(reason=reason.rstrip('.'), version=old_version))
         dest.chmod(0o700)
+        own(dest)
         for path in dest.iterdir():
             path.chmod(0o600)
-        update.keep_newest(STATE / 'backups', 'databases-', 3)
-        self.out.ok(update.SAVED_DATABASES.format(path=dest.relative_to(REPO)))
+            own(path)
+        update.keep_newest(STATE / 'backups', 'databases-', 3, keep=set(keep) | {dest.name})
+        self.out.ok(update.SAVED_DATABASES.format(path=shown(dest)))
+        return dest
 
 
 def subsync_status():

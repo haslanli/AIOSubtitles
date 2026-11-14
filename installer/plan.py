@@ -5,6 +5,7 @@ the user says yes.
 """
 import ipaddress
 import math
+import os
 import re
 import urllib.parse
 
@@ -171,16 +172,34 @@ def merge_env(written, current, owned=()):
     return {**written, **{k: current[k] for k in kept}}, kept
 
 
+def project():
+    """The compose project's name: aiosubtitles (an isolated test sets its own with AIOSUBTITLES_PROJECT)."""
+    return os.environ.get('AIOSUBTITLES_PROJECT') or 'aiosubtitles'
+
+
+def container_name():
+    return f'{project()}-subsync'
+
+
+INSTALL_LABEL = 'org.aiosubtitles.install'    # on everything setup makes: what its ownership check looks for
+
+
 def compose_yaml(s):
-    """state/compose.yaml: subsync only, on AIOStreams' Docker network(s) when it runs on this machine."""
+    """state/compose.yaml: subsync only, on AIOStreams' Docker network(s) when it runs on this machine. It runs the
+    image setup itself runs from (`s['image']`, pinned by digest; `local`: built on this machine, never pulled), as its
+    own user, never with Docker's socket, and labels the container, its volume and its own network with the install's
+    id (`s['install_id']`)."""
+    label = f'{{{INSTALL_LABEL}: "{s["install_id"]}"}}'
     lines = [
         '# Written by ./setup (AIOSubtitles). Run ./setup again to change it; edits here are replaced.',
-        'name: aiosubtitles',
+        f'name: {project()}',
         'services:',
         '  subsync:',
-        '    build: ../subsync',
-        f"    image: aiosubtitles/subsync:{s['version']}",
-        '    container_name: aiosubtitles-subsync',
+        f"    image: {s['image']}",
+        f"    pull_policy: {'never' if s.get('local') else 'missing'}",
+        f'    container_name: {container_name()}',
+        '    user: "10001"',
+        f'    labels: {label}',
         '    restart: unless-stopped',
         '    env_file: [subsync.env]',
         '    volumes: ["subsync-data:/data"]',
@@ -195,11 +214,11 @@ def compose_yaml(s):
         lines.append('      default: {}')
         for i, _ in enumerate(s.get('networks') or []):
             lines.append(f'      aios{i}: {{aliases: [{SUBSYNC_HOST}]}}')
-    if not s.get('host_network') and s.get('networks'):
         lines.append('networks:')
-        for i, name in enumerate(s['networks']):
+        lines.append(f'  default: {{labels: {label}}}')
+        for i, name in enumerate(s.get('networks') or []):
             lines.append(f'  aios{i}: {{external: true, name: "{name}"}}')
-    lines += ['volumes:', '  subsync-data: {}', '']
+    lines += ['volumes:', f'  subsync-data: {{labels: {label}}}', '']
     return '\n'.join(lines)
 
 

@@ -58,7 +58,8 @@ INSTALLER_WORDS = (
     'Updates', 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
     RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, REMOVE_HOST, REMOVE_HOST_TEXT,
     REMOVE_TEXT,
-    update.ABOUT, update.ABOUT_HOSTING, update.NEWEST, update.NOT_GIT,
+    update.ABOUT, update.ABOUT_HOSTING, update.NEWEST, update.ROLLBACK_HEADING, update.ROLLBACK_ABOUT,
+    update.RESTORE_HELP,
     # the terminal setup's questions and lines, as labels and headings
     'What address do you open AIOStreams at?', 'More than one AIOStreams runs here. Which one do your apps use?',
     'Config ID (or paste your Stremio link)', 'Its password', 'Which subtitle languages should be synced?',
@@ -350,23 +351,35 @@ def host_choices(problem=None, usenet=False, audio=False):
 
 # ------------------------------------------------------------------------------------------- after setup
 
-def after_setup(route, rows, details, running_version, ready, problem=None, offer_opensubtitles=False, config=''):
-    """The page after setup: the status, updates, your answers, removing. `ready`: update.Ready, or None
-    while nothing was looked for."""
+def after_setup(route, rows, details, running_version, ready, problem=None, offer_opensubtitles=False, config='',
+                rollback=None):
+    """The page after setup: the status, updates, your answers, removing. `ready`: update.Ready, from comparing this
+    setup's version with the service's. `rollback`: (the earlier version, its database copy's name or None) while one
+    is recorded."""
     status = (f'<h1>AIOSubtitles · subsync status</h1><div class="grid12 band">' + ui.check_rows(list(rows))
               + '<dl class="details">' + ''.join(f'<div><dt>{e(label)}</dt><dd>{e(value)}</dd></div>'
                                                  for label, value in details) + '</dl></div>')
     running = e(update.RUNNING.format(version=running_version))
-    if ready and ready.how == 'git':
-        panel = ui.update_panel('Updates', update.ABOUT_HOSTING if route == 'host' else update.ABOUT, running,
-                                update.READY.format(version=ready.version), 'Update')
+    about = update.ABOUT_HOSTING if route == 'host' else update.ABOUT
+    if ready and ready.how == 'ready':
+        panel = ui.update_panel('Updates', about, running, update.READY.format(version=ready.version), 'Update')
         panel = f'<form method="post" action="update">{panel}</form>'
     else:
-        words = {'newest': update.NEWEST, 'not-git': update.NOT_GIT}.get(getattr(ready, 'how', None))
-        if ready and ready.how == 'error':
-            words = update.LOOK_FAILED.format(reason=ready.reason)
-        panel = ui.update_panel('Updates', update.ABOUT_HOSTING if route == 'host' else update.ABOUT,
-                                running + (f'</p><p>{e(words)}' if words else ''), None, 'Update')
+        words = update.NEWEST
+        if ready and ready.how == 'newer-here':
+            words = update.NEWER_HERE.format(running=running_version, setup=ready.version)
+        panel = ui.update_panel('Updates', about, running + f'</p><p>{e(words)}', None, 'Update')
+    if rollback:
+        version, copy = rollback
+        controls = ''
+        if copy:
+            controls = ui.choices(ui.choice('restore', update.RESTORE_QUESTION.format(version=running_version, name=copy),
+                                            update.RESTORE_HELP, name='RESTORE_DATABASES', value='yes'))
+        controls += (f'<div class="actions">{ui.button(update.ROLLBACK.format(version=version), "secondary", type="submit")}'
+                     '</div>')
+        panel += (f'<section class="grid12 row" aria-labelledby="rb-h"><div class="about"><h2 id="rb-h">'
+                  f'{e(update.ROLLBACK_HEADING)}</h2><p class="help">{e(update.ROLLBACK_ABOUT)}</p></div>'
+                  f'<form class="controls" method="post" action="rollback">{controls}</form></section>')
     answers = (f'<section class="grid12 row" aria-labelledby="ans-h"><div class="about"><h2 id="ans-h">Your answers</h2>'
                f'<p class="help">{e("Already set up here: your answers are kept unless you change them.")}</p></div>'
                f'<form class="controls" method="post" action="answers"><div class="actions">'

@@ -1,138 +1,73 @@
-"""Easy updates: only when asked, by git; the old version keeps running
-until the new one answers, and a failed build puts the folder back. Real git, in throwaway folders: the "origin" is a
-local folder, so nothing leaves this machine."""
-import contextlib
-import io
+"""Updates as a newer image (§5): only when asked; the databases copied first; the new version checked
+while the old one keeps running; then the switch, checked, and put back when it fails, with the databases from
+before the update when the old version needs them; a rollback on request. Docker is a stand-in that knows which image
+the service runs and whether that one answers."""
 import json
 import os
-import shutil
 import stat
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, update
+from installer import dockerenv, engine, plan, update, where
 from installer.ui import Stop
 
-
-def git(cwd, *args):
-    return subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'init.defaultBranch=main',
-                           *args], cwd=cwd, check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+OLD = 'ghcr.io/haslanli/aiosubtitles:1.3.0@sha256:' + '1' * 64
+NEW = 'ghcr.io/haslanli/aiosubtitles:1.4.0@sha256:' + '2' * 64
 
 
-class Repos(unittest.TestCase):
+def place(image=NEW, version_local=False):
+    return where.Place('image', 'bridge', 'c0ffee', image, version_local, 'ghcr.io/haslanli/aiosubtitles:latest', 8789,
+                       '/home/me/aiosubtitles', (os.getuid(), os.getgid()), '172.17.0.1')
+
+
+class Compare(unittest.TestCase):
+    def test_a_newer_setup_is_an_update(self):
+        self.assertEqual(update.compare({'version': '1.3.0', 'image': OLD}, NEW, '1.4.0'), update.Ready('1.4.0', 'ready'))
+
+    def test_the_same_one_is_the_newest(self):
+        self.assertEqual(update.compare({'version': '1.4.0', 'image': NEW}, NEW, '1.4.0').how, 'newest')
+
+    def test_an_older_setup_offers_only_a_rollback(self):
+        self.assertEqual(update.compare({'version': '1.4.0', 'image': NEW}, OLD, '1.3.0').how, 'newer-here')
+        self.assertEqual(update.compare({'version': '1.10.0', 'image': NEW}, OLD, '1.9.0').how, 'newer-here')
+
+    def test_another_build_of_the_same_version_is_an_update(self):
+        # a release candidate's 1.4.0 before the release's 1.4.0
+        self.assertEqual(update.compare({'version': '1.4.0', 'image': OLD}, NEW, '1.4.0').how, 'ready')
+
+
+class EngineUpdate(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp)
-        self.origin = self.tmp / 'origin'
-        self.origin.mkdir()
-        git(self.origin, 'init', '-q')
-        (self.origin / 'VERSION').write_text('1.1.0\n')
-        (self.origin / '.gitignore').write_text('state/\n')
-        (self.origin / 'setup').write_text('#!/bin/sh\n')
-        git(self.origin, 'add', '-A')
-        git(self.origin, 'commit', '-qm', 'one')
-        git(self.tmp, 'clone', '-q', str(self.origin), 'folder')
-        self.folder = self.tmp / 'folder'
-
-    def release(self, version):
-        (self.origin / 'VERSION').write_text(version + '\n')
-        git(self.origin, 'commit', '-qam', version)
-
-
-class Look(Repos):
-    def test_the_newest_version(self):
-        self.assertEqual(update.look(self.folder), update.Ready(None, 'newest', None))
-
-    def test_a_newer_version_is_ready(self):
-        self.release('1.2.0')
-        self.assertEqual(update.look(self.folder), update.Ready('1.2.0', 'git', None))
-        self.assertEqual(update.running(self.folder), '1.1.0')          # looking changes nothing here
-
-    def test_a_folder_not_cloned_with_git(self):
-        plain = self.tmp / 'plain'
-        plain.mkdir()
-        (plain / 'VERSION').write_text('1.1.0\n')
-        self.assertEqual(update.look(plain).how, 'not-git')
-
-    def test_no_network_is_a_reason_not_a_crash(self):
-        shutil.rmtree(self.origin)
-        ready = update.look(self.folder)
-        self.assertEqual(ready.how, 'error')
-        self.assertTrue(ready.reason)
-
-    def test_the_words(self):
-        self.assertEqual(update.NEWEST, 'This is the newest version.')
-        self.assertEqual(update.LOOK_FAILED.format(reason='x'), "Couldn't look for a new version: x.")
-        self.assertEqual(update.NOT_GIT, "This folder wasn't downloaded with git, so it can't fetch a new version: "
-                                         "download the new version, copy this folder's state/ into it, and run ./setup "
-                                         "there.")
-
-
-class Apply(Repos):
-    def test_a_folder_changed_by_hand_stops_before_changing_anything(self):
-        self.release('1.2.0')
-        (self.folder / 'setup').write_text('#!/bin/sh\necho mine\n')
-        head = git(self.folder, 'rev-parse', 'HEAD')
-        with self.assertRaises(update.UpdateStopped) as caught:
-            update.fast_forward(self.folder)
-        self.assertEqual(caught.exception.message, 'This folder has changes of its own, so the update stopped before '
-                                                   'changing anything: setup.')
-        self.assertEqual(git(self.folder, 'rev-parse', 'HEAD'), head)
-        self.assertEqual(update.running(self.folder), '1.1.0')
-
-    def test_state_is_never_counted_as_a_change(self):
-        self.release('1.2.0')
-        (self.folder / 'state').mkdir()
-        (self.folder / 'state' / 'subsync.env').write_text('X=1\n')
-        update.look(self.folder)                                         # what was shown is what is applied
-        update.fast_forward(self.folder)
-        self.assertEqual(update.running(self.folder), '1.2.0')
-        self.assertTrue((self.folder / 'state' / 'subsync.env').exists())
-
-    def test_fast_forward_then_put_back(self):
-        self.release('1.2.0')
-        update.look(self.folder)
-        old = update.fast_forward(self.folder)
-        self.assertEqual(update.running(self.folder), '1.2.0')
-        self.assertEqual(update.version_at(self.folder, old), '1.1.0')
-        update.put_back(self.folder, old)
-        self.assertEqual(update.running(self.folder), '1.1.0')
-
-    def test_keep_the_newest_three(self):
-        backups = self.tmp / 'backups'
-        for stamp in ('20261101-000000', '20261102-000000', '20261103-000000', '20261104-000000'):
-            (backups / f'databases-{stamp}').mkdir(parents=True)
-        (backups / 'viewer-1a2b3c4d-20261101-000000.json').write_text('{}')
-        update.keep_newest(backups, 'databases-', 3)
-        self.assertEqual(sorted(p.name for p in backups.iterdir()),
-                         ['databases-20261102-000000', 'databases-20261103-000000', 'databases-20261104-000000',
-                          'viewer-1a2b3c4d-20261101-000000.json'])
-
-
-class EngineUpdate(Repos):
-    """The update as the page and ./setup --update run it, with Docker faked."""
-
-    def setUp(self):
-        super().setUp()
-        self.state = self.folder / 'state'
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / 'state'
         self.events = []
-        self.build_fails = False
+        self.answers = {OLD: True, NEW: True}       # which image's service answers
+        self.answers_now = lambda image: self.answers.get(image)
+        self.readable = lambda image: True              # whether that image's service reads its databases
+        self.check_answers = True                   # the throwaway start check of the new image
+        self.running = None
+        self.foreign = []
+        self.public_ok = [True, True]                # the route's own check, before and after the switch
 
         def compose(state, *args, **kw):
             text = (state / 'compose.yaml').read_text()
-            tag = text.split('image: aiosubtitles/subsync:')[1].split()[0]
-            self.events.append((args[0], tag))
-            if args[0] == 'build' and self.build_fails:
-                return 1, '', 'boom: the build failed'
+            image = text.split('    image: ')[1].split('\n')[0]
+            self.events.append((args[0], image))
+            if args[0] == 'up':
+                self.running = image
+            if args[0] == 'stop':
+                self.running = None
             return 0, '', ''
 
         def exec_in(name, cmd, stdin=None, timeout=120):
             self.events.append(('exec', ' '.join(cmd)))
             if 'copy-databases' in cmd:
                 return 0, json.dumps({'copied': ['users.sqlite3', 'subsync.sqlite3']}), ''
+            if cmd[-2:] == ['subsync.hostcmd', 'status']:
+                return (0, '{"people": 0}', '') if self.readable(self.running) else (1, '', 'file is not a database')
             return 0, '{}', ''
 
         def run(cmd, timeout=60, stdin=None):
@@ -140,83 +75,275 @@ class EngineUpdate(Repos):
                 self.events.append(('cp', cmd[2]))
                 dest = Path(cmd[3])
                 dest.mkdir(parents=True)
-                (dest / 'users.sqlite3').write_text('x')
+                (dest / 'users.sqlite3').write_bytes(b'users before')
+                (dest / 'subsync.sqlite3').write_bytes(b'store before')
             return 0, '', ''
-        for p in (mock.patch.object(engine, 'STATE', self.state), mock.patch.object(engine, 'REPO', self.folder),
+
+        def check_image(image, project, install_id, seconds=90):
+            self.events.append(('check', image))
+            return (True, '') if self.check_answers else (False, 'no answer within 90 seconds')
+
+        def restore(image, volume, files):
+            self.events.append(('restore', image, volume, tuple(sorted(files))))
+            self.restored = files
+            return True, ''
+
+        def state_of(name):
+            if not self.running:
+                return 'exited'
+            return 'running healthy' if self.answers_now(self.running) else 'running unhealthy'
+
+        def route_check(e, out=None):
+            return self.public_ok.pop(0) if self.public_ok else True
+        for p in (mock.patch.object(engine, 'STATE', self.state), mock.patch.object(engine, 'PLACE', place()),
                   mock.patch.object(dockerenv, 'compose', compose), mock.patch.object(dockerenv, 'run', run),
                   mock.patch.object(dockerenv, 'exec_in', exec_in),
-                  mock.patch.object(dockerenv, 'container_state', lambda n: 'running healthy'),
-                  mock.patch.object(engine.Engine, 'public_health', lambda self: True),
-                  mock.patch('installer.hosting.check', lambda address, out: out.ok('checked') or True)):
+                  mock.patch.object(dockerenv, 'container_state', state_of),
+                  mock.patch.object(dockerenv, 'check_image', check_image),
+                  mock.patch.object(dockerenv, 'restore_databases', restore),
+                  mock.patch.object(dockerenv, 'foreign', lambda project, container, install_id: self.foreign),
+                  mock.patch.object(engine.Engine, 'wait_healthy',
+                                    lambda e, seconds=90: dockerenv.container_state(engine.CONTAINER).split()[-1:]
+                                    == ['healthy']),
+                  mock.patch.object(engine.Engine, 'route_check', route_check),
+                  mock.patch.object(engine, 'setup_version', lambda: '1.4.0')):
             p.start()
             self.addCleanup(p.stop)
 
-    def install(self, route='yourself'):
+    def install(self, route='yourself', image=OLD, version='1.3.0', previous=None):
         self.state.mkdir()
-        settings = {'route': route, 'version': '1.1.0', 'mode': 'remote', 'networks': [], 'bind': '127.0.0.1',
-                    'port': 8790, 'public_base': 'https://aio.example.com/subsync', 'installed': '2026-11-13'}
+        settings = {'route': route, 'version': version, 'image': image, 'install_id': 'id-1', 'mode': 'remote',
+                    'networks': [], 'bind': '127.0.0.1', 'port': 8790, 'public_base': 'https://aio.example.com/subsync',
+                    'installed': '2026-11-13'}
+        if previous:
+            settings['previous'] = previous
         engine.save_settings(settings)
-        (self.state / 'compose.yaml').write_text(engine.compose_for(settings, '1.1.0'))
+        (self.state / 'compose.yaml').write_text(engine.compose_for(settings))
+        self.running = image
         self.compose_before = (self.state / 'compose.yaml').read_text()
 
-    def update(self):
-        """The whole update in this process: the restart runs the second half on 'the new code' (the same code here)."""
+    def rows(self, e):
+        return [tuple(r[:2]) for r in e.out.rows]
+
+    def kinds(self):
+        return [ev[0] for ev in self.events]
+
+    def test_a_good_update_checks_the_new_version_before_switching(self):
+        self.install()
         e = engine.Engine({}, page=True)
-        e.update(restart=lambda old: engine.Engine({}, page=True, out=e.out).finish_update(old))
-        return e
+        self.assertTrue(e.update())
+        kinds = self.kinds()
+        self.assertLess(kinds.index('cp'), kinds.index('check'))               # the copy before anything else
+        self.assertLess(kinds.index('check'), kinds.index('up'))               # the new one answers before the switch
+        self.assertEqual([ev for ev in self.events if ev[0] == 'up'], [('up', NEW)])
+        self.assertIn(f'    image: {NEW}\n', (self.state / 'compose.yaml').read_text())
+        s = engine.load_settings()
+        self.assertEqual((s['version'], s['image']), ('1.4.0', NEW))
+        self.assertEqual(s['previous']['image'], OLD)
+        self.assertEqual(s['previous']['version'], '1.3.0')
+        self.assertTrue(s['previous']['databases'].startswith('databases-'))
+        rows = self.rows(e)
+        self.assertIn(('ok', update.CHECKED), rows)
+        self.assertIn(('ok', update.SWITCHED.format(version='1.4.0')), rows)
+        switched = next(r for r in e.out.rows if r[1] == update.SWITCHED.format(version='1.4.0'))
+        self.assertEqual(switched[2], update.KEPT.format(version='1.3.0') + ' '
+                         + update.OLD_IMAGES.format(image=OLD))                  # under the switch, not the check
 
-    def test_nothing_is_fetched_until_asked(self):
-        self.install()
-        with mock.patch.object(update, 'look', side_effect=AssertionError('fetched')):
-            engine.Engine({}, page=True).prefill()
+    def test_the_words_are_the_approved_drafts(self):
+        self.assertEqual(update.ABOUT, 'Updating saves a copy of the databases, checks the new version while the old '
+                                       'one keeps running, then switches: AIOSubtitles is offline for a few seconds. If '
+                                       "the new version doesn't answer, the old one is put back.")
+        self.assertEqual(update.ROLLED_BACK.format(new='1.4.0', old='1.3.0'),
+                         "Version 1.4.0 didn't answer: version 1.3.0 is running again")
+        self.assertEqual(update.KEPT.format(version='1.3.0'), 'Version 1.3.0 is kept for a rollback: ./setup --rollback.')
 
-    def test_a_good_update_builds_the_new_version_while_the_old_one_runs(self):
+    def test_a_new_version_that_doesnt_answer_beside_the_old_changes_nothing(self):
         self.install()
-        self.release('1.2.0')
-        e = self.update()
-        rows = [tuple(r[:2]) for r in e.out.rows]
-        self.assertIn(('done', 'Fetching version 1.2.0'), rows)
-        self.assertIn(('done', 'Starting setup again on the new version'), rows)
-        self.assertIn('image: aiosubtitles/subsync:1.2.0', (self.state / 'compose.yaml').read_text())
-        self.assertEqual([ev for ev in self.events if ev[0] in ('build', 'up')], [('build', '1.2.0'), ('up', '1.2.0')])
-        self.assertEqual(engine.load_settings()['version'], '1.2.0')
-
-    def test_update_never_leaves_a_half_update(self):
-        self.install()
-        self.release('1.2.0')
-        self.build_fails = True
+        self.check_answers = False
         with self.assertRaises(Stop) as caught:
-            self.update()
-        self.assertEqual(caught.exception.message, "The update didn't go through: Building subsync failed. Version "
-                                                   "1.1.0 keeps running.")
-        self.assertEqual(update.running(self.folder), '1.1.0')                   # the folder is put back
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.FAILED.format(reason='no answer within 90 seconds',
+                                                                        version='1.3.0'))
+        self.assertNotIn('up', self.kinds())
         self.assertEqual((self.state / 'compose.yaml').read_text(), self.compose_before)
-        self.assertNotIn(('up', '1.2.0'), self.events)                           # the new one never started
-        self.assertEqual(engine.load_settings()['version'], '1.1.0')
+        self.assertEqual(engine.load_settings()['version'], '1.3.0')
+        self.assertEqual(self.running, OLD)
 
-    def test_an_update_that_cant_go_ahead_changes_nothing(self):
+    def test_a_switch_that_doesnt_answer_puts_the_old_version_back(self):
         self.install()
+        self.answers[NEW] = False
         e = engine.Engine({}, page=True)
         with self.assertRaises(Stop) as caught:
-            e.update(restart=lambda old: self.fail('restarted'))
-        self.assertEqual(caught.exception.message, 'This is the newest version.')
+            e.update()
+        self.assertEqual(caught.exception.message, update.ROLLED_BACK.format(new='1.4.0', old='1.3.0'))
+        self.assertEqual([ev for ev in self.events if ev[0] == 'up'], [('up', NEW), ('up', OLD)])
+        self.assertNotIn('restore', self.kinds())                               # the old one ran on the data as it was
+        self.assertEqual((self.state / 'compose.yaml').read_text(), self.compose_before)
+        s = engine.load_settings()
+        self.assertEqual((s['version'], s['image']), ('1.3.0', OLD))
+        self.assertNotIn('previous', s)
+
+    def test_an_old_version_that_cant_run_on_the_new_data_gets_the_copy_back(self):
+        self.install()
+        # the new version doesn't answer, and the old one answers only on the databases from before the update
+        self.answers_now = lambda image: image == OLD and 'restore' in self.kinds()
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.ROLLED_BACK.format(new='1.4.0', old='1.3.0')
+                         + update.WITH_DATABASES)
+        restore = next(ev for ev in self.events if ev[0] == 'restore')
+        self.assertEqual(restore[1:3], (OLD, 'aiosubtitles_subsync-data'))     # the old image puts the copy back
+        self.assertEqual(self.restored, {'users.sqlite3': b'users before', 'subsync.sqlite3': b'store before'})
+        kinds = self.kinds()
+        self.assertLess(kinds.index('stop'), kinds.index('restore'))           # never under a running service
+        self.assertEqual(self.running, OLD)
+
+    def test_a_new_version_that_cant_read_the_databases_is_not_kept(self):
+        # /health answers without reading the databases: the switch also asks the service to read them
+        self.install()
+        self.readable = lambda image: image != NEW
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.ROLLED_BACK.format(new='1.4.0', old='1.3.0'))
+        self.assertEqual(self.running, OLD)
+
+    def test_an_old_version_that_answers_but_cant_read_the_data_gets_the_copy_back(self):
+        # the run of: the new version broke the people's database; the old one answered /health on it anyway
+        self.install()
+        self.answers[NEW] = False
+        self.readable = lambda image: image == OLD and 'restore' in self.kinds()
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.ROLLED_BACK.format(new='1.4.0', old='1.3.0')
+                         + update.WITH_DATABASES)
+        self.assertEqual(self.running, OLD)
+
+    def test_a_check_that_held_before_and_fails_after_puts_the_old_one_back(self):
+        self.install(route='host')
+        self.public_ok = [True, False, True]
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.ROLLED_BACK.format(new='1.4.0', old='1.3.0'))
+        self.assertEqual(self.running, OLD)
+
+    def test_a_check_that_failed_before_too_doesnt_roll_back(self):
+        # a router that never lets this machine reach its own public address: not the new version's doing
+        self.install()
+        self.public_ok = [False, False]
+        self.assertFalse(engine.Engine({}, page=True).update())
+        self.assertEqual(self.running, NEW)
+        self.assertEqual(engine.load_settings()['version'], '1.4.0')
+
+    def test_the_databases_are_copied_on_both_routes(self):
+        for route in ('yourself', 'host'):
+            with self.subTest(route=route):
+                if self.state.exists():
+                    import shutil
+                    shutil.rmtree(self.state)
+                self.events.clear()
+                self.install(route=route)
+                e = engine.Engine({}, page=True)
+                e.update()
+                self.assertIn('cp', self.kinds())
+                self.assertTrue(any(r[1].startswith('Saved a copy of the databases: state/backups/databases-')
+                                    for r in e.out.rows))
+                newest = sorted((self.state / 'backups').glob('databases-*'))[-1]
+                self.assertEqual(stat.S_IMODE(os.stat(newest).st_mode), 0o700)
+
+    def test_a_failed_copy_stops_before_anything_changes(self):
+        self.install()
+
+        def exec_in(name, cmd, stdin=None, timeout=120):
+            return 1, '', 'database is locked'
+        with mock.patch.object(dockerenv, 'exec_in', exec_in), self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.FAILED.format(reason='database is locked', version='1.3.0'))
+        self.assertNotIn('check', self.kinds())
+        self.assertNotIn('up', self.kinds())
+
+    def test_the_guard_stops_it_before_anything(self):
+        self.install()
+        self.foreign = [('container', 'aiosubtitles-subsync')]
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, engine.GUARD_STOP.format(kind='container',
+                                                                           name='aiosubtitles-subsync'))
         self.assertEqual(self.events, [])
 
-    def test_a_public_instance_copies_its_databases_first(self):
-        self.install(route='host')
-        self.release('1.2.0')
-        backups = self.state / 'backups'
-        for stamp in ('20261101-000000', '20261102-000000', '20261103-000000'):
-            (backups / f'databases-{stamp}').mkdir(parents=True)
-        e = self.update()
-        kinds = [ev[0] for ev in self.events]
-        self.assertLess(kinds.index('cp'), kinds.index('build'))                  # the copy before anything changes
-        copies = sorted(p.name for p in backups.iterdir() if p.name.startswith('databases-'))
+    def test_the_newest_or_an_older_setup_changes_nothing(self):
+        self.install(image=NEW, version='1.4.0')
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.NEWEST)
+        with mock.patch.object(engine, 'PLACE', place(OLD)), mock.patch.object(engine, 'setup_version', lambda: '1.3.0'), \
+                self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.NEWER_HERE.format(running='1.4.0', setup='1.3.0'))
+        self.assertEqual(self.events, [])
+
+    def test_a_rollback_on_request_goes_to_the_previous_version(self):
+        self.install(image=NEW, version='1.4.0',
+                     previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-20261113-000000'})
+        before = self.state / 'backups' / 'databases-20261113-000000'
+        before.mkdir(parents=True)
+        (before / 'users.sqlite3').write_bytes(b'before 1.4.0')
+        e = engine.Engine({}, page=True)
+        self.assertTrue(e.rollback(restore=True))
+        self.assertEqual(self.running, OLD)
+        restore = next(ev for ev in self.events if ev[0] == 'restore')
+        self.assertEqual((restore[1], restore[3]), (OLD, ('users.sqlite3',)))
+        s = engine.load_settings()
+        self.assertEqual((s['version'], s['image']), ('1.3.0', OLD))
+        self.assertNotIn('previous', s)
+        self.assertIn('check', self.kinds())                                     # checked before the switch too
+
+    def test_the_copy_a_rollback_needs_is_never_the_one_dropped(self):
+        # two failed updates since: four copies with the rollback's own, but the one from before 1.4.0 stays
+        self.install(image=NEW, version='1.4.0',
+                     previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-20261113-000000'})
+        for stamp in ('20261113-000000', '20261113-010000', '20261113-020000'):
+            copy = self.state / 'backups' / f'databases-{stamp}'
+            copy.mkdir(parents=True)
+            (copy / 'users.sqlite3').write_bytes(stamp.encode())
+        self.assertTrue(engine.Engine({}, page=True).rollback(restore=True))
+        self.assertEqual(self.restored, {'users.sqlite3': b'20261113-000000'})
+        copies = sorted(p.name for p in (self.state / 'backups').iterdir())
         self.assertEqual(len(copies), 3)
-        self.assertNotIn('databases-20261101-000000', copies)
-        newest = backups / copies[-1]
-        self.assertEqual(stat.S_IMODE(os.stat(newest).st_mode), 0o700)
-        self.assertTrue(any(r[1].startswith('Saved a copy of the databases: state/backups/databases-') for r in e.out.rows))
+
+    def test_an_update_keeps_the_copy_its_rollback_would_need(self):
+        self.install(image=OLD, version='1.3.0',
+                     previous={'image': OLD, 'version': '1.2.0', 'local': False, 'databases': 'databases-20261101-000000'})
+        for stamp in ('20261101-000000', '20261112-000000', '20261113-000000'):
+            (self.state / 'backups' / f'databases-{stamp}').mkdir(parents=True)
+        with mock.patch.object(dockerenv, 'check_image', lambda *a, **k: (False, 'no answer')), \
+                self.assertRaises(Stop):
+            engine.Engine({}, page=True).update()
+        self.assertTrue((self.state / 'backups' / 'databases-20261101-000000').is_dir())
+
+    def test_a_rollback_without_the_copy_keeps_the_data(self):
+        self.install(image=NEW, version='1.4.0',
+                     previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-x'})
+        self.assertTrue(engine.Engine({}, page=True).rollback())
+        self.assertNotIn('restore', self.kinds())
+
+    def test_no_earlier_version_no_rollback(self):
+        self.install()
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).rollback()
+        self.assertEqual(caught.exception.message, update.NO_ROLLBACK)
+
+
+class Backups(unittest.TestCase):
+    def test_keep_the_newest_three(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backups = Path(tmp)
+            for stamp in ('20261101-000000', '20261102-000000', '20261103-000000', '20261104-000000'):
+                (backups / f'databases-{stamp}').mkdir(parents=True)
+            (backups / 'viewer-1a2b3c4d-20261101-000000.json').write_text('{}')
+            update.keep_newest(backups, 'databases-', 3)
+            self.assertEqual(sorted(p.name for p in backups.iterdir()),
+                             ['databases-20261102-000000', 'databases-20261103-000000', 'databases-20261104-000000',
+                              'viewer-1a2b3c4d-20261101-000000.json'])
 
 
 if __name__ == '__main__':

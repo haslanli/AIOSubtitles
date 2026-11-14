@@ -14,28 +14,38 @@ copy that doesn't fit is never offered: you get the originals as before.
 
 ## What you need
 
-- A machine running **AIOStreams** (v2.37 or newer), usually in Docker. subsync goes on the same machine.
-- **Docker** with Docker Compose v2, **Python 3.9+**, and about **3 GB** of free disk space.
+- A machine running **AIOStreams** (v2.37 or newer), usually in Docker. AIOSubtitles goes on the same machine.
+- **Docker** (Docker Engine 23 or newer, Docker Desktop or Colima) and about **3 GB** of free disk space. Nothing else:
+  setup runs inside the AIOSubtitles image.
 - An AIOStreams config with a **debrid service other than Real-Debrid** (TorBox, AllDebrid, Premiumize, ...). subsync
   reads debrid files only, and never uses Real-Debrid (see [Fixed rules](#fixed-rules)).
 
 ## Install
 
-On the machine that runs AIOStreams, or for a public instance, the machine its web address reaches:
+On the machine that runs AIOStreams, or for a public instance, the machine its web address reaches, make a folder for
+AIOSubtitles and run setup in it:
 
 ```bash
-git clone https://github.com/haslanli/AIOSubtitles.git
+mkdir aiosubtitles && cd aiosubtitles
 ```
 
 ```bash
-cd AIOSubtitles
+docker run --rm -it --pull always -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/folder" -p 127.0.0.1:8789:8789 ghcr.io/haslanli/aiosubtitles:latest setup
 ```
 
-```bash
-./setup
-```
+What each part does:
 
-Setup runs in your browser. `./setup` prints the address to open on this machine. On a server you reach over ssh, it
+- `--pull always`: fetches the newest release first, so the same command also updates.
+- `-v /var/run/docker.sock:/var/run/docker.sock`: lets setup start AIOSubtitles in Docker (see
+  [Why setup needs Docker's socket](#why-setup-needs-dockers-socket)).
+- `-v "$PWD:/folder"`: setup keeps its files in this folder: `state/` (your settings, keys and config backups, readable
+  only by you) and a `./setup` that runs this same command.
+- `-p 127.0.0.1:8789:8789`: the setup page, on this machine only. If 8789 is taken here, change both numbers.
+- `--rm`: the setup container is removed when the page stops; AIOSubtitles itself keeps running in its own container.
+
+After this first run the folder has a `./setup` that runs the same command: use it from then on.
+
+Setup runs in your browser. Setup prints the address to open on this machine. On a server you reach over ssh, it
 also prints one `ssh -L` line: run it on your own computer first, then open the same address there. The page stops
 when you finish, after 60 minutes without use, or with Ctrl-C.
 
@@ -43,10 +53,20 @@ The first screen asks how you want to use it. **Install it for yourself**: this 
 run. **Host a public instance**: runs here with its own sign-up page, so other people can use it with their own
 AIOStreams. Each step says what it does and what it changes. Nothing in your AIOStreams changes until you confirm, and
 a copy of your config is saved first. Every question, with its explanation, is also under [Settings](#settings). The
-first build takes a few minutes (about 3 on a 4-core server).
+first run downloads the image (about 1 GB).
 
 To set it up without the page, give the answers in a file: `./setup --answers FILE --yes` (see
 `docs/answers.example`).
+
+### Why setup needs Docker's socket
+
+Setup starts, updates and removes the AIOSubtitles container, finds your AIOStreams container and its network, and
+copies the databases before an update. Docker's socket is how a program asks Docker to do that. Access to it is as
+strong as root on this machine, so it is given only to the short-lived setup container, never to AIOSubtitles itself,
+which runs as its own user. The image comes only from this repository's checked build: every action pinned, every test
+passed before anything is published, and a published version never overwritten. Setup changes only what it made: before
+every change it checks that each container, network and volume under its names carries its own install's mark, and
+stops without changing anything if one doesn't.
 
 ## What it changes
 
@@ -101,18 +121,48 @@ subsync reads only files your apps ask subtitles for:
 ./setup
 ```
 
-The page after setup shows the version this machine runs and, when there is one, the version that is ready, with an
-Update button. From the terminal:
+The page after setup shows the version this machine runs and, when the setup you just ran is newer, that version with
+an Update button. From the terminal:
 
 ```bash
 ./setup --update
 ```
 
-Updating builds subsync again from the new version and restarts it; your answers, keys and stored copies stay. On a
-public instance: updating builds AIOSubtitles again from the new version and restarts it; your answers, keys, sign-ups
-and stored copies stay, and a copy of its databases is saved first. Nothing looks for a new version by itself: setup
-asks git only when you open the page after setup or run `./setup --update`. The old version keeps running until the new
-one is built and answers; if the build fails, the folder goes back to the old version.
+Updating saves a copy of the databases, checks the new version while the old one keeps running, then switches:
+AIOSubtitles is offline for a few seconds. If the new version doesn't answer, the old one is put back. Your answers,
+keys, sign-ups and stored copies stay. Nothing looks for a new version by itself: `./setup` fetches the newest release
+each time you run it, and nothing changes until you choose Update.
+
+### Rollback
+
+```bash
+./setup --rollback
+```
+
+Goes back to the version before the last update, with the same copy of the databases and the same checks as an update.
+`./setup --rollback --restore-databases` also puts back the databases from before that update: everything since then
+is lost (sign-ups, records and stored copies made after it). The page after setup has the same, as a button. Older
+images stay on disk until you remove them: `docker image rm` with the image's name frees about 1 GB each.
+
+### Build it from source
+
+```bash
+git clone https://github.com/haslanli/AIOSubtitles.git
+```
+
+```bash
+cd AIOSubtitles
+```
+
+```bash
+./setup
+```
+
+Here `./setup` builds the image from this folder (its tests run in the build; a few minutes the first time, about 3 on
+a 4-core server), then runs the same setup inside it, with this folder's `state/`. It needs Docker and git, nothing
+else. On Linux, setup then runs on this machine's own network, so it also reaches an AIOStreams that listens on
+127.0.0.1 only. `./setup --update` fetches the newest commit with git, builds it while the old version keeps running,
+and puts the folder back if the build fails; then it updates as above.
 
 This folder wasn't downloaded with git? Then it can't fetch a new version: download the new version, copy this folder's
 state/ into it, and run ./setup there.
@@ -137,6 +187,12 @@ Shows whether subsync is running and what it has done today.
 ```
 
 Updates to the newest version, if there is one.
+
+```bash
+./setup --rollback
+```
+
+Goes back to the version before the last update (see [Rollback](#rollback)).
 
 ```bash
 ./setup --uninstall
@@ -360,9 +416,9 @@ These are not settings: AIOSubtitles always works this way.
 
 | Path | What it holds |
 |---|---|
-| `setup` | Starts the installer, `installer/wizard.py`. |
-| `installer/` | The installer, written in plain Python with no packages to install. Its tests run with `python3 -m unittest discover -s installer/tests -t .`; `python3 -I installer/docs.py` rewrites the Settings section above and `docs/answers.example` from `subsync/subsync/explain.py`. |
-| `subsync/` | The service. Its Docker build runs its own tests and stops if any test fails. |
+| `setup` | Builds the image from this folder, then runs setup inside it (`installer/wizard.py`). In a folder made for the image, setup writes its own `setup`, which runs the image's setup. |
+| `installer/` | The installer, written in plain Python with no packages to install. Its tests run with `python3 -m unittest discover -s installer/tests -t .`, and inside the image's build; `python3 -I installer/docs.py` rewrites the Settings section above and `docs/answers.example` from `subsync/subsync/explain.py`. |
+| `subsync/` | The service, and the image's `Dockerfile` (built from this folder: `docker build -f subsync/Dockerfile .`). The build runs both test suites and stops if any test fails. |
 | `state/` | Your settings, keys and config backups, readable only by you. Never share or commit this folder. |
 
 ## Licence

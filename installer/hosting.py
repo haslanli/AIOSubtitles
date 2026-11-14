@@ -67,10 +67,10 @@ def public_env(answers, secret, limit_values):
     return {k: v for k, v in env.items() if v not in (None, '')}
 
 
-def compose_yaml(version, port):
+def compose_yaml(image, install_id, port, local=False):
     """subsync alone, listening on 127.0.0.1 only, on no AIOStreams network."""
-    return plan.compose_yaml({'version': version, 'host_network': False, 'networks': [], 'bind': '127.0.0.1',
-                              'port': port})
+    return plan.compose_yaml({'image': image, 'local': local, 'install_id': install_id, 'host_network': False,
+                              'networks': [], 'bind': '127.0.0.1', 'port': port})
 
 
 def web_server_rule(address, target):

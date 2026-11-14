@@ -1,0 +1,6 @@
+# The image's build context is the repository (docker build -f subsync/Dockerfile .): what it never needs
+.git
+state
+**/__pycache__
+**/*.pyc
+**/.DS_Store

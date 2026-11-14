@@ -1,6 +1,8 @@
 """The installer's rules, one by one (python3 -m unittest discover -s installer/tests -t .)."""
 import copy
+import os
 import unittest
+from unittest import mock
 
 from installer import plan
 from subsync import explain, realdebrid
@@ -293,15 +295,57 @@ class Files(unittest.TestCase):
         self.assertNotIn('SUBSYNC_PORT', merged)                              # an owned line ./setup no longer writes goes
         self.assertEqual(list(merged)[:len(written)], list(written))          # ./setup's lines first, yours after
 
+    IMAGE = 'ghcr.io/haslanli/aiosubtitles:1.4.0@sha256:' + 'a' * 64
+
+    def compose(self, **s):
+        return plan.compose_yaml(dict({'image': self.IMAGE, 'install_id': 'id-1234', 'port': 8790}, **s))
+
     def test_compose(self):
-        text = plan.compose_yaml({'version': '1.0.0', 'networks': ['aio_default', 'proxy'], 'bind': '127.0.0.1', 'port': 8790})
+        text = self.compose(networks=['aio_default', 'proxy'], bind='127.0.0.1')
         self.assertIn('ports: ["127.0.0.1:8790:8790"]', text)
         self.assertIn('aios1: {aliases: [aiosubtitles-subsync]}', text)
         self.assertIn('aios0: {external: true, name: "aio_default"}', text)
-        host = plan.compose_yaml({'version': '1.0.0', 'host_network': True, 'port': 8790})
+        host = self.compose(host_network=True)
         self.assertIn('network_mode: host', host)
         self.assertNotIn('ports:', host)
         self.assertNotIn('networks:', host)
+
+    def test_compose_runs_the_image_setup_runs_from_and_never_builds(self):
+        text = self.compose(bind='127.0.0.1')
+        self.assertIn(f'    image: {self.IMAGE}\n', text)
+        self.assertNotIn('build:', text)
+        self.assertIn('    pull_policy: missing\n', text)          # pinned by digest: already here, never moved
+        local = self.compose(image='aiosubtitles:local-1.4.0', local=True)
+        self.assertIn('    image: aiosubtitles:local-1.4.0\n', local)
+        self.assertIn('    pull_policy: never\n', local)            # built here: never looked for on a registry
+
+    def test_compose_labels_what_it_makes_with_the_install_id(self):
+        text = self.compose(networks=['aio_default'], bind='127.0.0.1')
+        self.assertIn('    labels: {org.aiosubtitles.install: "id-1234"}\n', text)           # the container
+        self.assertIn('  subsync-data: {labels: {org.aiosubtitles.install: "id-1234"}}\n', text)   # its volume
+        self.assertIn('  default: {labels: {org.aiosubtitles.install: "id-1234"}}\n', text)  # its own network
+        self.assertIn('\n  aios0: {external: true, name: "aio_default"}\n', text)   # never AIOStreams' network
+
+    def test_compose_runs_the_service_as_its_own_user(self):
+        for s in ({'bind': '127.0.0.1'}, {'host_network': True}, {'networks': ['aio_default'], 'bind': '0.0.0.0'}):
+            self.assertIn('    user: "10001"\n', self.compose(**s))
+
+    def test_compose_never_gives_the_service_dockers_socket(self):
+        for s in ({'bind': '127.0.0.1'}, {'host_network': True}, {'networks': ['aio_default'], 'bind': '0.0.0.0'},
+                  {'image': 'aiosubtitles:local-1.4.0', 'local': True}):
+            text = self.compose(**s)
+            self.assertNotIn('docker.sock', text)
+            self.assertEqual(text.count('volumes:'), 2, text)             # the service's data volume, and its list
+            self.assertIn('    volumes: ["subsync-data:/data"]\n', text)
+
+    def test_an_isolated_test_names_its_own_project(self):
+        with mock.patch.dict(os.environ, {'AIOSUBTITLES_PROJECT': 'aiosub-test'}):
+            text = self.compose(bind='127.0.0.1')
+            self.assertEqual(plan.container_name(), 'aiosub-test-subsync')
+        self.assertIn('name: aiosub-test\n', text)
+        self.assertIn('    container_name: aiosub-test-subsync\n', text)
+        self.assertEqual(plan.container_name(), 'aiosubtitles-subsync')
+        self.assertIn('name: aiosubtitles\n', self.compose(bind='127.0.0.1'))
 
     def test_proxy_snippets_keep_the_path(self):
         s = plan.proxy_snippets('https://a.example.com/subsync', '127.0.0.1:8790')
