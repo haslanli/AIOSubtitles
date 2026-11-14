@@ -1,0 +1,132 @@
+# One architecture of the AIOSubtitles image, called by image.yml. With publish false: build it (the Dockerfile runs
+# the tests, and a failed test fails the build), then start it once and check that it answers. With publish true:
+# build it again from the cache the test build wrote, so every layer is the tested one, and push it by digest with
+# its provenance and SBOM. No permissions are set here: each call gets its caller's.
+name: image-build
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+      publish:
+        type: boolean
+        required: true
+    outputs:
+      digest:
+        description: The pushed image's digest (publish only)
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    name: ${{ inputs.publish && 'Push' || 'Build and test' }} ${{ inputs.arch }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      CACHE: type=gha,scope=aiosubtitles-${{ inputs.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Image name
+        id: name
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "image=ghcr.io/${OWNER,,}/aiosubtitles" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.39.0
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+
+      # -- build and test ----------------------------------------------------------------------------------------
+      - name: Build and test
+        if: ${{ !inputs.publish }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: subsync
+          platforms: linux/${{ inputs.arch }}
+          load: true
+          tags: aiosubtitles-check:${{ inputs.arch }}
+          provenance: false
+          sbom: false
+          cache-from: ${{ env.CACHE }}
+          cache-to: ${{ github.event_name == 'push' && format('{0},mode=max', env.CACHE) || '' }}
+      - name: Start it once and check that it answers
+        if: ${{ !inputs.publish }}
+        env:
+          IMAGE: aiosubtitles-check:${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          # public mode with a secret and invite code made here, used once and never shown
+          secret="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          invite="$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
+          echo "::add-mask::$secret"
+          echo "::add-mask::$invite"
+          envfile="$RUNNER_TEMP/check.env"
+          ( umask 077; printf '%s\n' SUBSYNC_PUBLIC=on SUBSYNC_PUBLIC_BASE=http://127.0.0.1:18790 \
+              "SUBSYNC_SECRET_KEY=$secret" "SUBSYNC_PUBLIC_INVITE=$invite" SUBSYNC_RECHECK_HOURS=0 > "$envfile" )
+          docker run -d --name aiosubtitles-check --env-file "$envfile" -p 127.0.0.1:18790:8790 \
+            --cpus 2 --memory 2g "$IMAGE" > /dev/null
+          rm -f "$envfile"
+          state=starting
+          for _ in $(seq 1 40); do
+            state="$(docker inspect -f '{{.State.Health.Status}}' aiosubtitles-check)"
+            [ "$state" = healthy ] && break
+            [ "$state" = unhealthy ] && break
+            sleep 5
+          done
+          fail() { echo "::error::$1"; docker logs aiosubtitles-check 2>&1 | tail -n 30; exit 1; }
+          [ "$state" = healthy ] || fail "It didn't become healthy ($state)"
+          [ "$(curl -fsS http://127.0.0.1:18790/health)" = ok ] || fail "/health didn't say ok"
+          curl -fsS -D - -o /dev/null http://127.0.0.1:18790/ | grep -qi "^content-security-policy:.*default-src 'none'" \
+            || fail "The sign-up page has no security header"
+          for font in AtkinsonHyperlegibleNext-wght.ttf AtkinsonHyperlegibleMono-wght.ttf; do
+            [ "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:18790/static/fonts/$font")" = 200 ] \
+              || fail "The font $font doesn't load"
+          done
+          if docker logs aiosubtitles-check 2>&1 | grep -qF "$secret"; then fail "The secret is in the log"; fi
+          echo "Healthy; /health, the sign-up page's security header and both fonts answer"
+      - name: Remove the check container
+        if: ${{ always() && !inputs.publish }}
+        run: docker rm -f aiosubtitles-check > /dev/null 2>&1 || true
+
+      # -- push ----------------------------------------------------------------------------------------------------
+      - name: Labels
+        id: meta
+        if: inputs.publish
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.name.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.title=AIOSubtitles
+            org.opencontainers.image.description=AIOSubtitles: synced subtitles for AIOStreams
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+      - name: Log in to ghcr.io
+        if: inputs.publish
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push by digest
+        id: push
+        if: inputs.publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: subsync
+          platforms: linux/${{ inputs.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.name.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
+          cache-from: ${{ env.CACHE }}
