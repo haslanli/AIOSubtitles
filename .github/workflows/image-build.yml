@@ -30,6 +30,7 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     env:
       CACHE: type=gha,scope=aiosubtitles-${{ inputs.arch }}
+      DOCKER_BUILD_RECORD_UPLOAD: false   # no workflow artifacts; the build summary stays on the run's page
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

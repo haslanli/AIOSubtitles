@@ -158,6 +158,11 @@ class WorkflowRules(unittest.TestCase):
             for script in run_scripts(text):
                 self.assertNotIn('${{', script, name)
 
+    def test_no_workflow_artifacts(self):
+        self.assertIn('\n      DOCKER_BUILD_RECORD_UPLOAD: false', self.build)    # build-push-action uploads one otherwise
+        for text in self.files.values():
+            self.assertNotIn('upload-artifact', text)
+
     def test_pinned_tools(self):
         self.assertIn('version: v0.39.0', self.build)
         self.assertRegex(self.build, r'image=moby/buildkit:v[\d.]+@sha256:[0-9a-f]{64}')
