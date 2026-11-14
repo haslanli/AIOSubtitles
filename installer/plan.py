@@ -13,7 +13,8 @@ from subsync.aiosconfig import (  # noqa: F401  (the rules live in subsync, shar
     SUBSYNC_PRESET_NAME, SUBTITLE_PRESETS, USENET_PRESETS, USENET_SERVICES, SYNC_SETTINGS, LANGUAGES, UUID_RE,
     parse_languages, language_names, config_id_from, new_key, debrid_names, is_subtitle_preset, is_subsync_preset,
     subtitle_sources, stream_sources, free_instance_id, with_defaults, subsync_preset, opensubtitles_preset,
-    _before_other_subtitles, viewer_change, without_subsync, sync_config, sync_config_problems, _BY)
+    _before_other_subtitles, viewer_change, without_subsync, sync_config, sync_config_problems, usenet_route,
+    usenet_sync_config, _BY)
 
 SUBSYNC_PORT = 8790
 SUBSYNC_HOST = 'aiosubtitles-subsync'   # its name on AIOStreams' Docker network(s)
@@ -102,8 +103,11 @@ def subsync_env(s):
     """The service's settings. `s` holds the answers and what was found (see wizard.py); everything else keeps
     subsync's own defaults."""
     env = {
-        'SUBSYNC_SOURCE_MANIFEST': s['sync_manifest'],
-        'SUBSYNC_SOURCE_PASSWORD': s['sync_password'],
+        'SUBSYNC_SOURCE_MANIFEST': s.get('sync_manifest', ''),     # none for a config read through Usenet only
+        'SUBSYNC_SOURCE_PASSWORD': s.get('sync_password', ''),
+        'SUBSYNC_USENET': 'on' if s.get('usenet') else 'off',
+        'SUBSYNC_USENET_MANIFEST': s.get('usenet_manifest', '') if s.get('usenet') else '',
+        'SUBSYNC_USENET_PASSWORD': s.get('usenet_password', '') if s.get('usenet') else '',
         'SUBSYNC_PUBLIC_BASE': s['public_base'],
         'SUBSYNC_BASE_PATH': base_path_of(s['public_base']),
         'SUBSYNC_ADDON_KEY': s['addon_key'],

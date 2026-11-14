@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 
 from . import realdebrid, srclimits
+from .aiosconfig import USENET_READABLE
 from .langs import lang3
 
 log = logging.getLogger("subsync.sources")
@@ -114,23 +115,58 @@ def expected_size(hints, row):
     return None
 
 
-def unreadable(stream, skip_addons=()):
-    """Why subsync may not read a listed row (None = it may): it reads cached debrid files only. `skip_addons`: addon
-    names (lower case) whose rows are never read."""
+_VIDEO_EXTENSION = re.compile(r"\.(mkv|mp4|m4v|avi|ts|m2ts|webm|mov|wmv)$", re.I)
+
+
+def release_name(name):
+    """A file or release name without its video extension, for comparing a Usenet release with the file inside it."""
+    return _VIDEO_EXTENSION.sub("", str(name or "")).strip()
+
+
+def usenet_match(rows, name, size):
+    """A Usenet row of the same release when the exact rule found none ('s test): AIOStreams lists a release by
+    its name at its whole NZB's size until its engine has opened it, then as a library row by the file inside (".mkv")
+    at the file's size, a few per cent smaller. So the names are compared without a video extension, and the sizes
+    by the reader's Usenet rule (the smaller at least half the larger). A release whose file inside has a random name
+    is listed, once opened, by that name, with the release's name as the row's folder: that counts as its name too."""
+    wanted = release_name(name)
+
+    def names(s):
+        return {release_name(row_hints(s).get("filename")), release_name((s.get("streamData") or {}).get("folderName"))}
+
+    def fits(s):
+        listed = row_hints(s).get("videoSize")
+        if not (size and plausible_size(listed) and plausible_size(size)):
+            return True
+        return min(listed, size) >= 0.5 * max(listed, size)
+    same = [s for s in rows if wanted in names(s) and fits(s)]
+    return same[0] if same else None
+
+
+def unreadable(stream, skip_addons=(), usenet=False):
+    """Why subsync may not read a listed row (None = it may): it reads cached debrid files, and, listed through the
+    Usenet config (`usenet`), ready Usenet files of the services that serve part of a file: never
+    Stremio's NNTP streams, never a TorBox library item. `skip_addons`: addon names (lower case) whose rows are never
+    read."""
     d = stream.get("streamData") or {}
     svc = d.get("service") or {}
     addon = d.get("addon")
     addon_name = addon.get("name") if isinstance(addon, dict) else addon
     if not stream.get("url"):
         return "no url"
-    if d.get("type") != "debrid":
+    is_usenet = usenet and d.get("type") == "usenet"
+    if d.get("type") != "debrid" and not is_usenet:
         return f"type {d.get('type')}"
     service_problem = realdebrid.row_problem(stream)
     if service_problem:
         return service_problem
+    if is_usenet and svc.get("id") not in USENET_READABLE:
+        return f"usenet service {svc.get('id')}"
     if svc.get("cached") is not True:
         return "not cached"
-    if d.get("library"):
+    # a library row is a file already in the person's account: for TorBox never read (no download list of theirs is
+    # touched); for NzbDAV, AltMount and AIOStreams' own Usenet streaming it is the release being played
+    if d.get("library") and not (is_usenet and svc.get("id") != "torbox"):
         return "library row"
     if skip_addons and (addon_name or "").strip().lower() in skip_addons:
         return f"addon {addon_name.strip()}"
@@ -204,24 +240,33 @@ class Aios:
         return _get_json(url, self.timeout).get("streams") or []
 
     def find_row(self, type_, video_id, hints):
-        """The listed cached debrid row of the file a viewer opened (checklist 18a): a row whose listing gives the file's
-        hash; else a row of the file's name with the request's size, or the closest listed size within the rounding
-        slack (Stremio sends the real size, listings round it to 0.01 GiB); else the one row of that name whose listed
-        size no video file can have (Torrentio listed 1,679 bytes for a 3 GB file: the first reply gives the real size;
-        of several such rows the first).
+        """The listed cached debrid row of the file a viewer opened (checklist 18a), from one listing: `match`."""
+        return self.match(self.streams(type_, video_id), hints)
+
+    def match(self, listed, hints, usenet=False):
+        """The row of the file a viewer opened among `listed` rows (with `usenet`, ready Usenet rows too): a row whose
+        listing gives the file's hash; else a row of the file's name with the request's size, or the closest listed
+        size within the rounding slack (Stremio sends the real size, listings round it to 0.01 GiB); else the one row
+        of that name whose listed size no video file can have (Torrentio listed 1,679 bytes for a 3 GB file: the first
+        reply gives the real size; of several such rows the first).
         Another size of the same name is another file. The file's own hash, read with its index, settles it."""
         name, size = hints.get("filename"), hints.get("videoSize")
         video_hash = str(hints.get("videoHash") or "").lower()
-        listed = self.streams(type_, video_id)
         real_debrid = sum(1 for s in listed if realdebrid.row_service(s) == realdebrid.SERVICE)
         if real_debrid:
             log.warning("Real-Debrid check: %d listed Real-Debrid file%s skipped, never read", real_debrid,
                         "" if real_debrid == 1 else "s")
-        rows = [s for s in listed if unreadable(s, self.skip) is None]
+        rows = [s for s in listed if unreadable(s, self.skip, usenet=usenet) is None]
         if video_hash:
             listed = next((s for s in rows if str(row_hints(s).get("videoHash") or "").lower() == video_hash), None)
             if listed is not None:
                 return listed
+        found = self._by_name_and_size(rows, name, size)
+        if found is None and usenet and name:
+            found = usenet_match(rows, name, size)
+        return found
+
+    def _by_name_and_size(self, rows, name, size):
         named = [s for s in rows if name and row_hints(s).get("filename") == name]
         if not size:
             return named[0] if named else None

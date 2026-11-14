@@ -717,8 +717,8 @@ class PublicTextsTest(unittest.TestCase):
                 self.assertNotIn("\n", text)
                 self.assertTrue(text.endswith((".", ")")), text[-30:])
                 self.assertIsNone(note.search(text))
-                if name in explain.PUBLIC_FIELDS:
-                    self.assertLessEqual(len(text.split()), 125)
+                if name in explain.PUBLIC_FIELDS:   # the Usenet box's explanation, approved as written at 136
+                    self.assertLessEqual(len(text.split()), 140 if name == "usenet" else 125)
 
     def test_every_page_field_has_its_explanation(self):
         import re

@@ -9,7 +9,7 @@ every value from a person or a config is escaped. The texts come from explain.py
 and UI_WORDS below; nothing else is shown.
 """
 from . import explain, ui
-from .aiosconfig import LANGUAGES
+from .aiosconfig import LANGUAGES, usenet_names
 from .ui import e
 
 _NAMES = {three: name for name, _, three in LANGUAGES}
@@ -33,6 +33,8 @@ UI_WORDS = (
     "to start over.", "Something went wrong", "Back to the start page", "https://…/stremio/…/manifest.json",
     "Signed up · AIOSubtitles", "Settings · AIOSubtitles", "Delete · AIOSubtitles", "Deleted · AIOSubtitles",
     "Privacy · AIOSubtitles", "Not found · AIOSubtitles",
+    # Usenet
+    "Sync Usenet files too", "Usenet", "searches used today",
 )
 LINK_PLACEHOLDER = "https://…/stremio/…/manifest.json"
 
@@ -111,10 +113,12 @@ def signup_page(settings, error=None, field=None, order=None):
                            + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(limit))}</p>"
                            + ui.language_slots(_CHOICES, order, limit, "languages-q", "languages-help",
                                                err("languages"))))
+    usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day)),) \
+        if usenet_allowed(settings) else ()
     screens.append(_screen("config", steps, 100, "<h2 class=\"q\">Your AIOStreams config</h2>" + ui.choices(
         ui.choice("add_addon", "Add AIOSubtitles to my AIOStreams config", explain.PUBLIC_FIELDS["add_addon"], checked=True),
         ui.choice("clean_up", "Remove the subtitle addons AIOSubtitles now searches itself",
-                  explain.PUBLIC_FIELDS["clean_up"], needs="add_addon")), last=True))
+                  explain.PUBLIC_FIELDS["clean_up"], needs="add_addon"), *usenet), last=True))
     fields = ("link", "password", "languages") + (("invite",) if settings.invite else ())
     problem = _problem(error, field, "Sign-up didn't go through", fields,
                        extra=f"<p>{e(explain.PUBLIC_TEXTS['kept_note'])}</p>")
@@ -148,10 +152,17 @@ def _settings_link(manifest_url):
     return manifest_url[: -len("manifest.json")] + "configure"
 
 
+def usenet_allowed(settings):
+    """Whether this instance lets people turn Usenet on."""
+    return bool(settings.usenet and settings.usenet_listings_per_day > 0)
+
+
 def result_page(result):
     texts = explain.PUBLIC_TEXTS
     stored = getattr(result, "store_only", False)
-    done = [] if stored else [texts["made_config"]]
+    done = [texts["made_config"]] if getattr(result, "sync_made", not stored) and not stored else []
+    if getattr(result, "usenet", False):
+        done.append(texts["usenet_made"])
     if result.added:
         done += [f"Changed in your AIOStreams config: {c}" for c in result.changes] or \
                 ["AIOSubtitles is in your AIOStreams config already."]
@@ -160,6 +171,9 @@ def result_page(result):
     notes = []
     if stored:
         notes.append(ui.note("warn", explain.PUBLIC_STORE_ONLY[1], explain.PUBLIC_STORE_ONLY[0], role="status"))
+    why = getattr(result, "usenet_why", None)
+    if why in explain.USENET_WHY:
+        notes.append(ui.note("warn", explain.USENET_WHY[why], role="status"))
     if result.warning:
         head, sep, rest = result.warning.partition(": ")
         notes.append(ui.note("warn", rest[:1].upper() + rest[1:], head, role="status") if sep
@@ -264,11 +278,30 @@ def _row(hid, heading, about, controls_html):
             f"{about}</div>{controls_html}</section>")
 
 
+def _usenet_row(settings, record, usenet_usage):
+    """The Usenet row: its state (on or off, paused, or why it stays off) and the box's explanation; the box
+    itself is in the Refresh form, since turning it on makes a config with the person's password."""
+    if not usenet_allowed(settings):
+        return ""
+    on = bool(record.get("usenet_uuid"))
+    status = explain.usenet_status(on, usenet_names(record.get("usenet_services") or []), usenet_usage["listings"],
+                                   settings.usenet_listings_per_day)
+    lines = f"<p>{e(status)}</p>"
+    if on and usenet_usage["stopped"]:
+        lines += f"<p>{e(explain.PUBLIC_TEXTS['usenet_paused'])}</p>"
+    elif record.get("usenet") and record.get("usenet_why") in explain.USENET_WHY:
+        lines += f"<p>{e(explain.USENET_WHY[record['usenet_why']])}</p>"
+    return _row("usenet-h", "Usenet", f"<p class=\"help\">{e(explain.usenet_help(settings.usenet_listings_per_day))}</p>",
+                f"<div class=\"controls\">{lines}</div>")
+
+
 def settings_page(settings, record, usage, manifest_url, message=None, error=None, notice=None, now=0, field=None,
-                  state=None):
+                  state=None, usenet_usage=None):
     texts = explain.PUBLIC_TEXTS
     stored = record.get("store_only") is True
     limit = settings.max_languages or 4
+    usenet_usage = usenet_usage or {"listings": 0, "stopped": False}
+    usenet_on = usenet_allowed(settings) and bool(record.get("usenet_uuid"))
     files_limit, bytes_limit = settings.user_files_per_day, settings.user_daily_bytes
     full = usage["files"] >= files_limit or usage["bytes"] >= bytes_limit
     notes = (ui.note("ok", message, role="status") if message else "") \
@@ -283,6 +316,10 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                    usage["files"] >= files_limit)
         + ui.gauge(f"{_megabytes(usage['bytes'])} MB of {bytes_limit / (1024 * 1024):.0f} MB", "read",
                    _share(usage["bytes"], bytes_limit), usage["bytes"] >= bytes_limit)
+        + (ui.gauge(f"{usenet_usage['listings']} of {settings.usenet_listings_per_day}", "searches used today",
+                    _share(usenet_usage["listings"], settings.usenet_listings_per_day),
+                    usenet_usage["listings"] >= settings.usenet_listings_per_day)
+           if usenet_on else "")
         + f"<p class=\"help\">{e(texts['reset'].format(when=reset_in(now)))}</p></section>")
     link = (f"<section class=\"key\" aria-labelledby=\"personal-l\">"
             + ui.link_block(manifest_url, texts["settings_lead"])
@@ -310,7 +347,10 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                               attrs=f"autocomplete=\"off\" spellcheck=\"false\" inputmode=\"url\" "
                                     f"placeholder=\"{e(LINK_PLACEHOLDER)}\"")
                    + ui.choices(ui.choice("keep_password", "Keep my password, so AIOSubtitles follows my config by itself",
-                                          explain.PUBLIC_FIELDS["keep_password"], checked=kept))
+                                          explain.PUBLIC_FIELDS["keep_password"], checked=kept),
+                                *((ui.choice("usenet", "Sync Usenet files too",
+                                             explain.usenet_help(settings.usenet_listings_per_day),
+                                             checked=bool(record.get("usenet"))),) if usenet_allowed(settings) else ()))
                    + "<input type=\"hidden\" name=\"add_addon\" value=\"on\">"
                    + f"<div class=\"actions\">{ui.button('Refresh', 'primary', type='submit')}</div>", cls="")
                    + forget + "</div>")
@@ -321,7 +361,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
     body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT)}<main><h1>Your AIOSubtitles</h1>"
             + (f"<div class=\"notes\" aria-live=\"polite\">{notes}</div>" if notes else "")
             + f"<div class=\"grid12 band\">{link}{today}</div>"
-            f"<div class=\"rows\">{languages}{refresh}{delete}</div></main></div>")
+            f"<div class=\"rows\">{languages}{_usenet_row(settings, record, usenet_usage)}{refresh}{delete}</div></main></div>")
     return ui.page("Settings · AIOSubtitles", body, "settings", personal=True)
 
 

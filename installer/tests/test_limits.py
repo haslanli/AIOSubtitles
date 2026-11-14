@@ -6,7 +6,8 @@ from installer import limits, plan
 from subsync import explain
 
 HOSTING_ORDER = [
-    ('Each person', ['SUBSYNC_USER_FILES_PER_DAY', 'SUBSYNC_USER_DAILY_MB', 'SUBSYNC_MAX_LANGUAGES']),
+    ('Each person', ['SUBSYNC_USER_FILES_PER_DAY', 'SUBSYNC_USER_DAILY_MB', 'SUBSYNC_MAX_LANGUAGES',
+                     'SUBSYNC_USENET_LISTINGS_PER_DAY']),   # the last one only when Usenet is allowed
     ('The whole service', ['SUBSYNC_DAILY_BUDGET_GB', 'SUBSYNC_MAX_USERS', 'SUBSYNC_SIGNUPS_PER_HOUR']),
     ('This server', ['SUBSYNC_SYNCS_AT_ONCE', 'SUBSYNC_ACTIVE_WORKERS', 'SUBSYNC_MAX_CONNECTIONS']),
 ]
@@ -16,6 +17,7 @@ LABELS = {   # the approved labels
     'SUBSYNC_USER_DAILY_MB': 'Data per person a day', 'SUBSYNC_MAX_USERS': 'People signed up',
     'SUBSYNC_SIGNUPS_PER_HOUR': 'Sign-up attempts per address an hour', 'SUBSYNC_SYNCS_AT_ONCE': 'Files synced at a time',
     'SUBSYNC_ACTIVE_WORKERS': 'Workers at once', 'SUBSYNC_MAX_CONNECTIONS': 'Requests at once',
+    'SUBSYNC_USENET_LISTINGS_PER_DAY': 'Usenet searches per person a day',   # personal: 'Usenet searches a day'
 }
 
 
@@ -24,6 +26,9 @@ class Routes(unittest.TestCase):
         self.assertEqual([lim.setting for lim in limits.personal(audio=False)], ['SUBSYNC_DAILY_BUDGET_GB'])
         self.assertEqual([lim.setting for lim in limits.personal(audio=True)],
                          ['SUBSYNC_DAILY_BUDGET_GB', 'SUBSYNC_AUDIO_BUDGET_GB'])
+        self.assertEqual([lim.label for lim in limits.personal(audio=False, usenet=True)],
+                         ['Data a day in total', 'Usenet searches a day'])
+        self.assertNotIn('SUBSYNC_USENET_LISTINGS_PER_DAY', limits.names(limits.hosting(usenet=False)))
 
     def test_a_public_instance_asks_every_limit_in_three_groups_without_audio(self):
         self.assertEqual([(heading, [lim.setting for lim in group]) for heading, group in limits.HOSTING],

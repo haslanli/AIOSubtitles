@@ -1,7 +1,8 @@
 """The limits each install asks, with the defaults and explanations of subsync/subsync/explain.py.
 
-A personal install asks the daily total and, with the audio route on, the audio limit; a public instance asks every
-limit, in three groups. Left out because they would do nothing: the language limit on a personal
+A personal install asks the daily total and, with the audio route on, the audio limit, and with Usenet on its daily
+number of Usenet searches; a public instance asks every limit, in three groups (the Usenet number only when it lets
+people turn Usenet on). Left out because they would do nothing: the language limit on a personal
 install (you choose your own languages there) and the audio limit on a public instance (public mode keeps the audio
 route off).
 
@@ -19,12 +20,16 @@ Limit.default = property(lambda self: explain.SETTINGS[self.setting][0])
 
 DAILY = Limit('SUBSYNC_DAILY_BUDGET_GB', 'Data a day in total', 'GB', 'decimal')
 AUDIO = Limit('SUBSYNC_AUDIO_BUDGET_GB', 'Audio per file', 'GB', 'segmented', ('0.5', '1', '2', '4'))
+# The Usenet searches a day (one setting, per person on a public instance)
+USENET = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches a day', None, 'number')
+USENET_HOSTED = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches per person a day', None, 'number')
 
 HOSTING = [
     ('Each person', [
         Limit('SUBSYNC_USER_FILES_PER_DAY', 'New files per person a day', 'files', 'number'),
         Limit('SUBSYNC_USER_DAILY_MB', 'Data per person a day', 'MB', 'number'),
         Limit('SUBSYNC_MAX_LANGUAGES', 'Languages per person', None, 'segmented', ('1', '2', '3', '4')),
+        USENET_HOSTED,
     ]),
     ('The whole service', [
         DAILY,
@@ -46,12 +51,17 @@ NOT_AN_AUDIO_LIMIT = 'Type 0.5, 1, 2 or 4 (GB per file).'
 NOT_A_LANGUAGE_LIMIT = 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'
 
 
-def personal(audio):
-    return [DAILY, AUDIO] if audio else [DAILY]
+def personal(audio, usenet=False):
+    return [DAILY] + ([AUDIO] if audio else []) + ([USENET] if usenet else [])
 
 
-def hosting():
-    return [lim for _, group in HOSTING for lim in group]
+def hosting_groups(usenet=True):
+    """The hosting route's groups, without the Usenet number when the instance doesn't let people turn Usenet on."""
+    return [(heading, [lim for lim in group if usenet or lim is not USENET_HOSTED]) for heading, group in HOSTING]
+
+
+def hosting(usenet=True):
+    return [lim for _, group in hosting_groups(usenet) for lim in group]
 
 
 def names(asked):

@@ -29,16 +29,20 @@ RULES = [
      "each addon it leaves out. Your own config and apps keep every addon; subsync only finds fewer files when a "
      "left-out addon was the only one listing a file. Addons built into AIOStreams are not affected: they take their "
      "debrid service from your service list."),
-    ("Usenet is never read",
-     "subsync never reads through Usenet: its config leaves out Usenet sources (Newznab indexers, NZBHydra, Easynews "
-     "and similar) and Usenet services (NzbDAV, AltMount and similar). Why: every listing through an indexer spends "
-     "calls of its daily limit, and opening a Usenet file usually starts a download of the whole file. A file you play "
-     "from Usenet gets a synced copy only when your debrid service has the same file ready. Your indexer calls and "
-     "download queue stay untouched; there is no switch for this."),
+    ("Usenet: only parts of a file, only when you turn it on",
+     "With Usenet on, AIOSubtitles also syncs files you play from Usenet. It reads only what it needs (the file's index "
+     "and its subtitle track, usually a few MB) through a Usenet service in your AIOStreams that can stream part of a "
+     "file: AIOStreams' own Usenet streaming, NzbDAV, AltMount, Easynews, or TorBox Usenet for releases TorBox already "
+     "has. It never uses Stremio's NNTP streams, never makes TorBox download a release, and never searches or reads "
+     "anything in the background. Off, a file you play from Usenet gets a synced copy only when your debrid service "
+     "has the same file ready. NzbDAV and AltMount count only when AIOStreams' own proxy serves them. A file it "
+     "doesn't find there isn't looked for again for a day, and an error from your indexer or Usenet service stops it "
+     "until 00:00 UTC."),
     ("Only ready debrid files are read",
      "subsync reads a file only when your debrid service already has it ready (cached), never one the service would "
      "first have to download, and never one found in your debrid account's own download list. So subsync never adds a "
-     "download to your account. Files played from plain torrents or web links get no synced copy."),
+     "download to your account. Files played from plain torrents or web links get no synced copy. Usenet files are "
+     "read only when you turn Usenet on (see \"Usenet: only parts of a file\")."),
     ("Only MKV and MP4 files",
      "subsync reads the subtitle tracks of MKV and MP4 files only, the formats nearly all streaming releases use. Other "
      "files (AVI, M2TS and the like) keep their original subtitles, after one small read that shows the format."),
@@ -71,8 +75,9 @@ RULES = [
      "When you sign up or refresh, AIOSubtitles uses your AIOStreams password in that request and then forgets it, "
      "unless you tick the box that lets it keep the password: then it is kept encrypted in your record, never in a "
      "log, until you untick it. It needs it to read your config, to make a separate config for AIOSubtitles on your "
-     "AIOStreams (without Real-Debrid, Usenet, AIOSubtitles itself or anything that starts work in the background, so "
-     "opening a file opens only that file) and, if you leave the box checked, to add AIOSubtitles to your own config. "
+     "AIOStreams (without Real-Debrid, AIOSubtitles itself or anything that starts work in the background, so opening "
+     "a file opens only that file, and without Usenet unless you turn it on) and, if you leave the box checked, to add "
+     "AIOSubtitles to your own config. "
      "Without that separate config, a file that failed to open could make your AIOStreams move on to another source, "
      "Real-Debrid or a Usenet download among them."),
     ("Public mode: your AIOStreams is checked about once a day",
@@ -81,13 +86,14 @@ RULES = [
      "changed link by itself and tells you what only you can fix, on your settings page and with one \"AIOSubtitles: "
      "action needed\" entry in your subtitle lists. Without a kept password it can't see services or addons you add "
      "or remove, so press Refresh after such a change; with one, it rebuilds its own config from yours by itself, "
-     "leaving Real-Debrid and Usenet out, and never changes your config."),
+     "leaving Real-Debrid out, and Usenet unless you turn it on, and never changes your config."),
     ("Public mode: Real-Debrid is left out",
      f"If your AIOStreams uses Real-Debrid, AIOSubtitles leaves it out of its own config and never reads a Real-Debrid "
      f"file, because {REASON}. It syncs only files from your other services: a file you play from Real-Debrid gets a "
      "synced copy when another of your services has the same file ready. With Real-Debrid as your only debrid service, "
      "AIOSubtitles reads nothing for you: you get only the copies already synced for someone else who played the same "
-     "release. Your own config and apps keep Real-Debrid as "
+     "release. With Usenet on, AIOSubtitles reads the files you play from Usenet for you, through your Usenet "
+     "services; Real-Debrid stays out. Your own config and apps keep Real-Debrid as "
      "before, and your AIOStreams still searches it when you browse."),
     ("Public mode: a few files at once",
      "The service works on a set number of files at once for everyone (SUBSYNC_SYNCS_AT_ONCE), in the order people "
@@ -189,6 +195,16 @@ QUESTIONS = {
         "subsync reads short audio parts of it, up to the limit you choose next (1 GB recommended; counted in the "
         "daily limit and in your debrid service's traffic), and the copy is there the next time you open the file; "
         "files with too high a bitrate for that limit keep their originals."),
+    "USENET": (
+        "no",
+        "Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a "
+        "second config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it "
+        "needs. Recommended if you play from Usenet and your indexer's daily limit isn't tight. The cost: at most 10 "
+        "extra searches a day through your indexers (usually none, because your AIOStreams reuses the search you just "
+        "made), fetching a release's NZB when your Usenet service doesn't have it yet, and some Usenet data per file "
+        "(more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and "
+        "everyone who plays the same release, because one sync serves all of them. Off: nothing on Usenet is searched "
+        "or read."),
     "AUDIO_BUDGET": (
         "1",
         "Asked only with the audio route on: the most it reads of one file, through your debrid service: 0.5, 1, 2 "
@@ -310,6 +326,22 @@ GROUPS = [
             "synced from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each after you pick their "
             "\"(Subsync)\" entry. Recommended: off unless you often watch such files. Off: they keep their original "
             "subtitles and subsync reads about 1 MB per file."),
+        "SUBSYNC_USENET": (
+            "off",
+            "Off by default. On your own install: on, subsync also syncs files you play from Usenet, through a second "
+            "config made from yours with only your Usenet searches and services; off, nothing on Usenet is searched or "
+            "read. On a public instance: on lets each person turn Usenet on for themselves, with their own Usenet "
+            "services and indexers through their own AIOStreams; nobody's Usenet is searched or read until they do, "
+            "and this server holds no Usenet or indexer key."),
+        "SUBSYNC_USENET_MANIFEST": (
+            "",
+            "The link of subsync's Usenet config, a second config ./setup makes from yours when you turn Usenet on, "
+            "with only your Usenet searches and services and nothing that works in the background. subsync lists "
+            "through it only when your debrid service doesn't have the file you play. Keep it private."),
+        "SUBSYNC_USENET_PASSWORD": (
+            "",
+            "The password of that config: random, made by ./setup, never yours, used as SUBSYNC_SOURCE_PASSWORD is. "
+            "Keep it private."),
         "SUBSYNC_AUDIO_BUDGET_GB": (
             "1",
             "With the audio route on, the most audio subsync reads of one file, in GB: your answer to ./setup's audio "
@@ -340,6 +372,12 @@ GROUPS = [
             "a few MB when the track's lines are pictures; up to 1 GB per file with the audio route), so it only "
             "catches something going wrong. Lower it if your "
             "debrid service or server has a tight traffic limit."),
+        "SUBSYNC_USENET_LISTINGS_PER_DAY": (
+            "10",
+            "How many times a day AIOSubtitles may look for a Usenet file through your indexers (10 by default). Each "
+            "look is one search per indexer in your config, usually answered from AIOStreams' own cache at no cost. "
+            "Lower it if your indexer's daily limit is tight; 0 turns Usenet off. On a public instance this is per "
+            "person, through each person's own indexers."),
         "SUBSYNC_INDEX_CAP_MB": (
             "16",
             "The most subsync reads of one file to find its subtitle tracks (the start, the index, and 64 KB at each "
@@ -778,12 +816,14 @@ PUBLIC_STORE_ONLY = (
     f"Real-Debrid is the only debrid service in your AIOStreams config, and AIOSubtitles never uses it, because {REASON}. "
     "So it reads none of your files: for each file you play, it offers the synced copies already made for someone who "
     "played the same release, when there are any. To get your own synced copies, add another service, such as TorBox, "
-    "to your config, then press Refresh on your settings page.")
+    "to your config, then press Refresh on your settings page. With Usenet on, AIOSubtitles reads the files you play "
+    "from Usenet for you, through your Usenet services; Real-Debrid stays out.")
 
 PUBLIC_PASSWORD_TEXT = (
     "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams config (if you leave the "
-    "box below checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, Usenet or "
-    "automatic fallback to other sources, so opening a file opens only that file. It is not stored unless you tick "
+    "box below checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid or automatic "
+    "fallback to other sources, and without Usenet unless you turn it on, so opening a file opens only that file. It "
+    "is not stored unless you tick "
     "\"Keep my password\" below. You'll be asked again only if you refresh.")
 
 CONTACT = "https://github.com/haslanli/AIOSubtitles/issues"
@@ -811,6 +851,7 @@ PUBLIC_FIELDS = {
         "while AIOSubtitles is down, these subtitles are missing too, until it is back. Unchecked, your config keeps "
         "them and nothing is removed. It works only together with adding AIOSubtitles; to undo it, add the addons "
         "again on AIOStreams' configure page."),
+    "usenet": QUESTIONS["USENET"][1],      # the same text as the installer question
     "invite": "The code you were given. AIOSubtitles is open only to invited people for now.",
     "refresh": (
         "Your AIOStreams password, used now to read your config again and rebuild AIOSubtitles' own config from it, for "
@@ -824,8 +865,8 @@ PUBLIC_FIELDS = {
     "keep_password": (
         "Off by default. Ticked: AIOSubtitles keeps your AIOStreams password, encrypted so that it opens only with your "
         "personal link, and about once a day while you use it rebuilds its own config from yours, so services and "
-        "addons you add or remove are followed without Refresh; Real-Debrid and Usenet stay out, and your own config "
-        "is never changed. The cost: that password can change your whole AIOStreams config, all your keys included, "
+        "addons you add or remove are followed without Refresh; Real-Debrid stays out, and Usenet unless you turn it "
+        "on, and your own config is never changed. The cost: that password can change your whole AIOStreams config, all your keys included, "
         "so if AIOSubtitles' server were broken into while you use it, it could be read. Unticked: it is used once and "
         "forgotten. Untick and refresh, or press \"Stop keeping my password\", to delete it at once; the encrypted "
         "backups keep it up to 30 days more."),
@@ -839,6 +880,27 @@ PUBLIC_FIELDS = {
         "your AIOStreams config; without it, remove the AIOSubtitles addon there yourself. The password is used once "
         "and not stored. How subtitles were synced stays in the shared store: it belongs to files, not to you."),
 }
+
+# Usenet on the public pages: why a ticked box made no Usenet config, the settings
+# row, and the box's explanation with the instance's own number of searches
+USENET_NO_SERVICE = ("Usenet stays off: your AIOStreams has no Usenet service AIOSubtitles can read (it reads Usenet "
+                     "files through services that stream part of a file; not Stremio's NNTP streams).")
+USENET_WHY = {
+    "proxy": ("Usenet stays off: your Usenet service gives addresses on your home network, which AIOSubtitles can't "
+              "reach from the internet. Turn on AIOStreams' proxy for it, or leave Usenet off."),
+    "nntp": USENET_NO_SERVICE,
+    "none": USENET_NO_SERVICE,
+}
+
+
+def usenet_help(per_day):
+    return PUBLIC_FIELDS["usenet"].replace("at most 10 extra searches", f"at most {per_day} extra searches")
+
+
+def usenet_status(on, names, used, per_day):
+    """The settings row: "Usenet: on, through NzbDAV (2 of 10 searches used today)" / "Usenet: off"."""
+    return f"Usenet: on, through {names} ({used} of {per_day} searches used today)" if on else "Usenet: off"
+
 
 NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four"}
 LANGUAGES_ONE = (
@@ -888,15 +950,17 @@ PRIVACY_PARTS = (
     ("What is read", "What is read:",
      "your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, its subtitle track "
      "(about 1 MB; a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its own server and "
-     "doesn't keep) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your AIOStreams. "
+     "doesn't keep) and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your AIOStreams, or "
+     "from your Usenet service when you turn Usenet on. "
      "AIOSubtitles also searches subtitle sites itself (OpenSubtitles, TheSubtitleDB, Gestdown, SubDL, SubSource): they "
      "get the title's IMDb id, season and episode, the languages, and the file's name, size and hashes, from "
      "AIOSubtitles' server, never your internet address."),
     ("What is stored", "What is stored:",
      "one record, encrypted so that it opens only with your personal link (your AIOStreams address, AIOSubtitles' own "
-     "config there and its password, your config's id, your languages, and when your AIOStreams was last checked), and "
-     "how much was read for you each day. AIOSubtitles' own config holds your debrid keys, as your own config does, and "
-     "the service can open it while your requests come in. Your AIOStreams password is stored only if you tick \"Keep "
+     "config there and its password (and its Usenet config's, with Usenet on), your config's id, your languages, and when "
+     "your AIOStreams was last checked), and how much was read for you each day. AIOSubtitles' own config holds your "
+     "debrid keys, as your own config does (its Usenet config your Usenet and indexer keys), and the service can open "
+     "them while your requests come in. Your AIOStreams password is stored only if you tick \"Keep "
      "my password\", in the same encrypted record, until you untick it (and up to 30 days more in the encrypted "
      "backups). For each synced subtitle only its new timing "
      "(never its text), with the names and sizes of the files it fits, is shared and kept 180 days after last use, "
@@ -980,8 +1044,14 @@ PUBLIC_TEXTS.update({
     "forgot": ("Your kept password is deleted. AIOSubtitles no longer follows your config by itself: press Refresh after "
                "you change it."),
     "notice_where": "Open your AIOSubtitles settings page: your personal link with /configure at the end.",
-    "made_config": ("Made AIOSubtitles' own config on your AIOStreams, without Real-Debrid, Usenet or automatic "
-                    "fallback to other sources."),
+    "made_config": ("Made AIOSubtitles' own config on your AIOStreams, without Real-Debrid or automatic fallback to "
+                    "other sources, and without Usenet unless you turn it on."),
+    # Usenet
+    "usenet_made": ("Usenet is on: AIOSubtitles made a second config on your AIOStreams with only your Usenet searches "
+                    "and services."),
+    "usenet_off": "Usenet is off: AIOSubtitles removed its Usenet config from your AIOStreams.",
+    "usenet_paused": ("Usenet is paused until 00:00 UTC: your indexer or Usenet service answered with an error, so "
+                      "AIOSubtitles stopped asking it today. Nothing else is affected."),
     "languages_chosen": "Languages: {names}.",
     "next": ("Play something in your app. For each file, AIOSubtitles offers synced copies of your subtitles in your "
              "app's subtitle list. A file nobody has played before takes a few seconds; if your app has already picked "

@@ -24,19 +24,22 @@ from .signup import (SignupError, SignupGate, delete, forget_password, form_lang
                      signup, store_only)
 from .sources import Aios
 from .users import day_of
-from .worker import OverLimit, Safety, Turn, Worker
+from .worker import OverLimit, Safety, Turn, UsenetGate, Worker
 
 log = logging.getLogger("subsync.public")
 
 
 def user_settings(env, record, token):
-    """A person's own settings: the service's, with their languages, their sync config and their own address. A record
-    for stored copies only has no sync config: nothing to read through."""
+    """A person's own settings: the service's, with their languages, their sync config, their Usenet config
+    and their own address. A record for stored copies only has no sync config: nothing to read through; one
+    with Usenet only has only the Usenet config."""
     base = Settings(env).public_base
     own = dict(env)
     own.update({"SUBSYNC_LANGUAGES": ",".join(record["languages"]),
                 "SUBSYNC_SOURCE_MANIFEST": record.get("sync_link") or "",
                 "SUBSYNC_SOURCE_PASSWORD": record.get("sync_password") or "",
+                "SUBSYNC_USENET_MANIFEST": record.get("usenet_link") or "",
+                "SUBSYNC_USENET_PASSWORD": record.get("usenet_password") or "",
                 "SUBSYNC_PUBLIC_BASE": f"{base}/u/{token}",
                 "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
     return Settings(own)
@@ -67,6 +70,27 @@ class UserLimits:
     def after_read(self, n):
         if n:
             self.users.add_usage(self.token, nbytes=n)
+
+    def usenet_counts(self):
+        """This person's Usenet listings and the day's stop (worker.UsenetGate), in their usage rows."""
+        return UserUsenetCounts(self.users, self.token)
+
+
+class UserUsenetCounts:
+    def __init__(self, users, token):
+        self.users, self.token = users, token
+
+    def listings(self):
+        return self.users.usenet_usage(self.token)["listings"]
+
+    def add_listing(self):
+        self.users.add_usenet_listing(self.token)
+
+    def stopped(self):
+        return self.users.usenet_usage(self.token)["stopped"]
+
+    def stop(self):
+        self.users.stop_usenet(self.token)
 
 
 class StoreOnly:
@@ -106,8 +130,15 @@ class Pool:
         s = user_settings(self.env, record, token)
         aios = Aios(s.source_manifest, own_bases=(self.s.public_base,), skip_addons=s.skip_addons,
                     size_slack=s.size_slack, password=s.source_password)
+        usenet = gate = None
+        if self.s.usenet and self.s.usenet_listings_per_day > 0 and s.usenet_manifest and \
+                isinstance(limits, UserLimits):
+            usenet = Aios(s.usenet_manifest, own_bases=(self.s.public_base,), skip_addons=s.skip_addons,
+                          size_slack=s.size_slack, password=s.usenet_password)
+            gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(), who=limits.who)
         safety = Safety(backoff_s=s.backoff_s)
-        worker = Worker(s, self.store, aios, safety, extra=self.extra, turn=self.turn, limits=limits)
+        worker = Worker(s, self.store, aios, safety, extra=self.extra, turn=self.turn, limits=limits, usenet=usenet,
+                        usenet_gate=gate)
         if start:
             worker.start()
         return App(s, self.store, worker, safety, state=record.get("state"), detail=record.get("state_detail"))
@@ -382,7 +413,8 @@ class PublicHandler(Handler):
             return self._html(code, pages.settings_page(svc.s, current, svc.users.usage(token), manifest_url,
                                                         message=message, error=error, notice=notice,
                                                         now=svc.clock(), field=field,
-                                                        state="reads_refused" if refused else None), personal=True)
+                                                        state="reads_refused" if refused else None,
+                                                        usenet_usage=svc.users.usenet_usage(token)), personal=True)
         if method == "GET":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             message, notice = pages.done_message((query.get("done") or [None])[0], record)
@@ -403,7 +435,7 @@ class PublicHandler(Handler):
                 try:
                     result = refresh(svc.s, svc.users, token,
                                      {"password": form.get("password"), "add_addon": "on", "link": form.get("link"),
-                                      "keep_password": form.get("keep_password")},
+                                      "keep_password": form.get("keep_password"), "usenet": form.get("usenet")},
                                      api_factory=svc.api_factory, timeout=svc.timeout)
                 except SignupError as e:      # the password field is called "refresh" on this page, the link "new_link"
                     return page(e.code, error=e.message,

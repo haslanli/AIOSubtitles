@@ -45,8 +45,17 @@ class Stopped(Exception):
 
 
 class RangeReader:
-    def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=0.0, opener=None, size_slack=0):
+    def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=0.0, opener=None, size_slack=0,
+                 max_re_resolve=MAX_RE_RESOLVE, first_timeout=None, size_ok=None):
         self.url, self.label, self.guard, self.timeout = url, label, guard, timeout
+        # a Usenet file: its link asked at most twice (a fresh look-up could fetch its NZB again), and
+        # its first look-up waits longer (the Usenet service fetches and opens the NZB first; NzbDAV's add takes up to
+        # 90 s)
+        self.max_re_resolve = max_re_resolve
+        self.first_timeout = first_timeout
+        # with no exact size: a rule the served size must meet when the first reply gives it (a Usenet release is
+        # listed by its whole NZB, so its file is a little smaller than listed)
+        self.size_ok = size_ok
         self.size = size              # expected served size (from the listing), checked on the first reply
         self.tolerance = size_tolerance
         # bytes the listed size may be off by rounding: addons list sizes to 0.01 GiB, so up to 0.005 GiB (5.4 MB),
@@ -102,16 +111,18 @@ class RangeReader:
                 self._log(start, length, 0, None, time.time(), "the link was asked too often: not asked again")
                 raise LinkUsedUp("the link was asked too often")
             t0 = time.time()
+            first = self.lookups == 0
             self.lookups += 1
-            r = self.open(self._request(self.url, start, length), timeout=self.timeout)
+            r = self.open(self._request(self.url, start, length),
+                          timeout=self.first_timeout if first and self.first_timeout else self.timeout)
             final = r.geturl() if hasattr(r, "geturl") else None
             if final and final != self.url:
                 self.resolved, self.redirects = final, True
             return r, t0
 
     def used_up(self):
-        """The link has redirected and been asked 1 + MAX_RE_RESOLVE times: it isn't asked again."""
-        return self.redirects and self.lookups > MAX_RE_RESOLVE
+        """The link has redirected and been asked 1 + max_re_resolve times: it isn't asked again."""
+        return self.redirects and self.lookups > self.max_re_resolve
 
     def get(self, start, length):
         if length <= 0:
@@ -167,6 +178,8 @@ class RangeReader:
             raise ReadFailed("range ignored")
         if total is not None:
             if self.size is None:
+                if self.size_ok is not None and not self.size_ok(total):
+                    raise ReadFailed("size differs")
                 self.size = total
             elif abs(total - self.size) > max(self.tolerance * self.size, self.slack):
                 raise ReadFailed("size differs")

@@ -33,6 +33,29 @@ SUBTITLE_PRESETS = {'opensubtitles', 'opensubtitles-v3-plus', 'subsource', 'subd
 USENET_PRESETS = {'newznab', 'nzbhydra', 'easynews', 'easynews-search', 'easynewsPlus', 'easynewsPlusPlus',
                   'usenet-streamer', 'streamnzb', 'davex'}
 USENET_SERVICES = {'stremio_nntp', 'nzbdav', 'aiostreams', 'altmount', 'easynews', 'stremthru_newz'}
+# Addons whose own Sources choice decides whether they search Usenet indexers beside torrent ones (AIOStreams' Prowlarr
+# searches both, whatever its services, unless that choice leaves one out): (its torrent value, its Usenet value)
+SOURCES_CHOICE = {'prowlarr': ('torrent', 'usenet')}
+
+# Usenet, when a person turns it on: a second config, the Usenet config, with only their Usenet searches
+# and the Usenet services that serve the requested part of a file: AIOStreams' own Usenet streaming, NzbDAV and AltMount
+# (only through AIOStreams' own proxy: without it their links need the WebDAV password, and often point into a home
+# network), Easynews, and TorBox for the Usenet copies it has ready. Never Stremio's NNTP streams (the player reads
+# Usenet itself; there is no link to read) and never a separate Usenet addon.
+USENET_READABLE = ('aiostreams', 'nzbdav', 'altmount', 'easynews', 'torbox')   # also the order they are named in
+USENET_NAMES = {'aiostreams': 'AIOStreams\' own Usenet streaming', 'nzbdav': 'NzbDAV', 'altmount': 'AltMount',
+                'easynews': 'Easynews', 'torbox': 'TorBox Usenet'}
+PROXIED_ONLY = ('nzbdav', 'altmount')
+# The Usenet config's addons and, of the services above, the ones each can use (AIOStreams v2.35.8's presets)
+USENET_ADDONS = {'newznab': {'torbox', 'nzbdav', 'altmount', 'aiostreams'},
+                 'nzbhydra': {'torbox', 'nzbdav', 'altmount', 'aiostreams'},
+                 'prowlarr': {'torbox', 'nzbdav', 'altmount', 'aiostreams'},
+                 'easynews-search': {'easynews'}}
+# On top of SYNC_SETTINGS: only ready copies (a TorBox release it would first download is never listed), and an indexer's
+# error shown as a row of the listing, so AIOSubtitles stops asking that person's indexers for the day
+USENET_SETTINGS = {'excludeUncached': True, 'hideErrors': False}
+USENET_DROPPED = ('excludeUncachedFromAddons', 'excludeUncachedFromServices', 'excludeUncachedFromStreamTypes',
+                  'excludeUncachedMode')
 # The sync config: no Usenet, no Real-Debrid, no subsync, and nothing that starts work in the background, so a read of
 # a listed link opens that one file and nothing else (no failover to the next row, no preload, no pre-caching).
 SYNC_SETTINGS = {
@@ -260,17 +283,24 @@ def _within_services(config):
     return kept
 
 
-def sync_config(viewer, manifest_url=None, names=(SUBSYNC_PRESET_NAME,)):
-    """The config subsync finds files through: the viewer's sources (so it finds the file being watched) and subtitle
-    sources (so it syncs what the viewer sees), without subsync itself, without Usenet, without any way to Real-Debrid
-    (realdebrid.without_real_debrid), with no addon naming a service it left out (_within_services), and with nothing
-    that resolves or queues in the background."""
-    new = copy.deepcopy(viewer)
-    new['presets'] = [p for p in new.get('presets') or []
-                      if not is_subsync_preset(p, manifest_url, names) and p.get('type') not in USENET_PRESETS]
-    new['services'] = [s for s in new.get('services') or [] if s.get('id') not in USENET_SERVICES]
-    new, _ = realdebrid.without_real_debrid(new)
-    new['presets'] = _within_services(new)
+def _one_kind(presets, kind):
+    """The addons, each one with its own Sources choice (SOURCES_CHOICE: Prowlarr) set to search `kind` only ('torrent'
+    in the sync config, 'usenet' in the Usenet config), and one set to the other kind only left out."""
+    kept = []
+    for preset in presets:
+        values = SOURCES_CHOICE.get(preset.get('type'))
+        if values:
+            wanted = values[0] if kind == 'torrent' else values[1]
+            options = preset.setdefault('options', {})
+            chosen = options.get('sources')
+            if isinstance(chosen, list) and chosen and wanted not in [str(c).lower() for c in chosen]:
+                continue
+            options['sources'] = [wanted]
+        kept.append(preset)
+    return kept
+
+
+def _with_sync_settings(new):
     for key, value in SYNC_SETTINGS.items():
         if isinstance(value, dict):
             new[key] = {**(new.get(key) or {}), **value}
@@ -281,11 +311,110 @@ def sync_config(viewer, manifest_url=None, names=(SUBSYNC_PRESET_NAME,)):
     return new
 
 
-def sync_config_problems(sync):
-    """Why the sync config can't find any file subsync could read (empty = it can)."""
+def sync_config(viewer, manifest_url=None, names=(SUBSYNC_PRESET_NAME,)):
+    """The config subsync finds files through: the viewer's sources (so it finds the file being watched) and subtitle
+    sources (so it syncs what the viewer sees), without subsync itself, without Usenet (no Usenet addon or service, and
+    Prowlarr set to its torrent indexers: _one_kind), without any way to Real-Debrid (realdebrid.without_real_debrid),
+    with no addon naming a service it left out (_within_services), and with nothing that resolves or queues in the
+    background."""
+    new = copy.deepcopy(viewer)
+    new['presets'] = [p for p in new.get('presets') or []
+                      if not is_subsync_preset(p, manifest_url, names) and p.get('type') not in USENET_PRESETS]
+    new['services'] = [s for s in new.get('services') or [] if s.get('id') not in USENET_SERVICES]
+    new, _ = realdebrid.without_real_debrid(new)
+    new['presets'] = _one_kind(_within_services(new), 'torrent')
+    return _with_sync_settings(new)
+
+
+def _readable_services(services):
+    """The Usenet services of a service list that AIOSubtitles reads through (USENET_READABLE), switched on; NzbDAV and
+    AltMount only through AIOStreams' own proxy (their credentials hold the address AIOStreams gave them)."""
+    kept = []
+    for s in services or []:
+        if s.get('id') not in USENET_READABLE or not s.get('enabled', True):
+            continue
+        if s.get('id') in PROXIED_ONLY and not ((s.get('credentials') or {}).get('aiostreamsAuth')):
+            continue
+        kept.append(s)
+    return kept
+
+
+def _usable(config):
+    """The config's addons without one that has no service it can use on the config's list (AIOStreams refuses a config
+    where Newznab, Prowlarr or Easynews Search has none, whatever their own choice says)."""
+    have = {s.get('id') for s in config.get('services') or []}
+    kept = []
+    for preset in config.get('presets') or []:
+        can = USENET_ADDONS.get(preset.get('type'))
+        if can is not None:
+            chosen = (preset.get('options') or {}).get('services')
+            if not (set(chosen) if isinstance(chosen, list) else have) & have & can:
+                continue
+        kept.append(preset)
+    return kept
+
+
+def usenet_sync_config(viewer, manifest_url=None, names=(SUBSYNC_PRESET_NAME,), subtitles=False):
+    """The Usenet config: the viewer's Usenet searches (USENET_ADDONS, Prowlarr set to its Usenet
+    indexers) and the Usenet services AIOSubtitles reads through (_readable_services), nothing else; with `subtitles`
+    also the viewer's subtitle sources, for a setup that has no sync config. Made by the sync config's steps
+    (no way to Real-Debrid, each addon's own Services choice cut to this list, _within_services), plus: an addon with no
+    service it can use left out (_usable); only ready copies listed and errors shown (USENET_SETTINGS)."""
+    new = copy.deepcopy(viewer)
+    new['presets'] = [p for p in new.get('presets') or [] if not is_subsync_preset(p, manifest_url, names)
+                      and (p.get('type') in USENET_ADDONS or (subtitles and is_subtitle_preset(p)))]
+    new['services'] = _readable_services(new.get('services'))
+    new, _ = realdebrid.without_real_debrid(new)
+    new['presets'] = _one_kind(_within_services(new), 'usenet')
+    new['presets'] = _usable(new)
+    new = _with_sync_settings(new)
+    new.update(USENET_SETTINGS)
+    for key in USENET_DROPPED:
+        new.pop(key, None)
+    if isinstance(new.get('hideErrorsForResources'), list):
+        new['hideErrorsForResources'] = [r for r in new['hideErrorsForResources'] if r != 'stream']
+    return new
+
+
+def usenet_route(viewer, manifest_url=None, names=(SUBSYNC_PRESET_NAME,)):
+    """(services, why): the Usenet services the viewer's Usenet files would be read through, in USENET_READABLE's order
+    (TorBox only when a kept Usenet search can use it), and None; or ([], why there are none): 'proxy' (NzbDAV or
+    AltMount not through AIOStreams' proxy), 'nntp' (only Stremio's NNTP streams) or 'none' (no Usenet
+    search AIOSubtitles uses)."""
+    usenet = usenet_sync_config(viewer, manifest_url, names)
+    have = {s.get('id') for s in usenet['services']}
+    used = set()
+    for preset in usenet['presets']:
+        chosen = (preset.get('options') or {}).get('services')
+        used |= (set(chosen) if isinstance(chosen, list) else have) & have & USENET_ADDONS[preset['type']]
+    if used:
+        return [s for s in USENET_READABLE if s in used], None
+    theirs = {s.get('id') for s in viewer.get('services') or [] if s.get('enabled', True)}
+    if theirs & set(PROXIED_ONLY):
+        return [], 'proxy'
+    if 'stremio_nntp' in theirs:
+        return [], 'nntp'
+    return [], 'none'
+
+
+def usenet_names(services):
+    """'NzbDAV', 'NzbDAV and TorBox Usenet', 'AIOStreams' own Usenet streaming, NzbDAV and TorBox Usenet'."""
+    names = [USENET_NAMES[s] for s in services if s in USENET_NAMES]
+    return names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1] if names else ''
+
+
+NO_SERVICE = 'no debrid service (subsync reads files from debrid services only, not Usenet or torrents)'
+# Where Usenet files are read too
+NO_SERVICE_USENET = ('no debrid or Usenet service AIOSubtitles can read (it reads ready debrid files, and Usenet files '
+                     'through services that stream part of a file; not torrents, not Stremio\'s NNTP streams)')
+
+
+def sync_config_problems(sync, usenet=False):
+    """Why the sync config can't find any file subsync could read (empty = it can). `usenet`: Usenet files are read too
+    where this is said."""
     problems = []
     if not realdebrid.debrid_in_use(sync):
-        problems.append('no debrid service (subsync reads files from debrid services only, not Usenet or torrents)')
+        problems.append(NO_SERVICE_USENET if usenet else NO_SERVICE)
     if not stream_sources(sync):
         problems.append('no stream source other than Usenet ones')
     return problems

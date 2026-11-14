@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, blob BLOB NOT NULL, creat
   seen_day TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS usage (id TEXT NOT NULL, day TEXT NOT NULL, files INTEGER NOT NULL DEFAULT 0,
   bytes INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, day));
+CREATE TABLE IF NOT EXISTS usenet_usage (id TEXT NOT NULL, day TEXT NOT NULL, listings INTEGER NOT NULL DEFAULT 0,
+  stopped INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, day));
 """
+# usenet_usage is a table of its own: the usage table keeps its four columns, so the image before Usenet,
+# whose usage insert names none, still works on this database (the way back after a deploy)
 
 
 def new_token():
@@ -116,6 +120,7 @@ class Users:
         with self.lock:
             cur = self.db.execute("DELETE FROM users WHERE id=?", (uid,))
             self.db.execute("DELETE FROM usage WHERE id=?", (uid,))
+            self.db.execute("DELETE FROM usenet_usage WHERE id=?", (uid,))
         return cur.rowcount == 1
 
     def touch(self, token):
@@ -134,7 +139,9 @@ class Users:
             for uid in gone:
                 self.db.execute("DELETE FROM users WHERE id=?", (uid,))
                 self.db.execute("DELETE FROM usage WHERE id=?", (uid,))
+                self.db.execute("DELETE FROM usenet_usage WHERE id=?", (uid,))
             self.db.execute("DELETE FROM usage WHERE day < ?", (day_of(self.clock() - 40 * DAY),))
+            self.db.execute("DELETE FROM usenet_usage WHERE day < ?", (day_of(self.clock() - 40 * DAY),))
         return len(gone)
 
     # -- usage per UTC day -------------------------------------------------------------------------------------
@@ -149,3 +156,21 @@ class Users:
             row = self.db.execute("SELECT files, bytes FROM usage WHERE id=? AND day=?",
                                   (self.user_id(token), day_of(self.clock()))).fetchone()
         return {"files": row[0], "bytes": row[1]} if row else {"files": 0, "bytes": 0}
+
+    # -- Usenet listings per UTC day ----------------------------------------------------------------------------
+    def add_usenet_listing(self, token):
+        with self.lock:
+            self.db.execute("INSERT INTO usenet_usage (id, day, listings) VALUES (?,?,1) ON CONFLICT(id, day) DO UPDATE "
+                            "SET listings=listings+1", (self.user_id(token), day_of(self.clock())))
+
+    def stop_usenet(self, token):
+        """No more Usenet listings for this person today: their indexer or Usenet service answered with an error."""
+        with self.lock:
+            self.db.execute("INSERT INTO usenet_usage (id, day, stopped) VALUES (?,?,1) ON CONFLICT(id, day) DO UPDATE "
+                            "SET stopped=1", (self.user_id(token), day_of(self.clock())))
+
+    def usenet_usage(self, token):
+        with self.lock:
+            row = self.db.execute("SELECT listings, stopped FROM usenet_usage WHERE id=? AND day=?",
+                                  (self.user_id(token), day_of(self.clock()))).fetchone()
+        return {"listings": row[0], "stopped": bool(row[1])} if row else {"listings": 0, "stopped": False}

@@ -60,12 +60,34 @@ def every_state():
     sections = [('Your config 1a2b3c4d…', [('+', 'adds 1 subtitle source: subsync (synced copies of the subtitles you '
                                                  'already get)')],
                  'Nothing else in it changes. A copy of it as it is now is saved first.'),
-                ("subsync's own config (new)", [], 'a copy of yours without Usenet, Real-Debrid and subsync, with nothing '
-                                                   'running in the background, so subsync can find the file you are '
-                                                   'watching. It never appears in your apps.')]
+                ("subsync's own config (new)", [], 'a copy of yours without Real-Debrid and subsync, and without Usenet '
+                                                   'unless you turn it on, with nothing running in the background, so '
+                                                   'subsync can find the file you are watching. It never appears in your '
+                                                   'apps.')]
     words = [w for heading, lines, after in sections for w in [heading, after] + [line for _, line in lines]] + ['+']
     add('review', screens.review(sections), *words)
     add('review-sign-in', screens.review(sections, cache=True, sign_in=True), *words)
+    # Usenet: the question, its stop, its number, the third config, a Usenet-only config, the check line
+    add('choices-usenet', screens.choices(['eng'], False, f'{PUBLIC}/subsync', usenet=True), f'{PUBLIC}/subsync')
+    no_usenet = (engine.NO_USENET, engine.NO_USENET_WAY_OUT_PAGE)
+    add('choices-usenet-stop', screens.choices(['eng'], False, f'{PUBLIC}/subsync', usenet=False, stop=no_usenet),
+        f'{PUBLIC}/subsync', *no_usenet)
+    add('limits-usenet', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50',
+                                                     'SUBSYNC_USENET_LISTINGS_PER_DAY': '10'}, usenet=True))
+    usenet_section = ("subsync's Usenet config (new)", [], 'only your Usenet searches and services, with nothing running '
+                      'in the background, so subsync can find a file you play from Usenet when your debrid service '
+                      "doesn't have it. It never appears in your apps.")
+    add('review-usenet', screens.review(sections + [usenet_section]), *words, usenet_section[2])
+    add('review-usenet-only', screens.review([sections[0], usenet_section]), *words, usenet_section[2])
+    usenet_checks = [('ok', f'Your apps can reach subsync at {PUBLIC}/subsync', None),
+                                     ('ok', 'AIOStreams asks subsync for subtitles', None),
+                                     ('ok', "subsync's Usenet config answers (no search made, to spare your indexer's "
+                                            "daily calls)", None)]
+    add('check-usenet', screens.check('yourself', usenet_checks, running=False), *[r[1] for r in usenet_checks[:2]])
+    add('check-usenet-warned', screens.check('yourself', [('warn', "subsync's Usenet config doesn't answer. Run "
+                                                                   "./setup again, or send the output of ./setup "
+                                                                   "--status with a bug report.", None)],
+                                             running=False))
     progress = [('done', "Created subsync's own config (5e6f7a8b…)", None),
                 ('now', 'Building subsync (the first time takes a few minutes) ...', None)]
     add('install-running', screens.installing('yourself', progress, running=True), *[r[1] for r in progress])
@@ -101,7 +123,9 @@ def every_state():
         'http://subs.example.com', 'gateway', hosting.ADDRESS_WORDS)
     add('host-signups', screens.host_signups('k7pm-2qra-9xwd'), 'k7pm-2qra-9xwd')
     add('host-choices', screens.host_choices())
+    add('host-choices-usenet', screens.host_choices(usenet=True))
     add('host-limits', screens.limits('host', {}))
+    add('host-limits-usenet', screens.limits('host', {}, usenet=True))
     add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'},
                                               problem=('SUBSYNC_SYNCS_AT_ONCE', 'A whole number from 1, or auto.')),
         'A whole number from 1, or auto.')

@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS offers (file_key TEXT NOT NULL, lang TEXT NOT NULL, p
   updated REAL NOT NULL, PRIMARY KEY (file_key, lang, pos));
 CREATE TABLE IF NOT EXISTS judged (file_key TEXT NOT NULL, lang TEXT NOT NULL, rule TEXT NOT NULL, at REAL NOT NULL,
   PRIMARY KEY (file_key, lang));
+CREATE TABLE IF NOT EXISTS usenet_misses (key TEXT PRIMARY KEY, at REAL NOT NULL);
 """
+USENET_MISSES_KEPT_S = 2 * DAY
 
 
 def result_key(file_key, sub_sha):
@@ -276,6 +278,20 @@ class Store:
         with self.lock:
             row = self.db.execute("SELECT retry_at FROM files WHERE file_key=? AND fails>0", (alias,)).fetchone()
         return bool(row and row[0] is not None and row[0] > self.clock())
+
+    # -- Usenet: a file not found there ---------------------------------------------------------------------------
+    def usenet_missed(self, key):
+        """A file not found in a Usenet listing, by a key that names neither the person nor the file (worker.UsenetGate),
+        so it lasts through restarts and stopped workers. Entries older than two days go."""
+        now = self.clock()
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO usenet_misses VALUES (?,?)", (key, now))
+            self.db.execute("DELETE FROM usenet_misses WHERE at < ?", (now - USENET_MISSES_KEPT_S,))
+
+    def usenet_recently_missed(self, key, within):
+        with self.lock:
+            row = self.db.execute("SELECT at FROM usenet_misses WHERE key=?", (key,)).fetchone()
+        return bool(row and self.clock() - row[0] < within)
 
     # -- which languages were judged for a file -------------------------------------------------------------------
     def judged_put(self, file_key, langs, rule):

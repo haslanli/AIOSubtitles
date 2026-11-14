@@ -41,6 +41,15 @@ LANGUAGES=English
 # for that limit keep their originals.
 AUDIO=no
 
+# Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a second
+# config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it needs.
+# Recommended if you play from Usenet and your indexer's daily limit isn't tight. The cost: at most 10 extra
+# searches a day through your indexers (usually none, because your AIOStreams reuses the search you just made),
+# fetching a release's NZB when your Usenet service doesn't have it yet, and some Usenet data per file (more than
+# the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and everyone who plays
+# the same release, because one sync serves all of them. Off: nothing on Usenet is searched or read.
+USENET=no
+
 # Asked only with the audio route on: the most it reads of one file, through your debrid service: 0.5, 1, 2 or 4 GB.
 # Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, re-encodes); remuxes
 # usually carry image subtitles and need no audio. Higher: very high-quality files such as 4K remuxes get synced

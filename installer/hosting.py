@@ -17,7 +17,7 @@ PORT = plan.SUBSYNC_PORT
 ADDRESS_WORDS = 'The web address of your public instance, with https, like https://subtitles.example.com.'   # the address question's own words
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
-         'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY') + limits.names(LIMITS)
+         'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET') + limits.names(LIMITS)
 _INVITE_LETTERS = 'abcdefghjkmnpqrstuvwxyz23456789'     # no 0/o, 1/l/i: easy to read out and type
 
 
@@ -52,8 +52,11 @@ def public_env(answers, secret, limit_values):
         'SUBSYNC_TRUSTED_PROXY': answers.get('SUBSYNC_TRUSTED_PROXY') or 'gateway',
         'SUBSYNC_SUBDL_KEY': answers.get('SUBDL_KEY', ''),
         'SUBSYNC_SUBSOURCE_KEY': answers.get('SUBSYNC_SUBSOURCE_KEY', ''),
+        # whether people may turn Usenet on for themselves (with their own services, through their AIOStreams)
+        'SUBSYNC_USENET': 'on' if str(answers.get('SUBSYNC_USENET', '')).lower() in ('yes', 'on', 'true') else 'off',
     }
-    env.update(limits.env_lines(LIMITS, limit_values))
+    usenet = env['SUBSYNC_USENET'] == 'on'
+    env.update(limits.env_lines(limits.hosting(usenet), limit_values))
     return {k: v for k, v in env.items() if v not in (None, '')}
 
 

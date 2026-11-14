@@ -176,9 +176,23 @@ class SyncConfig(unittest.TestCase):
 
     def test_an_addon_without_its_own_services_choice_is_kept_as_it_is(self):
         viewer = copy.deepcopy(VIEWER)
-        prowlarr = {'type': 'prowlarr', 'instanceId': 'prw', 'enabled': True, 'options': {'name': 'Prowlarr'}}
-        viewer['presets'].append(copy.deepcopy(prowlarr))
-        self.assertEqual(plan.sync_config(viewer, URL)['presets'][-1], prowlarr)
+        store = {'type': 'stremthruStore', 'instanceId': 'sts', 'enabled': True, 'options': {'name': 'StremThru Store'}}
+        viewer['presets'].append(copy.deepcopy(store))
+        self.assertEqual(plan.sync_config(viewer, URL)['presets'][-1], store)
+
+    # AIOStreams' Prowlarr searches its Usenet indexers beside its torrent ones whatever its
+    # services, unless its own Sources choice leaves Usenet out, so the sync config sets it to torrent only
+    def test_prowlarr_searches_torrent_indexers_only(self):
+        for chosen, kept in [(None, ['torrent']), ([], ['torrent']), (['torrent', 'usenet'], ['torrent']),
+                             (['Torrent'], ['torrent']), (['usenet'], None)]:
+            with self.subTest(sources=chosen):
+                viewer = copy.deepcopy(VIEWER)
+                options = {'name': 'Prowlarr'} if chosen is None else {'name': 'Prowlarr', 'sources': chosen}
+                viewer['presets'].append({'type': 'prowlarr', 'instanceId': 'prw', 'enabled': True, 'options': options})
+                found = [p['options'].get('sources') for p in plan.sync_config(viewer, URL)['presets']
+                         if p['type'] == 'prowlarr']
+                self.assertEqual(found, [kept] if kept else [])
+                self.assertEqual(viewer['presets'][-1]['options'], options)   # theirs as it was
 
 
 class RealDebrid(unittest.TestCase):
@@ -234,7 +248,15 @@ class Files(unittest.TestCase):
         self.assertEqual(env['SUBSYNC_SOURCE_PASSWORD'], 'P')
         self.assertEqual(sorted(env), sorted(['SUBSYNC_SOURCE_MANIFEST', 'SUBSYNC_SOURCE_PASSWORD', 'SUBSYNC_PUBLIC_BASE',
                                              'SUBSYNC_BASE_PATH', 'SUBSYNC_ADDON_KEY',
-                                             'SUBSYNC_LANGUAGES', 'SUBSYNC_URL_REWRITE', 'SUBSYNC_AUDIO_ROUTE']))
+                                             'SUBSYNC_LANGUAGES', 'SUBSYNC_URL_REWRITE', 'SUBSYNC_AUDIO_ROUTE',
+                                             'SUBSYNC_USENET']))                   # off unless turned on
+        self.assertEqual(env['SUBSYNC_USENET'], 'off')
+        on = plan.subsync_env(dict(self.S, usenet=True, usenet_manifest='http://u/manifest.json', usenet_password='Q'))
+        self.assertEqual((on['SUBSYNC_USENET'], on['SUBSYNC_USENET_MANIFEST'], on['SUBSYNC_USENET_PASSWORD']),
+                         ('on', 'http://u/manifest.json', 'Q'))
+        only = plan.subsync_env(dict(self.S, sync_manifest='', sync_password='', usenet=True,
+                                     usenet_manifest='http://u/manifest.json', usenet_password='Q'))
+        self.assertNotIn('SUBSYNC_SOURCE_MANIFEST', only)                     # a Usenet-only setup
         self.assertLessEqual(set(env), set(explain.WRITTEN_BY_SETUP))          # ./setup writes only the lines it owns
         env = plan.subsync_env(dict(self.S, audio=True, public_base='http://1.2.3.4:8790', rewrite=''))
         self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'on')

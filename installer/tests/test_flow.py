@@ -44,7 +44,21 @@ def refusal(config):
                         'but it is not enabled or has missing credentials')
         if not chosen:
             return f'{name} requires at least one usable service, but none were found.'
+    for preset in (config or {}).get('presets') or []:     # no usable service at all
+        can = CAN_USE.get(preset.get('type'))
+        if not preset.get('enabled') or can is None:
+            continue
+        chosen = (preset.get('options') or {}).get('services')
+        usable = {s for s, found in services.items() if found.get('enabled') and found.get('credentials') is not None}
+        if not ((set(chosen) if isinstance(chosen, list) else usable) & usable & can):
+            name = (preset.get('options') or {}).get('name') or preset.get('type')
+            return f'{name} requires at least one usable service, but none were found.'
     return None
+
+
+_NEWZ = {'torbox', 'nzbdav', 'altmount', 'stremio_nntp', 'stremthru_newz', 'aiostreams'}
+CAN_USE = {'newznab': _NEWZ, 'nzbhydra': _NEWZ, 'easynews-search': {'easynews'},
+           'prowlarr': _NEWZ | {'realdebrid', 'alldebrid', 'premiumize', 'debridlink', 'offcloud', 'easydebrid'}}
 
 
 class FakeAios:
@@ -120,6 +134,8 @@ class FakeAios:
                 parts = path.split('/')
                 if len(parts) > 4 and parts[1] == 'stremio':
                     uuid, resource = parts[2], parts[4]
+                    if resource == 'manifest.json' and uuid in outer.users:   # each config's manifest ('s check)
+                        return self._json(200, {'id': 'com.aiostreams', 'name': 'AIOStreams', 'resources': ['stream']})
                     if resource == 'subtitles':
                         outer.subtitle_calls = getattr(outer, 'subtitle_calls', 0) + 1
                         return self._json(200, {'subtitles': []})

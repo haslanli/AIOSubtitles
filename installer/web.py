@@ -250,6 +250,8 @@ class App:
             chosen = [code for code in form.get('LANGUAGES', []) if code]
             e.answers['LANGUAGES'] = ', '.join(chosen)
             e.answers['AUDIO'] = 'yes' if one.get('AUDIO') else 'no'
+            if getattr(e, 'usenet_services', None):
+                e.answers['USENET'] = 'yes' if one.get('USENET') else 'no'
             if offer:
                 e.answers['ADD_OPENSUBTITLES'] = 'yes' if one.get('ADD_OPENSUBTITLES') else 'no'
             for key in ('SUBDL_KEY', 'WYZIE_KEY'):
@@ -262,10 +264,13 @@ class App:
         text = e.answers.get('LANGUAGES') or filled.get('LANGUAGES') or 'English'
         languages = [three for _, _, three in (plan.parse_languages(text)[0] or [])] or ['eng']
         audio = str(e.answers.get('AUDIO') or filled.get('AUDIO')) == 'yes'
+        usenet = str(e.answers.get('USENET') or filled.get('USENET')) == 'yes' \
+            if getattr(e, 'usenet_services', None) else None
         address = e.answers.get('PUBLIC_ADDRESS') or filled.get('PUBLIC_ADDRESS') or \
             plan.public_default(e.s['aios_public'], dockerenv.lan_address())[1]
         return self.page(screens.choices(languages, audio, address, s.problems.get('choices'), offer_opensubtitles=offer,
-                                         add_opensubtitles=e.answers.get('ADD_OPENSUBTITLES', 'yes') == 'yes'))
+                                         add_opensubtitles=e.answers.get('ADD_OPENSUBTITLES', 'yes') == 'yes',
+                                         usenet=usenet, stop=s.stops.get('choices')))
 
     def step_limits(self, s, method, form, one):
         e = s.e
@@ -273,11 +278,16 @@ class App:
             e.answers[limits.DAILY.setting] = one.get(limits.DAILY.setting, '')
             if one.get(limits.AUDIO.setting):
                 e.answers['AUDIO_BUDGET'] = one[limits.AUDIO.setting]
+            if one.get(limits.USENET.setting):
+                e.answers[limits.USENET.setting] = one[limits.USENET.setting]
             if s.run('limits', e.limits):
                 return self.go('review')
         values = {limits.DAILY.setting: e.answers.get(limits.DAILY.setting) or e.prefill()[limits.DAILY.setting],
-                  limits.AUDIO.setting: e.answers.get('AUDIO_BUDGET') or e.known_audio_budget() or '1'}
-        return self.page(screens.limits('yourself', values, s.problems.get('limits'), audio=e.audio))
+                  limits.AUDIO.setting: e.answers.get('AUDIO_BUDGET') or e.known_audio_budget() or '1',
+                  limits.USENET.setting: e.answers.get(limits.USENET.setting)
+                  or limits.current(limits.USENET, engine.env_values())}
+        return self.page(screens.limits('yourself', values, s.problems.get('limits'), audio=e.audio,
+                                        usenet=getattr(e, 'usenet', False)))
 
     def step_review(self, s, method, form, one):
         e = s.e
@@ -370,22 +380,26 @@ class App:
             for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY'):
                 if one.get(key):
                     e.answers[key] = one[key]
+            e.answers['SUBSYNC_USENET'] = 'yes' if one.get('SUBSYNC_USENET') else 'no'
             if s.run('hostchoices', e.host_choices):
                 return self.go('hostlimits')
-        return self.page(screens.host_choices(s.problems.get('hostchoices')))
+        usenet = e.answers.get('SUBSYNC_USENET', '') == 'yes' if 'SUBSYNC_USENET' in e.answers else \
+            engine.env_values().get('SUBSYNC_USENET', 'off').strip().lower() in ('on', 'yes', 'true', '1')
+        return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=usenet))
 
     def step_hostlimits(self, s, method, form, one):
         e = s.e
         if method == 'POST':
-            for lim in limits.hosting():
+            for lim in limits.hosting(getattr(e, 'host_usenet', True)):
                 if one.get(lim.setting):
                     e.answers[lim.setting] = one[lim.setting]
             if s.run('hostlimits', e.host_limits):
                 s.start_job('hostinstall', e.host_install)
                 return self.go('hostinstall')
         env = engine.env_values()
-        values = {lim.setting: e.answers.get(lim.setting) or limits.current(lim, env) for lim in limits.hosting()}
-        return self.page(screens.limits('host', values, s.problems.get('hostlimits')))
+        usenet = getattr(e, 'host_usenet', True)
+        values = {lim.setting: e.answers.get(lim.setting) or limits.current(lim, env) for lim in limits.hosting(usenet)}
+        return self.page(screens.limits('host', values, s.problems.get('hostlimits'), usenet=usenet))
 
     def step_hostinstall(self, s, method, form, one):
         return self.installing(s, 'hostinstall', method, 'hostcheck')

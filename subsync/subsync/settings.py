@@ -213,6 +213,14 @@ class Settings:
         self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS", "256"))
         # files worked on at once for everyone (each person's worker takes a place of one shared turn)
         self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE", "auto"))
+        # Usenet: off by default. On: files are also looked for through a second config, the Usenet
+        # config, when the sync config doesn't have them, at most SUBSYNC_USENET_LISTINGS_PER_DAY times a day (per
+        # person in public mode, where "on" lets each person turn it on for themselves and their record holds the
+        # Usenet config's link); its reads take the index cap and never the audio route
+        self.usenet = _on(g("SUBSYNC_USENET", "off"))
+        self.usenet_listings_per_day = max(0, int(g("SUBSYNC_USENET_LISTINGS_PER_DAY", "10")))
+        self.usenet_manifest = g("SUBSYNC_USENET_MANIFEST", "")
+        self.usenet_password = g("SUBSYNC_USENET_PASSWORD", "")
 
     def secret_bytes(self):
         """The public mode's secret: base64url of at least 32 random bytes. ValueError otherwise."""
@@ -246,8 +254,10 @@ class Settings:
                 secret_ok = False
             return [name for name, ok in (("SUBSYNC_SECRET_KEY", secret_ok),
                                           ("SUBSYNC_PUBLIC_BASE", bool(self.public_base))) if not ok]
-        return [name for name, value in (("SUBSYNC_SOURCE_MANIFEST", self.source_manifest),
-                                         ("SUBSYNC_SOURCE_PASSWORD", self.source_password),
+        # a setup with Usenet only finds files and subtitles through its Usenet config alone
+        usenet_only = bool(self.usenet and self.usenet_manifest and self.usenet_password)
+        return [name for name, value in (("SUBSYNC_SOURCE_MANIFEST", self.source_manifest or usenet_only),
+                                         ("SUBSYNC_SOURCE_PASSWORD", self.source_password or usenet_only),
                                          ("SUBSYNC_PUBLIC_BASE", self.public_base)) if not value]
 
     def conflicts(self):

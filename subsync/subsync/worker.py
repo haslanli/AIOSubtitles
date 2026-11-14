@@ -2,7 +2,9 @@
 with SUBSYNC_SYNCS_AT_ONCE places, and never two of them work on the same file at once).
 
 A job is a file a viewer opened or played. A subtitle request that names the file (its name, size or hash, as Stremio
-and AIOStreams send them) queues it; the file is then found in subsync's own AIOStreams listing (cached debrid only).
+and AIOStreams send them) queues it; the file is then found in subsync's own AIOStreams listing (cached debrid only),
+and, with Usenet on and only when that listing doesn't have it, in the Usenet config's listing (UsenetGate: a few a
+day, never twice a day for the same file, none after an error).
 Reads count toward a daily budget (default 50 GB, bytes received). Any HTTP 403/429 stops every read for a back-off
 (15 min, doubling to 6 h), since the refusal is most likely per account. Every connection is closed after its read
 (reader.py).
@@ -12,20 +14,85 @@ import hashlib
 import logging
 import threading
 import time
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import choose, pipeline, srclimits
+from . import choose, pipeline, realdebrid, srclimits
 from .langs import lang3
 from .mkv import MkvIndex, NotMatroska  # noqa: F401
 from .mp4 import open_index
-from .reader import RangeReader, ReadFailed, Refused, Stopped
-from .sources import bt_alias, expected_size, fetch_subtitle, same_hash
+from .reader import MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused, Stopped
+from .sources import bt_alias, expected_size, fetch_subtitle, plausible_size, same_hash
 from .store import JUDGED_FOR_S, result_key
 from .subs import decode, fingerprint, is_ass, parse
 
 log = logging.getLogger("subsync.worker")
 UNLISTED_S = 3600
 FETCHED_CAP = 32 * 1024 * 1024   # downloads kept for the audio job that follows a pick (worker._fetch_one), in bytes
+# Usenet: fixed rules, explained in explain.RULES
+USENET_UNLISTED_S = 24 * 3600     # a file not found on Usenet isn't looked up there again for a day
+USENET_FIRST_READ_S = 120         # its first read may wait this long (the Usenet service opens the NZB first)
+USENET_MAX_RE_RESOLVE = 1         # its link is asked at most twice per job (a fresh look-up could fetch the NZB again)
+
+
+def usenet_size_ok(listed):
+    """The rule a Usenet file's served size must meet: AIOStreams lists a release by its whole NZB (the video and its
+    par2 and other files), so the file it serves is a few per cent smaller (3.79 GB served for 4.10 GB
+    listed); at least half the listed size and not more than it, so a small error video (AIOStreams answers a release
+    it can't open with a 19,856-byte download_failed.mp4) or another file is still refused."""
+    if not plausible_size(listed):
+        return lambda total: True
+    return lambda total: listed * 0.5 <= total <= listed
+
+
+class StoreUsenetCounts:
+    """The Usenet listings and the day's stop of a service for one viewer (./setup's install), in the store's day
+    counters. Public mode counts per person in the users' records instead (public.UserLimits)."""
+
+    def __init__(self, store):
+        self.store = store
+
+    def listings(self):
+        return self.store.bytes_today("usenet")
+
+    def add_listing(self):
+        self.store.add_bytes("usenet", 1)
+
+    def stopped(self):
+        return self.store.bytes_today("usenet_stop") > 0
+
+    def stop(self):
+        if not self.stopped():
+            self.store.add_bytes("usenet_stop", 1)
+
+
+class UsenetGate:
+    """Whether a Usenet listing may be made now: at most `per_day` a UTC day (0: none), none for the
+    rest of the day once a Usenet listing or read failed (an indexer's error or limit, or one AIOSubtitles can't tell
+    from it), none for a file not found there in the last 24 h. `counts`: listings(), add_listing(), stopped(), stop();
+    `who`: an opaque key of the person (public mode), so one person's misses don't stop another's look-ups."""
+
+    def __init__(self, store, per_day, counts, who=""):
+        self.store, self.per_day, self.counts, self.who = store, per_day, counts, who or ""
+
+    @staticmethod
+    def key_of(who, alias):
+        return hashlib.sha256(f"usenet|{who}|{alias}".encode()).hexdigest()[:32]
+
+    def may_list(self, alias):
+        if self.per_day <= 0 or self.counts.stopped() or self.counts.listings() >= self.per_day:
+            return False
+        return not self.store.usenet_recently_missed(self.key_of(self.who, alias), USENET_UNLISTED_S)
+
+    def listed(self):
+        self.counts.add_listing()
+
+    def missed(self, alias):
+        self.store.usenet_missed(self.key_of(self.who, alias))
+
+    def stop(self, why):
+        self.counts.stop()
+        log.info("Usenet stopped until 00:00 UTC: %s", why)
 
 
 class Safety:
@@ -152,6 +219,7 @@ class Job:
         self.fetched = {}         # lang -> [(candidate, text)] downloaded for a file that waits for the audio route
         self.not_before = 0.0
         self.audio = False        # may this job use the audio route (set when the viewer picked subsync's entry)
+        self.usenet = False       # found through the Usenet config: index cap, never the audio route
 
     @property
     def alias(self):
@@ -181,9 +249,13 @@ def rewrite(url, rules):
 
 
 class Worker(threading.Thread):
-    def __init__(self, settings, store, aios, safety, vad_factory=None, extra=None, turn=None, limits=None):
+    def __init__(self, settings, store, aios, safety, vad_factory=None, extra=None, turn=None, limits=None, usenet=None,
+                 usenet_gate=None):
         super().__init__(daemon=True, name="subsync-worker")
         self.s, self.store, self.aios, self.safety = settings, store, aios, safety
+        # Usenet: the Usenet config's sources.Aios and its UsenetGate, both or neither
+        self.usenet, self.usenet_gate = (usenet, usenet_gate) if usenet is not None and usenet_gate is not None \
+            else (None, None)
         # public mode: the turn every person's worker shares, and this person's limits (may_queue, may_start_file,
         # file_started, before_read, after_read)
         self.turn = turn if turn is not None else NoTurn()
@@ -205,6 +277,7 @@ class Worker(threading.Thread):
         self.by_id = {}           # (candidate id, language) -> candidate, from this person's lists (public mode's recipes)
         self.fetched_subs = {}    # subtitle url -> (time, bytes): downloads shared by a file's text pass and audio job
         self.unlisted = {}        # alias -> when a file was last not found in the listing
+        self.usenet_rows = {}     # alias -> (when, row) of a file found on Usenet: a retry doesn't list again
         self.pickable = {}        # alias -> job of a file that needs the audio route and waits for the viewer's pick
         self.picked_early = {}    # alias -> when its entry was downloaded before the file was known to need audio
         self.seen = {}            # alias -> (type, video_id, hints) of its last job, so a pick can ask for the list again
@@ -235,7 +308,13 @@ class Worker(threading.Thread):
             return job
 
     def audio_allowed(self, job):
-        return self.s.audio_route and (job.audio or not self.s.audio_on_pick)
+        return self.s.audio_route and not job.usenet and (job.audio or not self.s.audio_on_pick)
+
+    def _lister(self):
+        """The config subtitle lists come through: the sync config, else (a setup with none) the Usenet one."""
+        if getattr(self.aios, "base", True) or self.usenet is None:
+            return self.aios
+        return self.usenet
 
     def _restore(self, alias):
         """After a restart: a file that waited for a pick, and its original subtitles, from the store (cv held)."""
@@ -558,13 +637,20 @@ class Worker(threading.Thread):
 
     def process(self, job):
         hints = dict(job.hints)
-        row = self.aios.find_row(job.type, job.video_id, hints)
+        job.usenet = False
+        row = self.aios.find_row(job.type, job.video_id, hints)   # none without a sync config (Usenet only)
+        if row is None and self.usenet is not None:
+            row = self._usenet_row(job, hints)
+            job.usenet = row is not None
         if row is None:
             log.info("file not in the listing %s", job.label)
             self.unlisted[job.alias] = time.time()
             while len(self.unlisted) > 5000:
                 self.unlisted.pop(next(iter(self.unlisted)))
             return
+        if job.usenet:      # two people playing the same Usenet release at once: it is read once
+            with self.turn.claim(f"usenet:{job.alias}"):
+                return self._process_row(job, hints, row, None)
         bt = bt_alias(row)
         if not bt:
             return self._process_row(job, hints, row, None)
@@ -574,9 +660,43 @@ class Worker(threading.Thread):
         with self.turn.claim(bt):   # another person playing the same torrent file under another name waits, then reads nothing
             return self._process_row(job, hints, row, bt)
 
+    def _usenet_row(self, job, hints):
+        """The played file's row in one Usenet listing, when the gate allows one: the listing is
+        counted; an error row, an HTTP error or no answer stops Usenet for the day and nothing is read; a file not
+        listed isn't looked up there again for a day."""
+        kept = self.usenet_rows.get(job.alias)
+        if kept and time.time() - kept[0] < UNLISTED_S:     # a retry, or the same file asked for again
+            return kept[1]
+        gate = self.usenet_gate
+        if not gate.may_list(job.alias):
+            return None
+        gate.listed()
+        try:
+            listed = self.usenet.streams(job.type, job.video_id)
+        except realdebrid.Blocked:       # the Usenet config couldn't be checked: nothing was listed
+            return None
+        except urllib.error.HTTPError as e:
+            e.close()
+            gate.stop(f"HTTP {e.code} from the Usenet listing")
+            return None
+        except (OSError, ValueError) as e:
+            gate.stop(f"the Usenet listing failed ({type(e).__name__})")
+            return None
+        if any((s.get("streamData") or {}).get("type") == "error" for s in listed):
+            gate.stop("an error in the Usenet listing")
+            return None
+        found = self.usenet.match(listed, hints, usenet=True)
+        if found is None:
+            gate.missed(job.alias)
+        else:
+            self.usenet_rows[job.alias] = (time.time(), found)
+            while len(self.usenet_rows) > 200:
+                self.usenet_rows.pop(next(iter(self.usenet_rows)))
+        return found
+
     def _process_row(self, job, hints, row, bt):
         """The file's work once its listed row is known (`bt`: the row's torrent file, or None)."""
-        known = self.store.resolve(bt) if bt else None
+        known = self.store.resolve(bt or (job.alias if job.usenet else None)) if bt or job.usenet else None
         if known and self.store.judged_all(known, self.s.languages, self.s.rule_id, time.time() - JUDGED_FOR_S):
             # the same file of the same torrent, judged for every language here lately (read through someone else's
             # listing, in public mode): nothing to read
@@ -605,7 +725,11 @@ class Worker(threading.Thread):
         guard = JobGuard(self.safety, self.store, self.s.daily_budget,
                          self.s.file_cap if self.audio_allowed(job) else self.s.index_cap, limits=self.limits)
         reader = RangeReader(rewrite(url, self.s.url_rewrite), job.label, guard, timeout=self.s.read_timeout,
-                             size=expected_size(hints, row), size_tolerance=0.0005, size_slack=self.s.size_slack)
+                             size=None if job.usenet else expected_size(hints, row), size_tolerance=0.0005,
+                             size_slack=self.s.size_slack,
+                             max_re_resolve=USENET_MAX_RE_RESOLVE if job.usenet else MAX_RE_RESOLVE,
+                             first_timeout=USENET_FIRST_READ_S if job.usenet else None,
+                             size_ok=usenet_size_ok(expected_size(hints, row)) if job.usenet else None)
         if self.limits is not None:
             self.limits.file_started()
         try:
@@ -616,8 +740,12 @@ class Worker(threading.Thread):
             self.store.file_failed(job.alias)
             return
         except Refused:
+            if job.usenet:
+                self.usenet_gate.stop("the first read of a Usenet file was refused")
             raise
         except ReadFailed as e:
+            if job.usenet:      # an NZB fetch that failed can't be told apart from other faults here
+                self.usenet_gate.stop("the first read of a Usenet file failed")
             retry = self.store.file_failed(job.alias)
             log.info("read failed %s (%s), retry %s", job.label, e, "never" if retry is None else time.strftime("%H:%M", time.gmtime(retry)))
             return
@@ -626,6 +754,8 @@ class Worker(threading.Thread):
             # this file's, and the listing is not asked for it again for an hour
             log.info("the listed row is not the played file %s: not synced", job.label)
             self.unlisted[job.alias] = time.time()
+            if job.usenet:
+                self.usenet_gate.missed(job.alias)
             return
         if not hints.get("videoHash"):   # the file's own hash is known now: a subtitle made for it is the better guess
             self._set_originals(job.alias, candidates, hints.get("filename"), oshash)
@@ -640,7 +770,7 @@ class Worker(threading.Thread):
                                          for t in tracks + images], "bytes": reader.bytes,
                               "image_check": pipeline.image_check(pipeline.text_references(index), images), "rule": self.s.rule_id})
         per_lang = {lang: [c for c in candidates if c["lang"] == lang] for lang in self.s.languages}
-        if self.s.audio_route and not self.audio_allowed(job) and not self._has_reference(index):
+        if self.s.audio_route and not job.usenet and not self.audio_allowed(job) and not self._has_reference(index):
             self._await_pick(job, per_lang, hints.get("filename"), oshash)
             log.info("done %s file=%s bytes=%d requests=%d", job.label, file_key, reader.bytes, reader.requests)
             return
@@ -659,14 +789,15 @@ class Worker(threading.Thread):
             got = self.lists.get(job.alias)
         if job.audio and got and now - got[0] < self.LIST_TTL_S:
             return [dict(c) for c in got[1]]
-        candidates = self.aios.subtitles(job.type, job.video_id, hints)
+        lister = self._lister()
+        candidates = lister.subtitles(job.type, job.video_id, hints)
         for c in candidates:   # the config's subtitles, tagged with the source they come from when it is a known one
             c["source"] = srclimits.source_of_url(c.get("url")) or "config"
             c["from_config"] = True
         if self.extra is not None:
             # A source the config already has is asked once, through the config; a subtitle the config lists
             # (same address, or the same source's same id) isn't added twice
-            skip = set(getattr(self.aios, "config_sources", None) or ()) if self.s.skip_config_sources else set()
+            skip = set(getattr(lister, "config_sources", None) or ()) if self.s.skip_config_sources else set()
             seen = {c["url"] for c in candidates} | {(c["source"], c["id"]) for c in candidates}
             try:
                 found = self.extra.search(job.type, job.video_id, langs=self.s.languages, hints=hints, skip=skip)

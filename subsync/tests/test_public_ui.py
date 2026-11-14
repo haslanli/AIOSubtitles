@@ -77,7 +77,8 @@ class Tree(html.parser.HTMLParser):
 def result(**kw):
     # the fields of signup.SignupResult, without importing signup (it needs cryptography), so the page tests run anywhere
     base = dict(token=TOKEN, manifest_url=LINK, changes=["adds 1 subtitle source: AIOSubtitles"], warning=None,
-                added=True, manual=False, languages=["eng", "spa"], store_only=False, to_store_only=False)
+                added=True, manual=False, languages=["eng", "spa"], store_only=False, to_store_only=False,
+                usenet=False, usenet_why=None, sync_made=True)
     base.update(kw)
     return types.SimpleNamespace(**base)
 

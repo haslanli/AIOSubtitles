@@ -49,7 +49,7 @@ REMOVE_TEXT = ("This takes subsync out of your config (1 entry), deletes subsync
 INSTALLER_WORDS = (
     TITLE, QUESTION, *[w for way in WAYS for w in way[1:]], *INTRO, *BEFORE,
     *PERSONAL, *HOSTING, RAIL,
-    *[lim.label for lim in limit_list.personal(audio=True) + limit_list.hosting()],
+    *[lim.label for lim in limit_list.personal(audio=True, usenet=True) + limit_list.hosting()],
     *[heading for heading, _ in limit_list.HOSTING],
     'GB', 'MB', 'files',
     'Save these changes',
@@ -70,6 +70,11 @@ INSTALLER_WORDS = (
     'setup also added OpenSubtitles to your config. Take that out too?',
     'These stay, in case you set it up again; remove them when you no longer need them:',
     'AIOStreams', 'languages', 'audio', 'config', "subsync's config", 'logs',
+    # Usenet
+    'Sync files you play from Usenet too?', 'Let people sync Usenet files too?', "subsync's Usenet config",
+    "subsync's Usenet config (new)", "subsync's Usenet config (update)",
+    "subsync's Usenet config answers (no search made, to spare your indexer's daily calls)",
+    "subsync's Usenet config doesn't answer. Run ./setup again, or send the output of ./setup --status with a bug report.",
 )
 
 
@@ -210,17 +215,19 @@ def config(rows, config_id='', problem=None, stop=None):
 
 
 def choices(languages, audio, public_address, problem=None, offer_opensubtitles=False, add_opensubtitles=True,
-            limit=4):
-    """Your choices: the languages (the site's slots), the audio route, the optional keys, OpenSubtitles when
-    the config has no subtitle source, and subsync's address for your apps."""
+            limit=4, usenet=None, stop=None):
+    """Your choices: the languages (the site's slots), the audio route, Usenet when the config has a Usenet service
+    subsync reads through (`usenet` not None), the optional keys, OpenSubtitles when the config has no subtitle
+    source, and subsync's address for your apps. `stop`: a config without a debrid service answered no to Usenet."""
     error = _error(problem, 'LANGUAGES')
     langs = ('<div class="field"><span class="label" id="languages-l">Which subtitle languages should be synced?</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
              + ui.language_slots([(name, code) for name, _, code in LANGUAGES], languages, limit, 'languages-l',
                                  'languages-help', 'languages-error' if error else None, name='LANGUAGES')
              + f'<p class="help" id="languages-help">{e(_explanation("LANGUAGES"))}</p></div>')
-    body = (langs + ui.choices(_choice('AUDIO', 'Also sync files that carry no subtitles of their own, by listening to '
-                                                'the audio?', audio))
+    usenet_box = (_choice('USENET', 'Sync files you play from Usenet too?', usenet),) if usenet is not None else ()
+    body = (_stop(stop) + langs + ui.choices(_choice('AUDIO', 'Also sync files that carry no subtitles of their own, by '
+                                                              'listening to the audio?', audio), *usenet_box)
             + _input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
             + _input('WYZIE_KEY', 'Wyzie Subs API key (optional)', '', problem, kind='password', mono=True, reveal=True))
     if offer_opensubtitles:
@@ -246,17 +253,17 @@ def _limit(lim, value, problem):
     return field
 
 
-def limits(route, values, problem=None, audio=False):
+def limits(route, values, problem=None, audio=False, usenet=False):
     """Limits: a personal install asks the daily total and, with the audio route, the audio limit; a public instance
     every limit in its three groups (each
     install only the limits that do something for it)."""
     if route == 'host':
         body = ''.join(f'<section class="limits" aria-labelledby="g{i}"><h2 id="g{i}">{e(heading)}</h2>'
                        + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem) for lim in group)
-                       + '</section>' for i, (heading, group) in enumerate(limit_list.HOSTING))
+                       + '</section>' for i, (heading, group) in enumerate(limit_list.hosting_groups(usenet)))
         return step('host', 'hostlimits', body, _back_and_continue('host', 'hostlimits'))
     body = '<div class="limits">' + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem)
-                                            for lim in limit_list.personal(audio)) + '</div>'
+                                            for lim in limit_list.personal(audio, usenet)) + '</div>'
     return step('yourself', 'limits', body, _back_and_continue('yourself', 'limits'))
 
 
@@ -329,10 +336,11 @@ def host_signups(invite, problem=None):
     return step('host', 'signups', body, _back_and_continue('host', 'signups'))
 
 
-def host_choices(problem=None):
+def host_choices(problem=None, usenet=False):
     body = (_input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
             + _input('SUBSYNC_SUBSOURCE_KEY', 'SubSource API key (optional)', '', problem, kind='password', mono=True,
-                     reveal=True))
+                     reveal=True)
+            + ui.choices(_choice('SUBSYNC_USENET', 'Let people sync Usenet files too?', usenet)))
     return step('host', 'hostchoices', body, _back_and_continue('host', 'hostchoices'))
 
 

@@ -23,6 +23,9 @@ def settings_read_by_the_code():
     return names
 
 
+APPROVED_LONG = ("USENET",)
+
+
 class ExplainTest(unittest.TestCase):
     def test_every_setting_the_code_reads_has_one_explanation(self):
         self.assertEqual(set(explain.SETTINGS), settings_read_by_the_code())
@@ -48,19 +51,21 @@ class ExplainTest(unittest.TestCase):
         yield from ((name, text) for name, (_, text) in explain.QUESTIONS.items())
         yield from explain.RULES
 
+    # approved as written though longer than 125 words: the Usenet box's explanation
     def test_each_explanation_is_one_short_plain_paragraph(self):
         for name, text in self.texts():
             with self.subTest(name=name):
                 self.assertNotIn("\n", text)
                 self.assertEqual(text, text.strip())
                 self.assertTrue(text.endswith((".", ")")), text[-30:])
-                self.assertLessEqual(len(text.split()), 160 if name in dict(explain.RULES) else 125)
+                self.assertLessEqual(len(text.split()), 160 if name in dict(explain.RULES) or name in APPROVED_LONG
+                                     else 125)
                 self.assertIsNone(REGISTER_NOTE.search(text))
 
     def test_the_real_debrid_rule_gives_the_reason_the_setup_stops_with(self):
         rules = dict(explain.RULES)
         self.assertIn("Remote Traffic", rules["Real-Debrid is never used"])
-        self.assertIn("Usenet is never read", rules)
+        self.assertIn("Usenet: only parts of a file, only when you turn it on", rules)
 
 
 # The limits' defaults and their texts as the owner approved them

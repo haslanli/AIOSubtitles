@@ -108,7 +108,9 @@ class FakeAiostreams:
     """A stand-in for a person's AIOStreams: its status, its config API (read, save, create, delete, with basic auth)
     and each config's manifest. Records every request (method, path). Faults: 'wrong_password', 'refuse_create',
     'refuse_save', 'hang' (answers after `hang_s`), 'html' (answers a web page), 'bad_config' (userData not an object),
-    'no_manifest' (configs' manifests answer 404), 'rate_limited' (new configs answer 429, retry in an hour)."""
+    'no_manifest' (configs' manifests answer 404), 'rate_limited' (new configs answer 429, retry in an hour).
+    `creates_left`: after that many new configs, the next ones are refused. Each config's stream and subtitle routes
+    answer `listings[uuid]` and `subtitle_lists[uuid]` and log every listing in `listed`."""
 
     STATUS = {"success": True, "data": {"version": "2.37.0", "settings": {"presets": [
         {"ID": "custom", "OPTIONS": [{"id": "timeout", "default": 7000}]},
@@ -121,6 +123,8 @@ class FakeAiostreams:
         import uuid as uuidlib
         self.configs, self.requests, self.fault, self.hang_s = {}, [], None, 3.0
         self.refuse_save_for = set()   # config ids whose saves are refused
+        self.creates_left = None       # new configs allowed before the next ones are refused (None: no limit)
+        self.listings, self.subtitle_lists, self.listed = {}, {}, []
         self.encrypted = {}            # config id -> the encrypted password its link carries (default "ENC" + id[:8])
         self.auth_ids = []             # the config ids each password-checked request named
         self.inflight = self.max_inflight = 0
@@ -191,7 +195,7 @@ class FakeAiostreams:
                             self.end_headers()
                             self.wfile.write(body)
                             return
-                        if outer.fault == "refuse_create":
+                        if outer.fault == "refuse_create" or outer.creates_left == 0:
                             return self.answer(400, {"success": False, "error": {"code": "USER_INVALID_CONFIG",
                                                                                  "message": "bad config"}})
                         b = self.body()
@@ -200,6 +204,8 @@ class FakeAiostreams:
                             return self.answer(400, {"success": False, "error": {"code": "USER_INVALID_CONFIG",
                                                                                  "message": refused}})
                         new = str(uuidlib.uuid4())
+                        if outer.creates_left:
+                            outer.creates_left -= 1
                         outer.configs[new] = {"password": b["password"], "config": b["config"]}
                         return self.answer(201, {"success": True, "data": {"uuid": new,
                                                                            "encryptedPassword": outer.enc(new)}})
@@ -229,6 +235,12 @@ class FakeAiostreams:
                 if len(parts) == 5 and parts[1] == "stremio" and parts[4] == "manifest.json" and parts[2] in outer.configs \
                         and outer.fault != "no_manifest":
                     return self.answer(200, {"id": "com.aiostreams", "name": "AIOStreams", "resources": ["stream"]})
+                if len(parts) >= 6 and parts[1] == "stremio" and parts[2] in outer.configs and parts[4] in ("stream",
+                                                                                                        "subtitles"):
+                    outer.listed.append((parts[2], parts[4]))
+                    if parts[4] == "stream":
+                        return self.answer(200, {"streams": outer.listings.get(parts[2], [])})
+                    return self.answer(200, {"subtitles": outer.subtitle_lists.get(parts[2], [])})
                 return self.answer(404, {"success": False})
 
             do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = handle_any
@@ -245,7 +257,13 @@ class FakeAiostreams:
                      "stremio_nntp": "Stremio NNTP", "stremthru_newz": "StremThru Newz", "easynews": "Easynews",
                      "realdebrid": "Real-Debrid"}
     PRESET_NAMES = {"prowlarr": "Prowlarr", "stremthruStore": "StremThru Store", "mediafusion": "MediaFusion",
-                    "library": "Library", "comet": "Comet"}
+                    "library": "Library", "comet": "Comet", "newznab": "Newznab", "nzbhydra": "NZBHydra",
+                    "easynews-search": "Easynews Search"}
+    # the services these addons can use (AIOStreams v2.35.8's presets): without one, the config is refused
+    _DEBRID = {"realdebrid", "alldebrid", "premiumize", "debridlink", "torbox", "offcloud", "easydebrid", "debrider",
+               "pikpak", "torrin"}
+    _NEWZ = {"torbox", "nzbdav", "altmount", "stremio_nntp", "stremthru_newz", "aiostreams"}
+    CAN_USE = {"newznab": _NEWZ, "nzbhydra": _NEWZ, "prowlarr": _DEBRID | _NEWZ, "easynews-search": {"easynews"}}
 
     @classmethod
     def refusal(cls, config):
@@ -265,6 +283,15 @@ class FakeAiostreams:
                             f"{name}, but it is not enabled or has missing credentials")
             if not chosen:
                 return f"{name} requires at least one usable service, but none were found."
+        for preset in (config or {}).get("presets") or []:     # no usable service at all (generateAddons)
+            can = cls.CAN_USE.get(preset.get("type"))
+            if not preset.get("enabled") or can is None:
+                continue
+            chosen = (preset.get("options") or {}).get("services")
+            usable = {s for s, found in services.items() if found.get("enabled") and found.get("credentials") is not None}
+            if not ((set(chosen) if isinstance(chosen, list) else usable) & usable & can):
+                return (f"{cls.PRESET_NAMES.get(preset.get('type'), preset.get('type'))} requires at least one usable "
+                        "service, but none were found.")
         return None
 
     def add(self, config, password):

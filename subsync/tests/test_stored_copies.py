@@ -247,7 +247,9 @@ class TextsTest(unittest.TestCase):
             f"Real-Debrid is the only debrid service in your AIOStreams config, and AIOSubtitles never uses it, because "
             f"{REASON}. So it reads none of your files: for each file you play, it offers the synced copies already made "
             "for someone who played the same release, when there are any. To get your own synced copies, add another "
-            "service, such as TorBox, to your config, then press Refresh on your settings page."))
+            "service, such as TorBox, to your config, then press Refresh on your settings page. With Usenet on, "
+            "AIOSubtitles reads the files you play from Usenet for you, through your Usenet services; Real-Debrid "
+            "stays out."))                                                     # the last sentence: the Usenet one
 
     def test_after_a_refresh_that_moved_them(self):
         from subsync import explain

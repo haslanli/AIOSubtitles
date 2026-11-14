@@ -9,7 +9,8 @@ It installs one thing, the subsync service (in Docker, built on this machine), a
 AIOStreams, each shown first and saved only after a yes:
   1. your config gets one more subtitle source, subsync (a backup copy is saved first);
   2. a second config, made from yours, that subsync uses to find files (no Usenet, no Real-Debrid, nothing in the
-     background).
+     background), and with Usenet on a third, the Usenet config, with only your Usenet searches and services
+; a config with no debrid service other than Real-Debrid gets only the Usenet config.
 It doesn't install or change AIOStreams itself or AIOMetadata.
 """
 import json
@@ -35,6 +36,12 @@ TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'T
 # the Real-Debrid stop's way out: on the page and in a terminal
 RD_WAY_OUT_PAGE = "After adding it on AIOStreams' configure page, go back one step and continue again."
 RD_WAY_OUT = "After adding it on AIOStreams' configure page, run ./setup again."
+# A config with no debrid service but Usenet, answered no to the Usenet question
+NO_USENET = "subsync can't work with this config without Usenet: it has no debrid service other than Real-Debrid."
+NO_USENET_WAY_OUT_PAGE = ("Answer yes to the Usenet question, or add a debrid service (TorBox, …) on AIOStreams' "
+                          "configure page, then continue again.")
+NO_USENET_WAY_OUT = ("Answer yes to the Usenet question, or add a debrid service (TorBox, …) on AIOStreams' configure "
+                     "page, then run ./setup again.")
 
 
 # ------------------------------------------------------------------------------------------- state files
@@ -279,6 +286,7 @@ class Engine:
         if names:
             filled['LANGUAGES'] = ', '.join(names)
         filled['AUDIO'] = 'yes' if p.get('audio') else 'no'
+        filled['USENET'] = 'yes' if p.get('usenet') else 'no'
         audio = self.known_audio_budget()
         if audio:
             filled['AUDIO_BUDGET'] = audio
@@ -385,17 +393,21 @@ class Engine:
         self.out.say()
         (self.out.ok if names else self.out.warn)('Debrid services: ' + (', '.join(names) if names else 'none'))
         (self.out.ok if subs else self.out.warn)('Subtitle sources: ' + (', '.join(subs) if subs else 'none yet'))
-        if realdebrid.real_debrid_only(self.viewer):
+        # Usenet: a config with no debrid service but a Usenet route goes on to the Usenet question
+        self.usenet_services, self.usenet_why = plan.usenet_route(self.viewer)
+        self.has_sync = not realdebrid.real_debrid_only(self.viewer) and \
+            not plan.sync_config_problems(plan.sync_config(self.viewer))
+        if realdebrid.real_debrid_only(self.viewer) and not self.usenet_services:
             raise Stop(realdebrid.REAL_DEBRID_ONLY, RD_WAY_OUT, page_fix=RD_WAY_OUT_PAGE)
         cleaned, ways = realdebrid.without_real_debrid(self.viewer)
-        if realdebrid.SERVICE in realdebrid.debrid_in_use(self.viewer):
+        if realdebrid.SERVICE in realdebrid.debrid_in_use(self.viewer) and plan.debrid_names(cleaned):
             self.out.ok(f'Real-Debrid is never used: subsync reads through {", ".join(plan.debrid_names(cleaned))} only')
         if ways:
             self.out.note('subsync\'s own config leaves out:')
             for line in ways:
                 self.out.note(f'  {line}')
-        problems = plan.sync_config_problems(plan.sync_config(self.viewer))
-        if problems:
+        problems = plan.sync_config_problems(plan.sync_config(self.viewer), usenet=True)
+        if problems and not self.usenet_services:
             stop('subsync can\'t work with this config: ' + '; '.join(problems) + '.',
                  'Add a debrid service other than Real-Debrid (TorBox, ...) on AIOStreams\' configure page, then run '
                  './setup again.')
@@ -413,6 +425,15 @@ class Engine:
         self.languages = plan.parse_languages(text)[0]
         self.audio = self.ask.yesno('AUDIO', 'Also sync files that carry no subtitles of their own, by listening to the audio?',
                                     self.prev.get('audio', False))
+        self.usenet = False
+        if self.usenet_services:
+            self.usenet = self.ask.yesno('USENET', 'Sync files you play from Usenet too?', self.prev.get('usenet', False))
+        elif self.answers.get('USENET', '').strip().lower() in ('yes', 'y', 'on') and self.usenet_why:
+            self.out.note(explain.USENET_WHY[self.usenet_why])
+        if not self.has_sync and not self.usenet:
+            if realdebrid.real_debrid_only(self.viewer):
+                raise Stop(realdebrid.REAL_DEBRID_ONLY, RD_WAY_OUT, page_fix=RD_WAY_OUT_PAGE)
+            raise Stop(NO_USENET, NO_USENET_WAY_OUT, page_fix=NO_USENET_WAY_OUT_PAGE)
         self.source_keys()
         self.add_os = False
         if not plan.subtitle_sources(self.viewer):
@@ -477,6 +498,10 @@ class Engine:
             return (False, error, value) if error else (True, '', chosen)
         self.limit_values = {lim.setting: self.ask.text(lim.setting, lim.label, current=limits.current(lim, env_values()),
                                                         check=check)}
+        if self.usenet:
+            lim = limits.USENET
+            self.limit_values[lim.setting] = self.ask.text(lim.setting, lim.label,
+                                                           current=limits.current(lim, env_values()), check=check)
         self.audio_budget = self.ask_audio_budget() if self.audio else None
         if self.audio_budget is None:      # audio off: the last answer (or a value set by hand) is kept for later
             self.audio_budget_kept = self.known_audio_budget()
@@ -502,13 +527,24 @@ class Engine:
         self.new_viewer, self.changes = plan.viewer_change(self.viewer, self.manifest_url, metadata, self.add_os)
         self.sync = plan.sync_config(self.new_viewer, self.manifest_url)
         self.sync_exists = bool(self.keys.get('SYNC_UUID') and self.keys.get('SYNC_PASSWORD'))
+        self.usenet_sync = plan.usenet_sync_config(self.new_viewer, self.manifest_url, subtitles=not self.has_sync) \
+            if self.usenet else None
+        self.usenet_exists = bool(self.keys.get('USENET_UUID') and self.keys.get('USENET_PASSWORD'))
         viewer = (f'Your config {short(self.uuid)}', [('+', line) for line in self.changes],
                   'Nothing else in it changes. A copy of it as it is now is saved first.' if self.changes
                   else 'no change (subsync is already in it)')
-        sync = ("subsync's own config " + ('(update)' if self.sync_exists else '(new)'), [],
-                'a copy of yours without Usenet, Real-Debrid and subsync, with nothing running in the background, '
-                'so subsync can find the file you are watching. It never appears in your apps.')
-        return [viewer, sync]
+        sections = [viewer]
+        if self.has_sync:
+            sections.append(("subsync's own config " + ('(update)' if self.sync_exists else '(new)'), [],
+                             'a copy of yours without Real-Debrid and subsync, and without Usenet unless you turn it '
+                             'on, with nothing running in the background, so subsync can find the file you are '
+                             'watching. It never appears in your apps.'))
+        if self.usenet:
+            sections.append(("subsync's Usenet config " + ('(update)' if self.usenet_exists else '(new)'), [],
+                             'only your Usenet searches and services, with nothing running in the background, so subsync '
+                             'can find a file you play from Usenet when your debrid service doesn\'t have it. It never '
+                             'appears in your apps.'))
+        return sections
 
     def review_and_save(self):
         self.out.step(6, 'Your AIOStreams configs')
@@ -519,7 +555,29 @@ class Engine:
             stop('Nothing was changed.', 'Run ./setup again when you are ready.')
         # subsync's own config first: subsync needs it to start. Yours changes only once subsync answers, since
         # AIOStreams fetches an addon's manifest when a config that lists it is saved.
-        self.save_sync(self.sync, self.sync_exists)
+        if self.has_sync:
+            self.save_sync(self.sync, self.sync_exists)
+        else:
+            self.drop_config('SYNC', "Deleted subsync's own config")
+        if self.usenet:
+            self.save_sync(self.usenet_sync, self.usenet_exists, kind='USENET')
+        else:
+            self.drop_config('USENET', "Deleted subsync's Usenet config")
+
+    def drop_config(self, kind, done):
+        """A config of subsync's this setup no longer uses (Usenet turned off, or no debrid service any more): deleted
+        on AIOStreams, its keys forgotten."""
+        if not self.keys.get(f'{kind}_UUID'):
+            return
+        try:
+            self.with_sign_in(lambda: self.aios.delete_config(self.keys[f'{kind}_UUID'], self.keys[f'{kind}_PASSWORD']))
+            self.out.ok(done)
+        except AiosError as e:
+            if 'match' not in e.message:     # already gone: nothing to delete
+                raise
+        self.keys.pop(f'{kind}_UUID', None)
+        self.keys.pop(f'{kind}_PASSWORD', None)
+        self.write_keys()
 
     def save_viewer(self):
         if self.changes:
@@ -544,23 +602,28 @@ class Engine:
         if self.cache:
             self.apply_cache_setting(*self.cache)
 
-    def save_sync(self, sync, exists):
+    def save_sync(self, sync, exists, kind='SYNC'):
+        """subsync's own config (`kind` 'USENET': its Usenet config), saved into the one it has or made new."""
+        name = "subsync's Usenet config" if kind == 'USENET' else "subsync's own config"
+        uuid_key, password_key = f'{kind}_UUID', f'{kind}_PASSWORD'
         if exists:
             try:
-                self.with_sign_in(lambda: self.aios.save_config(self.keys['SYNC_UUID'], self.keys['SYNC_PASSWORD'], sync))
-                _, self.sync_encrypted = self.aios.get_config(self.keys['SYNC_UUID'], self.keys['SYNC_PASSWORD'])
-                self.out.ok(f"Updated subsync's own config ({short(self.keys['SYNC_UUID'])})")
+                self.with_sign_in(lambda: self.aios.save_config(self.keys[uuid_key], self.keys[password_key], sync))
+                _, encrypted = self.aios.get_config(self.keys[uuid_key], self.keys[password_key])
+                setattr(self, f'{kind.lower()}_encrypted', encrypted)
+                self.out.ok(f"Updated {name} ({short(self.keys[uuid_key])})")
                 return
             except AiosError as e:
                 if 'match' not in e.message:
                     raise
-                self.out.warn('subsync\'s old config is gone from AIOStreams; making a new one.')
+                self.out.warn(f'{name[0].upper()}{name[1:]} is gone from AIOStreams; making a new one.'
+                              if kind == 'USENET' else 'subsync\'s old config is gone from AIOStreams; making a new one.')
         password = secrets.token_urlsafe(24)
         uuid, encrypted = self.with_sign_in(lambda: self.aios.create_config(sync, password))
-        self.keys.update(SYNC_UUID=uuid, SYNC_PASSWORD=password)
-        self.sync_encrypted = encrypted
+        self.keys.update({uuid_key: uuid, password_key: password})
+        setattr(self, f'{kind.lower()}_encrypted', encrypted)
         self.write_keys()
-        self.out.ok(f"Created subsync's own config ({short(uuid)})")
+        self.out.ok(f"Created {name} ({short(uuid)})")
 
     def with_sign_in(self, action):
         """Some AIOStreams instances only save configs for a signed-in account: ask once, then retry."""
@@ -619,9 +682,15 @@ class Engine:
         self.out.step(7, 'Installing subsync')
         if self.s['public_kind'] == 'path':
             self.proxy_rule()
-        sync_base = f"{self.s['aios_internal']}/stremio/{self.keys['SYNC_UUID']}/{self.sync_encrypted}"
+        def link(kind):
+            if not self.keys.get(f'{kind}_UUID'):
+                return ''
+            return (f"{self.s['aios_internal']}/stremio/{self.keys[f'{kind}_UUID']}/"
+                    f"{getattr(self, f'{kind.lower()}_encrypted')}/manifest.json")
         env = plan.subsync_env({
-            'sync_manifest': f'{sync_base}/manifest.json', 'sync_password': self.keys['SYNC_PASSWORD'],
+            'sync_manifest': link('SYNC'), 'sync_password': self.keys.get('SYNC_PASSWORD', ''),
+            'usenet': self.usenet, 'usenet_manifest': link('USENET') if self.usenet else '',
+            'usenet_password': self.keys.get('USENET_PASSWORD', '') if self.usenet else '',
             'public_base': self.s['public_base'],
             'addon_key': self.keys['ADDON_KEY'], 'languages': self.languages,
             'rewrite': plan.rewrite_rule(self.s['aios_public'], self.s['aios_internal']) if self.s['mode'] != 'remote' else '',
@@ -629,13 +698,14 @@ class Engine:
             'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
-        env.update(limits.env_lines([limits.DAILY], self.limit_values))
-        env, kept = plan.merge_env(env, env_values(), owned=limits.names([limits.DAILY]))
+        asked = limits.personal(audio=False, usenet=self.usenet)
+        env.update(limits.env_lines(asked, self.limit_values))
+        env, kept = plan.merge_env(env, env_values(), owned=limits.names([limits.DAILY, limits.USENET]))
         write_env(STATE / 'subsync.env', env)
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         (STATE / 'compose.yaml').write_text(compose_for(self.s, current_version()))
-        self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio,
+        self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio, usenet=self.usenet,
                       audio_budget=self.audio_budget or getattr(self, 'audio_budget_kept', None),   # for when it's on again
                       manifest_url=self.manifest_url, installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
         for kept in ('cache_before', 'added_opensubtitles'):
@@ -735,7 +805,20 @@ class Engine:
             self.good = False
             self.out.bad('AIOStreams did not reach subsync.')
             self.out.note(f"It calls {plan.manifest_base(self.manifest_url).rsplit('/', 1)[0]}/…; check that address works from AIOStreams.")
-        # c) subsync's config finds files (a search and a cache check; nothing is opened)
+        # d) subsync's Usenet config answers: its manifest only, no search, so no indexer call is spent
+        if getattr(self, 'usenet', False) and self.keys.get('USENET_UUID'):
+            usenet_base = f"{self.s['aios_url']}/stremio/{self.keys['USENET_UUID']}/{self.usenet_encrypted}"
+            try:
+                self.aios.addon_get(usenet_base, '/manifest.json', timeout=40)
+                self.out.ok("subsync's Usenet config answers (no search made, to spare your indexer's daily calls)")
+            except AiosError:
+                self.good = False
+                self.out.warn("subsync's Usenet config doesn't answer. Run ./setup again, or send the output of "
+                              "./setup --status with a bug report.")
+        # c) subsync's config finds files (a search and a cache check; nothing is opened); none with Usenet only
+        if not self.keys.get('SYNC_UUID'):
+            self.ready_rows = []
+            return []
         sync_base = f"{self.s['aios_url']}/stremio/{self.keys['SYNC_UUID']}/{self.sync_encrypted}"
         rows, title = [], None
         for type_, imdb, name in TEST_TITLES[:2]:
@@ -909,13 +992,15 @@ class Engine:
             value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key))
             if value:
                 self.keys[key] = value
+        kept = env_values().get('SUBSYNC_USENET', 'off').strip().lower() in ('on', 'yes', 'true', '1')
+        self.host_usenet = self.ask.yesno('SUBSYNC_USENET', 'Let people sync Usenet files too?', kept)
 
     def host_limits(self):
         """Every limit, in its three groups, the current value or subsync's default filled in."""
         self.out.step(5, 'Limits', self.HOST_STEPS)
         env = env_values()
         self.limit_values = {}
-        for lim in hosting.LIMITS:
+        for lim in limits.hosting(getattr(self, 'host_usenet', True)):
             def check(value, lim=lim):
                 chosen, error = limits.check(lim, value)
                 return (False, error, value) if error else (True, '', chosen)
@@ -928,7 +1013,8 @@ class Engine:
             self.out.ok('Made the secret key and kept it in state/subsync.env, readable only by your user.')
         answers = {'HOST_ADDRESS': self.address, 'SUBSYNC_TRUSTED_PROXY': self.trusted_proxy,
                    'SUBSYNC_PUBLIC_INVITE': self.invite, 'SUBDL_KEY': self.keys.get('SUBDL_KEY', ''),
-                   'SUBSYNC_SUBSOURCE_KEY': self.keys.get('SUBSYNC_SUBSOURCE_KEY', '')}
+                   'SUBSYNC_SUBSOURCE_KEY': self.keys.get('SUBSYNC_SUBSOURCE_KEY', ''),
+                   'SUBSYNC_USENET': 'yes' if getattr(self, 'host_usenet', False) else 'no'}
         env, kept = plan.merge_env(hosting.public_env(answers, self.secret, self.limit_values), env_values(),
                                    owned=hosting.OWNED)
         write_env(STATE / 'subsync.env', env)
@@ -1021,7 +1107,9 @@ class Engine:
         audio = f"on, up to {s.get('audio_budget') or '1'} GB per file" if s.get('audio') else 'off'
         details = [('AIOStreams', s.get('aios_public')), ('languages', ', '.join(s.get('languages', []))),
                    ('audio', audio), ('config', short(keys.get('VIEWER_UUID', ''))),
-                   ("subsync's config", short(keys.get('SYNC_UUID', ''))), ('logs', f'docker logs {CONTAINER}')]
+                   ("subsync's config", short(keys.get('SYNC_UUID', '')))] \
+            + ([("subsync's Usenet config", short(keys['USENET_UUID']))] if keys.get('USENET_UUID') else []) \
+            + [('logs', f'docker logs {CONTAINER}')]
         return rows, details
 
     def remove(self):
@@ -1056,12 +1144,13 @@ class Engine:
             path = backup(self.viewer, uuid)
             aios.save_config(uuid, password, new)
             self.out.ok(f'Your config no longer lists subsync (copy before: {path.relative_to(REPO)})')
-        if keys.get('SYNC_UUID'):
-            try:
-                aios.delete_config(keys['SYNC_UUID'], keys['SYNC_PASSWORD'])
-                self.out.ok('Deleted subsync\'s own config')
-            except AiosError as e:
-                self.out.warn(e.message)
+        for kind, done in (('SYNC', 'Deleted subsync\'s own config'), ('USENET', "Deleted subsync's Usenet config")):
+            if keys.get(f'{kind}_UUID'):
+                try:
+                    aios.delete_config(keys[f'{kind}_UUID'], keys[f'{kind}_PASSWORD'])
+                    self.out.ok(done)
+                except AiosError as e:
+                    self.out.warn(e.message)
         if (STATE / 'compose.yaml').exists():
             dockerenv.compose(STATE, 'down', '-v', timeout=300)
             self.out.ok('Removed the subsync container and its stored copies')

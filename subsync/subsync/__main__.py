@@ -9,7 +9,7 @@ from .addon import App, serve
 from .settings import Settings
 from .sources import Aios
 from .store import Store
-from .worker import Safety, Worker
+from .worker import Safety, StoreUsenetCounts, UsenetGate, Worker
 
 
 def main():
@@ -37,7 +37,12 @@ def main():
 
     from .extra import make_sources
     extra = make_sources(s)
-    worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra)
+    usenet = gate = None
+    if s.usenet and s.usenet_manifest and s.usenet_listings_per_day > 0:   #
+        usenet = Aios(s.usenet_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack,
+                      password=s.usenet_password)
+        gate = UsenetGate(store, s.usenet_listings_per_day, StoreUsenetCounts(store))
+    worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra, usenet=usenet, usenet_gate=gate)
     worker.start()
     server = serve(App(s, store, worker, safety), s.port)
     def stop(*_):
@@ -45,8 +50,9 @@ def main():
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
-    logging.getLogger("subsync").info("listening on %d; languages %s; audio route %s", s.port, ",".join(s.languages),
-                                      "on" if s.audio_route else "off")
+    logging.getLogger("subsync").info("listening on %d; languages %s; audio route %s; Usenet %s", s.port,
+                                      ",".join(s.languages), "on" if s.audio_route else "off",
+                                      f"on, {s.usenet_listings_per_day} listings a day" if usenet else "off")
     server.serve_forever()
 
 
