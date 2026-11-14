@@ -123,10 +123,14 @@ class SourceSetup(unittest.TestCase):
         self.assertTrue(calls[1].endswith('aiosubtitles:local-1.4.0 setup --update'))   # setup says it's the newest
 
     def test_no_docker_is_a_plain_message(self):
-        os.unlink(self.bin / 'docker')
-        env = {'PATH': f'{self.bin}:/bin', 'LOG': str(self.log), 'UNAME': 'Linux'}
-        done = subprocess.run(['bash', str(self.folder / 'setup')], capture_output=True, text=True, timeout=30,
-                              env=env, stdin=subprocess.DEVNULL)
+        # a PATH with only what the script needs before it looks for Docker: /bin is /usr/bin on many systems (GitHub's
+        # runners), where a real docker may be
+        bare = self.tmp / 'bare'
+        bare.mkdir()
+        os.symlink(shutil.which('dirname'), bare / 'dirname')
+        env = {'PATH': str(bare), 'LOG': str(self.log), 'UNAME': 'Linux'}
+        done = subprocess.run([shutil.which('bash'), str(self.folder / 'setup')], capture_output=True, text=True,
+                              timeout=30, env=env, stdin=subprocess.DEVNULL)
         self.assertNotEqual(done.returncode, 0)
         self.assertIn('Docker is not installed.', done.stdout)
 
