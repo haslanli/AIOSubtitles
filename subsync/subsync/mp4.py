@@ -14,7 +14,7 @@ import subprocess
 import bisect
 
 from .mkv import (HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, WORD_READ, LineReads, NotMatroska, add_audio_bytes,
-                  add_words_bytes, oshash, read_lines)
+                  add_words_bytes, decoder_cmd, oshash, read_lines)
 
 MAX_MOOV = 64 * 1024 * 1024
 TEXT_SAMPLE_ENTRIES = {b"tx3g": 2, b"text": 2, b"wvtt": 8}   # codec -> largest size of an empty sample
@@ -340,8 +340,8 @@ class Mp4Index:
             fmt = AUDIO_RAW[t["codec"]]
             stream = b"".join(data[offs[i] - a: offs[i] - a + self._size(t, i)] for i in range(first, last + 1))
         skip = max(0.0, start - first_time)
-        out = subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-f", fmt, "-i", "pipe:0", "-ss", f"{skip:.3f}",
-                              "-t", f"{length:.3f}", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
+        out = subprocess.run(decoder_cmd(ffmpeg, fmt, ["-ss", f"{skip:.3f}", "-t", f"{length:.3f}", "-ac", "1",
+                                                       "-ar", str(sr), "-f", "s16le", "-"]),
                              input=stream, capture_output=True, timeout=300)
         return out.stdout
 

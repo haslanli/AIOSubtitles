@@ -263,8 +263,9 @@ class Settings:
     def conflicts(self):
         """Settings that can't go together, in plain sentences (empty: none)."""
         out = []
-        if self.public and self.audio_route:
-            out.append("The audio route is off in public mode: set SUBSYNC_AUDIO_ROUTE=off or turn public mode off.")
+        if self.public and self.audio_route and not self.audio_on_pick:
+            # In public mode nobody's audio is read for a file they only opened
+            out.append("In public mode the audio route runs only after a pick: set SUBSYNC_AUDIO_ON_PICK=on.")
         if self.public and self.wyzie_key:
             out.append("Wyzie Subs isn't used in public mode (one free key per network, paused when used from servers): "
                        "remove SUBSYNC_WYZIE_KEY or turn public mode off.")

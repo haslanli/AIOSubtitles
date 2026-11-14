@@ -35,7 +35,7 @@ class Pieces(unittest.TestCase):
                 self.assertFalse(good)
                 self.assertIn('with https, like https://subtitles.example.com', message)
 
-    def test_the_env_passes_subsyncs_own_checks_and_never_has_wyzie_or_audio(self):
+    def test_the_env_passes_subsyncs_own_checks_never_has_wyzie_and_audio_only_when_chosen(self):
         answers = {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'SUBSYNC_PUBLIC_INVITE': 'abcd-efgh-jkmn',
                    'SUBDL_KEY': 'sd', 'SUBSYNC_SUBSOURCE_KEY': 'ss', 'WYZIE_KEY': 'wz', 'AUDIO': 'yes',
                    'SUBSYNC_MAX_USERS': '150', 'SUBSYNC_SYNCS_AT_ONCE': 'auto'}
@@ -45,7 +45,8 @@ class Pieces(unittest.TestCase):
         self.assertEqual(env['SUBSYNC_MAX_USERS'], '150')
         self.assertNotIn('SUBSYNC_SYNCS_AT_ONCE', env)                 # the default: no line
         self.assertNotIn('SUBSYNC_WYZIE_KEY', env)                     # public mode refuses it
-        self.assertNotIn('SUBSYNC_AUDIO_ROUTE', env)                   # off in public mode
+        self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'off')             # off unless the host chooses it
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', env)
         try:     # subsync's settings need numpy, which a server's own Python may not have (the installer doesn't)
             from subsync.settings import Settings
         except ImportError as e:
@@ -55,6 +56,39 @@ class Pieces(unittest.TestCase):
             self.assertEqual(s.missing(), [])
             self.assertEqual(s.conflicts(), [])
         self.assertEqual((s.subdl_key, s.subsource_key, s.invite), ('sd', 'ss', 'abcd-efgh-jkmn'))
+
+    def test_the_audio_route_and_its_limit_when_the_host_chooses_them(self):
+        # A public instance may sync files without a subtitle track from their sound, after a pick
+        answers = {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes'}
+        env = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_AUDIO_BUDGET_GB': '2'})
+        self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_AUDIO_BUDGET_GB']), ('on', '2'))
+        self.assertNotIn('SUBSYNC_AUDIO_ON_PICK', env)                 # never written: it stays on
+        default = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_AUDIO_BUDGET_GB': '1'})
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', default)            # the default: no line
+        off = hosting.public_env(dict(answers, SUBSYNC_AUDIO_ROUTE='no'), hosting.new_secret(),
+                                 {'SUBSYNC_AUDIO_BUDGET_GB': '2'})
+        self.assertEqual(off['SUBSYNC_AUDIO_ROUTE'], 'off')
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', off)                # no limit asked or written with it off
+        self.assertTrue({'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_AUDIO_BUDGET_GB'} <= set(hosting.OWNED))
+        try:
+            from subsync.settings import Settings
+        except ImportError as e:
+            self.skipTest(f'subsync.settings needs {e.name}')
+        with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
+            s = Settings(env)
+        self.assertEqual(s.conflicts(), [])
+        self.assertTrue(s.audio_route and s.audio_on_pick)
+
+    def test_the_hosting_screens_ask_the_audio_route_and_its_limit(self):
+        from installer import screens
+        page = screens.host_choices(audio=True)
+        self.assertIn('Let people sync files that carry no subtitles of their own, by listening to the audio, when '
+                      'they pick them?', page)
+        self.assertRegex(page, r'<input[^>]*name="SUBSYNC_AUDIO_ROUTE"[^>]*checked')
+        self.assertNotRegex(screens.host_choices(audio=False), r'<input[^>]*name="SUBSYNC_AUDIO_ROUTE"[^>]*checked')
+        values = {lim.setting: lim.default for lim in limits.hosting(audio=True)}
+        self.assertIn('Audio per file', screens.limits('host', values, audio=True))
+        self.assertNotIn('Audio per file', screens.limits('host', values, audio=False))
 
     def test_the_compose_file_listens_on_this_machine_only(self):
         text = hosting.compose_yaml('1.1.0', 8790)
@@ -70,7 +104,7 @@ class Pieces(unittest.TestCase):
         self.assertIn('rule: Host(`subs.example.com`)', rule['Traefik'])
 
     def test_the_hosting_limits_are_the_three_groups(self):
-        self.assertEqual(hosting.LIMITS, limits.hosting())
+        self.assertEqual(hosting.LIMITS, limits.hosting(usenet=True, audio=True))   # every limit the route may write
 
 
 class RouteFixture(unittest.TestCase):
@@ -153,6 +187,20 @@ class Route(RouteFixture):
         self.assertNotIn(SECRET_WORDS, out)
         code, out = self.run_setup({'SUBSYNC_PUBLIC_INVITE': ''})
         self.assertNotIn('SUBSYNC_PUBLIC_INVITE', engine.read_kv(self.state / 'subsync.env'))
+
+    def test_a_public_instance_with_the_audio_route(self):
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes',
+                                    'SUBSYNC_AUDIO_BUDGET_GB': '0.5'})
+        self.assertEqual(code, 0, out)
+        env = engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_AUDIO_BUDGET_GB']), ('on', '0.5'))
+        code, out = self.run_setup({})                                   # a re-run keeps both
+        again = engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual((again['SUBSYNC_AUDIO_ROUTE'], again['SUBSYNC_AUDIO_BUDGET_GB']), ('on', '0.5'))
+        code, out = self.run_setup({'SUBSYNC_AUDIO_ROUTE': 'no'})        # turned off: its limit goes too
+        off = engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual(off['SUBSYNC_AUDIO_ROUTE'], 'off')
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', off)
 
     def test_the_status_and_removing_a_public_instance(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})

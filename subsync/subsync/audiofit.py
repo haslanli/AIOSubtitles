@@ -56,6 +56,36 @@ CLOSE = 0.2         # a verdict within 20 % of's numbers is a close call
 CLOSE_MATCHED = 40  # a pass on fewer matched lines is a close call
 
 
+def planned_window(budget, rate, k=8, v=4, w=30.0):
+    """The length of a file's audio windows: W, or shorter so all K + V + PLANNED windows fit the audio budget at the
+    file's byte rate; None when they would be shorter than MIN_W (the file keeps its original, no audio is read)."""
+    if not (budget and rate):
+        return w
+    fit = budget / ((k + v + PLANNED) * COST * rate)
+    return None if fit < MIN_W else min(w, round(fit, 1))
+
+
+def most_read(rate, budget=None, extra=0, tracks=1, k=8, v=4, w=30.0):
+    """The most an audio sync of a file could read, in bytes: every planned window and every close-call
+    window, on each audio track it may fit (fit_tracks: two when a second language's track exists), within the budget.
+    The whole budget when the file's byte rate isn't known; 0 when its windows would be too short to read."""
+    if not rate:
+        return budget or 0
+    length = planned_window(budget, rate, k, v, w)
+    if length is None:
+        return 0
+    total = int((k + v + PLANNED + extra) * COST * length * rate * max(1, tracks))
+    return min(total, int(budget)) if budget else total
+
+
+def second_track(index):
+    """The audio track fit_tracks tries when the default one keeps the original: one in another language, or None."""
+    tracks = (index.audio_tracks() or []) if hasattr(index, "audio_tracks") else []
+    default = next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
+    return next((t for t in tracks if default is not None and t is not default
+                 and lang3(t.get("language")) != lang3(default.get("language"))), None)
+
+
 class AudioBudget(Exception):
     """The next audio window would pass the file's audio budget."""
 
@@ -265,11 +295,11 @@ class AudioFit:
         if not self.index.duration() or not self.lines:
             return {"decision": "keep_original", "why": "no duration or no dialogue"}
         if self.budget and self.rate():
-            w = self.budget / ((self.K + self.V + PLANNED) * COST * self.rate())
-            if w < MIN_W:
+            w = planned_window(self.budget, self.rate(), self.K, self.V, self.W)
+            if w is None:
                 return {"decision": "keep_original", "windows": 0, "audio_s": 0.0,
                         "why": f"the file's bitrate is too high for the audio budget ({self.budget / 1e6:.0f} MB)"}
-            self.W = min(self.W, round(w, 1))
+            self.W = w
         try:
             first = self._run()
         except AudioBudget:
@@ -544,12 +574,9 @@ def fit_tracks(index, lines, fit_class=None, **kw):
     that gives a result wins; the rule is the same. Windows of both count toward the file's audio budget."""
     fit_class = fit_class or AudioFit
     fit = fit_class(index, lines, **kw).run()
-    if fit["decision"] != "keep_original" or not hasattr(index, "audio_tracks"):
+    if fit["decision"] != "keep_original":
         return fit
-    tracks = index.audio_tracks() or []
-    default = next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
-    other = next((t for t in tracks if default is not None and t is not default
-                  and lang3(t.get("language")) != lang3(default.get("language"))), None)
+    other = second_track(index)
     if other is None:
         return fit
     second = fit_class(index, lines, track=other["index"], **kw).run()

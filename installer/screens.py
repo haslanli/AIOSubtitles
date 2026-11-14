@@ -6,6 +6,7 @@ the site's pages.UI_WORDS, and INSTALLER_WORDS below (each with the decision tha
 person, from AIOStreams and the engine's rows are escaped by the parts. Every form posts to the page it is on and works
 without the script; the installing page loads itself again every 2 seconds while the work runs.
 """
+from installer import hosting
 from installer import limits as limit_list
 from installer import update
 from subsync import explain, ui
@@ -72,6 +73,8 @@ INSTALLER_WORDS = (
     'AIOStreams', 'languages', 'audio', 'config', "subsync's config", 'logs',
     # Usenet
     'Sync files you play from Usenet too?', 'Let people sync Usenet files too?', "subsync's Usenet config",
+    # the audio route on a public instance
+    hosting.AUDIO_QUESTION,
     "subsync's Usenet config (new)", "subsync's Usenet config (update)",
     "subsync's Usenet config answers (no search made, to spare your indexer's daily calls)",
     "subsync's Usenet config doesn't answer. Run ./setup again, or send the output of ./setup --status with a bug report.",
@@ -260,7 +263,7 @@ def limits(route, values, problem=None, audio=False, usenet=False):
     if route == 'host':
         body = ''.join(f'<section class="limits" aria-labelledby="g{i}"><h2 id="g{i}">{e(heading)}</h2>'
                        + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem) for lim in group)
-                       + '</section>' for i, (heading, group) in enumerate(limit_list.hosting_groups(usenet)))
+                       + '</section>' for i, (heading, group) in enumerate(limit_list.hosting_groups(usenet, audio)))
         return step('host', 'hostlimits', body, _back_and_continue('host', 'hostlimits'))
     body = '<div class="limits">' + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem)
                                             for lim in limit_list.personal(audio, usenet)) + '</div>'
@@ -336,11 +339,12 @@ def host_signups(invite, problem=None):
     return step('host', 'signups', body, _back_and_continue('host', 'signups'))
 
 
-def host_choices(problem=None, usenet=False):
+def host_choices(problem=None, usenet=False, audio=False):
     body = (_input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
             + _input('SUBSYNC_SUBSOURCE_KEY', 'SubSource API key (optional)', '', problem, kind='password', mono=True,
                      reveal=True)
-            + ui.choices(_choice('SUBSYNC_USENET', 'Let people sync Usenet files too?', usenet)))
+            + ui.choices(_choice('SUBSYNC_USENET', 'Let people sync Usenet files too?', usenet),
+                         _choice('SUBSYNC_AUDIO_ROUTE', hosting.AUDIO_QUESTION, audio)))
     return step('host', 'hostchoices', body, _back_and_continue('host', 'hostchoices'))
 
 

@@ -76,11 +76,13 @@ APPROVED = {
         "is affected. 60 is a long day of episodes; it keeps one person, or a leaked link, from using up the "
         "service's daily reads.",
     "SUBSYNC_USER_DAILY_MB":
+        # with the audio route's sentence
         "Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes "
         "about 1 MB, a few MB when the track's lines are pictures; 1,000 is 60 files at the most one file's index may "
-        "take (16 MB), so it never stops someone before the file limit, and it stops someone whose files have unusual "
-        "layouts from using most of the service's daily total. Past it, that person gets only copies already in the "
-        "store until the next day.",
+        "take (16 MB), so those reads never stop someone before the file limit. With the audio route on, a file synced "
+        "from its sound takes about 60–350 MB, so 1,000 MB covers about three to five a day; such a sync starts only "
+        "when what is left of the day likely covers it, so it rarely stops half-way; if it does, the file waits for "
+        "another pick. Past the limit, that person gets only copies already in the store until the next day.",
     "SUBSYNC_MAX_LANGUAGES":
         "How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they "
         "play: its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: "

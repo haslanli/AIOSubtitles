@@ -381,25 +381,30 @@ class App:
                 if one.get(key):
                     e.answers[key] = one[key]
             e.answers['SUBSYNC_USENET'] = 'yes' if one.get('SUBSYNC_USENET') else 'no'
+            e.answers['SUBSYNC_AUDIO_ROUTE'] = 'yes' if one.get('SUBSYNC_AUDIO_ROUTE') else 'no'
             if s.run('hostchoices', e.host_choices):
                 return self.go('hostlimits')
-        usenet = e.answers.get('SUBSYNC_USENET', '') == 'yes' if 'SUBSYNC_USENET' in e.answers else \
-            engine.env_values().get('SUBSYNC_USENET', 'off').strip().lower() in ('on', 'yes', 'true', '1')
-        return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=usenet))
+        chosen = {}
+        for key in ('SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE'):
+            chosen[key] = e.answers.get(key, '') == 'yes' if key in e.answers else \
+                engine.env_values().get(key, 'off').strip().lower() in ('on', 'yes', 'true', '1')
+        return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=chosen['SUBSYNC_USENET'],
+                                              audio=chosen['SUBSYNC_AUDIO_ROUTE']))
 
     def step_hostlimits(self, s, method, form, one):
         e = s.e
         if method == 'POST':
-            for lim in limits.hosting(getattr(e, 'host_usenet', True)):
+            for lim in limits.hosting(getattr(e, 'host_usenet', True), getattr(e, 'host_audio', False)):
                 if one.get(lim.setting):
                     e.answers[lim.setting] = one[lim.setting]
             if s.run('hostlimits', e.host_limits):
                 s.start_job('hostinstall', e.host_install)
                 return self.go('hostinstall')
         env = engine.env_values()
-        usenet = getattr(e, 'host_usenet', True)
-        values = {lim.setting: e.answers.get(lim.setting) or limits.current(lim, env) for lim in limits.hosting(usenet)}
-        return self.page(screens.limits('host', values, s.problems.get('hostlimits'), usenet=usenet))
+        usenet, audio = getattr(e, 'host_usenet', True), getattr(e, 'host_audio', False)
+        values = {lim.setting: e.answers.get(lim.setting) or limits.current(lim, env)
+                  for lim in limits.hosting(usenet, audio)}
+        return self.page(screens.limits('host', values, s.problems.get('hostlimits'), usenet=usenet, audio=audio))
 
     def step_hostinstall(self, s, method, form, one):
         return self.installing(s, 'hostinstall', method, 'hostcheck')

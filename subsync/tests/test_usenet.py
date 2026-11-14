@@ -526,6 +526,32 @@ class UsenetJobTest(TempDirTest):
         self.assertTrue(counts.stopped_)
 
 
+    def test_a_usenet_file_with_no_track_never_waits_for_a_pick(self):
+        """A Usenet file never takes the audio route, so it gets no pick entry, and the same person's next
+        requests within the hour don't read it again; its languages are marked judged as before (someone who plays
+        the same file from a debrid service gets their own first pass: test_public_audio.OwnFirstPassTest)."""
+        from helpers import FIXTURES, RangeServer
+        srv = RangeServer(FIXTURES)
+        self.addCleanup(srv.close)
+        size = os.path.getsize(os.path.join(FIXTURES, "tiny-nosub.mp4"))
+        hints = {"filename": "tiny-nosub.mp4", "videoSize": size}
+        s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_AUDIO_ROUTE": "on",
+                      "SUBSYNC_EXTRA_SOURCES": ""})
+        store = Store(self.dir)
+        subs = [{"id": "s", "url": srv.url("tiny.srt"), "lang": "eng", "release": "", "hash": "", "hash_match": False,
+                 "ai": False}]
+        u = FakeUsenet([row(url=srv.url("tiny-nosub.mp4"), name="tiny-nosub.mp4", size=size)], subs=subs)
+        w = Worker(s, store, FakeDebrid(subs), worker_mod.Safety(), usenet=u,
+                   usenet_gate=worker_mod.UsenetGate(store, 10, Counts(), who="w"))
+        job = Job("movie", "tt1", hints)
+        w.process(job)
+        self.assertTrue(job.usenet)
+        file_key = store.resolve(job.alias)
+        self.assertIsNotNone(file_key)                       # the file was read
+        self.assertFalse(w.waits_for_pick(job.alias))
+        self.assertTrue(store.judged_all(file_key, ["eng"], s.rule_id, 0))
+        self.assertTrue(w.recently_unpickable(job.alias))
+
 
 # --------------------------------------------------------------------------------------------------------- public mode
 

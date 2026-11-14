@@ -110,9 +110,12 @@ class PublicSettingsTest(unittest.TestCase):
         self.assertEqual(Settings({}).missing(),
                          ["SUBSYNC_SOURCE_MANIFEST", "SUBSYNC_SOURCE_PASSWORD", "SUBSYNC_PUBLIC_BASE"])
 
-    def test_audio_route_conflicts_in_public_mode(self):
+    def test_the_audio_route_in_public_mode_only_after_a_pick(self):
+        # Allowed in public mode, but never on a plain request (SUBSYNC_AUDIO_ON_PICK off)
         self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on"}).conflicts(), [])
-        self.assertEqual(len(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on"}).conflicts()), 1)
+        self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on"}).conflicts(), [])
+        self.assertEqual(len(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on",
+                                       "SUBSYNC_AUDIO_ON_PICK": "off"}).conflicts()), 1)
         self.assertEqual(Settings({"SUBSYNC_AUDIO_ROUTE": "on"}).conflicts(), [])
 
 
@@ -688,10 +691,10 @@ class StartupTest(unittest.TestCase):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test"})
         self.assertIn("SUBSYNC_SECRET_KEY", out)
 
-    def test_main_refuses_public_mode_with_the_audio_route(self):
+    def test_main_refuses_public_mode_with_the_audio_route_on_any_request(self):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test", "SUBSYNC_SECRET_KEY": KEY,
-                             "SUBSYNC_AUDIO_ROUTE": "on"})
-        self.assertIn("audio route", out)
+                             "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_ON_PICK": "off"})
+        self.assertIn("audio route runs only after a pick", out)
         self.assertNotIn(KEY, out)
 
     def test_requirements_pin_both_platforms(self):

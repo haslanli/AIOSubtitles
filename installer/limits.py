@@ -1,10 +1,9 @@
 """The limits each install asks, with the defaults and explanations of subsync/subsync/explain.py.
 
 A personal install asks the daily total and, with the audio route on, the audio limit, and with Usenet on its daily
-number of Usenet searches; a public instance asks every limit, in three groups (the Usenet number only when it lets
-people turn Usenet on). Left out because they would do nothing: the language limit on a personal
-install (you choose your own languages there) and the audio limit on a public instance (public mode keeps the audio
-route off).
+number of Usenet searches; a public instance asks every limit, in three groups (the audio limit only with the audio
+route on,, and the Usenet number only when it lets people turn Usenet on). Left out because it would do nothing:
+the language limit on a personal install (you choose your own languages there).
 
 A limit is written to state/subsync.env only when it differs from subsync's default, so a later default still
 applies to everyone who kept it.
@@ -55,13 +54,21 @@ def personal(audio, usenet=False):
     return [DAILY] + ([AUDIO] if audio else []) + ([USENET] if usenet else [])
 
 
-def hosting_groups(usenet=True):
-    """The hosting route's groups, without the Usenet number when the instance doesn't let people turn Usenet on."""
-    return [(heading, [lim for lim in group if usenet or lim is not USENET_HOSTED]) for heading, group in HOSTING]
+def hosting_groups(usenet=True, audio=False):
+    """The hosting route's groups, without the Usenet number when the instance doesn't let people turn Usenet on; with
+    the audio route on, the audio limit in "Each person", before the Usenet number."""
+    groups = []
+    for heading, group in HOSTING:
+        kept = [lim for lim in group if usenet or lim is not USENET_HOSTED]
+        if audio and heading == 'Each person':
+            at = kept.index(USENET_HOSTED) if USENET_HOSTED in kept else len(kept)
+            kept = kept[:at] + [AUDIO] + kept[at:]
+        groups.append((heading, kept))
+    return groups
 
 
-def hosting(usenet=True):
-    return [lim for _, group in hosting_groups(usenet) for lim in group]
+def hosting(usenet=True, audio=False):
+    return [lim for _, group in hosting_groups(usenet, audio) for lim in group]
 
 
 def names(asked):

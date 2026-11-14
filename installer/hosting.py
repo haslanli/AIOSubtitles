@@ -2,8 +2,8 @@
 
 Setup writes public mode's lines of state/subsync.env, makes the service's secret once and never shows it, and
 runs subsync on 127.0.0.1 only: the hoster's own web server sends their https address to it; setup shows the one rule
-that needs and checks the address before it says done. No Wyzie Subs key and no audio route: public mode refuses
-both.
+that needs and checks the address before it says done. No Wyzie Subs key (public mode refuses it); the audio route
+only when the host chooses it, and then only after a person's pick.
 """
 import secrets
 import urllib.error
@@ -12,12 +12,16 @@ import urllib.request
 
 from installer import limits, plan
 
-LIMITS = limits.hosting()
+LIMITS = limits.hosting(audio=True)
 PORT = plan.SUBSYNC_PORT
+# the audio route's question on this route; its explanation is SUBSYNC_AUDIO_ROUTE's own ((2))
+AUDIO_QUESTION = ('Let people sync files that carry no subtitles of their own, by listening to the audio, when they '
+                  'pick them?')
 ADDRESS_WORDS = 'The web address of your public instance, with https, like https://subtitles.example.com.'   # the address question's own words
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
-         'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET') + limits.names(LIMITS)
+         'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE') \
+    + limits.names(LIMITS)
 _INVITE_LETTERS = 'abcdefghjkmnpqrstuvwxyz23456789'     # no 0/o, 1/l/i: easy to read out and type
 
 
@@ -54,9 +58,12 @@ def public_env(answers, secret, limit_values):
         'SUBSYNC_SUBSOURCE_KEY': answers.get('SUBSYNC_SUBSOURCE_KEY', ''),
         # whether people may turn Usenet on for themselves (with their own services, through their AIOStreams)
         'SUBSYNC_USENET': 'on' if str(answers.get('SUBSYNC_USENET', '')).lower() in ('yes', 'on', 'true') else 'off',
+        # whether files with no subtitle track of their own are synced from their sound, after a person's pick
+        'SUBSYNC_AUDIO_ROUTE': 'on' if str(answers.get('SUBSYNC_AUDIO_ROUTE', '')).lower() in ('yes', 'on', 'true')
+        else 'off',
     }
-    usenet = env['SUBSYNC_USENET'] == 'on'
-    env.update(limits.env_lines(limits.hosting(usenet), limit_values))
+    usenet, audio = env['SUBSYNC_USENET'] == 'on', env['SUBSYNC_AUDIO_ROUTE'] == 'on'
+    env.update(limits.env_lines(limits.hosting(usenet, audio), limit_values))
     return {k: v for k, v in env.items() if v not in (None, '')}
 
 

@@ -9,11 +9,29 @@ import bisect
 import logging
 import struct
 import subprocess
+import sys
 import threading
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 AUDIO_BYTES_LOCK = threading.Lock()
+# ffmpeg decodes bytes of files anyone can publish; on Linux each decoder gets its own limits
+FFMPEG_MEMORY_KB = 1024 * 1024    # address space of one decoder (1 GiB; a 30 s window needs a few MB)
+FFMPEG_CPU_S = 120                # processor seconds of one decoder (a window takes well under one)
+
+
+def decoder_cmd(ffmpeg, fmt, args, linux=None):
+    """An ffmpeg command that decodes audio from standard input in the format `fmt`: it opens only the pipe (no file
+    or network address a file could name) and only that one demuxer; on Linux the shell sets its memory and processor
+    limits just before ffmpeg starts (no preexec_fn: the worker has threads), and ffmpeg dies past them."""
+    cmd = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "pipe", "-format_whitelist", fmt, "-f", fmt,
+           "-i", "pipe:0", *args]
+    on_linux = sys.platform.startswith("linux") if linux is None else linux
+    if on_linux:
+        # the limits where the shell can set them; ffmpeg runs either way, so a shell that can't never stops decoding
+        return ["sh", "-c", f'ulimit -v {FFMPEG_MEMORY_KB} 2>/dev/null; ulimit -t {FFMPEG_CPU_S} 2>/dev/null; exec "$@"',
+                "ffmpeg", *cmd]
+    return cmd
 
 
 def add_audio_bytes(index, n):
@@ -558,9 +576,10 @@ class MkvIndex:
         streamed into the decoder and stops once the window is decoded. Bytes read are added to `audio_bytes`."""
         a, b = self.byte_range(start, length)
         header = self.ebml + bytes.fromhex("18538067") + bytes.fromhex("01FFFFFFFFFFFFFF") + self.info + self.tracks_raw
-        cmd = [ffmpeg, "-nostdin", "-v", "error", "-f", "matroska", "-i", "pipe:0", "-ss", f"{start:.3f}",
-               "-t", f"{length:.3f}", "-copyts", "-map", f"0:a:{track if track is not None else (self.audio_track_index() or 0)}",
-               "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"]
+        cmd = decoder_cmd(ffmpeg, "matroska", [
+            "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-copyts",
+            "-map", f"0:a:{track if track is not None else (self.audio_track_index() or 0)}",
+            "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"])
         got = [0]
 
         def counted(chunks):   # this read's own bytes (other windows may be read at the same time)

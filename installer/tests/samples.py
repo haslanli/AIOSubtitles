@@ -124,8 +124,10 @@ def every_state():
     add('host-signups', screens.host_signups('k7pm-2qra-9xwd'), 'k7pm-2qra-9xwd')
     add('host-choices', screens.host_choices())
     add('host-choices-usenet', screens.host_choices(usenet=True))
+    add('host-choices-audio', screens.host_choices(usenet=True, audio=True))                    #
     add('host-limits', screens.limits('host', {}))
     add('host-limits-usenet', screens.limits('host', {}, usenet=True))
+    add('host-limits-audio', screens.limits('host', {}, usenet=True, audio=True))                 #
     add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'},
                                               problem=('SUBSYNC_SYNCS_AT_ONCE', 'A whole number from 1, or auto.')),
         'A whole number from 1, or auto.')

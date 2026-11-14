@@ -24,7 +24,7 @@ from .signup import (SignupError, SignupGate, delete, forget_password, form_lang
                      signup, store_only)
 from .sources import Aios
 from .users import day_of
-from .worker import OverLimit, Safety, Turn, UsenetGate, Worker
+from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 
 log = logging.getLogger("subsync.public")
 
@@ -41,7 +41,8 @@ def user_settings(env, record, token):
                 "SUBSYNC_USENET_MANIFEST": record.get("usenet_link") or "",
                 "SUBSYNC_USENET_PASSWORD": record.get("usenet_password") or "",
                 "SUBSYNC_PUBLIC_BASE": f"{base}/u/{token}",
-                "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
+                # the instance's audio route and audio limit, only ever after the person's pick
+                "SUBSYNC_AUDIO_ON_PICK": "on", "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
     return Settings(own)
 
 
@@ -66,6 +67,10 @@ class UserLimits:
     def before_read(self, length):
         if self.users.usage(self.token)["bytes"] + length > self.s.user_daily_bytes:
             raise OverLimit("bytes per day")
+
+    def has_room(self, n):
+        """Whether what is left of the person's data today covers n bytes: an audio sync starts only then."""
+        return self.users.usage(self.token)["bytes"] + n <= self.s.user_daily_bytes
 
     def after_read(self, n):
         if n:
@@ -108,6 +113,9 @@ class StoreOnly:
     def before_read(self, length):
         raise OverLimit("no worker free")
 
+    def has_room(self, n):
+        return False
+
     def after_read(self, n):
         pass
 
@@ -119,6 +127,9 @@ class Pool:
         self.s, self.env, self.store, self.users, self.clock = settings, dict(env), store, users, clock
         self.start_workers = start_workers
         self.turn = Turn(settings.syncs_at_once or 1)
+        # the audio route: its own places, half the turn's, and one speech detector for everyone
+        self.audio_turn = Turn(audio_places(self.turn.places))
+        self._vad, self._vad_lock = None, threading.Lock()
         # One set of built-in sources for everyone: answers, pauses and the sites' limits are shared
         from .extra import make_sources
         self.extra = make_sources(settings)
@@ -137,11 +148,19 @@ class Pool:
                           size_slack=s.size_slack, password=s.usenet_password)
             gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(), who=limits.who)
         safety = Safety(backoff_s=s.backoff_s)
-        worker = Worker(s, self.store, aios, safety, extra=self.extra, turn=self.turn, limits=limits, usenet=usenet,
-                        usenet_gate=gate)
+        worker = Worker(s, self.store, aios, safety, vad_factory=self.vad, extra=self.extra, turn=self.turn,
+                        limits=limits, usenet=usenet, usenet_gate=gate, audio_turn=self.audio_turn)
         if start:
             worker.start()
         return App(s, self.store, worker, safety, state=record.get("state"), detail=record.get("state_detail"))
+
+    def vad(self):
+        """The one speech detector (Silero VAD) every person's audio sync uses, made on first use."""
+        with self._vad_lock:
+            if self._vad is None:
+                from . import vad
+                self._vad = vad.SileroVad()
+            return self._vad
 
     def app(self, token):
         """The person's App (their worker started on first use), or None for a token nobody signed up with. Past
@@ -196,7 +215,7 @@ class Pool:
         with self.lock:
             for uid, entry in list(self.entries.items()):
                 worker = entry["app"].worker
-                if entry["last"] < cutoff and not worker.jobs and worker.current is None:
+                if entry["last"] < cutoff and not worker.jobs and worker.current is None and worker.current_audio is None:
                     stopped.append(self.entries.pop(uid)["app"].worker)
         for worker in stopped:
             worker.stop()
@@ -397,7 +416,7 @@ class PublicHandler(Handler):
         except SignupError as e:
             return self._html(e.code, pages.signup_page(svc.s, error=e.message, field=e.field,
                                                         order=_chosen(form, svc.s.max_languages)))
-        return self._html(200, pages.result_page(result), personal=True)
+        return self._html(200, pages.result_page(result, svc.s), personal=True)
 
     def _configure(self, token, method):
         svc = self.service

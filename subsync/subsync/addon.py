@@ -211,18 +211,31 @@ class App:
         if hints.get("filename") and hints.get("videoSize"):
             aliases.append(f"name:{hints['filename']}|{hints['videoSize']}")
         file_key, out = self.offers(aliases)
+        if out and (hints.get("filename") or hints.get("videoHash")):
+            # A copy listed here is rebuilt from this person's own subtitle list when it is downloaded; with no
+            # job for the file, the list is fetched then, from this request's file
+            self.worker.remember(job)
         if len({e["lang"] for e in out}) == len(self.s.languages) or not (hints.get("filename") or hints.get("videoHash")):
             return out
         recent = False
         if file_key:
             row = self.store.db.execute("SELECT read_at, detail FROM files WHERE file_key=?", (file_key,)).fetchone()
             recent = bool(row and row[0] and time.time() - row[0] < REPROCESS_S)
-            rule = json.loads(row[1] or "{}").get("rule") if row else None
+            detail = json.loads(row[1] or "{}") if row else {}
+            rule = detail.get("rule")
             if recent and rule is not None and rule != self.s.rule_id:
                 recent = False   # read under another pass rule: judge its subtitles again now
-            if recent and self.store.judged_all(file_key, self.s.languages, self.s.rule_id,
-                                                time.time() - REPROCESS_S) is False:
+            judged = self.store.judged_all(file_key, self.s.languages, self.s.rule_id, time.time() - REPROCESS_S) \
+                if recent else None
+            if judged is False:
                 recent = False   # read lately, but not for every language asked here (another person's, in public mode)
+            elif recent and self.s.audio_route and detail.get("reference") is False \
+                    and not self.worker.waits_for_pick(job.alias) and not self.worker.recently_unpickable(job.alias) \
+                    and not self.store.audio_judged(file_key, self.s.languages):
+                # A file with no subtitle track of its own, read lately for someone else and not judged by the
+                # audio route yet: the waiting file is each person's own, so this person gets their own first pass
+                # (an index read) and can pick it
+                recent = False
         if not recent and not self.worker.recently_unlisted(job.alias):
             job = self.worker.submit(job) or job
         if not self.worker.busy_with(job.alias):

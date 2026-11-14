@@ -263,6 +263,13 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,0,NULL)",
                             (file_key, size, oshash, 1 if text_track else 0, json.dumps(detail), self.clock()))
 
+    def file_detail(self, file_key):
+        """What the first read of a file found (`file_read`'s detail: its tracks, bytes, whether it has a track a
+        subtitle can be judged against, its audio byte rate), or None."""
+        with self.lock:
+            row = self.db.execute("SELECT detail FROM files WHERE file_key=?", (file_key,)).fetchone()
+        return json.loads(row[0] or "{}") if row else None
+
     def file_failed(self, alias):
         """A read failure for a file (by alias, since a file that can't be read has no hash): 1 h / 6 h / 24 h,
         then never again. Returns the retry time, or None when it stops."""
@@ -325,6 +332,21 @@ class Store:
     def pickable_drop(self, alias):
         with self.lock:
             self.db.execute("DELETE FROM pickable WHERE alias=?", (alias,))
+
+    def audio_judged(self, file_key, langs):
+        """Whether every one of langs has a verdict of the audio route for the file (a copy, or the original kept)."""
+        with self.lock:
+            have = {row[0] for row in self.db.execute(
+                "SELECT DISTINCT lang FROM results WHERE file_key=? AND route='audio'", (file_key,))}
+        return all(lang in have for lang in langs)
+
+    def drop_shared_waiting(self):
+        """Public mode: waiting files and their original subtitles are each person's own (keys starting "p:");
+        rows an earlier version kept by the file alone, shared by everyone, are deleted. Returns how many went."""
+        with self.lock:
+            gone = sum(self.db.execute(f"DELETE FROM {table} WHERE alias NOT LIKE 'p:%'").rowcount
+                       for table in ("pickable", "originals"))
+        return gone
 
     def originals_put(self, alias, langs):
         with self.lock:

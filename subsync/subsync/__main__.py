@@ -57,6 +57,28 @@ def main():
 
 
 
+def public_store(s):
+    """The shared store of public mode:, it keeps how each copy was made, never a subtitle's text (texts an
+    earlier version kept go);, waiting files and their original subtitles are each person's own (rows an earlier
+    version kept by the file alone go)."""
+    store = Store(s.data, s.cap_bytes, keep_texts=False)
+    store.drop_texts()
+    store.drop_shared_waiting()
+    return store
+
+
+def public_start_line(s, places, audio_places):
+    """The public service's start line: its limits and whether the audio route runs, and how."""
+    if s.audio_route:
+        limit = f"{s.audio_budget / 1e9:g} GB" if s.audio_budget else "no limit"
+        audio = f"audio route on after a pick, up to {limit} a file, {audio_places} at a time"
+    else:
+        audio = "audio route off"
+    return (f"public mode: listening on {s.port}; up to {s.max_users} people, {s.active_workers} active at once, "
+            f"{places} file{'' if places == 1 else 's'} at once; {audio}; trusted proxy "
+            f"{', '.join(s.trusted_proxy) or 'none'}")
+
+
 def main_public(s):
     """Public mode: the sign-up pages and every person's own service in one process (public.py)."""
     import os
@@ -64,9 +86,7 @@ def main_public(s):
     from .public import Pool, PublicService, serve_public
     from .users import Users
     net.configure(public_only=True)
-    # The shared store keeps how each copy was made, never a subtitle's text; texts an earlier version kept go
-    store = Store(s.data, s.cap_bytes, keep_texts=False)
-    store.drop_texts()
+    store = public_store(s)
     users = Users(os.path.join(s.data, "users.sqlite3"), s.secret_bytes())
     env = dict(os.environ)
     pool = Pool(s, env, store, users)
@@ -91,9 +111,7 @@ def main_public(s):
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
-    log.info("public mode: listening on %d; up to %d people, %d active at once, %d file%s at once; trusted proxy %s",
-             s.port, s.max_users, s.active_workers, pool.turn.places, "" if pool.turn.places == 1 else "s",
-             ", ".join(s.trusted_proxy) or "none")
+    log.info("%s", public_start_line(s, pool.turn.places, pool.audio_turn.places))
     server.serve_forever()
 
 

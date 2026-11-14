@@ -30,6 +30,15 @@ class Routes(unittest.TestCase):
                          ['Data a day in total', 'Usenet searches a day'])
         self.assertNotIn('SUBSYNC_USENET_LISTINGS_PER_DAY', limits.names(limits.hosting(usenet=False)))
 
+    def test_a_public_instance_asks_the_audio_limit_only_with_the_audio_route(self):
+        # With the audio route on, the audio limit is asked under "Each person", before the Usenet number
+        each = dict(limits.hosting_groups(usenet=True, audio=True))['Each person']
+        self.assertEqual([lim.setting for lim in each],
+                         ['SUBSYNC_USER_FILES_PER_DAY', 'SUBSYNC_USER_DAILY_MB', 'SUBSYNC_MAX_LANGUAGES',
+                          'SUBSYNC_AUDIO_BUDGET_GB', 'SUBSYNC_USENET_LISTINGS_PER_DAY'])
+        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', limits.names(limits.hosting()))
+        self.assertIn('SUBSYNC_AUDIO_BUDGET_GB', limits.names(limits.hosting(audio=True)))
+
     def test_a_public_instance_asks_every_limit_in_three_groups_without_audio(self):
         self.assertEqual([(heading, [lim.setting for lim in group]) for heading, group in limits.HOSTING],
                          HOSTING_ORDER)

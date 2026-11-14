@@ -994,13 +994,15 @@ class Engine:
                 self.keys[key] = value
         kept = env_values().get('SUBSYNC_USENET', 'off').strip().lower() in ('on', 'yes', 'true', '1')
         self.host_usenet = self.ask.yesno('SUBSYNC_USENET', 'Let people sync Usenet files too?', kept)
+        kept = env_values().get('SUBSYNC_AUDIO_ROUTE', 'off').strip().lower() in ('on', 'yes', 'true', '1')
+        self.host_audio = self.ask.yesno('SUBSYNC_AUDIO_ROUTE', hosting.AUDIO_QUESTION, kept)
 
     def host_limits(self):
         """Every limit, in its three groups, the current value or subsync's default filled in."""
         self.out.step(5, 'Limits', self.HOST_STEPS)
         env = env_values()
         self.limit_values = {}
-        for lim in limits.hosting(getattr(self, 'host_usenet', True)):
+        for lim in limits.hosting(getattr(self, 'host_usenet', True), getattr(self, 'host_audio', False)):
             def check(value, lim=lim):
                 chosen, error = limits.check(lim, value)
                 return (False, error, value) if error else (True, '', chosen)
@@ -1014,7 +1016,8 @@ class Engine:
         answers = {'HOST_ADDRESS': self.address, 'SUBSYNC_TRUSTED_PROXY': self.trusted_proxy,
                    'SUBSYNC_PUBLIC_INVITE': self.invite, 'SUBDL_KEY': self.keys.get('SUBDL_KEY', ''),
                    'SUBSYNC_SUBSOURCE_KEY': self.keys.get('SUBSYNC_SUBSOURCE_KEY', ''),
-                   'SUBSYNC_USENET': 'yes' if getattr(self, 'host_usenet', False) else 'no'}
+                   'SUBSYNC_USENET': 'yes' if getattr(self, 'host_usenet', False) else 'no',
+                   'SUBSYNC_AUDIO_ROUTE': 'yes' if getattr(self, 'host_audio', False) else 'no'}
         env, kept = plan.merge_env(hosting.public_env(answers, self.secret, self.limit_values), env_values(),
                                    owned=hosting.OWNED)
         write_env(STATE / 'subsync.env', env)

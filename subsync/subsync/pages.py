@@ -67,9 +67,9 @@ def _headline():
     return (f"{e(first)}<br class=\"phone\"> {e(middle)} <br class=\"wide\">{e(word)}<br class=\"phone\"> {e(rest)}")
 
 
-def _intro():
+def _intro(settings=None):
     """The intro in two paragraphs, split at a sentence end (no word changed)."""
-    text = explain.PUBLIC_TEXTS["intro"]
+    text = explain.intro_text(settings)
     at = text.find(" A file synced once")
     parts = [text[:at], text[at + 1:]] if at > 0 else [text]
     return "".join(f"<p>{e(p)}</p>" for p in parts)
@@ -134,7 +134,7 @@ def signup_page(settings, error=None, field=None, order=None):
     tries = explain.PUBLIC_TEXTS["tries"].format(n=settings.signups_per_hour)
     opener = ui.link_button("Sign up", "#signup", "primary", attrs="data-open", arrow=True)
     body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT)}<main class=\"grid\">"
-            f"<h1>{_headline()}</h1><section class=\"what\">{_intro()}</section>"
+            f"<h1>{_headline()}</h1><section class=\"what\">{_intro(settings)}</section>"
             f"<section class=\"need\" aria-labelledby=\"need-h\"><h2 id=\"need-h\">Before you start</h2>{before}"
             f"<p class=\"small\">{e(tries)}</p><div class=\"go\">{opener}</div></section>"
             "<div class=\"page-end\" aria-hidden=\"true\"></div></main></div>"
@@ -157,7 +157,7 @@ def usenet_allowed(settings):
     return bool(settings.usenet and settings.usenet_listings_per_day > 0)
 
 
-def result_page(result):
+def result_page(result, settings=None):
     texts = explain.PUBLIC_TEXTS
     stored = getattr(result, "store_only", False)
     done = [texts["made_config"]] if getattr(result, "sync_made", not stored) and not stored else []
@@ -191,7 +191,7 @@ def result_page(result):
             + (f"<div class=\"notes\">{''.join(notes)}</div>" if notes else "")
             + "<section aria-labelledby=\"done-h\"><h2 id=\"done-h\">Done on your AIOStreams"
             f"</h2>{ui.dots(done)}{left}</section><section aria-labelledby=\"next-h\"><h2 id=\"next-h\">What happens next</h2>"
-            f"<p>{e(texts['next'])}</p>"
+            f"<p>{e(explain.next_text(settings))}</p>"
             + ui.link_button("Open your settings page", _settings_link(result.manifest_url), "secondary", arrow=True)
             + f"<p class=\"after\">{e(texts['settings_link'])}</p></section></div></main></div>")
     return ui.page("Signed up · AIOSubtitles", body, "done", personal=True)
@@ -404,7 +404,7 @@ def deleted_page(outcome):
 def privacy_page(settings):
     sections = "".join(
         f"<section aria-labelledby=\"privacy-{i}\"><h2 id=\"privacy-{i}\">{e(head)}</h2>"
-        f"<p>{e(text[:1].upper() + text[1:])}</p></section>" for i, (head, _, text) in enumerate(explain.PRIVACY_PARTS))
+        f"<p>{e(text[:1].upper() + text[1:])}</p></section>" for i, (head, _, text) in enumerate(explain.privacy_parts(settings)))
     content = (f"<div class=\"body\">{sections}<section aria-labelledby=\"privacy-q\"><h2 id=\"privacy-q\">Questions</h2>"
                f"<p><a class=\"mono\" href=\"{e(explain.CONTACT)}\">{e(explain.CONTACT)}</a></p></section></div>")
     return _letter("Privacy · AIOSubtitles", "What AIOSubtitles reads and keeps", content)

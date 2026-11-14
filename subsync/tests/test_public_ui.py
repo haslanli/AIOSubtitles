@@ -125,6 +125,10 @@ def every_page():
         "deleted": pages.deleted_page({"sync_removed": True, "addon_removed": True}),
         "deleted-left": pages.deleted_page({}),
         "privacy": pages.privacy_page(s),
+        # an instance with the audio route on: the pages say what it reads
+        "signup-audio": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on")),
+        "result-audio": pages.result_page(result(), settings(SUBSYNC_AUDIO_ROUTE="on")),
+        "privacy-audio": pages.privacy_page(settings(SUBSYNC_AUDIO_ROUTE="on")),
         "not-found": pages.not_found_page(),
         "error": pages.error_page("Wrong."),
     }
@@ -147,6 +151,9 @@ def approved_corpus():
     texts += [explain.PUBLIC_REAL_DEBRID_WARNING, explain.CONTACT] + [explain.languages_help(n) for n in (1, 2, 3, 4)]
     texts += [h for h, _, _ in explain.PRIVACY_PARTS]
     texts += [(t[:1].upper() + t[1:]) for _, _, t in explain.PRIVACY_PARTS]
+    audio = settings(SUBSYNC_AUDIO_ROUTE="on")            # the audio route's words, as an instance with it on shows them
+    texts += [explain.intro_text(audio), explain.next_text(audio)]
+    texts += [(t[:1].upper() + t[1:]) for _, _, t in explain.privacy_parts(audio)]
     for title, text, _ in explain.PUBLIC_STATES.values():
         texts += [title, text.replace("{detail}", "Detail.")]
     for key, text in explain.PUBLIC_TEXTS.items():
