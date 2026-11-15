@@ -77,18 +77,52 @@ class Pieces(unittest.TestCase):
         with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
             s = Settings(env)
         self.assertEqual(s.conflicts(), [])
-        self.assertTrue(s.audio_route and s.audio_on_pick)
+        self.assertEqual(s.audio_choice, 'pick')         # the default; in public mode each person chooses
 
-    def test_the_hosting_screens_ask_the_audio_route_and_its_limit(self):
+    def test_the_hosting_screens_ask_the_audio_route_and_its_limits(self):
+        # Allow it (each person then chooses) or remove it completely, off by default; with it on, its limits
+        import html
         from installer import screens
+        from subsync import explain
         page = screens.host_choices(audio=True)
-        self.assertIn('Let people sync files that carry no subtitles of their own, by listening to the audio, when '
-                      'they pick them?', page)
+        self.assertEqual(hosting.AUDIO_QUESTION, 'Offer syncing files that have no subtitles of their own, from their '
+                                                 'audio?')
+        self.assertIn(hosting.AUDIO_QUESTION, page)
+        self.assertIn(html.escape(explain.QUESTIONS['SUBSYNC_AUDIO_ROUTE'][1]), page)
+        self.assertTrue(explain.QUESTIONS['SUBSYNC_AUDIO_ROUTE'][1].startswith('Off by default. Off removes it '
+                                                                               'completely'))
+        self.assertEqual(explain.QUESTIONS['SUBSYNC_AUDIO_ROUTE'][0], 'no')
         self.assertRegex(page, r'<input[^>]*name="SUBSYNC_AUDIO_ROUTE"[^>]*checked')
         self.assertNotRegex(screens.host_choices(audio=False), r'<input[^>]*name="SUBSYNC_AUDIO_ROUTE"[^>]*checked')
         values = {lim.setting: lim.default for lim in limits.hosting(audio=True)}
-        self.assertIn('Audio per file', screens.limits('host', values, audio=True))
-        self.assertNotIn('Audio per file', screens.limits('host', values, audio=False))
+        on, off = screens.limits('host', values, audio=True), screens.limits('host', values, audio=False)
+        for label in ('Audio per file', 'Audio syncs per person a day', 'Of those, as soon as a file is opened',
+                      'Audio syncs at a time'):
+            with self.subTest(label=label):
+                self.assertIn(label, on)
+                self.assertNotIn(label, off)
+
+    def test_the_audio_routes_limits_are_written_only_with_it_on_and_when_not_the_default(self):
+        # The two daily counts and the audio syncs at a time
+        answers = {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes'}
+        changed = {'SUBSYNC_USER_AUDIO_PER_DAY': '10', 'SUBSYNC_USER_OPENED_PER_DAY': '0', 'SUBSYNC_AUDIO_AT_ONCE': '1'}
+        env = hosting.public_env(answers, hosting.new_secret(), changed)
+        self.assertEqual({k: env[k] for k in changed}, changed)
+        default = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_USER_AUDIO_PER_DAY': '20',
+                                                                     'SUBSYNC_USER_OPENED_PER_DAY': '5',
+                                                                     'SUBSYNC_AUDIO_AT_ONCE': 'auto'})
+        self.assertFalse(set(changed) & set(default))
+        off = hosting.public_env(dict(answers, SUBSYNC_AUDIO_ROUTE='no'), hosting.new_secret(), changed)
+        self.assertFalse(set(changed) & set(off))
+        self.assertLessEqual(set(changed), set(hosting.OWNED))       # a line set by hand gives way to the answer
+        try:
+            from subsync.settings import Settings
+        except ImportError as e:
+            self.skipTest(f'subsync.settings needs {e.name}')
+        with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
+            s = Settings(env)
+        self.assertEqual(s.conflicts(), [])
+        self.assertEqual((s.user_audio_per_day, s.user_opened_per_day, s.audio_at_once), (10, 0, 1))
 
     def test_the_compose_file_listens_on_this_machine_only(self):
         image = 'ghcr.io/haslanli/aiosubtitles:1.4.0@sha256:' + 'a' * 64
@@ -203,6 +237,28 @@ class Route(RouteFixture):
         off = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual(off['SUBSYNC_AUDIO_ROUTE'], 'off')
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', off)
+
+    def test_the_audio_routes_daily_counts_and_places_through_the_answers_file(self):
+        # Asked with the audio route on, with their defaults; audio syncs at a time within the files at a time
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes',
+                                    'SUBSYNC_USER_OPENED_PER_DAY': '0', 'SUBSYNC_SYNCS_AT_ONCE': '4',
+                                    'SUBSYNC_AUDIO_AT_ONCE': '2'})
+        self.assertEqual(code, 0, out)
+        flat = ' '.join(out.split())
+        self.assertIn('Offer syncing files that have no subtitles of their own, from their audio?', flat)
+        for label in ('Audio syncs per person a day', 'Of those, as soon as a file is opened', 'Audio syncs at a time'):
+            self.assertIn(label, flat)
+        env = engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual((env['SUBSYNC_USER_OPENED_PER_DAY'], env['SUBSYNC_AUDIO_AT_ONCE']), ('0', '2'))
+        self.assertNotIn('SUBSYNC_USER_AUDIO_PER_DAY', env)                  # the default: no line
+        code, out = self.run_setup({'SUBSYNC_AUDIO_AT_ONCE': '5'})          # more than the 4 files at a time
+        self.assertNotEqual(code, 0)
+        self.assertIn('A whole number from 1 to 4 (the files synced at a time), or auto.', ' '.join(out.split()))
+        code, out = self.run_setup({'SUBSYNC_AUDIO_ROUTE': 'no'})            # off: none of them asked or written
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('Audio syncs at a time', out)
+        off = engine.read_kv(self.state / 'subsync.env')
+        self.assertFalse({'SUBSYNC_USER_AUDIO_PER_DAY', 'SUBSYNC_USER_OPENED_PER_DAY', 'SUBSYNC_AUDIO_AT_ONCE'} & set(off))
 
     def test_the_status_and_removing_a_public_instance(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})

@@ -124,11 +124,12 @@ def release_name(name):
 
 
 def usenet_match(rows, name, size):
-    """A Usenet row of the same release when the exact rule found none ('s test): AIOStreams lists a release by
-    its name at its whole NZB's size until its engine has opened it, then as a library row by the file inside (".mkv")
-    at the file's size, a few per cent smaller. So the names are compared without a video extension, and the sizes
-    by the reader's Usenet rule (the smaller at least half the larger). A release whose file inside has a random name
-    is listed, once opened, by that name, with the release's name as the row's folder: that counts as its name too."""
+    """A Usenet row of the same release when the exact rule found none (seen in a test): AIOStreams lists a
+    release by its name at its whole NZB's size until its engine has opened it, then as a library row by the file inside
+    (".mkv") at the file's size, a few per cent smaller. So the names are compared without a video extension, and the
+    sizes by the reader's Usenet rule (the smaller at least half the larger). A release whose file inside has a random
+    name is listed, once opened, by that name, with the release's name as the row's folder: that counts as its name
+    too."""
     wanted = release_name(name)
 
     def names(s):
@@ -240,7 +241,7 @@ class Aios:
         return _get_json(url, self.timeout).get("streams") or []
 
     def find_row(self, type_, video_id, hints):
-        """The listed cached debrid row of the file a viewer opened (checklist 18a), from one listing: `match`."""
+        """The listed cached debrid row of the file a viewer opened, from one listing: `match`."""
         return self.match(self.streams(type_, video_id), hints)
 
     def match(self, listed, hints, usenet=False):

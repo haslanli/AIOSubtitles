@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, where, wizard
+from installer import dockerenv, engine, plan, where, wizard
 from subsync import explain, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
@@ -135,7 +135,7 @@ class FakeAios:
                 parts = path.split('/')
                 if len(parts) > 4 and parts[1] == 'stremio':
                     uuid, resource = parts[2], parts[4]
-                    if resource == 'manifest.json' and uuid in outer.users:   # each config's manifest ('s check)
+                    if resource == 'manifest.json' and uuid in outer.users:   # each config's manifest
                         return self._json(200, {'id': 'com.aiostreams', 'name': 'AIOStreams', 'resources': ['stream']})
                     if resource == 'subtitles':
                         outer.subtitle_calls = getattr(outer, 'subtitle_calls', 0) + 1
@@ -382,6 +382,94 @@ class Flow(FlowFixture):
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')   # remembered
 
+    def test_the_audio_question_has_three_answers(self):
+        # No, when I pick the file, as soon as a file is opened; SUBSYNC_AUDIO_WHEN written only when not the
+        # default, the audio limit still asked after a yes, the answer kept for a re-run and the page
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='open'))
+        self.assertEqual(code, 0, out)
+        flat = ' '.join(out.split())
+        self.assertIn('Sync files that have no subtitles of their own, from their audio?', flat)
+        for answer in ('1) No', '2) Yes, when I pick the file', '3) Yes, as soon as a file is opened'):
+            self.assertIn(answer, flat)
+        self.assertIn(' '.join(explain.QUESTIONS['AUDIO'][1].split()[:12]), flat)
+        self.assertIn('How much of each file', out)
+        env_path = self.state / 'subsync.env'
+        env = engine.read_kv(env_path)
+        self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_AUDIO_WHEN'], env['SUBSYNC_AUDIO_BUDGET_GB']),
+                         ('on', 'open', '1'))
+        self.assertEqual(engine.load_settings()['audio_when'], 'open')
+        self.assertEqual(self.page_engine({}).prefill()['AUDIO'], 'open')
+        self.assertIn(('audio', 'on when opened, up to 1 GB per file'), self.page_engine({}).status_parts()[1])
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})        # a re-run keeps it
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(env_path)['SUBSYNC_AUDIO_WHEN'], 'open')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'pick'})
+        self.assertEqual(code, 0, out)
+        env = engine.read_kv(env_path)
+        self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'on')
+        self.assertNotIn('SUBSYNC_AUDIO_WHEN', env)                                          # the default: no line
+        self.assertEqual(self.page_engine({}).prefill()['AUDIO'], 'pick')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'no'})
+        self.assertEqual(code, 0, out)
+        env = engine.read_kv(env_path)
+        self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'off')
+        self.assertFalse({'SUBSYNC_AUDIO_WHEN', 'SUBSYNC_AUDIO_BUDGET_GB'} & set(env))
+        self.assertEqual(self.page_engine({}).prefill()['AUDIO'], 'no')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'maybe'})
+        self.assertNotEqual(code, 0)
+        self.assertIn('Type a number from 1 to 3.', out)
+
+    def test_earlier_answers_and_installs_read_as_when_i_pick_the_file(self):
+        # an answers file from the yes/no question, and an install from before it: "when I pick the file"
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='yes'))
+        self.assertEqual(code, 0, out)
+        env_path = self.state / 'subsync.env'
+        self.assertEqual(engine.read_kv(env_path)['SUBSYNC_AUDIO_ROUTE'], 'on')
+        self.assertNotIn('SUBSYNC_AUDIO_WHEN', engine.read_kv(env_path))
+        s = engine.load_settings()
+        s.pop('audio_when', None)
+        engine.save_settings(s)
+        self.assertEqual(self.page_engine({}).prefill()['AUDIO'], 'pick')
+        # the setting SUBSYNC_AUDIO_WHEN replaced, set by hand: its answer is kept, written the new way
+        env_path.write_text(env_path.read_text() + 'SUBSYNC_AUDIO_ON_PICK=off\n')
+        self.assertEqual(self.page_engine({}).prefill()['AUDIO'], 'open')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+        self.assertEqual(code, 0, out)
+        env = engine.read_kv(env_path)
+        self.assertEqual(env['SUBSYNC_AUDIO_WHEN'], 'open')
+        self.assertNotIn('SUBSYNC_AUDIO_ON_PICK', env)
+        env_path.write_text(env_path.read_text() + 'SUBSYNC_AUDIO_ON_PICK=off\n')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'pick'})
+        self.assertEqual(code, 0, out)
+        self.assertFalse({'SUBSYNC_AUDIO_WHEN', 'SUBSYNC_AUDIO_ON_PICK'} & set(engine.read_kv(env_path)))
+        self.assertEqual(dict(self.page_engine({}).status_parts()[1])['audio'], 'on when picked, up to 1 GB per file')
+
+    def test_a_number_for_the_audio_question_in_an_answers_file_is_refused(self):
+        # found in review: the question was yes or no (1 = yes), and the terminal's numbers now start with
+        # 1 = No: a number in an answers file could mean either, so it is refused with a clear message and nothing is
+        # changed
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='pick'))
+        self.assertEqual(code, 0, out)
+        env_path = self.state / 'subsync.env'
+        before = env_path.read_text()
+        for number in ('1', '0', '2', '3'):
+            with self.subTest(number=number):
+                code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': number})
+                self.assertNotEqual(code, 0)
+                self.assertIn(' '.join(plan.AUDIO_NUMBER_REFUSED.split()), ' '.join(out.split()))
+                self.assertEqual(env_path.read_text(), before)
+        self.assertEqual(plan.audio_answer('1'), None)                     # never read as an answer either way
+
+    def test_the_answers_example_runs_as_it_is(self):
+        # docs/answers.example's own values are answers setup takes (the audio question's "no" included)
+        from installer import docs
+        example = plan.parse_env(docs.answers_example())
+        self.assertEqual(plan.audio_answer(example['AUDIO']), 'no')
+        self.assertEqual(example['SUBSYNC_AUDIO_ROUTE'], 'no')
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO=example['AUDIO']))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_ROUTE'], 'off')
+
     def test_an_audio_limit_set_by_hand_is_kept_while_the_audio_route_is_off(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
@@ -425,7 +513,7 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         cmd, stdin = next(c for c in self.exec_calls if 'subsync.selftest' in c[0])
         self.assertEqual(stdin, f'{PUBLIC}/api/v1/debrid/playback/x/file-1511641761.mkv\n')
-        self.assertNotIn('--cap-mb', cmd)                              # subsync's own index cap (16 MB)
+        self.assertNotIn('--cap-mb', cmd)                              # subsync's own index cap (32 MB)
 
     def test_the_test_read_skips_files_listed_with_an_impossible_size(self):
         # Oracle, 2026-11-10: Torrentio listed 1679 and 229376 bytes for 3 GB files, and the size check refused them
@@ -437,7 +525,7 @@ class Flow(FlowFixture):
 
     def test_an_index_over_subsync_s_cap_is_a_note_not_a_failure(self):
         self.selftest = {'ok': False, 'error': 'cap', 'bytes': 262160, 'requests': 2,
-                         'detail': 'its index is larger than subsync reads (16 MB): subsync keeps the original subtitles for this file'}
+                         'detail': 'its index is larger than subsync reads (32 MB): subsync keeps the original subtitles for this file'}
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
         self.assertNotIn('The test read failed', out)
@@ -603,13 +691,13 @@ class Flow(FlowFixture):
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})       # kept on a re-run
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_DAILY_BUDGET_GB'], '20')
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no',
-                                    'SUBSYNC_DAILY_BUDGET_GB': '50'})
+                                    'SUBSYNC_DAILY_BUDGET_GB': '100'})
         self.assertEqual(code, 0, out)
         self.assertNotIn('SUBSYNC_DAILY_BUDGET_GB', engine.read_kv(self.state / 'subsync.env'))
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no',
                                     'SUBSYNC_DAILY_BUDGET_GB': '0'})
         self.assertEqual(code, 1, out)
-        self.assertIn('A number above 0, like 50.', out)
+        self.assertIn('A number above 0, like 100.', out)
 
     def test_each_step_returns_a_problem_at_its_field(self):
         cases = [
@@ -619,7 +707,7 @@ class Flow(FlowFixture):
             ({'LANGUAGES': 'Klingon'}, 'choices', 'LANGUAGES', ''),
             ({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': 'ftp://x'}, 'choices', 'PUBLIC_ADDRESS', ''),
             ({'LANGUAGES': 'English', 'SUBSYNC_DAILY_BUDGET_GB': '0'}, 'limits', 'SUBSYNC_DAILY_BUDGET_GB',
-             'A number above 0, like 50.'),
+             'A number above 0, like 100.'),
         ]
         for answers, step, field, words in cases:
             with self.subTest(field=field):

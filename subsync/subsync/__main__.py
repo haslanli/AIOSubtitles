@@ -50,17 +50,33 @@ def main():
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
-    logging.getLogger("subsync").info("listening on %d; languages %s; audio route %s; Usenet %s", s.port,
-                                      ",".join(s.languages), "on" if s.audio_route else "off",
-                                      f"on, {s.usenet_listings_per_day} listings a day" if usenet else "off")
+    logging.getLogger("subsync").info("%s", start_line(s, usenet is not None))
     server.serve_forever()
+
+
+def _audio_limit(s):
+    return f"{s.audio_budget / 1e9:g} GB" if s.audio_budget else "no limit"
+
+
+def start_line(s, usenet):
+    """The self-hosted service's start line: its languages, its one audio choice with its limits, and Usenet.
+    One audio lane: one audio sync at a time."""
+    choice = s.audio_choice
+    if choice == "off":
+        audio = "audio route off"
+    else:
+        opened = choice == "open" and s.user_opened_per_day > 0     # with none allowed it syncs on a pick
+        audio = (f"audio route {'when opened' if opened else 'on pick'}, up to {_audio_limit(s)} a file, 1 at a time, "
+                 f"{s.user_audio_per_day} a day" + (f" ({s.user_opened_per_day} opened)" if opened else ""))
+    return (f"listening on {s.port}; languages {','.join(s.languages)}; {audio}; Usenet "
+            + (f"on, {s.usenet_listings_per_day} listings a day" if usenet else "off"))
 
 
 
 def public_store(s):
-    """The shared store of public mode:, it keeps how each copy was made, never a subtitle's text (texts an
-    earlier version kept go);, waiting files and their original subtitles are each person's own (rows an earlier
-    version kept by the file alone go)."""
+    """The shared store of public mode: it keeps how each copy was made, never a subtitle's text (texts an
+    earlier version kept go), and waiting files and their original subtitles are each person's own (rows an
+    earlier version kept by the file alone go)."""
     store = Store(s.data, s.cap_bytes, keep_texts=False)
     store.drop_texts()
     store.drop_shared_waiting()
@@ -68,10 +84,13 @@ def public_store(s):
 
 
 def public_start_line(s, places, audio_places):
-    """The public service's start line: its limits and whether the audio route runs, and how."""
+    """The public service's start line: its limits and whether the audio route is allowed, the answers each person may
+    choose and its limits."""
     if s.audio_route:
-        limit = f"{s.audio_budget / 1e9:g} GB" if s.audio_budget else "no limit"
-        audio = f"audio route on after a pick, up to {limit} a file, {audio_places} at a time"
+        opened = s.user_opened_per_day
+        answers = "off / on pick / when opened" if opened else "off / on pick"
+        audio = (f"audio route allowed: each person {answers}, up to {_audio_limit(s)} a file, {audio_places} at a "
+                 f"time, {s.user_audio_per_day} a person a day" + (f" ({opened} opened)" if opened else ""))
     else:
         audio = "audio route off"
     return (f"public mode: listening on {s.port}; up to {s.max_users} people, {s.active_workers} active at once, "

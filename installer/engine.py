@@ -10,8 +10,8 @@ changes in
 AIOStreams, each shown first and saved only after a yes:
   1. your config gets one more subtitle source, subsync (a backup copy is saved first);
   2. a second config, made from yours, that subsync uses to find files (no Usenet, no Real-Debrid, nothing in the
-     background), and with Usenet on a third, the Usenet config, with only your Usenet searches and services
-; a config with no debrid service other than Real-Debrid gets only the Usenet config.
+     background), and with Usenet on a third, the Usenet config, with only your Usenet searches and services; a
+     config with no debrid service other than Real-Debrid gets only the Usenet config.
 It doesn't install or change AIOStreams itself or AIOMetadata.
 """
 import json
@@ -365,7 +365,7 @@ class Engine:
         names = [plan._BY[c][0] for c in p.get('languages', []) if c in plan._BY]
         if names:
             filled['LANGUAGES'] = ', '.join(names)
-        filled['AUDIO'] = 'yes' if p.get('audio') else 'no'
+        filled['AUDIO'] = self.known_audio()
         filled['USENET'] = 'yes' if p.get('usenet') else 'no'
         audio = self.known_audio_budget()
         if audio:
@@ -381,7 +381,7 @@ class Engine:
         problem = dockerenv.docker_problem()
         if problem:
             stop(*problem)
-        # before any question: nothing under setup's names that this install didn't make (OD18)
+        # before any question: nothing under setup's names that this install didn't make
         self.install_id = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
         guard(self.install_id)
         self.out.ok('Docker and Docker Compose work')
@@ -526,8 +526,8 @@ class Engine:
         text = self.ask.text('LANGUAGES', 'Which subtitle languages should be synced?', current=prev_langs, default='English',
                              check=check_langs)
         self.languages = plan.parse_languages(text)[0]
-        self.audio = self.ask.yesno('AUDIO', 'Also sync files that carry no subtitles of their own, by listening to the audio?',
-                                    self.prev.get('audio', False))
+        self.audio_when = self.ask_audio()
+        self.audio = self.audio_when != 'no'
         self.usenet = False
         if self.usenet_services:
             self.usenet = self.ask.yesno('USENET', 'Sync files you play from Usenet too?', self.prev.get('usenet', False))
@@ -543,6 +543,30 @@ class Engine:
             self.add_os = self.ask.yesno('ADD_OPENSUBTITLES', 'Your config has no subtitle source, so there is nothing to '
                                                               'sync yet. Add OpenSubtitles (free, no account needed)?', True)
         self.public_address()
+
+    def known_audio(self):
+        """The current answer to the audio question: no, pick or open. An install from before the question was
+        three answers (audio on) reads as state/subsync.env starts it: pick, or open set by hand there
+        (SUBSYNC_AUDIO_WHEN=open, or the setting it replaced, SUBSYNC_AUDIO_ON_PICK=off)."""
+        if not self.prev.get('audio'):
+            return 'no'
+        when = self.prev.get('audio_when')
+        return when if when in ('pick', 'open') else plan.audio_when_of(env_values())
+
+    def ask_audio(self):
+        """Files with no subtitles of their own: no, when I pick the file, or as soon as a file is opened. An
+        answers file may still say yes or no, as the question was before: yes is when I pick the file. A number there
+        is refused (plan.AUDIO_NUMBER_REFUSED): with --yes setup stops, else the question is asked; typed in the
+        terminal, a number is its option as listed."""
+        given = self.ask.answers.get('AUDIO')
+        if given is not None and str(given).strip().isdigit():
+            if getattr(self.ask, 'yes', False):
+                stop(plan.AUDIO_NUMBER_REFUSED)
+            self.out.warn(plan.AUDIO_NUMBER_REFUSED)
+            del self.ask.answers['AUDIO']
+        elif given is not None:
+            self.ask.answers['AUDIO'] = plan.audio_answer(given) or given
+        return self.ask.choose('AUDIO', plan.AUDIO_QUESTION, plan.AUDIO_ANSWERS, current=self.known_audio())
 
     def known_audio_budget(self):
         """The last answer to the audio limit question, or a value set by hand in state/subsync.env before; None."""
@@ -797,19 +821,23 @@ class Engine:
             'public_base': self.s['public_base'],
             'addon_key': self.keys['ADDON_KEY'], 'languages': self.languages,
             'rewrite': plan.rewrite_rule(self.s['aios_public'], self.s['aios_internal']) if self.s['mode'] != 'remote' else '',
-            'audio': self.audio, 'audio_budget': self.audio_budget,
+            'audio': self.audio, 'audio_when': self.audio_when, 'audio_budget': self.audio_budget,
             'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
         asked = limits.personal(audio=False, usenet=self.usenet)
         env.update(limits.env_lines(asked, self.limit_values))
-        env, kept = plan.merge_env(env, env_values(), owned=limits.names([limits.DAILY, limits.USENET]))
+        # the setting SUBSYNC_AUDIO_WHEN replaced goes: the audio answer carries it (known_audio)
+        env, kept = plan.merge_env(env, env_values(), owned=limits.names([limits.DAILY, limits.USENET])
+                                   + ('SUBSYNC_AUDIO_ON_PICK',))
         write_env(STATE / 'subsync.env', env)
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         self.own_image()
         guard(self.s['install_id'])
         write_compose(self.s)
+        if self.audio:
+            self.s['audio_when'] = self.audio_when
         self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio, usenet=self.usenet,
                       audio_budget=self.audio_budget or getattr(self, 'audio_budget_kept', None),   # for when it's on again
                       manifest_url=self.manifest_url, installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
@@ -832,7 +860,7 @@ class Engine:
             self.s.setdefault('local', True)
 
     def write_setup_script(self):
-        """The image route's folder gets its./setup."""
+        """The image route's folder gets its ./setup."""
         if PLACE and PLACE.route == 'image':
             where.write_setup_script(PLACE, STATE.parent)
 
@@ -1115,10 +1143,18 @@ class Engine:
         self.limit_values = {}
         for lim in limits.hosting(getattr(self, 'host_usenet', True), getattr(self, 'host_audio', False)):
             def check(value, lim=lim):
-                chosen, error = limits.check(lim, value)
+                chosen, error = limits.check(lim, value, places=self.places())
                 return (False, error, value) if error else (True, '', chosen)
             self.limit_values[lim.setting] = self.ask.text(lim.setting, lim.label, current=limits.current(lim, env),
                                                            check=check)
+
+    def places(self):
+        """The files synced at a time as answered (asked before the audio syncs at a time): its number, or with
+        auto this machine's processors (subsync's container runs without a processor limit); None before it is asked."""
+        value = self.limit_values.get('SUBSYNC_SYNCS_AT_ONCE')
+        if value == 'auto':
+            return os.cpu_count() or 1
+        return int(value) if value and value.isdigit() else None
 
     def host_install(self):
         self.out.step(6, 'Installing AIOSubtitles', self.HOST_STEPS)
@@ -1221,7 +1257,9 @@ class Engine:
                          f"read today: {st.get('bytes_today', 0) / 1e6:.1f} MB"))
             if st.get('backing_off'):
                 rows.append(('warn', 'backing off after a refused read (it waits before reading again)', None))
-        audio = f"on, up to {s.get('audio_budget') or '1'} GB per file" if s.get('audio') else 'off'
+        when = s.get('audio_when') if s.get('audio_when') in ('pick', 'open') else plan.audio_when_of(env_values())
+        audio = (f"on when {'opened' if when == 'open' else 'picked'}, up to {s.get('audio_budget') or '1'} GB per file"
+                 if s.get('audio') else 'off')
         details = [('AIOStreams', s.get('aios_public')), ('languages', ', '.join(s.get('languages', []))),
                    ('audio', audio), ('config', short(keys.get('VIEWER_UUID', ''))),
                    ("subsync's config", short(keys.get('SYNC_UUID', '')))] \
@@ -1308,7 +1346,7 @@ class Engine:
 
     # ------------------------------------------------------------------------------------- updates
     def update(self):
-        """The page's Update, or./setup --update: the service moves to this setup's own version (§5)."""
+        """The page's Update, or ./setup --update: the service moves to this setup's own version."""
         if not self.prev.get('installed'):
             stop('subsync is not set up here yet.', 'Run ./setup')
         ready = update.compare(self.prev, PLACE.image if PLACE else None, setup_version())

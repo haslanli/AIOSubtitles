@@ -10,17 +10,31 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import TempDir  # noqa: E402
+from helpers import FakeDownloads, TempDir, dialogue_srt, local_network_only  # noqa: E402
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.sources import Aios, expected_size, extras, parse_extras, same_hash, unreadable  # noqa: E402
-from subsync.store import Store, result_key  # noqa: E402
+from subsync.store import REFUSED_BACKOFF_S, Store, result_key  # noqa: E402
 from subsync.reader import Stopped  # noqa: E402
 from subsync.worker import Job, JobGuard, Safety, Worker, rewrite  # noqa: E402
 
 SHA_A, SHA_B, SHA_C = "a" * 64, "b" * 64, "c" * 64
 FILE = "0123456789abcdef-1000"
+# the originals the routes download and check before serving them: short, so the check gives no verdict
+X_TEXT = "1\n00:00:01,000 --> 00:00:02,000\nthe original\n"
+ORIGINALS = {"http://opensubs/x.srt": X_TEXT, "http://opensubs/y.srt": "1\n00:00:01,000 --> 00:00:02,000\nanother\n",
+             "http://opensubs/r.srt": "1\n00:00:01,000 --> 00:00:02,000\nоригинал\n"}
+SERVED = "X-AIOSubtitles-Served"   # what a pick, pending or "(original)" answer is
+
+
+def fake_downloads(test):
+    """Subtitle downloads for a test: ORIGINALS, nothing from the network."""
+    downloads = FakeDownloads(ORIGINALS)
+    for patcher in (downloads.patch(), local_network_only()):
+        patcher.start()
+        test.addCleanup(patcher.stop)
+    return downloads
 
 
 class Clock:
@@ -73,11 +87,16 @@ class StoreTest(unittest.TestCase):
             clock.t += 31 * 86400
             self.assertIsNone(st.fresh(k))                 # retried after 30 days
             waits = []
-            for _ in range(4):
+            for _ in range(5):
                 r = st.file_failed("name:x|1")
                 waits.append(None if r is None else round(r - clock.t))
-            self.assertEqual(waits, [3600, 21600, 86400, None])
+            self.assertEqual(waits, [600, 3600, 21600, 86400, None])          # 10 minutes first
             self.assertTrue(st.file_blocked("name:x|1"))
+            waits = []
+            for _ in range(4):                       # a refused file, or one neither MKV nor MP4: an hour first, as before
+                r = st.file_failed("name:y|1", REFUSED_BACKOFF_S)
+                waits.append(None if r is None else round(r - clock.t))
+            self.assertEqual(waits, [3600, 21600, 86400, None])
             ks = st.put(FILE, SHA_B, "eng", 0, "synced", body="x", fmt="srt")
             clock.t += 181 * 86400
             st.expire()
@@ -149,7 +168,7 @@ class SourcesTest(unittest.TestCase):
 
 
 class FindRowTest(unittest.TestCase):
-    """Checklist 18a: the played file is found when its listed size is rounded or wrong. Stremio sends the real
+    """The played file is found when its listed size is rounded or wrong. Stremio sends the real
     size, listings round it to 0.01 GiB (up to 5.4 MB off), Torrentio listed 1,679 bytes for a 3 GB file; a row whose
     listing names the file's hash is that file. The file's own hash, read with its index, settles it (process())."""
     REAL = 1_438_814_044
@@ -241,6 +260,7 @@ class AddonTest(unittest.TestCase):
                            "SUBSYNC_PENDING_WAIT_MS": "200"})
         self.store = Store(d)
         self.safety = Safety()
+        self.downloads = fake_downloads(self)
         self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
         self.server = serve(App(self.s, self.store, self.worker, self.safety), 0)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -299,15 +319,18 @@ class AddonTest(unittest.TestCase):
         code, _, headers = http(self.base + "/pending/" + token(job.alias) + "/eng.srt")
         self.assertEqual(code, 503)
         self.assertLess(time.time() - t0, 2.0)
-        # the original known: a redirect to it
+        # the original known: its text, downloaded and checked, not a redirect to it
         self.worker.originals[job.alias] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
-        opener = urllib.request.build_opener(NoRedirect)
-        try:
-            opener.open(self.base + "/pending/" + token(job.alias) + "/eng.srt", timeout=10)
-            self.fail("expected a redirect")
-        except urllib.error.HTTPError as e:
-            self.assertEqual(e.code, 302)
-            self.assertEqual(e.headers["Location"], "http://opensubs/x.srt")
+        code, body, headers = http(self.base + "/pending/" + token(job.alias) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
+        self.assertNotIn("Location", headers)
+        # an original in another language: the one-line note, not the original
+        self.downloads.files["http://opensubs/x.srt"] = dialogue_srt("spa").encode()
+        with self.worker.cv:
+            self.worker.fetched_subs.clear()
+        code, body, _ = http(self.base + "/pending/" + token(job.alias) + "/eng.srt")
+        self.assertEqual(code, 200)
+        self.assertIn(b"No English subtitle was found for this file.", body)
 
     def test_no_hints_no_job(self):
         code, body, _ = http(self.base + "/subtitles/movie/tt3.json")
@@ -339,7 +362,7 @@ class PickTest(AddonTest):
     def setUp(self):
         super().setUp()
         self.s.audio_route = True
-        self.assertTrue(self.s.audio_on_pick)
+        self.assertEqual(self.s.audio_choice, "pick")
         self.job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
         self.assertEqual(self.job.alias, self.ALIAS)
 
@@ -359,8 +382,9 @@ class PickTest(AddonTest):
         picked = Job("movie", "tt9", self.job.hints)
         picked.audio = True
         self.assertTrue(self.worker.audio_allowed(picked))
-        self.s.audio_on_pick = False                       # the old behaviour stays available
-        self.assertTrue(self.worker.audio_allowed(self.job))
+        self.s.audio_when = "open"       # as soon as it is opened is an audio job too, never the first pass
+        self.assertFalse(self.worker.audio_allowed(self.job))
+        self.assertTrue(self.worker.audio_allowed(picked))
         self.s.audio_route = False
         self.assertFalse(self.worker.audio_allowed(picked))
 
@@ -371,8 +395,9 @@ class PickTest(AddonTest):
         subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
         self.assertEqual([(s["lang"], s["label"], s["variantOf"]) for s in subs], [("eng", "English (Subsync)", "os-9")])
         self.assertTrue(subs[0]["url"].endswith("/pick/" + token(self.ALIAS) + "/eng.srt"))
-        self.s.audio_route = False
-        self.assertEqual(json.loads(http(self.base + self.URL)[1])["subtitles"], [])
+        self.s.audio_route = False                  # nothing waits for a pick any more: its original, unchanged
+        self.assertEqual([s["label"] for s in json.loads(http(self.base + self.URL)[1])["subtitles"]],
+                         ["English (original)"])
 
     def test_the_first_answer_is_not_held_back(self):
         self.s.pending_entry = False
@@ -408,8 +433,8 @@ class PickTest(AddonTest):
                 self.worker.cv.notify_all()
         threading.Thread(target=list_arrives, daemon=True).start()
         t0 = time.time()
-        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
-        self.assertEqual((code, headers["Location"]), (302, "http://opensubs/x.srt"))
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
         self.assertLess(time.time() - t0, 2.5)
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/rus.srt")   # no Russian subtitle exists: a note
         self.assertEqual(code, 200)
@@ -418,8 +443,9 @@ class PickTest(AddonTest):
 
     def test_downloading_the_entry_serves_the_original_and_starts_the_audio_route_once(self):
         self.waiting()
-        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
-        self.assertEqual((code, headers["Location"]), (302, "http://opensubs/x.srt"))
+        code, body, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, X_TEXT))          # its text, checked
+        self.assertNotIn("Location", headers)
         self.assertNotIn(self.ALIAS, self.worker.pickable)
         self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
         self.get("/pick/" + token(self.ALIAS) + "/eng.srt")           # again: nothing more is queued
@@ -431,8 +457,8 @@ class PickTest(AddonTest):
         self.worker.provisional[self.ALIAS] = {"rus": "1\n00:00:01,000 --> 00:00:02,000\nanchored\n"}
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/rus.srt")
         self.assertEqual((code, b"anchored" in body), (200, True))
-        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")   # the main language: its best guess
-        self.assertEqual((code, headers["Location"]), (302, "http://opensubs/x.srt"))
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")   # the main language: its best guess
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
 
     def test_the_audio_verdict_replaces_the_anchored_guess(self):
         self.waiting()
@@ -554,12 +580,27 @@ class PickTest(AddonTest):
 
     def test_a_download_before_the_file_is_known_to_need_audio_is_remembered(self):
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
-        self.assertEqual(self.get("/pick/" + token(self.ALIAS) + "/eng.srt")[0], 302)
+        self.assertEqual(self.get("/pick/" + token(self.ALIAS) + "/eng.srt")[0], 200)
         self.assertEqual(len(self.worker.jobs), 0)
         self.assertIn(self.ALIAS, self.worker.picked_early)
         self.worker._needs_pick(self.job)                              # the index read ends: no subtitle track
         self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
         self.assertNotIn(self.ALIAS, self.worker.pickable)
+
+    def test_a_pick_while_the_index_read_ends_is_not_lost(self):
+        # found in review: the early pick was read unlocked and dropped later under the lock; a pick recorded
+        # in between was lost, and the file waited for a pick that had come
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
+        real = self.worker._may_open
+
+        def pick_meanwhile(job):   # the viewer picks while _needs_pick decides: the file isn't waiting yet
+            self.assertFalse(self.worker.pick(self.ALIAS))
+            return real(job)
+        self.worker._may_open = pick_meanwhile
+        self.assertTrue(self.worker._needs_pick(self.job))
+        self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
+        self.assertNotIn(self.ALIAS, self.worker.pickable)
+        self.assertNotIn(self.ALIAS, self.worker.picked_early)
 
     def test_a_synced_copy_is_served_from_the_same_link(self):
         self.waiting()
@@ -605,6 +646,8 @@ class PickTest(AddonTest):
         self.s.pick_wait = 3.0
         http(self.base + self.URL)                                     # unknown file: an index-only job is queued
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+        with self.worker.cv:   # the pass downloaded the original first: the pick may wait its whole deadline
+            self.worker.fetched_subs["http://opensubs/x.srt"] = (time.time(), X_TEXT.encode())
         self.store.alias(self.ALIAS, "f" * 16 + "-5")
         keys = [self.store.put("f" * 16 + "-5", sha, "eng", rank, "synced", fmt="srt", offer=False,
                                body=f"1\n00:00:01,000 --> 00:00:02,000\n{label}\n")
@@ -654,6 +697,15 @@ class PickTest(AddonTest):
         self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual(self.worker.queue[0].alias, self.ALIAS)
 
+    def test_a_download_names_its_language_to_its_files_job(self):
+        # The picked language gets alass sooner in the file's job (Worker.prioritize); it no longer
+        # holds the other languages' downloads back
+        self.s.pick_wait = 0.3
+        calls = []
+        self.worker.prioritize = lambda alias, lang=None: calls.append((alias, lang))
+        self.get("/pick/" + token(self.ALIAS) + "/rus.srt")
+        self.assertEqual(calls, [(self.ALIAS, "rus")])
+
     def test_a_file_waiting_for_a_pick_is_remembered_after_a_restart(self):
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
         self.worker._needs_pick(self.job)
@@ -669,10 +721,364 @@ class PickTest(AddonTest):
                          [(self.ALIAS, True, "movie", "tt9", {"filename": "b.mp4", "videoSize": 5})])
         self.assertFalse(Worker(self.s, self.store, FakeAios(), Safety()).waits_for_pick(self.ALIAS))   # picked once
 
+    def listed(self, *cands):
+        """This person's subtitle list for the file, as its text pass got it."""
+        with self.worker.cv:
+            self.worker.lists[self.ALIAS] = (time.time(), [dict(c) for c in cands])
+
+    def test_a_refused_original_is_replaced_by_the_next_that_passes(self):
+        # (Friends S01E01: its "English" original, served by a redirect, was Spanish)
+        self.waiting()
+        self.downloads.files["http://opensubs/x.srt"] = dialogue_srt("spa").encode()
+        self.downloads.files["http://opensubs/y.srt"] = dialogue_srt("eng").encode()
+        self.listed({"id": "os-9", "url": "http://opensubs/x.srt", "lang": "eng"},
+                    {"id": "os-8", "url": "http://opensubs/y.srt", "lang": "eng"})
+        code, body, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, dialogue_srt("eng")))
+        self.assertNotIn("Location", headers)
+
+    def test_one_downloaded_already_comes_before_a_new_download(self):
+        self.waiting()
+        self.downloads.files["http://opensubs/x.srt"] = dialogue_srt("spa").encode()
+        others = [{"id": f"os-{i}", "url": f"http://opensubs/{i}.srt", "lang": "eng"} for i in range(3)]
+        self.listed({"id": "os-9", "url": "http://opensubs/x.srt", "lang": "eng"}, *others)
+        self.downloads.files["http://opensubs/0.srt"] = dialogue_srt("eng").encode()
+        with self.worker.cv:     # the file's text pass downloaded the third one a moment ago
+            self.worker.fetched_subs["http://opensubs/2.srt"] = (time.time(), dialogue_srt("eng", start=31.0).encode())
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual(body.decode(), dialogue_srt("eng", start=31.0))
+        self.assertEqual(self.downloads.asked, ["http://opensubs/x.srt"])
+
+    def test_the_note_when_none_passes_after_at_most_three_more_downloads(self):
+        self.waiting()
+        cands = [{"id": "os-9", "url": "http://opensubs/x.srt", "lang": "eng"}] + \
+            [{"id": f"os-{i}", "url": f"http://opensubs/{i}.srt", "lang": "eng"} for i in range(5)]
+        for c in cands:
+            self.downloads.files[c["url"]] = dialogue_srt("spa").encode()
+        self.listed(*cands)
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual(code, 200)
+        self.assertIn(b"No English subtitle was found for this file.", body)
+        self.assertEqual(len(self.downloads.asked), 4)                  # the original and three more
+
+    def test_a_download_past_the_pick_wait_is_a_redirect_to_the_persons_own_original(self):
+        # found in review: when the download can't end by the deadline, the original's own address in this
+        # person's list, as 1.4.0 sent it, never a 503 (AIOMetadata turns that into an error for the viewer); the pending
+        # route too
+        self.s.pick_wait = 0.3
+        self.waiting()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.downloads.hold["http://opensubs/x.srt"] = release
+        t0 = time.time()
+        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, headers.get("Location")), (302, "http://opensubs/x.srt"))
+        self.assertLess(time.time() - t0, 1.5)
+        code, _, headers = self.get("/pending/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, headers.get("Location")), (302, "http://opensubs/x.srt"))
+        # a subtitle subsync found itself that a player can't use as it is (a zip): the player asks again instead
+        zipped = "https://dl.subdl.com/subtitle/1-2.zip"
+        self.listed({"id": "os-9", "url": zipped, "lang": "eng", "source": "subdl"})
+        self.downloads.hold[zipped] = release
+        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, headers.get("Retry-After")), (503, "1"))
+
+    def test_a_slow_first_pass_leaves_time_to_download_the_original(self):
+        # found in review: the pick spent its whole deadline waiting for the job, and the original, not
+        # downloaded yet, got no time: a 503 where 1.4.0 served it
+        self.s.pick_wait = 3.5
+        http(self.base + self.URL)                                     # unknown file: an index-only job, nothing answers
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.downloads.hold["http://opensubs/x.srt"] = release        # a slow source: its download takes a second
+        timer = threading.Timer(1.0, release.set)
+        self.addCleanup(timer.cancel)
+        timer.start()
+        t0 = time.time()
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
+        self.assertLess(time.time() - t0, 3.5)
+
+    def test_downloads_of_originals_share_one_pool(self):
+        # review: original_for made and shut down a thread pool for every download on the request path
+        from unittest import mock
+        import subsync.worker as worker_module
+        made, real = [], worker_module.ThreadPoolExecutor
+        self.waiting()
+        with mock.patch.object(worker_module, "ThreadPoolExecutor", lambda *a, **k: made.append(k) or real(*a, **k)):
+            for _ in range(2):
+                with self.worker.cv:
+                    self.worker.fetched_subs.clear()
+                code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+                self.assertEqual((code, body.decode()), (200, X_TEXT))
+        self.assertEqual(self.downloads.asked, ["http://opensubs/x.srt"] * 2)
+        self.assertEqual(made, [])
+
+    def served(self, path):
+        """A route's answer: (status, what it says it served, the headers a web player may read)."""
+        code, _, headers = self.get(path)
+        return code, headers.get(SERVED), headers.get("Access-Control-Expose-Headers")
+
+    def test_each_answer_of_the_pick_route_says_what_it_served(self):
+        # An original is sent as text with 200, as a synced copy is; a header tells them apart, for
+        # measurement and debugging, readable by a web player too; a redirect has none
+        pick = "/pick/" + token(self.ALIAS)
+        self.waiting()
+        self.assertEqual(self.served(pick + "/eng.srt"), (200, "original", SERVED))
+        self.assertEqual(self.served(pick + "/rus.srt"), (200, "note", SERVED))        # no Russian subtitle at all
+        self.worker.provisional[self.ALIAS] = {"rus": "1\n00:00:01,000 --> 00:00:02,000\nanchored\n"}
+        self.assertEqual(self.served(pick + "/rus.srt"), (200, "guess", SERVED))
+        self.s.pick_wait = 0.3                                          # the original's download outlasts the pick
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.downloads.hold["http://opensubs/x.srt"] = release
+        with self.worker.cv:
+            self.worker.fetched_subs.clear()
+        self.assertEqual(self.served(pick + "/eng.srt"), (302, None, None))
+        release.set()
+        self.store.put("f" * 16 + "-5", SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n",
+                       fmt="srt")
+        self.store.alias(self.ALIAS, "f" * 16 + "-5")
+        self.assertEqual(self.served(pick + "/eng.srt"), (200, "copy", SERVED))
+
+    def test_each_answer_of_the_pending_route_says_what_it_served(self):
+        pending = "/pending/" + token(self.ALIAS) + "/eng.srt"
+        self.assertEqual(self.served(pending), (503, None, None))         # nothing known yet: the player asks again
+        self.waiting()
+        self.assertEqual(self.served(pending), (200, "original", SERVED))
+        self.downloads.files["http://opensubs/x.srt"] = dialogue_srt("spa").encode()   # its text isn't English
+        with self.worker.cv:
+            self.worker.fetched_subs.clear()
+        self.assertEqual(self.served(pending), (200, "note", SERVED))
+        key = self.store.put("f" * 16 + "-5", SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n",
+                             fmt="srt", offer=False)
+        self.worker._publish(self.ALIAS, "eng", key)
+        self.assertEqual(self.served(pending), (200, "copy", SERVED))
+
     def test_an_unknown_link_starts_nothing(self):
         self.assertEqual(self.get("/pick/" + token("name:other.mp4|9") + "/eng.srt")[0], 404)
         self.assertEqual(self.get("/pick/!!!/eng.srt")[0], 404)
         self.assertEqual(len(self.worker.jobs), 0)
+
+
+class NoTrack:
+    """A file's index with no subtitle track of its own: nothing to judge against but its speech."""
+
+    def text_tracks(self):
+        return []
+
+    def image_tracks(self):
+        return []
+
+
+class OriginalEntryTest(unittest.TestCase):
+    """A language that has subtitles but no synced copy, on a file that neither waits for a pick nor has a job on
+    it, is listed once, after the synced ones, as "<Language> (original)": the subtitle, unchanged, that the file's
+    judging measured best as it is, else the likeliest by its name, and only one whose text is in that language.
+    Downloading it serves that subtitle's text from this person's own list; it queues no job and reads nothing of the
+    file."""
+    URL = "/subtitles/movie/tt9/filename=b.mp4&videoSize=5.json"
+    ALIAS = "name:b.mp4|5"
+    FILE = "f" * 16 + "-5"
+    # each candidate's text, and how the stub judging measures it (its share of lines within 200 ms as it is)
+    CANDS = {"e1": ("eng", 30.0, 0.30), "e2": ("eng", 31.0, 0.55), "s1": ("spa", 30.0, 0.20), "s2": ("spa", 31.0, 0.10),
+             "r1": ("rus", 30.0, 0.40)}
+
+    def setUp(self):
+        self.tmp = TempDir()
+        d = self.tmp.__enter__()
+        self.addCleanup(self.tmp.__exit__, None, None, None)
+        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_AUDIO_ROUTE": "on",
+                           "SUBSYNC_LANGUAGES": "eng,spa,rus", "SUBSYNC_PICK_WAIT_MS": "2000",
+                           "SUBSYNC_PARALLEL_LANGUAGES": "off"})
+        self.store = Store(d)
+        self.texts = {cid: dialogue_srt(lang, start=start) for cid, (lang, start, _) in self.CANDS.items()}
+        self.measures = {self.texts[cid]: m for cid, (_, _, m) in self.CANDS.items()}
+        self.downloads = fake_downloads(self)
+        self.downloads.files.update({f"http://subs.test/{cid}.srt": t.encode() for cid, t in self.texts.items()})
+        self.cands = [{"id": cid, "url": f"http://subs.test/{cid}.srt", "lang": lang, "release": ""}
+                      for cid, (lang, _, _) in self.CANDS.items()]
+        aios = FakeAios()
+        aios.subtitles = lambda *a: [dict(c) for c in self.cands]
+        self.worker = Worker(self.s, self.store, aios, Safety())       # not started: jobs stay queued
+        self.server = serve(App(self.s, self.store, self.worker, Safety()), 0)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
+        from unittest import mock
+        from subsync import pipeline
+
+        def sync_subtitle(index, text, ext, lang, **kw):   # every candidate keeps its original, measured as above
+            return {"outcome": "keep_original", "reason": "below the bar or shift under 100 ms",
+                    "route": "audio" if kw.get("audio") else "cues",
+                    "gate_original": {"within200": self.measures.get(text), "median_ms": 300}}
+        for name, fake in (("check_original", lambda *a, **k: None), ("shift_sync", lambda *a, **k: None),
+                           ("sync_subtitle", sync_subtitle)):
+            patcher = mock.patch.object(pipeline, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def get(self, url):
+        try:
+            r = urllib.request.build_opener(NoRedirect).open(url.replace("http://subsync:8790", self.base), timeout=10)
+            return r.status, r.read(), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), dict(e.headers)
+
+    def listed(self):
+        return json.loads(http(self.base + self.URL)[1])["subtitles"]
+
+    def read(self, reference):
+        """The file's index was read just now (no new job), with or without a subtitle track of its own."""
+        self.store.file_read(self.FILE, 5, "f" * 16, reference, {"rule": self.s.rule_id, "reference": reference})
+        self.store.alias(self.ALIAS, self.FILE)
+
+    def judge(self, job, langs):
+        """The job judges each language's candidates (every one kept), then ends."""
+        for lang in langs:
+            self.worker._sync_language(job, NoTrack(), self.FILE, lang, [c for c in self.cands if c["lang"] == lang],
+                                       None, "b.mp4")
+        self.store.judged_put(self.FILE, self.s.languages, self.s.rule_id)
+        with self.worker.cv:
+            self.worker.jobs.clear()
+            self.worker.queue.clear()
+
+    def test_the_bears_shape(self):
+        # three languages wait for a pick; the pick; the audio job judges every candidate "keep original": each language
+        # keeps one entry, serving its best-measured original (The Bear's list went from 3 to pick to 0 entries)
+        self.worker._candidates(self.job, dict(self.job.hints))
+        self.worker._set_originals(self.ALIAS, self.cands, "b.mp4", None)
+        with self.worker.cv:
+            self.worker._put_waiting(self.job)
+        self.read(False)
+        self.assertEqual([e["label"] for e in self.listed()],
+                         ["English (Subsync)", "Spanish (Subsync)", "Russian (Subsync)"])
+        code, body, _ = self.get(f"http://subsync:8790/pick/{token(self.ALIAS)}/eng.srt")
+        self.assertEqual((code, body.decode()), (200, self.texts["e1"]))     # the name-ranked guess, checked
+        audio = next(iter(self.worker.jobs.values()))
+        self.assertTrue(audio.audio)
+        self.judge(audio, self.s.languages)
+        listed = self.listed()
+        self.assertEqual([(e["lang"], e["label"]) for e in listed],
+                         [("eng", "English (original)"), ("spa", "Spanish (original)"), ("rus", "Russian (original)")])
+        self.assertTrue(listed[0]["url"].endswith(f"/original/{token(self.ALIAS)}/eng.srt"))
+        self.assertEqual([e["variantOf"] for e in listed], ["e2", "s1", "r1"])
+        asked = len(self.downloads.asked)
+        for entry, best in zip(listed, ("e2", "s1", "r1")):
+            code, body, headers = self.get(entry["url"])
+            self.assertEqual((code, body.decode()), (200, self.texts[best]))
+            self.assertTrue(headers["Content-Type"].startswith("application/x-subrip"))
+        # its download queues no job and reads nothing of the file: only the subtitles, and those kept a moment ago
+        self.assertEqual((len(self.worker.jobs), len(self.worker.picked_early)), (0, 0))
+        self.assertEqual(self.store.bytes_today("read"), 0)
+        self.assertEqual(len(self.downloads.asked), asked)
+
+    def test_friends_shape(self):
+        # a Russian copy; English and Spanish judged against the file's own track and kept: Russian "(synced)", English
+        # and Spanish "(original)", after it
+        key = self.store.put(self.FILE, SHA_A, "rus", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nкопия\n",
+                             fmt="srt", candidate_id="r1", offer=False)
+        self.store.set_offers(self.FILE, "rus", [key])
+        self.read(True)
+        self.worker.remember(self.job)
+        self.judge(Job("movie", "tt9", dict(self.job.hints)), ["eng", "spa"])
+        self.assertEqual([(e["lang"], e["label"]) for e in self.listed()],
+                         [("rus", "Russian (synced)"), ("eng", "English (original)"), ("spa", "Spanish (original)")])
+        code, body, _ = self.get(f"http://subsync:8790/original/{token(self.ALIAS)}/spa.srt")
+        self.assertEqual((code, body.decode()), (200, self.texts["s1"]))   # its list fetched again: none was kept
+
+    def test_a_language_in_another_language_or_without_subtitles_gets_none(self):
+        self.downloads.files["http://subs.test/r1.srt"] = self.texts["e1"].encode()   # "Russian", but English text
+        self.cands = [c for c in self.cands if c["lang"] != "spa"]                     # no Spanish subtitle at all
+        self.read(True)
+        self.worker.remember(self.job)
+        self.judge(Job("movie", "tt9", dict(self.job.hints)), self.s.languages)
+        self.assertEqual([e["label"] for e in self.listed()], ["English (original)"])
+        self.assertIsNone(self.store.kept_original(self.FILE, "rus")["candidate_id"])
+
+    def test_a_file_not_judged_lists_the_likeliest_by_name_and_checks_it_when_served(self):
+        # its job ended before judging (a read that failed after the list): the name-ranked guess
+        self.downloads.files["http://subs.test/e1.srt"] = dialogue_srt("spa").encode()   # "English", but Spanish text
+        self.worker._candidates(self.job, dict(self.job.hints))
+        self.worker._set_originals(self.ALIAS, self.cands, "b.mp4", None)
+        self.worker.remember(self.job)
+        self.store.file_failed(self.ALIAS)
+        self.worker.unlisted[self.ALIAS] = time.time()                                 # no new job meanwhile
+        self.assertEqual([e["label"] for e in self.listed()],
+                         ["English (original)", "Spanish (original)", "Russian (original)"])
+        code, body, _ = self.get(f"http://subsync:8790/original/{token(self.ALIAS)}/eng.srt")
+        self.assertEqual((code, body.decode()), (200, self.texts["e2"]))   # e1 refused when served: the next by name
+        self.assertEqual(len(self.worker.jobs), 0)
+
+    def test_the_original_route_says_what_it_served(self):
+        # The "(original)" entry's subtitle sent unchanged, or the note when none of its language is in it
+        self.downloads.files["http://subs.test/r1.srt"] = self.texts["e1"].encode()   # "Russian", but English text
+        self.read(True)
+        self.worker.remember(self.job)
+        self.judge(Job("movie", "tt9", dict(self.job.hints)), self.s.languages)
+        for lang, served in (("eng", "original"), ("rus", "note")):
+            code, _, headers = self.get(f"http://subsync:8790/original/{token(self.ALIAS)}/{lang}.srt")
+            self.assertEqual((code, headers.get(SERVED), headers.get("Access-Control-Expose-Headers")),
+                             (200, served, SERVED))
+
+    def test_an_unknown_link_starts_nothing(self):
+        code, _, _ = self.get(f"http://subsync:8790/original/{token('name:other.mp4|9')}/eng.srt")
+        self.assertEqual(code, 404)
+        self.assertEqual(self.get("http://subsync:8790/original/!!!/eng.srt")[0], 404)
+        self.assertEqual((len(self.worker.jobs), self.downloads.asked), (0, []))
+
+
+class MeasuredPickTest(OriginalEntryTest):
+    """A pick that nothing passed for by its deadline is served the downloaded original that measured best as it
+    is against the file's own track, when it beats the name-ranked guess's measure (3 Idiots and Sherlock got the guess
+    at 14 s); its text, checked, from the file's own job's download."""
+    test_the_bears_shape = test_friends_shape = None
+    test_a_language_in_another_language_or_without_subtitles_gets_none = None
+    test_a_file_not_judged_lists_the_likeliest_by_name_and_checks_it_when_served = None
+    test_an_unknown_link_starts_nothing = test_the_original_route_says_what_it_served = None
+
+    def setUp(self):
+        super().setUp()
+        self.s.pick_wait = 0.3
+        from unittest import mock
+        from subsync import pipeline
+
+        def check_original(index, text, lang, **kw):   # not in sync as it is, measured as CANDS says
+            return {"in_sync": False, "route": "cues",
+                    "gate_original": {"within200": self.measures.get(text), "median_ms": 300}}
+        patcher = mock.patch.object(pipeline, "check_original", check_original)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def judging(self):
+        """The file's job, queued while its text pass judges English: nothing passes."""
+        self.worker._candidates(self.job, dict(self.job.hints))
+        self.worker._set_originals(self.ALIAS, self.cands, "b.mp4", None)
+        self.assertEqual(self.worker.known_originals(self.ALIAS)["eng"]["id"], "e1")    # the name-ranked guess, 30 %
+        self.worker.submit(Job("movie", "tt9", dict(self.job.hints)))
+        self.worker._sync_language(self.job, NoTrack(), self.FILE, "eng", [c for c in self.cands if c["lang"] == "eng"],
+                                   None, "b.mp4")
+        self.store.alias(self.ALIAS, self.FILE)
+
+    def pick(self, lang="eng"):
+        return self.get(f"{self.base}/pick/{token(self.ALIAS)}/{lang}.srt")
+
+    def test_nothing_passed_by_the_deadline_serves_the_best_measured_original(self):
+        self.judging()
+        code, body, _ = self.pick()
+        self.assertEqual((code, body.decode()), (200, self.texts["e2"]))           # 55 % within 200 ms as it is
+        self.assertEqual(self.downloads.asked.count("http://subs.test/e2.srt"), 1)   # the job's download, no other
+
+    def test_a_pass_in_time_is_served_as_before(self):
+        self.judging()
+        key = self.store.put(self.FILE, SHA_A, "eng", 1, "synced", fmt="srt", offer=False,
+                             body="1\n00:00:01,000 --> 00:00:02,000\nthe pass\n")
+        self.worker._publish(self.ALIAS, "eng", key)
+        code, body, _ = self.pick()
+        self.assertEqual((code, b"the pass" in body), (200, True))
 
 
 class LanesTest(unittest.TestCase):
@@ -825,6 +1231,7 @@ class AudioOffEntryTest(unittest.TestCase):
                            "SUBSYNC_PENDING_WAIT_MS": "3000", "SUBSYNC_PICK_WAIT_MS": "3000"})
         self.assertFalse(self.s.audio_route or self.s.pending_entry)    # the stock defaults
         self.store = Store(d)
+        fake_downloads(self)
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())  # not started: jobs stay queued
         self.server = serve(App(self.s, self.store, self.worker, Safety()), 0)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -855,6 +1262,8 @@ class AudioOffEntryTest(unittest.TestCase):
         http(self.base + self.URL)                                       # the job is queued
         with self.worker.cv:
             self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+            # the job downloaded the original first: the 3 s pick wait isn't shortened for its download
+            self.worker.fetched_subs["http://opensubs/x.srt"] = (time.time(), X_TEXT.encode())
 
         def copy_ready():
             time.sleep(0.4)
@@ -865,14 +1274,35 @@ class AudioOffEntryTest(unittest.TestCase):
         t0 = time.time()
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual(code, 200)
-        self.assertIn(b"00:00:01,000 --> 00:00:02,000", body)
+        self.assertEqual(body.decode(), "1\n00:00:01,000 --> 00:00:02,000\nHi\n")   # the copy, not the original
         self.assertLess(time.time() - t0, 2.5)
 
     def test_picking_after_the_original_was_kept_serves_the_original_and_reads_nothing_more(self):
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
-        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
-        self.assertEqual((code, headers["Location"]), (302, "http://opensubs/x.srt"))
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
         self.assertEqual((len(self.worker.jobs), len(self.worker.picked_early)), (0, 0))   # no audio read started
+
+    def test_a_busy_file_known_to_have_no_track_lists_its_original(self):
+        # found in review: for a viewer whose choice is off (the audio route off, or their own answer), a pick
+        # of a file with no track of its own can only serve its original, so once that is known it is listed as
+        # "(original)"; while its tracks are unknown, or it has one, the "(Subsync)" entry stays (it serves the
+        # copy once ready)
+        http(self.base + self.URL)                                       # the job is queued
+        with self.worker.cv:
+            self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+
+        def listed():
+            return [(s["label"], s["variantOf"]) for s in json.loads(http(self.base + self.URL)[1])["subtitles"]]
+        self.assertEqual(listed(), [("English (Subsync)", "os-9")])      # its tracks aren't known yet
+        self.store.alias(self.ALIAS, FILE)
+        self.store.file_read(FILE, 5, FILE[:16], False, {"reference": False})   # its first read: no track
+        self.assertTrue(self.worker.busy_with(self.ALIAS))
+        self.assertEqual(listed(), [("English (original)", "os-9")])
+        self.s.audio_route, self.s.audio_when = True, "off"              # a person who chose off, the route on
+        self.assertEqual(listed(), [("English (original)", "os-9")])
+        self.store.file_read(FILE, 5, FILE[:16], True, {"reference": True})     # a track: its copy comes
+        self.assertEqual(listed(), [("English (Subsync)", "os-9")])
 
     def test_a_finished_copy_is_listed_as_synced_without_a_subsync_entry(self):
         self.store.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nHi\n", fmt="srt")

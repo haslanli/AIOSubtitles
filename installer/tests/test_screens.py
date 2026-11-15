@@ -43,7 +43,7 @@ class Tree(HTMLParser):
 def approved():
     texts = set(screens.INSTALLER_WORDS) | set(pages.UI_WORDS) | {realdebrid.REAL_DEBRID_ONLY}
     texts |= {spoken for _, spoken in ui.CHECK_MARKS.values()} | {spoken for _, spoken in ui.PROGRESS_MARKS.values()}
-    texts |= {option for lim in limits.personal(audio=True) + limits.hosting() for option in lim.options}
+    texts |= {option for lim in limits.personal(audio=True) + limits.hosting(audio=True) for option in lim.options}
     texts |= {text for _, text in explain.QUESTIONS.values()} | {text for _, text in explain.SETTINGS.values()}
     return texts
 
@@ -70,8 +70,44 @@ class Words(unittest.TestCase):
                       'Installing AIOSubtitles', 'Limits', 'Check again', 'Remove AIOSubtitles',
                       "Delete everyone's records and stored copies",
                       'Run ./setup again to see its status, update it, change your answers or remove it.',
-                      'This setup page has ended. Run ./setup again for a new address.'):
+                      'This setup page has ended. Run ./setup again for a new address.',
+                      # the audio route: the questions, the answers, the hosting route's limits
+                      'Sync files that have no subtitles of their own, from their audio?', 'No',
+                      'Yes, when I pick the file', 'Yes, as soon as a file is opened',
+                      'Offer syncing files that have no subtitles of their own, from their audio?',
+                      'Audio syncs per person a day', 'Of those, as soon as a file is opened', 'Audio syncs at a time'):
             self.assertIn(words, screens.INSTALLER_WORDS)
+
+    def test_every_limit_label_is_an_approved_word(self):
+        # the hosting route's audio-only limits too: the list once left them out
+        for lim in limits.personal(audio=True, usenet=True) + limits.hosting(usenet=True, audio=True):
+            with self.subTest(label=lim.label):
+                self.assertIn(lim.label, screens.INSTALLER_WORDS)
+        for old in ('Also sync files that carry no subtitles of their own, by listening to the audio?',
+                    'Let people sync files that carry no subtitles of their own, by listening to the audio, when they '
+                    'pick them?'):
+            self.assertNotIn(old, screens.INSTALLER_WORDS)
+
+
+class AudioQuestion(unittest.TestCase):
+    """The personal route's audio question, one of three answers, as the setup page asks it."""
+
+    def radios(self, html):
+        return [(attrs['value'], 'checked' in attrs) for tag, attrs in Tree(html).tags
+                if tag == 'input' and attrs.get('name') == 'AUDIO']
+
+    def test_three_answers_the_current_one_picked_with_the_explanation(self):
+        for current in ('no', 'pick', 'open'):
+            with self.subTest(current=current):
+                html = screens.choices(['eng'], current, 'https://aio.example.com/subsync')
+                self.assertEqual(self.radios(html), [(v, v == current) for v in ('no', 'pick', 'open')])
+        html = screens.choices(['eng'], 'pick', 'https://aio.example.com/subsync')
+        tree = Tree(html)
+        self.assertIn('Sync files that have no subtitles of their own, from their audio?', tree.texts)
+        self.assertIn(' '.join(explain.QUESTIONS['AUDIO'][1].split()), tree.texts)
+        group = [attrs for tag, attrs in tree.tags if tag == 'fieldset'][0]
+        self.assertEqual(group.get('aria-describedby'), 'audio-help')
+        self.assertNotIn('type="checkbox" id="audio"', html)
 
 
 class Structure(unittest.TestCase):
@@ -149,7 +185,7 @@ class Rules(unittest.TestCase):
         rows = [('ok', HOSTILE, HOSTILE), ('bad', HOSTILE, None)]
         for html in (screens.machine('yourself', rows), screens.config(rows, HOSTILE, problem=('AIOS_CONFIG_ID', HOSTILE)),
                      screens.host_address(HOSTILE, HOSTILE), screens.host_signups(HOSTILE),
-                     screens.choices(['eng'], False, HOSTILE, problem=('LANGUAGES', HOSTILE)),
+                     screens.choices(['eng'], 'no', HOSTILE, problem=('LANGUAGES', HOSTILE)),
                      screens.review([(HOSTILE, [('+', HOSTILE)], HOSTILE)]),
                      screens.done('yourself', HOSTILE, [HOSTILE, HOSTILE], [('code', HOSTILE), ('p', HOSTILE)]),
                      screens.after_setup('yourself', rows, [(HOSTILE, HOSTILE)], HOSTILE, None, config=HOSTILE),

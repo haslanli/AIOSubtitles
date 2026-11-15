@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from subsync import choose, imageref, langs, pipeline, refine, shift, subs  # noqa: E402
+from subsync import relgate as relgate_mod  # noqa: E402
 from subsync.mkv import oshash  # noqa: E402
 from subsync.relgate import aligned, clearly_better, relgate  # noqa: E402
 from subsync.vad import FRAME, timestamps  # noqa: E402
@@ -264,6 +265,51 @@ class ChooseTest(unittest.TestCase):
         self.assertIsNone(choose.best_guess([{"release": "x", "ai": True}], name, skip=True))
         self.assertEqual([r for r, _ in choose.order(cands, name)], [0, 1, 2])      # tries still start with the viewer's
 
+    KOH_FILE = "Kingdom.Of.Heaven.2005.DC.2160p.4K.BluRay.x265.10bit.AAC5.1-[YTS.MX].mkv"
+    KOH = [{"release": "Kingdom.Of.Heaven.2005.2160p.4K.WEB.x265.10bit.AAC5.1-[YTS.MX]"},
+           {"release": "kingdom.of.heaven.2005.directors.cut.roadshow.version.uhd.bluray.2160p"},
+           {"release": "Kingdom.Of.Heaven.2005.DIRECTOR'S.CUT.ROADSHOW.BLURAY.1080p.BluRay.x264.AAC5.1-[YTS.MX]"}]
+
+    def test_editions_named_in_release_names(self):
+        self.assertEqual(choose.editions(self.KOH_FILE), {"dc"})
+        self.assertEqual(choose.editions(self.KOH[0]["release"]), set())
+        self.assertEqual(choose.editions(self.KOH[1]["release"]), {"dc", "roadshow"})
+        self.assertEqual(choose.editions(self.KOH[2]["release"]), {"dc", "roadshow"})
+        self.assertEqual(choose.editions("Blade Runner 1982 Directors Cut 1080p"), {"dc"})
+        self.assertEqual(choose.editions("Aliens.1986.Special.Edition.EXTENDED.1080p"), {"extended"})
+        self.assertEqual(choose.editions("American.Pie.1999.UNRATED.DVDRip"), {"unrated"})
+        self.assertEqual(choose.editions("The.Lord.of.the.Rings.2001.Theatrical.Cut.720p"), {"theatrical"})
+        for name in ("Movie.2001.DDC.1080p", "Movie.2001.AAC5.1-DCX", "Movie.2001.DCP.Rip", "Theatricality.2001", None):
+            self.assertEqual(choose.editions(name), set(), name)
+
+    def test_a_subtitle_of_the_files_edition_is_the_best_guess(self):
+        # Kingdom of Heaven DC: the theatrical WEB subtitle won by its release group alone
+        self.assertEqual([r for r, _ in choose.order(self.KOH, self.KOH_FILE, viewer_first=False)], [2, 0, 1])
+        self.assertIn("DIRECTOR'S.CUT", choose.best_guess(self.KOH, self.KOH_FILE)["release"])
+        self.assertEqual(choose.tier_of(1, self.KOH[1], self.KOH_FILE, viewer_first=False), 2)     # bluray: 3, up one
+        self.assertLess(choose.tier_of(2, self.KOH[2], self.KOH_FILE, viewer_first=False), 2)      # group: 2, up
+
+    def test_no_edition_in_the_file_name_changes_nothing(self):
+        name = self.KOH_FILE.replace(".DC", "")
+        self.assertEqual([r for r, _ in choose.order(self.KOH, name, viewer_first=False)], [0, 2, 1])
+        self.assertIs(choose.best_guess(self.KOH, name), self.KOH[0])
+
+    def test_a_subtitle_of_another_edition_goes_last(self):
+        name = "The.Lord.Of.The.Rings.2001.EXTENDED.1080p.BluRay.x264-GRP.mkv"
+        cands = [{"release": "LOTR.2001.Theatrical.1080p.BluRay.x264-GRP"}, {"release": "LOTR.2001.720p.WEB"},
+                 {"release": "LOTR.2001.DVDRip", "ai": True}, {"release": "LOTR.2001.Extended.Edition.WEB"},
+                 {"release": "LOTR.2001.HDTV"}]
+        self.assertEqual([r for r, _ in choose.order(cands, name, viewer_first=False)], [3, 1, 4, 0, 2])
+        self.assertEqual([r for r, _ in choose.order(cands, name)], [0, 3, 1, 4, 2])   # the viewer's first stays first
+        self.assertEqual([r for r, _ in choose.order(cands[1:], name.replace("EXTENDED.", ""))], [0, 2, 3, 1])
+
+    def test_a_hash_or_line_count_match_stays_first_whatever_its_name(self):
+        cands = [{"release": "Kingdom.Of.Heaven.2005.DC.BluRay-[YTS.MX]"},
+                 {"release": "Kingdom.Of.Heaven.2005.Theatrical", "hash": "ab12"}, {"release": "Kingdom.Of.Heaven.2005"}]
+        self.assertEqual([r for r, _ in choose.order(cands, self.KOH_FILE, "AB12", viewer_first=False)], [1, 0, 2])
+        cands[1] = {"release": "Kingdom.Of.Heaven.2005.Theatrical", "cues": 1100}
+        self.assertEqual([r for r, _ in choose.order(cands, self.KOH_FILE, ref_cues=1099, viewer_first=False)], [1, 0, 2])
+
     def test_official_opensubtitles_entries(self):
         # Stremio's official OpenSubtitles v3 names the release in movieReleaseName and says how it matched in m
         from subsync.sources import release_info
@@ -318,6 +364,68 @@ class PlainTrackReferenceTest(unittest.TestCase):
         idx = self.Index([self.track(6, "SDH", 665, "en"), self.track(5, "", 600, "ru")])
         self.assertEqual(pipeline.choose_reference(idx, 600, "eng")["number"], 6)
         self.assertEqual(pipeline.choose_reference(idx, 600, "rus")["number"], 5)
+
+
+class AgreeingTrackReferenceTest(unittest.TestCase):
+    """With several tracks in the subtitle's language, the reference is the one whose timing agrees with
+    the file's other plain tracks, not the one with the most lines (Game of Thrones S01E01: es-ES, 576 lines, runs about
+    167 ms early against English and es-419, 552 lines)."""
+
+    Index = PlainTrackReferenceTest.Index
+
+    @staticmethod
+    def track(number, lang, base, seed, lead=0.0, keep=1.0, name=""):
+        """The film's lines (base) in another author's timing: each start a little off, some lines left out (keep), all
+        of them `lead` seconds early."""
+        r = random.Random(seed)
+        cues = [(s - lead + r.gauss(0, 0.05), d) for s, d in base if r.random() < keep]
+        return {"number": number, "language": lang, "codec": "S_TEXT/UTF8", "name": name, "forced": False,
+                "cues": sorted(cues)}
+
+    def setUp(self):
+        base = rhythm(700, 11)
+        self.es_es = self.track(12, "es-ES", base, 1, lead=0.167, keep=0.83)
+        self.es_419 = self.track(11, "es-419", base, 2, keep=0.79)
+        self.others = [self.track(n, lang, base, n) for n, lang in ((2, "en"), (3, "fr"), (4, "de"))]
+        self.assertGreater(len(self.es_es["cues"]), len(self.es_419["cues"]))          # today's order: es-ES
+
+    def test_the_track_that_agrees_with_the_others_wins(self):
+        idx = self.Index([self.es_es, self.es_419] + self.others)
+        self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 11)
+        self.assertEqual(pipeline.choose_reference(idx, 540, "es")["number"], 11)
+
+    def test_one_track_in_the_language_is_unchanged(self):
+        idx = self.Index([self.es_es] + self.others)
+        self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 12)
+
+    def test_with_no_other_track_to_compare_with_the_most_lines_win(self):
+        idx = self.Index([self.es_es, self.es_419])
+        self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 12)
+
+    def test_other_languages_keep_their_reference(self):
+        idx = self.Index([self.es_es, self.es_419] + self.others)
+        self.assertEqual(pipeline.choose_reference(idx, 540, "rus")["number"], 2)      # the fallback, English
+        self.assertEqual(pipeline.choose_reference(idx, 540, "fre")["number"], 3)
+
+    def test_a_plain_track_still_beats_an_sdh_one_that_agrees(self):
+        sdh = dict(self.es_419, name="SDH")
+        idx = self.Index([self.es_es, sdh] + self.others)
+        self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 12)
+
+    def test_the_agreement_is_worked_out_once_per_file(self):
+        idx = self.Index([self.es_es, self.es_419] + self.others)
+        calls = []
+        real = pipeline.relgate
+        pipeline.relgate = lambda *a, **kw: calls.append(1) or real(*a, **kw)
+        try:
+            pipeline.choose_reference(idx, 540, "spa")
+            first = len(calls)
+            for _ in range(5):
+                pipeline.choose_reference(idx, 540, "spa")
+        finally:
+            pipeline.relgate = real
+        self.assertEqual(first, 8)                                      # each Spanish track against the 4 others
+        self.assertEqual(len(calls), first)
 
 
 class TypesettingTrackReferenceTest(unittest.TestCase):
@@ -588,6 +696,89 @@ class AlignedTest(unittest.TestCase):
         ok, why = aligned(g, min_span=0.7)
         self.assertFalse(ok)
         self.assertIn("does not fit", why)
+
+
+class CrossMissingSceneTest(unittest.TestCase):
+    """Against another language's track an untranslated stretch (a song, background talk, on-screen
+    text) looks like a missing scene, while a subtitle for another cut can't pair 90 % of its lines under one shift (the
+    lines after the extra scene are off by its length). MobLand S02E08's Russian against the en-GB track: one shift of
+    60 ms, 97 % of its 624 lines paired, refused only for "a scene of the release is missing"."""
+
+    def setUp(self):
+        self.cues = rhythm(900, 7)
+        self.ref = [s for s, _ in self.cues]
+        self.dur = [d for _, d in self.cues]
+
+    def translation(self, extra, gap=(1500.0, 1660.0), seed=3):
+        """Another language's subtitle (start, duration): its author's own timing, a 160 s stretch left untranslated,
+        and `extra` (a share of its lines) lines of its own that pair with no line of the track."""
+        r = random.Random(seed)
+        out = [(s + r.gauss(0, 0.15), d) for s, d in self.cues if not gap[0] <= s <= gap[1]]
+        # after a line ends and over 1 s from any start: not the second half of a split line
+        room = [max(a + d, a + 1.0) + 0.1 for (a, d), (b, _) in zip(self.cues, self.cues[1:])
+                if b - max(a + d, a + 1.0) > 1.2 and not gap[0] - 2 <= a <= gap[1] + 2]
+        out += [(m, 0.2) for m in r.sample(room, int(extra / (1 - extra) * len(out)))]
+        return sorted(out)
+
+    def gate(self, cand):
+        return relgate(self.ref, [s for s, _ in cand], self.dur, min_span=0.7)
+
+    @staticmethod
+    def srt(cand, shift_s=0.0):
+        return "\n".join(f"{i}\n{subs.ts(s + shift_s)} --> {subs.ts(s + d + shift_s)}\nline {i}\n"
+                         for i, (s, d) in enumerate(cand, 1))
+
+    def index(self):
+        return PlainTrackReferenceTest.Index([{"number": 2, "language": "en", "codec": "S_TEXT/UTF8", "name": "",
+                                               "forced": False, "cues": list(self.cues)}])
+
+    def test_an_untranslated_stretch_under_one_shift_is_aligned(self):
+        g = self.gate(self.translation(0.05))
+        self.assertTrue(g["missing_scene"])
+        self.assertGreaterEqual(g["paired"], 0.9)
+        self.assertEqual(aligned(g, min_span=0.7), (False, "a scene of the release is missing (another cut)"))
+        self.assertTrue(aligned(g, min_span=0.7, one_shift=True)[0])     # moved by one shift, or as it is
+
+    def test_a_subtitle_that_pairs_less_under_one_shift_is_still_refused(self):
+        g = self.gate(self.translation(0.25))
+        self.assertTrue(g["missing_scene"])
+        self.assertLessEqual(g["paired"], 0.8)
+        self.assertEqual(aligned(g, min_span=0.7, one_shift=True), (False, "a scene of the release is missing (another cut)"))
+
+    def test_the_shift_path_offers_it_across_languages_only(self):
+        text = self.srt(self.translation(0.05), shift_s=5.0)
+        r = pipeline.shift_sync(self.index(), text, "srt", "rus", better={})
+        self.assertEqual(r["outcome"], "synced", r.get("reason"))
+        self.assertTrue(r["reason"].startswith("aligned to another language's track (one shift)"), r["reason"])
+        r = pipeline.shift_sync(self.index(), text, "srt", "eng", better={})       # against its own language's track
+        self.assertEqual(r["outcome"], "keep_original")
+        self.assertTrue(r["gate_synced"]["missing_scene"])
+
+    def test_an_original_in_place_is_in_sync_across_languages_only(self):
+        text = self.srt(self.translation(0.05))
+        rule = dict(relgate_mod.BETTER)
+        self.assertTrue(pipeline.check_original(self.index(), text, "rus", better=rule)["in_sync"])
+        self.assertFalse(pipeline.check_original(self.index(), text, "eng", better=rule)["in_sync"])
+
+    def test_a_theatrical_subtitle_against_an_extended_cut_is_still_refused(self):
+        r = random.Random(17)
+        t, film = 20.0, []
+        for _ in range(600):                                                   # about 10 lines a minute
+            d = r.uniform(1.0, 3.5)
+            film.append((t, d))
+            t += d + r.uniform(1.5, 6.0)
+        self.cues, self.ref = film, [s for s, _ in film]
+        theatrical = self.translation(0.0, gap=(0.0, -1.0))                   # every line translated
+        cut = self.ref[400]                                                    # the release adds a 300 s scene here
+        scene = [(cut + 1.0 + 6.0 * k, 2.0) for k in range(50)]
+        self.cues = sorted([(s + (300.0 if s >= cut else 0.0), d) for s, d in film] + scene)
+        self.ref = [s for s, _ in self.cues]
+        for shift_s in (5.0, 0.0):
+            res = pipeline.shift_sync(self.index(), self.srt(theatrical, shift_s), "srt", "rus", better={})
+            self.assertEqual(res["outcome"], "keep_original", res.get("reason"))
+            self.assertLess(res["gate_synced"]["paired"], relgate_mod.ONE_SHIFT_PAIRED)   # one shift: the cut breaks it
+        self.assertFalse(pipeline.check_original(self.index(), self.srt(theatrical), "rus",
+                                                 better=dict(relgate_mod.BETTER))["in_sync"])
 
 
 class ImageRecallTest(unittest.TestCase):

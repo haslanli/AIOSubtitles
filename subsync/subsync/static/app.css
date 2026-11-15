@@ -129,6 +129,10 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .way span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2)}
 .way:has(input:checked){background:var(--accent-bg);border-color:var(--accent-link)}
 .way:has(input:checked) span{color:var(--on-accent-bg)}
+/* words for the picked row only (AD567): hidden while another row is picked; a browser without :has shows them */
+.way:not(:has(input:checked)) .if-chosen{display:none}
+.sheet .ways{margin-top:32px}
+.sheet .ways .help{margin-top:8px}
 
 /* ---------- the language slots: one slot, "Add language" up to the instance's limit ---------- */
 .slots{display:grid;gap:14px}

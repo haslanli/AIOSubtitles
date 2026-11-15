@@ -5,12 +5,13 @@ connection outlives its read. One info log line per read, naming the job's label
 AIOStreams playback address, which redirects to the debrid service's download address) is followed once: later
 reads go straight to the address it pointed to, kept in memory for this reader only, so a hundred small reads are not a
 hundred calls to AIOStreams; when that address stops answering, the link is asked once more, and a 429 there is a
-refusal like any other. Once the link has redirected, this reader asks it at most 1 + MAX_RE_RESOLVE times in all
-: after that a read the address can't answer fails without asking AIOStreams again (a connection fault
+refusal like any other. Once the link has redirected, this reader asks it at most 1 + MAX_RE_RESOLVE times in all:
+after that a read the address can't answer fails without asking AIOStreams again (a connection fault
 at the download address had made 50 calls). The Real-Debrid guard checks every address, that one too. A refusal
 (HTTP 403, most likely a debrid per-account download limit) raises Refused so the worker can back off; a
-reply whose total size differs from the file's raises ReadFailed. Before each read the guard
-(budget, pause) may stop the job.
+reply whose total size differs from the file's raises ReadFailed. A read that got no answer (no connection, a reset, a
+timeout) raises ReadFailed with `connection` set, so the worker can try a file's first read once more.
+Before each read the guard (budget, pause) may stop the job.
 """
 import logging
 import threading
@@ -18,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import realdebrid
+from . import net, realdebrid
 
 log = logging.getLogger("subsync.read")
 
@@ -29,7 +30,20 @@ MAX_RE_RESOLVE = 3     # look-ups of a redirecting link per reader after its fir
 
 
 class ReadFailed(Exception):
-    """The file can't be read as asked (HTTP error, wrong size, short reply)."""
+    """The file can't be read as asked (HTTP error, wrong size, short reply, no answer). `connection`: the request got
+    no answer (no connection, a reset, a timeout), so the same read may work a moment later."""
+
+    def __init__(self, *args, connection=False):
+        super().__init__(*args)
+        self.connection = connection
+
+
+def connection_fault(e):
+    """An OSError from a request that got no answer: not an HTTP status, and not one of AIOSubtitles' own refusals of
+    an address (Real-Debrid, one that isn't public), which would refuse it again."""
+    reason = e.reason if isinstance(e, urllib.error.URLError) else e
+    return isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError) \
+        and not isinstance(reason, (realdebrid.Blocked, net.Refused))
 
 
 class LinkUsedUp(ReadFailed):
@@ -42,6 +56,15 @@ class Refused(ReadFailed):
 
 class Stopped(Exception):
     """The guard stopped the job before a read (budget spent, a viewer is streaming)."""
+
+
+class CapReached(Stopped):
+    """The read would pass the job's own byte cap (`cap`, in bytes): final for the file under that cap,
+    so the job isn't tried again later."""
+
+    def __init__(self, cap):
+        super().__init__("file byte cap")
+        self.cap = cap
 
 
 class RangeReader:
@@ -162,7 +185,7 @@ class RangeReader:
             e.close()
         except (OSError, ValueError) as e:
             self._log(start, length, 0, status, t0, type(e).__name__)
-            raise ReadFailed(type(e).__name__) from None
+            raise ReadFailed(type(e).__name__, connection=connection_fault(e)) from None
         finally:
             if sent:
                 self._count(requests=1)
@@ -214,7 +237,7 @@ class RangeReader:
         except (OSError, ValueError) as e:
             self._count(requests=1)
             self._log(start, length, 0, 0, t0, type(e).__name__)
-            raise ReadFailed(type(e).__name__) from None
+            raise ReadFailed(type(e).__name__, connection=connection_fault(e)) from None
         self._count(requests=1)
         got, status = 0, getattr(r, "status", 200)
         try:

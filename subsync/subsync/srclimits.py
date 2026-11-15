@@ -30,6 +30,8 @@ LIMITS = {
 # SubSource counts a download as a request; the others count downloads apart.
 DOWNLOAD_KIND = {"subsource": "request", "wyzie": "request"}
 
+# Sites whose downloads are zips subsync unpacks (sources.fetch_subtitle): a player can't use their address as it is.
+ZIPPED = ("subdl", "subsource")
 # Per file and language, at most this many subtitles are downloaded from a site with a tight limit.
 PER_FILE_DOWNLOADS = {"subdl": 3, "subsource": 4, "wyzie": 2}
 # Public mode: at this share of a window's limit, a person who already used more than their share gets that site only

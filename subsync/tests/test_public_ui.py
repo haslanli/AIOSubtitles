@@ -129,6 +129,20 @@ def every_page():
         "signup-audio": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on")),
         "result-audio": pages.result_page(result(), settings(SUBSYNC_AUDIO_ROUTE="on")),
         "privacy-audio": pages.privacy_page(settings(SUBSYNC_AUDIO_ROUTE="on")),
+        # each person's answer for files with no subtitles of their own: three answers, or two while the
+        # instance allows no opened syncs; after a problem; on the settings page and after a save
+        "signup-audio-two": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_USER_OPENED_PER_DAY="0")),
+        "signup-audio-error": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on"), error="Wrong.", field="audio",
+                                                audio="open"),
+        "settings-audio": pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on"), dict(RECORD, audio="open"), USAGE,
+                                              LINK, now=0),
+        "settings-audio-two": pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_USER_OPENED_PER_DAY="0"),
+                                                  RECORD, USAGE, LINK, now=0),
+        "settings-audio-saved": pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on"), dict(RECORD, audio="off"),
+                                                    USAGE, LINK, now=0,
+                                                    message=pages.done_message("audio", dict(RECORD, audio="off"))[0]),
+        "settings-audio-error": pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on"), RECORD, USAGE, LINK, now=0,
+                                                    error="Wrong.", field="audio"),
         "not-found": pages.not_found_page(),
         "error": pages.error_page("Wrong."),
     }
@@ -157,7 +171,14 @@ def approved_corpus():
     for title, text, _ in explain.PUBLIC_STATES.values():
         texts += [title, text.replace("{detail}", "Detail.")]
     for key, text in explain.PUBLIC_TEXTS.items():
-        texts.append(text.format(n=5, when="at sign-up", names="English, Spanish") if "{" in text else text)
+        texts.append(text.format(n=5, when="at sign-up", names="English, Spanish", answer="Off") if "{" in text else text)
+    # the answer for files with no subtitles of their own, as an instance with three or two answers shows it
+    for env in ({}, {"SUBSYNC_USER_OPENED_PER_DAY": "0"}):
+        offers = settings(SUBSYNC_AUDIO_ROUTE="on", **env)
+        texts.append(explain.audio_help(offers))
+        texts += [explain.audio_answer_help(value, offers) for value, _ in pages.audio_answers(offers)]
+    texts.append(explain.PUBLIC_AUDIO["opened_note"])
+    texts += [pages.done_message("audio", {"audio": value})[0] for value in ("off", "pick", "open")]
     texts.append(explain.PUBLIC_TEXTS["reset"].format(when=pages.reset_in(0)))
     # the last sign-up step's note, as today's page has it, the Privacy link after it
     texts.append(explain.PUBLIC_TEXTS["password_once"] + " What AIOSubtitles reads and keeps:")
@@ -453,8 +474,8 @@ class SettingsPageTest(unittest.TestCase):
 
     def test_usage_and_the_reset_time(self):
         text = Tree(self.page(now=86400 * 5 + 3600)).text()
-        self.assertIn("3 of 60", text)
-        self.assertIn("0.3 MB of 1000 MB", text)
+        self.assertIn("3 of 200", text)
+        self.assertIn("0.3 MB of 10000 MB", text)
         self.assertIn("Resets at 00:00 UTC, in 23 h.", text)
 
     def test_the_reset_time_reads_plainly(self):
@@ -464,7 +485,7 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual(reset_in(86400 - 3600 * 7 - 60 * 12), "in 7 h 12 min")
 
     def test_a_reached_limit_is_called_out_and_its_bar_turns_red(self):
-        text = self.page(usage={"files": 60, "bytes": 0})
+        text = self.page(usage={"files": 200, "bytes": 0})
         self.assertIn("Today's limit is reached", Tree(text).text())
         self.assertIn('class="gauge full"', text)
 
@@ -517,6 +538,142 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual(pages.done_message("stored-manual", record), (None, manual))
         self.assertEqual(pages.done_message("forgot", record), (explain.PUBLIC_TEXTS["forgot"], None))
         self.assertEqual(pages.done_message("<script>", record), (None, None))
+
+
+class AudioChoiceTest(unittest.TestCase):
+    """Each person's answer for files with no subtitles of their own, on the sign-up's config screen and the
+    settings page: shown only with the instance's audio route on, two answers while it allows no opened syncs, the
+    person's own answer picked, and the note under "as soon as a file is opened" shown without the script."""
+
+    def on(self, **env):
+        return settings(SUBSYNC_AUDIO_ROUTE="on", **env)
+
+    def settings_page(self, s, record=None, **kw):
+        from subsync import pages
+        return pages.settings_page(s, record or RECORD, USAGE, LINK, now=0, **kw)
+
+    @staticmethod
+    def radios(text):
+        return [(a["value"], "checked" in a) for a in Tree(text).all("input", type="radio", name="audio")]
+
+    @staticmethod
+    def config_screen(text):
+        return re.search(r'<section class="screen" data-screen="config".*?</section>', text, re.S).group(0)
+
+    def test_the_sign_up_asks_it_on_the_config_screen(self):
+        from subsync import explain, pages
+        s = self.on()
+        screen = self.config_screen(pages.signup_page(s))
+        self.assertEqual(self.radios(screen), [("off", False), ("pick", True), ("open", False)])
+        tree = Tree(screen)
+        group = tree.all("fieldset", id="audio")[0]
+        self.assertEqual(group["aria-describedby"], "audio-help")
+        self.assertEqual(tree.text_of["audio-help"], explain.audio_help(s))
+        self.assertIn("Files with no subtitles of their own", tree.text())
+        self.assertEqual(tree.text_of["audio-open-help"], explain.audio_answer_help("open", s))
+        self.assertIn("(at most 5 a day)", tree.text_of["audio-open-help"])
+        self.assertIn("at most 1 GB", tree.text_of["audio-help"])
+        self.assertIn("at most 20 a day", tree.text_of["audio-help"])
+        for off in (settings(), settings(SUBSYNC_AUDIO_ROUTE="off")):
+            text = pages.signup_page(off)
+            self.assertEqual(self.radios(text), [])
+            self.assertNotIn("Files with no subtitles of their own", text)
+
+    def test_two_answers_while_the_instance_allows_no_opened_syncs(self):
+        from subsync import explain, pages
+        none = self.on(SUBSYNC_USER_OPENED_PER_DAY="0")
+        self.assertEqual(self.radios(pages.signup_page(none)), [("off", False), ("pick", True)])
+        page = self.settings_page(none, dict(RECORD, audio="open"))
+        self.assertEqual(self.radios(page), [("off", False), ("pick", True)])     # their "open" reads "pick"
+        self.assertNotIn(explain.PUBLIC_AUDIO["opened_note"], Tree(page).text())
+        self.assertNotIn("as soon as a file is opened", Tree(page).text())
+
+    def test_the_settings_page_shows_the_persons_answer_and_saves_it_with_the_audio_action(self):
+        for audio, picked in ((None, "pick"), ("off", "off"), ("pick", "pick"), ("open", "open"), ("loud", "pick")):
+            with self.subTest(audio=audio):
+                record = dict(RECORD, **({"audio": audio} if audio else {}))
+                self.assertEqual([v for v, chosen in self.radios(self.settings_page(self.on(), record)) if chosen],
+                                 [picked])
+        tree = Tree(self.settings_page(self.on()))
+        self.assertEqual(tree.text_of["audio-h"], "Files with no subtitles of their own")
+        group = tree.all("fieldset", id="audio")[0]
+        self.assertEqual((group["aria-labelledby"], group["aria-describedby"]), ("audio-h", "audio-help"))
+        self.assertTrue(tree.all("input", type="hidden", name="action", value="audio"))
+        self.assertIn("Save answer", tree.text())
+        for off in (settings(), settings(SUBSYNC_AUDIO_ROUTE="off")):
+            text = self.settings_page(off, dict(RECORD, audio="open"))
+            self.assertEqual(self.radios(text), [])
+            self.assertNotIn("audio-h", text)
+
+    def test_the_note_under_the_third_answer_needs_no_script(self):
+        from subsync import explain, pages, ui
+        text = self.settings_page(self.on())
+        tree = Tree(text)
+        self.assertEqual(tree.text_of["audio-open-note"], explain.PUBLIC_AUDIO["opened_note"])
+        self.assertEqual(tree.all("span", id="audio-open-note")[0]["class"], "if-chosen")
+        self.assertEqual(tree.all("input", id="audio-open")[0]["aria-describedby"], "audio-open-help audio-open-note")
+        self.assertNotIn("audio-off-note", tree.text_of)
+        # the stylesheet hides it while another answer is picked; a browser that can't tell shows it
+        self.assertIn(".way:not(:has(input:checked)) .if-chosen{display:none}", ui.APP_CSS)
+        # a plain form: choosing and saving work without the script
+        form = re.search(r'<form[^>]*>(?:(?!</form>).)*name="audio"(?:(?!</form>).)*</form>', text, re.S).group(0)
+        self.assertRegex(form, r'^<form class="controls" method="post" action="configure">')
+        self.assertIn('type="submit"', form)
+        self.assertNotIn("data-", form)
+        signup = Tree(self.config_screen(pages.signup_page(self.on())))
+        self.assertEqual(signup.text_of["audio-open-note"], explain.PUBLIC_AUDIO["opened_note"])
+
+    def test_after_a_problem_the_answer_is_kept_and_the_layer_opens_at_its_screen(self):
+        from subsync import pages
+        text = pages.signup_page(self.on(), error="Wrong.", field="audio", audio="open")
+        self.assertEqual([v for v, chosen in self.radios(text) if chosen], ["open"])
+        tree = Tree(text)
+        self.assertEqual(tree.all("body")[0]["data-open-at"], "config")
+        self.assertEqual([a["href"] for a in tree.all("a") if a.get("href") == "#audio"], ["#audio"])
+        for audio in ("loud", None, "open"):
+            with self.subTest(audio=audio):
+                s = self.on(SUBSYNC_USER_OPENED_PER_DAY="0") if audio == "open" else self.on()
+                text = pages.signup_page(s, error="Wrong.", field="link", audio=audio)
+                self.assertEqual([v for v, chosen in self.radios(text) if chosen], ["pick"])
+        tree = Tree(self.settings_page(self.on(), error="Wrong.", field="audio"))
+        self.assertEqual([a["href"] for a in tree.all("a") if a.get("href") == "#audio"], ["#audio"])
+
+    def test_the_answers_problem_is_tied_to_them_as_the_other_fields_are(self):
+        # found by a screen check: the answers were not marked or described by their problem; now, as for the other
+        # fields, on the sign-up by the summary right above, on the settings page by the row's own error, as Languages'
+        from subsync import pages
+        tree = Tree(self.config_screen(pages.signup_page(self.on(), error="Wrong.", field="audio", audio="open")))
+        self.assertEqual(tree.all("fieldset", id="audio")[0]["aria-describedby"].split(), ["problem-message", "audio-help"])
+        self.assertEqual([a.get("aria-invalid") for a in tree.all("input", type="radio", name="audio")], ["true"] * 3)
+        tree = Tree(self.settings_page(self.on(), error="Wrong.", field="audio"))
+        self.assertEqual(tree.text_of["audio-error"], "Wrong.")
+        self.assertEqual(tree.all("p", id="audio-error")[0]["class"], "field-error")
+        self.assertEqual(tree.all("fieldset", id="audio")[0]["aria-describedby"].split(), ["audio-error", "audio-help"])
+        self.assertEqual([a.get("aria-invalid") for a in tree.all("input", type="radio", name="audio")], ["true"] * 3)
+        self.assertIn("Wrong.", tree.text_of["problem-message"])           # the summary at the top stays
+        # no problem, or one about another field: nothing marked
+        for kw in ({}, {"error": "Wrong.", "field": "languages"}):
+            for text in (self.settings_page(self.on(), **kw), pages.signup_page(self.on(), **kw)):
+                tree = Tree(text)
+                self.assertNotIn("audio-error", tree.text_of)
+                self.assertEqual(tree.all("fieldset", id="audio")[0]["aria-describedby"], "audio-help")
+                self.assertFalse([a for a in tree.all("input", type="radio", name="audio") if a.get("aria-invalid")])
+
+    def test_the_note_under_the_third_answer_doesnt_repeat_its_tag(self):
+        # found by a screen check: the answer ends "(not recommended)", so its note doesn't start with it again
+        from subsync import explain
+        note = explain.PUBLIC_AUDIO["opened_note"]
+        self.assertTrue(note.startswith("This reads about 60–350 MB of each opened file that has no subtitle track"))
+        self.assertNotIn("recommended", note.lower())
+
+    def test_the_saved_message_names_the_answer(self):
+        from subsync import explain, pages
+        for audio, answer in (("off", "Off"), ("pick", "On, when I pick the file"),
+                              ("open", "On, as soon as a file is opened"), (None, "On, when I pick the file")):
+            with self.subTest(audio=audio):
+                self.assertEqual(pages.done_message("audio", dict(RECORD, audio=audio)),
+                                 (explain.PUBLIC_TEXTS["audio_saved"].format(answer=answer), None))
+        self.assertIn("audio", pages.DONE)
 
 
 class OtherPagesTest(unittest.TestCase):
@@ -587,6 +744,24 @@ class PartsTest(unittest.TestCase):
                          [("way", "self", True), ("way", "host", False)])
         self.assertEqual(tree.text_of["way-host-help"], "b.")
         self.assertIn("How?", tree.text())
+
+    def test_a_radio_group_with_its_explanation_and_a_note_for_the_picked_row(self):
+        # The public pages' answers for files with no subtitles of their own
+        from subsync import ui
+        tree = Tree(ui.radio_group("How?", [ui.radio_row("w", "a", "A", ""), ui.radio_row("w", "b", "B", "b.",
+                                                                                          note="Careful.")],
+                                   help_text="Why.", id="w"))
+        group = tree.all("fieldset")[0]
+        self.assertEqual((group["id"], group["aria-describedby"]), ("w", "w-help"))
+        self.assertEqual(tree.text_of["w-help"], "Why.")
+        self.assertNotIn("aria-describedby", tree.all("input", id="w-a")[0])     # no words of its own
+        self.assertNotIn("w-a-help", tree.text_of)
+        self.assertEqual(tree.all("input", id="w-b")[0]["aria-describedby"], "w-b-help w-b-note")
+        self.assertEqual(tree.all("span", id="w-b-note")[0]["class"], "if-chosen")
+        named = Tree(ui.radio_group(None, [ui.radio_row("w", "a", "A", "a.")], labelled_by="h", described_by="h-help"))
+        self.assertFalse(named.all("legend"))
+        group = named.all("fieldset")[0]
+        self.assertEqual((group["aria-labelledby"], group["aria-describedby"]), ("h", "h-help"))
 
     def test_the_step_frame(self):
         from subsync import ui

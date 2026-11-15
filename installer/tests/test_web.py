@@ -129,7 +129,7 @@ class Personal(FlowFixture):
         self.app = web.App(port=8802)
         self.b = Browser(self.app)
 
-    def walk_to_review(self):
+    def walk_to_review(self, **choices):
         b = self.b
         self.assertEqual(b.get('')[0], 200)
         status, headers, _ = b.post('', {'ROUTE': 'yourself'})
@@ -146,8 +146,9 @@ class Personal(FlowFixture):
         self.assertIn('Config found', text)
         _, _, text = b.follow('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
         self.assertIn('Which subtitle languages should be synced?', text)
+        self.assertIn('Sync files that have no subtitles of their own, from their audio?', text)
         _, _, text = b.follow('choices', {'LANGUAGES': ['eng', 'rus', ''], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
-                                          'ADD_OPENSUBTITLES': 'yes', 'go': 'next'})
+                                          'ADD_OPENSUBTITLES': 'yes', 'go': 'next', **choices})
         self.assertIn('Data a day in total', text)
         _, _, text = b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
         self.assertIn('Save these changes', text)
@@ -173,6 +174,22 @@ class Personal(FlowFixture):
         _, _, text = self.b.get('')                                                    # the page after setup now
         self.assertIn('AIOSubtitles · subsync status', text)
         self.assertIn(update.NEWEST, text)
+
+    def test_the_audio_answer_through_the_page(self):
+        # One of three answers; a yes asks the audio limit next, and "as soon as a file is opened" is written
+        text = self.walk_to_review(AUDIO='open')
+        _, _, text = self.b.get('limits')
+        self.assertIn('Audio per file', text)
+        _, _, text = self.b.get('choices')
+        self.assertIn('name="AUDIO" id="AUDIO-open" value="open" checked', text)
+        self.b.follow('choices', {'LANGUAGES': ['eng', 'rus', ''], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
+                                  'ADD_OPENSUBTITLES': 'yes', 'AUDIO': 'open', 'go': 'next'})
+        self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        status, headers, _ = self.b.post('review', {'CONFIRM': 'yes'})
+        self.assertEqual(status, 303)
+        self.b.settle('install')
+        env = engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_AUDIO_WHEN']), ('on', 'open'))
 
     def test_a_check_that_stops_still_leads_to_the_end(self):
         # a check that couldn't run once left no way to the done screen
@@ -338,7 +355,7 @@ if __name__ == '__main__':
 
 
 class Rollback(FlowFixture):
-    """The page after setup offers going back while an earlier version is recorded (Q5)."""
+    """The page after setup offers going back while an earlier version is recorded."""
 
     def setUp(self):
         super().setUp()

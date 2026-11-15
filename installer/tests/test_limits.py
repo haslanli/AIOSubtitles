@@ -18,6 +18,9 @@ LABELS = {   # the approved labels
     'SUBSYNC_SIGNUPS_PER_HOUR': 'Sign-up attempts per address an hour', 'SUBSYNC_SYNCS_AT_ONCE': 'Files synced at a time',
     'SUBSYNC_ACTIVE_WORKERS': 'Workers at once', 'SUBSYNC_MAX_CONNECTIONS': 'Requests at once',
     'SUBSYNC_USENET_LISTINGS_PER_DAY': 'Usenet searches per person a day',   # personal: 'Usenet searches a day'
+    # with the audio route on
+    'SUBSYNC_USER_AUDIO_PER_DAY': 'Audio syncs per person a day',
+    'SUBSYNC_USER_OPENED_PER_DAY': 'Of those, as soon as a file is opened', 'SUBSYNC_AUDIO_AT_ONCE': 'Audio syncs at a time',
 }
 
 
@@ -30,21 +33,33 @@ class Routes(unittest.TestCase):
                          ['Data a day in total', 'Usenet searches a day'])
         self.assertNotIn('SUBSYNC_USENET_LISTINGS_PER_DAY', limits.names(limits.hosting(usenet=False)))
 
-    def test_a_public_instance_asks_the_audio_limit_only_with_the_audio_route(self):
-        # With the audio route on, the audio limit is asked under "Each person", before the Usenet number
-        each = dict(limits.hosting_groups(usenet=True, audio=True))['Each person']
-        self.assertEqual([lim.setting for lim in each],
+    def test_a_public_instance_asks_the_audio_limits_only_with_the_audio_route(self):
+        # With the audio route on, the audio limit is asked under "Each person", before the Usenet number;
+        # Then the two daily counts, and the audio syncs at a time under "This server"
+        groups = dict(limits.hosting_groups(usenet=True, audio=True))
+        self.assertEqual([lim.setting for lim in groups['Each person']],
                          ['SUBSYNC_USER_FILES_PER_DAY', 'SUBSYNC_USER_DAILY_MB', 'SUBSYNC_MAX_LANGUAGES',
-                          'SUBSYNC_AUDIO_BUDGET_GB', 'SUBSYNC_USENET_LISTINGS_PER_DAY'])
-        self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', limits.names(limits.hosting()))
-        self.assertIn('SUBSYNC_AUDIO_BUDGET_GB', limits.names(limits.hosting(audio=True)))
+                          'SUBSYNC_AUDIO_BUDGET_GB', 'SUBSYNC_USER_AUDIO_PER_DAY', 'SUBSYNC_USER_OPENED_PER_DAY',
+                          'SUBSYNC_USENET_LISTINGS_PER_DAY'])
+        self.assertEqual([lim.setting for lim in groups['This server']],
+                         ['SUBSYNC_SYNCS_AT_ONCE', 'SUBSYNC_AUDIO_AT_ONCE', 'SUBSYNC_ACTIVE_WORKERS',
+                          'SUBSYNC_MAX_CONNECTIONS'])
+        audio_only = {'SUBSYNC_AUDIO_BUDGET_GB', 'SUBSYNC_USER_AUDIO_PER_DAY', 'SUBSYNC_USER_OPENED_PER_DAY',
+                      'SUBSYNC_AUDIO_AT_ONCE'}
+        for usenet in (True, False):
+            self.assertFalse(audio_only & set(limits.names(limits.hosting(usenet=usenet))))
+            self.assertLessEqual(audio_only, set(limits.names(limits.hosting(usenet=usenet, audio=True))))
+        self.assertEqual({lim.setting: lim.default for lim in limits.hosting(audio=True)
+                          if lim.setting in audio_only},
+                         {'SUBSYNC_AUDIO_BUDGET_GB': '1', 'SUBSYNC_USER_AUDIO_PER_DAY': '20',
+                          'SUBSYNC_USER_OPENED_PER_DAY': '5', 'SUBSYNC_AUDIO_AT_ONCE': 'auto'})
 
     def test_a_public_instance_asks_every_limit_in_three_groups_without_audio(self):
         self.assertEqual([(heading, [lim.setting for lim in group]) for heading, group in limits.HOSTING],
                          HOSTING_ORDER)
 
     def test_every_limit_has_its_approved_label_and_subsyncs_default(self):
-        for lim in limits.personal(audio=True) + [lim for _, group in limits.HOSTING for lim in group]:
+        for lim in limits.personal(audio=True) + limits.hosting(audio=True):
             with self.subTest(setting=lim.setting):
                 self.assertEqual(lim.label, LABELS[lim.setting])
                 self.assertEqual(lim.default, explain.SETTINGS[lim.setting][0])
@@ -60,6 +75,9 @@ class Routes(unittest.TestCase):
         self.assertEqual((by['SUBSYNC_USER_FILES_PER_DAY'].unit, by['SUBSYNC_USER_DAILY_MB'].unit), ('files', 'MB'))
         self.assertEqual(by['SUBSYNC_SYNCS_AT_ONCE'].kind, 'auto')
         self.assertIsNone(by['SUBSYNC_MAX_USERS'].unit)
+        audio = {lim.setting: lim for lim in limits.hosting(audio=True)}
+        self.assertEqual([audio[name].kind for name in ('SUBSYNC_USER_AUDIO_PER_DAY', 'SUBSYNC_USER_OPENED_PER_DAY',
+                                                        'SUBSYNC_AUDIO_AT_ONCE')], ['count', 'count', 'auto'])
 
 
 class Checks(unittest.TestCase):
@@ -90,7 +108,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(limits.check(lim, '20.0'), ('20', None))
         for bad in ('0', '-1', 'lots', '', 'auto', 'inf', 'nan'):
             with self.subTest(bad=bad):
-                self.assertEqual(limits.check(lim, bad), (None, 'A number above 0, like 50.'))
+                self.assertEqual(limits.check(lim, bad), (None, 'A number above 0, like 100.'))
 
     def test_the_segmented_choices(self):
         audio, langs = self.lim('SUBSYNC_AUDIO_BUDGET_GB'), self.lim('SUBSYNC_MAX_LANGUAGES')
@@ -99,6 +117,25 @@ class Checks(unittest.TestCase):
         self.assertEqual(limits.check(audio, '3', current='3'), ('3', None))   # set by hand before: kept
         self.assertEqual(limits.check(langs, '3'), ('3', None))
         self.assertEqual(limits.check(langs, '5'), (None, 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'))
+
+    def test_the_daily_audio_counts_take_0(self):
+        # 0 stops new audio syncs (SUBSYNC_USER_AUDIO_PER_DAY) or removes the opened answer (the other)
+        by = {lim.setting: lim for lim in limits.hosting(audio=True)}
+        for name, default in (('SUBSYNC_USER_AUDIO_PER_DAY', '20'), ('SUBSYNC_USER_OPENED_PER_DAY', '5')):
+            with self.subTest(name=name):
+                self.assertEqual(limits.check(by[name], '0'), ('0', None))
+                self.assertEqual(limits.check(by[name], ' 12 '), ('12', None))
+                for bad in ('-1', '1.5', 'lots', '', 'auto'):
+                    self.assertEqual(limits.check(by[name], bad), (None, f'A whole number from 0, like {default}.'))
+
+    def test_audio_syncs_at_a_time_cant_be_more_than_the_files_synced_at_a_time(self):
+        lim = {lim.setting: lim for lim in limits.hosting(audio=True)}['SUBSYNC_AUDIO_AT_ONCE']
+        self.assertEqual(limits.check(lim, 'auto', places=4), ('auto', None))
+        self.assertEqual(limits.check(lim, '4', places=4), ('4', None))
+        self.assertEqual(limits.check(lim, '5', places=4),
+                         (None, 'A whole number from 1 to 4 (the files synced at a time), or auto.'))
+        self.assertEqual(limits.check(lim, '0', places=4), (None, 'A whole number from 1, or auto.'))
+        self.assertEqual(limits.check(lim, '9'), ('9', None))                 # the places not known: subsync checks
 
     def test_the_value_shown_has_thousands_marked(self):
         self.assertEqual(limits.shown(self.lim('SUBSYNC_USER_DAILY_MB'), '1000'), '1,000')
@@ -109,19 +146,19 @@ class Checks(unittest.TestCase):
 class InTheEnvFile(unittest.TestCase):
     def test_a_value_set_by_hand_is_the_current_value(self):
         lim = self.daily = limits.personal(audio=False)[0]
-        self.assertEqual(limits.current(lim, {}), '50')
+        self.assertEqual(limits.current(lim, {}), '100')
         self.assertEqual(limits.current(lim, {'SUBSYNC_DAILY_BUDGET_GB': '20'}), '20')
 
     def test_only_values_other_than_the_default_are_written(self):
         asked = limits.personal(audio=False)
-        self.assertEqual(limits.env_lines(asked, {'SUBSYNC_DAILY_BUDGET_GB': '50'}), {})
+        self.assertEqual(limits.env_lines(asked, {'SUBSYNC_DAILY_BUDGET_GB': '100'}), {})
         self.assertEqual(limits.env_lines(asked, {'SUBSYNC_DAILY_BUDGET_GB': '20'}), {'SUBSYNC_DAILY_BUDGET_GB': '20'})
 
     def test_an_asked_limit_replaces_its_hand_set_line_and_other_lines_stay(self):
         asked = limits.personal(audio=False)
         current = {'SUBSYNC_DAILY_BUDGET_GB': '20', 'SUBSYNC_MAX_TRIES': '8', 'SUBSYNC_LANGUAGES': 'eng'}
         written = {'SUBSYNC_LANGUAGES': 'spa'}
-        merged, kept = plan.merge_env({**written, **limits.env_lines(asked, {'SUBSYNC_DAILY_BUDGET_GB': '50'})},
+        merged, kept = plan.merge_env({**written, **limits.env_lines(asked, {'SUBSYNC_DAILY_BUDGET_GB': '100'})},
                                       current, owned=limits.names(asked))
         self.assertEqual(merged, {'SUBSYNC_LANGUAGES': 'spa', 'SUBSYNC_MAX_TRIES': '8'})
         self.assertEqual(kept, ['SUBSYNC_MAX_TRIES'])

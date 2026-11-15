@@ -69,6 +69,29 @@ def _places(value):
     return int(value) if value.isdigit() and int(value) >= 1 else None
 
 
+def _audio_at_once(value):
+    """SUBSYNC_AUDIO_AT_ONCE: auto, or a whole number from 1; None when it is neither."""
+    value = str(value).strip().lower()
+    if value == "auto":
+        return "auto"
+    return int(value) if value.isdigit() and int(value) >= 1 else None
+
+
+def _audio_when(env):
+    """SUBSYNC_AUDIO_WHEN (pick or open; None when it is neither); when it isn't set, the setting it replaced,
+    SUBSYNC_AUDIO_ON_PICK, still read: off means open."""
+    value = env.get("SUBSYNC_AUDIO_WHEN")
+    if value is None or not str(value).strip():
+        return "pick" if _on(env.get("SUBSYNC_AUDIO_ON_PICK", "on")) else "open"
+    value = str(value).strip().lower()
+    return value if value in ("pick", "open") else None
+
+
+# A person's answer to "files with no subtitles of their own" (public mode, kept in their record), behind the
+# instance's audio route: never, after their pick, or as soon as a file is opened
+AUDIO_CHOICES = ("off", "pick", "open")
+
+
 def _language_limit(value):
     """SUBSYNC_MAX_LANGUAGES: a whole number from 1 to 4 (the pages name four places at most); None otherwise."""
     value = str(value).strip()
@@ -88,7 +111,7 @@ class Settings:
         self.languages = lang_list(g("SUBSYNC_LANGUAGES", "eng"))
         self.max_tries = int(g("SUBSYNC_MAX_TRIES", "6"))                      # subtitles tried per language and file
         self.cap_bytes = int(float(g("SUBSYNC_STORE_CAP_MB", "2048")) * 1024 * 1024)
-        self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB", "50")) * 1e9)
+        self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB", "100")) * 1e9)
         self.backoff_s = int(g("SUBSYNC_403_BACKOFF_S", "900"))
         self.retry_stopped_s = int(g("SUBSYNC_RETRY_STOPPED_S", "600"))
         # the audio route: a file with no text or image subtitle track is timed from its speech, reading audio windows
@@ -97,10 +120,14 @@ class Settings:
         self.audio_route = _on(g("SUBSYNC_AUDIO_ROUTE", "off"))
         self.audio_budget = int(float(g("SUBSYNC_AUDIO_BUDGET_GB", "1")) * 1e9) or None
         self.file_cap = int(float(g("SUBSYNC_FILE_CAP_GB", "6")) * 1e9) or None
-        # the audio route starts only when the viewer downloads subsync's own entry for the file (proof of play): a plain
-        # subtitle request also comes for files nobody played (AIOMetadata asks for the first listed version). Off: the
-        # audio route starts on any request, as before.
-        self.audio_on_pick = _on(g("SUBSYNC_AUDIO_ON_PICK", "on"))
+        # when a file with no usable track starts its audio sync: pick, only when the viewer downloads subsync's
+        # own entry for the file (proof of play: a plain subtitle request also comes for files nobody played, as
+        # AIOMetadata asks for the first listed version); open, as soon as it is opened, within the checks of
+        # Worker._may_open. In public mode each person's own choice replaces it (public.user_settings), "off" included
+        self.audio_when = _audio_when(e)
+        # Audio syncs one viewer may start a UTC day, picked or opened, and of those, opened
+        self.user_audio_per_day = max(0, int(g("SUBSYNC_USER_AUDIO_PER_DAY", "20")))
+        self.user_opened_per_day = max(0, int(g("SUBSYNC_USER_OPENED_PER_DAY", "5")))
         # a pick (the "(Subsync)" entry's download) waits this long for the file's result, like AutoSync; AIOMetadata
         # gives up on a subtitle after 15 s
         self.pick_wait = float(g("SUBSYNC_PICK_WAIT_MS", "14000")) / 1000
@@ -132,7 +159,7 @@ class Settings:
         self.osv3plus_url = g("SUBSYNC_OSV3PLUS_URL", "https://opensubtitles.stremio.homes").rstrip("/")
         # best fit: originals checked (no alass) for up to this many candidates; alass only on SUBSYNC_MAX_TRIES of them
         self.gate_tries = max(1, int(g("SUBSYNC_GATE_TRIES", "20")))
-        self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB", "16")) * 1024 * 1024)
+        self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB", "32")) * 1024 * 1024)
         self.audio_lead = float(g("SUBSYNC_AUDIO_LEAD_MS", "190")) / 1000
         # a "(synced)" entry for a file still being worked on, served as the original until the copy is ready
         self.pending_entry = _on(g("SUBSYNC_PENDING_ENTRY", "off"))
@@ -187,8 +214,8 @@ class Settings:
         self.invite = g("SUBSYNC_PUBLIC_INVITE", "").strip()
         self.max_users = int(g("SUBSYNC_MAX_USERS", "200"))
         self.signups_per_hour = int(g("SUBSYNC_SIGNUPS_PER_HOUR", "5"))      # per address
-        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "60"))
-        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "1000")) * 1024 * 1024)
+        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "200"))
+        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "10000")) * 1024 * 1024)
         self.user_queue = int(g("SUBSYNC_USER_QUEUE", "3"))
         # the most languages a person may choose on the sign-up and settings pages
         self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES", "4"))
@@ -213,10 +240,12 @@ class Settings:
         self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS", "256"))
         # files worked on at once for everyone (each person's worker takes a place of one shared turn)
         self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE", "auto"))
+        # audio syncs at once for everyone (public mode's audio places, worker.audio_places): auto is half the places
+        self.audio_at_once = _audio_at_once(g("SUBSYNC_AUDIO_AT_ONCE", "auto"))
         # Usenet: off by default. On: files are also looked for through a second config, the Usenet
         # config, when the sync config doesn't have them, at most SUBSYNC_USENET_LISTINGS_PER_DAY times a day (per
         # person in public mode, where "on" lets each person turn it on for themselves and their record holds the
-        # Usenet config's link); its reads take the index cap and never the audio route
+        # Usenet config's link); a file with no usable track takes the audio route like a debrid one
         self.usenet = _on(g("SUBSYNC_USENET", "off"))
         self.usenet_listings_per_day = max(0, int(g("SUBSYNC_USENET_LISTINGS_PER_DAY", "10")))
         self.usenet_manifest = g("SUBSYNC_USENET_MANIFEST", "")
@@ -231,6 +260,14 @@ class Settings:
         if len(raw) < 32:
             raise ValueError("SUBSYNC_SECRET_KEY is shorter than 32 bytes")
         return raw
+
+    @property
+    def audio_choice(self):
+        """When a file with no usable track starts its audio sync, for this viewer: off (the instance's audio route is
+        off, or the person chose off), pick or open."""
+        if not self.audio_route:
+            return "off"
+        return self.audio_when if self.audio_when in AUDIO_CHOICES else "pick"
 
     @property
     def rule_id(self):
@@ -263,9 +300,14 @@ class Settings:
     def conflicts(self):
         """Settings that can't go together, in plain sentences (empty: none)."""
         out = []
-        if self.public and self.audio_route and not self.audio_on_pick:
-            # In public mode nobody's audio is read for a file they only opened
-            out.append("In public mode the audio route runs only after a pick: set SUBSYNC_AUDIO_ON_PICK=on.")
+        if self.audio_when is None:
+            out.append("SUBSYNC_AUDIO_WHEN must be pick or open.")
+        if self.audio_at_once is None:
+            out.append("SUBSYNC_AUDIO_AT_ONCE must be a whole number from 1, or auto.")
+        elif self.public and self.audio_at_once != "auto" and self.syncs_at_once \
+                and self.audio_at_once > self.syncs_at_once:
+            # a self-hosted install has one audio lane whatever it says, so only public mode's places are checked
+            out.append(f"SUBSYNC_AUDIO_AT_ONCE can't be more than SUBSYNC_SYNCS_AT_ONCE ({self.syncs_at_once}).")
         if self.public and self.wyzie_key:
             out.append("Wyzie Subs isn't used in public mode (one free key per network, paused when used from servers): "
                        "remove SUBSYNC_WYZIE_KEY or turn public mode off.")

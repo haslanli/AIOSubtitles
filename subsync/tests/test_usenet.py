@@ -276,8 +276,9 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(sources.unreadable(row(kind="error"), usenet=True), "type error")
 
     def test_a_release_the_engine_opened_is_still_matched(self):
-        #'s test: once AIOStreams' engine has opened a release (the viewer's own play), its listing names the file
-        # inside (".mkv") at the file's size, while the player asked by the release's name at the NZB's size
+        # seen in a test: once AIOStreams' engine has opened a release (the viewer's own play), its listing
+        # names the file inside (".mkv") at the file's size, while the player asked by the release's name at the NZB's
+        # size
         a = sources.Aios("")
         asked = {"filename": "Breaking.Bad.S01E01.1080p.NF.WEB-DL.DDP5.1.x264-PiA", "videoSize": 4_097_690_000}
         opened = row(name="Breaking.Bad.S01E01.1080p.NF.WEB-DL.DDP5.1.x264-PiA.mkv", size=3_793_335_091, library=True)
@@ -294,8 +295,8 @@ class RowsTest(unittest.TestCase):
         self.assertIs(a.match([opened, exact], asked, usenet=True), exact)
 
     def test_an_obfuscated_file_is_matched_by_its_release_folder(self):
-        #'s test: a release whose file inside has a random name is listed, once opened, by that name, with the
-        # release's name as the row's folder
+        # seen in a test: a release whose file inside has a random name is listed, once opened, by that name,
+        # with the release's name as the row's folder
         a = sources.Aios("")
         asked = {"filename": "The.Matrix.1999.1080p.10bit.BluRay.6CH.x265.HEVC-PSA", "videoSize": 1_753_362_000}
         opened = row(name="rNPhFFMoelkciQ8EpQuXmiUZ1H6sZ6vB.mkv", size=1_665_140_622, library=True)
@@ -328,8 +329,9 @@ class ReaderTest(unittest.TestCase):
         self.assertLessEqual(self.d.link_hits, 2)
 
     def test_a_served_size_is_checked_by_a_rule_when_the_listed_one_is_not_the_files(self):
-        #'s test: AIOStreams lists a Usenet release by its whole NZB (video, par2, nfo), so the file it serves is
-        # a few per cent smaller; a reader with a size rule checks the served size by it instead of by an exact size
+        # seen in a test: AIOStreams lists a Usenet release by its whole NZB (video, par2, nfo), so the file it
+        # serves is a few per cent smaller; a reader with a size rule checks the served size by it instead of by an
+        # exact size
         from test_resolve_once import DATA
         ok = RangeReader(self.d.link, "test", size_ok=lambda total: total == len(DATA))
         self.assertEqual(len(ok.get(0, 100)), 100)
@@ -495,11 +497,12 @@ class WorkerTest(TempDirTest):
 
 
 class UsenetJobTest(TempDirTest):
-    """A Usenet job: the index cap, never the audio route, and a failed first read stops Usenet for the day."""
+    """A Usenet file's first pass: the index cap, and a failed first read stops Usenet for the day; with no track it
+    waits for a pick like a debrid file (its audio job: test_audio_choice.UsenetTest)."""
 
     def test_a_failed_first_read_stops_usenet_and_reads_index_only(self):
         s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_AUDIO_ROUTE": "on",
-                      "SUBSYNC_AUDIO_ON_PICK": "off"})
+                      "SUBSYNC_AUDIO_WHEN": "open"})
         store = Store(self.dir)
         counts = Counts()
         subs = [{"id": "s", "url": "http://127.0.0.1:1/1.srt", "lang": "eng"}]
@@ -507,7 +510,7 @@ class UsenetJobTest(TempDirTest):
         w = Worker(s, store, FakeDebrid(subs), worker_mod.Safety(), usenet=u,
                    usenet_gate=worker_mod.UsenetGate(store, 10, counts, who="w"))
         job = Job("movie", "tt1", HINTS)
-        self.assertTrue(w.audio_allowed(job))
+        self.assertFalse(w.audio_allowed(job))                   # a first pass reads the index only, opened or not
         seen = {}
         real = worker_mod.RangeReader
 
@@ -518,7 +521,7 @@ class UsenetJobTest(TempDirTest):
         self.addCleanup(setattr, worker_mod, "RangeReader", real)
         w.process(job)
         self.assertTrue(job.usenet)
-        self.assertFalse(w.audio_allowed(job))
+        self.assertEqual(w._cap(job), s.index_cap)
         self.assertEqual((seen["max_re_resolve"], seen["first_timeout"]), (1, 120))
         self.assertIsNone(seen["size"])                          # a Usenet file's size is checked by the rule
         self.assertTrue(seen["size_ok"](HINTS["videoSize"] * 0.94))
@@ -526,10 +529,10 @@ class UsenetJobTest(TempDirTest):
         self.assertTrue(counts.stopped_)
 
 
-    def test_a_usenet_file_with_no_track_never_waits_for_a_pick(self):
-        """A Usenet file never takes the audio route, so it gets no pick entry, and the same person's next
-        requests within the hour don't read it again; its languages are marked judged as before (someone who plays
-        the same file from a debrid service gets their own first pass: test_public_audio.OwnFirstPassTest)."""
+    def test_a_usenet_file_with_no_track_waits_for_a_pick(self):
+        """A Usenet file with no usable track, once kept out of the audio route, now waits for the
+        person's pick like a debrid file, and its languages aren't marked judged, so others can still pick it; the pick
+        starts its audio job."""
         from helpers import FIXTURES, RangeServer
         srv = RangeServer(FIXTURES)
         self.addCleanup(srv.close)
@@ -548,9 +551,10 @@ class UsenetJobTest(TempDirTest):
         self.assertTrue(job.usenet)
         file_key = store.resolve(job.alias)
         self.assertIsNotNone(file_key)                       # the file was read
-        self.assertFalse(w.waits_for_pick(job.alias))
-        self.assertTrue(store.judged_all(file_key, ["eng"], s.rule_id, 0))
-        self.assertTrue(w.recently_unpickable(job.alias))
+        self.assertTrue(w.waits_for_pick(job.alias))
+        self.assertIsNone(store.judged_all(file_key, ["eng"], s.rule_id, 0))
+        self.assertTrue(w.pick(job.alias))
+        self.assertEqual([(j.alias, j.audio) for j in w.jobs.values()], [(job.alias, True)])
 
 
 # --------------------------------------------------------------------------------------------------------- public mode

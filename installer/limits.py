@@ -1,9 +1,10 @@
 """The limits each install asks, with the defaults and explanations of subsync/subsync/explain.py.
 
 A personal install asks the daily total and, with the audio route on, the audio limit, and with Usenet on its daily
-number of Usenet searches; a public instance asks every limit, in three groups (the audio limit only with the audio
-route on,, and the Usenet number only when it lets people turn Usenet on). Left out because it would do nothing:
-the language limit on a personal install (you choose your own languages there).
+number of Usenet searches; a public instance asks every limit, in three groups (the audio route's only with it on: the
+audio limit, the audio syncs a person may start a day, those started as soon as a file is opened, and the audio
+syncs at a time; the Usenet number only when it lets people turn Usenet on). Left out because it would do
+nothing: the language limit on a personal install (you choose your own languages there).
 
 A limit is written to state/subsync.env only when it differs from subsync's default, so a later default still
 applies to everyone who kept it.
@@ -22,6 +23,10 @@ AUDIO = Limit('SUBSYNC_AUDIO_BUDGET_GB', 'Audio per file', 'GB', 'segmented', ('
 # The Usenet searches a day (one setting, per person on a public instance)
 USENET = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches a day', None, 'number')
 USENET_HOSTED = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches per person a day', None, 'number')
+# A public instance's audio route, asked only with it on (0 stops new audio syncs, or removes the opened answer)
+AUDIO_PER_DAY = Limit('SUBSYNC_USER_AUDIO_PER_DAY', 'Audio syncs per person a day', None, 'count')
+OPENED_PER_DAY = Limit('SUBSYNC_USER_OPENED_PER_DAY', 'Of those, as soon as a file is opened', None, 'count')
+AUDIO_AT_ONCE = Limit('SUBSYNC_AUDIO_AT_ONCE', 'Audio syncs at a time', None, 'auto')
 
 HOSTING = [
     ('Each person', [
@@ -44,7 +49,9 @@ HOSTING = [
 
 # the words for a value that doesn't fit (the two segmented ones are the terminal setup's)
 WHOLE = 'A whole number from 1, like {default}.'
+COUNT = 'A whole number from 0, like {default}.'
 WHOLE_OR_AUTO = 'A whole number from 1, or auto.'
+NOT_ABOVE_PLACES = 'A whole number from 1 to {places} (the files synced at a time), or auto.'
 ABOVE_ZERO = 'A number above 0, like {default}.'
 NOT_AN_AUDIO_LIMIT = 'Type 0.5, 1, 2 or 4 (GB per file).'
 NOT_A_LANGUAGE_LIMIT = 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'
@@ -56,13 +63,18 @@ def personal(audio, usenet=False):
 
 def hosting_groups(usenet=True, audio=False):
     """The hosting route's groups, without the Usenet number when the instance doesn't let people turn Usenet on; with
-    the audio route on, the audio limit in "Each person", before the Usenet number."""
+    the audio route on, the audio limit in "Each person", before the Usenet number, then the audio syncs a
+    person may start a day and those started as soon as a file is opened, and the audio syncs at a time in "This
+    server", after the files synced at a time."""
     groups = []
     for heading, group in HOSTING:
         kept = [lim for lim in group if usenet or lim is not USENET_HOSTED]
         if audio and heading == 'Each person':
             at = kept.index(USENET_HOSTED) if USENET_HOSTED in kept else len(kept)
-            kept = kept[:at] + [AUDIO] + kept[at:]
+            kept = kept[:at] + [AUDIO, AUDIO_PER_DAY, OPENED_PER_DAY] + kept[at:]
+        if audio and heading == 'This server':
+            at = [lim.setting for lim in kept].index('SUBSYNC_SYNCS_AT_ONCE') + 1
+            kept = kept[:at] + [AUDIO_AT_ONCE] + kept[at:]
         groups.append((heading, kept))
     return groups
 
@@ -75,13 +87,13 @@ def names(asked):
     return tuple(lim.setting for lim in asked)
 
 
-def _whole(text):
+def _whole(text, least=1):
     value = text.strip()
     parts = value.split(',')
     if len(parts) > 1 and not (1 <= len(parts[0]) <= 3 and all(len(p) == 3 for p in parts[1:])):
         return None
     value = ''.join(parts)
-    return str(int(value)) if value.isdigit() and int(value) >= 1 else None
+    return str(int(value)) if value.isdigit() and int(value) >= least else None
 
 
 def _above_zero(text):
@@ -94,17 +106,23 @@ def _above_zero(text):
     return str(int(number)) if number == int(number) else str(number)
 
 
-def check(lim, text, current=None):
+def check(lim, text, current=None, places=None):
     """(value as written in subsync.env, None) or (None, the words for the problem). `current`: a value set by hand
-    before, kept when it is given again (the audio limit, as ./setup did)."""
+    before, kept when it is given again (the audio limit, as ./setup did). `places`: the files synced at a time, which
+    the audio syncs at a time can't be more than (subsync refuses to start otherwise)."""
     text = '' if text is None else str(text)
     if lim.kind == 'number':
         value = _whole(text)
         return (value, None) if value else (None, WHOLE.format(default=shown(lim, lim.default)))
+    if lim.kind == 'count':
+        value = _whole(text, least=0)
+        return (value, None) if value else (None, COUNT.format(default=shown(lim, lim.default)))
     if lim.kind == 'auto':
         if text.strip().lower() == 'auto':
             return 'auto', None
         value = _whole(text)
+        if value and lim is AUDIO_AT_ONCE and places and int(value) > places:
+            return None, NOT_ABOVE_PLACES.format(places=places)
         return (value, None) if value else (None, WHOLE_OR_AUTO)
     if lim.kind == 'decimal':
         value = _above_zero(text)
@@ -120,7 +138,7 @@ def check(lim, text, current=None):
 def shown(lim, value):
     """A value as the page shows it: thousands marked in whole numbers."""
     value = str(value)
-    return f'{int(value):,}' if lim.kind == 'number' and value.isdigit() else value
+    return f'{int(value):,}' if lim.kind in ('number', 'count') and value.isdigit() else value
 
 
 def current(lim, env):

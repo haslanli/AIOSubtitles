@@ -203,7 +203,7 @@ class PublicHttpTest(Base):
         code, body, headers = http(f"{self.base}/u/{token}/configure")
         text = body.decode()
         self.assertEqual(code, 200)
-        self.assertIn("3 of 60", text)
+        self.assertIn("3 of 200", text)                  # 200 new files a day
         self.assertEqual(headers["Cache-Control"], "no-store")
         code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="languages", languages="Russian, en"))
         self.assertEqual(code, 303)                      # saved, then the page again, so a reload sends nothing
@@ -397,6 +397,68 @@ class PublicCheckTest(Base):
         self.assertEqual(sum(1 for m, _ in self.fake.requests if m == "HEAD"), heads + 1)
         self.assertEqual(self.users.open(token)["sync_uuid"], sync_uuid)
         self.service.checker.join(5)
+
+
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+class AudioChoiceHttpTest(Base):
+    """over HTTP: the answer for files with no subtitles of their own, chosen at sign-up, shown and changed on
+    the settings page with the "audio" action, read back by the person's worker; nothing of it on an instance with
+    the audio route off."""
+
+    def setUp(self):
+        self.start(SUBSYNC_AUDIO_ROUTE="on")
+
+    def page(self, token, query=""):
+        code, body, _ = http(f"{self.base}/u/{token}/configure{query}")
+        self.assertEqual(code, 200)
+        return body.decode()
+
+    def test_chosen_at_sign_up_then_changed_on_the_settings_page(self):
+        import html
+        from subsync import explain
+        code, body, _ = http(self.base + "/")
+        self.assertIn('name="audio" id="audio-pick" value="pick" checked', body.decode())
+        _, code, text, _, token = self.sign_up(audio="open")
+        self.assertEqual(code, 200, text)
+        self.assertEqual(self.users.open(token)["audio"], "open")
+        self.assertEqual(self.pool.app(token).s.audio_choice, "open")
+        self.assertIn('name="audio" id="audio-open" value="open" checked', self.page(token))
+        code, _, headers = http(f"{self.base}/u/{token}/configure", form(action="audio", audio="off"))
+        self.assertEqual((code, headers["Location"]), (303, "configure?done=audio"))
+        self.assertEqual(self.users.open(token)["audio"], "off")
+        text = html.unescape(self.page(token, "?done=audio"))
+        self.assertIn(explain.PUBLIC_TEXTS["audio_saved"].format(answer="Off"), text)
+        self.assertIn('name="audio" id="audio-off" value="off" checked', text)
+        code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="audio", audio="loud"))
+        self.assertEqual(code, 400)
+        self.assertIn("Choose one of the answers for files with no subtitles of their own.", body.decode())
+        self.assertIn('href="#audio"', body.decode())
+        self.assertEqual(self.users.open(token)["audio"], "off")
+
+    def test_an_answer_not_offered_at_sign_up_is_refused_before_anything_is_made(self):
+        uuid, code, text, _, token = self.sign_up(audio="loud")
+        self.assertEqual(code, 400)
+        self.assertIsNone(token)
+        self.assertIn("Choose one of the answers for files with no subtitles of their own.", text)
+        self.assertIn('data-open-at="config"', text)
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(self.users.count(), 0)
+
+
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+class AudioOffHttpTest(Base):
+    def setUp(self):
+        self.start()
+
+    def test_no_answer_asked_shown_or_saved_with_the_audio_route_off(self):
+        self.assertNotIn('name="audio"', http(self.base + "/")[1].decode())
+        _, code, text, _, token = self.sign_up(audio="open")
+        self.assertEqual(code, 200, text)
+        self.assertNotIn("audio", self.users.open(token))
+        self.assertNotIn('name="audio"', http(f"{self.base}/u/{token}/configure")[1].decode())
+        code, _, _ = http(f"{self.base}/u/{token}/configure", form(action="audio", audio="pick"))
+        self.assertEqual(code, 400)
+        self.assertNotIn("audio", self.users.open(token))
 
 
 if __name__ == "__main__":

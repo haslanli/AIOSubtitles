@@ -7,6 +7,9 @@ for this very release are the likeliest to be in sync already, so they go next:
      `Spirited Away (2001) JAPANESE.Bluray.REMUX.H264.6.1[RedDeadProject]`);
   3. the same kind of source (remux, Blu-ray, web, TV, DVD);
   4. everything else, in the viewer's order.
+When the file's name gives an edition (Director's Cut or DC, Extended, Roadshow, Unrated, Theatrical), a subtitle naming
+the same one moves up a tier (not above a hash or line-count match) and one naming another goes after everything else
+(Kingdom of Heaven DC's theatrical WEB subtitle was the guess by its release group alone).
 Machine-translated subtitles go last; with `skip` AI-made, machine-translated and forced subtitles are left
 out altogether, the viewer's first too. Ties keep the viewer's order, which is also the rank the store records.
 """
@@ -25,6 +28,12 @@ NOT_GROUPS = {"multiple subtitle", "multi-subs", "multi subs", "dual audio", "du
               "hdr", "dv", "sdr", "1080p", "720p", "2160p", "480p", "576p", "4k", "uhd"}
 HEX = re.compile(r"^[0-9a-f]{8}$", re.I)
 WORD = re.compile(r"[a-z0-9]+")
+EDITIONS = {"dc": r"dc|director['’]?s?[ ._-]*cut", "extended": r"extended", "roadshow": r"road[ ._-]?show",
+            "unrated": r"unrated", "theatrical": r"theatrical"}
+EDITION = {k: re.compile(rf"(?<![a-z0-9])(?:{v})(?![a-z0-9])", re.I) for k, v in EDITIONS.items()}
+SAME_EDITION_UP = 1      # tiers a subtitle naming the file's edition moves up,
+EDITION_FLOOR = 1.5      # but not above a hash or line-count match (1)
+OTHER_EDITION_TIER = 5   # a subtitle naming another edition: after the rest (4), before machine-translated ones (9)
 UNWANTED = re.compile(r"(?<![a-z])(ai[ ._-]?(translated|made|generated)|machine[ ._-]?translat\w*|auto[ ._-]?translat\w*|"
                       r"google[ ._-]?translat\w*|deepl|forced|foreign[ ._-]?parts?([ ._-]?only)?)(?![a-z])", re.I)
 
@@ -56,6 +65,12 @@ def groups(filename):
     return {g for g in out if len(g) >= 2}
 
 
+def editions(text):
+    """The editions a file or release name names, as whole words: "dc" (DC, Director's Cut), "extended", "roadshow",
+    "unrated", "theatrical"."""
+    return {k for k, rx in EDITION.items() if rx.search(text or "")}
+
+
 def source_kind(text):
     words = set(re.findall(r"[a-z0-9-]+", (text or "").lower().replace(".", " ").replace("_", " ")))
     for kind in ("remux", "bluray", "web", "tv", "dvd"):
@@ -64,11 +79,7 @@ def source_kind(text):
     return None
 
 
-def _tier(rank, c, gs, kind, fh, ref_cues, viewer_first):
-    if rank == 0 and viewer_first:
-        return 0
-    if c.get("ai"):
-        return 9
+def _release_tier(c, gs, kind, fh, ref_cues):
     rel = " " + _norm(c.get("release")) + " "
     if (fh and c.get("hash") == fh) or c.get("hash_match"):   # hash_match: the source matched this file's hash
         return 1
@@ -81,10 +92,24 @@ def _tier(rank, c, gs, kind, fh, ref_cues, viewer_first):
     return 4
 
 
+def _tier(rank, c, gs, kind, fh, ref_cues, viewer_first, eds=frozenset()):
+    if rank == 0 and viewer_first:
+        return 0
+    if c.get("ai"):
+        return 9
+    tier = _release_tier(c, gs, kind, fh, ref_cues)
+    theirs = editions(c.get("release")) if eds and tier > 1 else None
+    if not theirs:     # no edition named by the file or the subtitle, or a hash or line-count match: as it is
+        return tier
+    return max(tier - SAME_EDITION_UP, EDITION_FLOOR) if theirs & eds else OTHER_EDITION_TIER
+
+
 def tier_of(rank, c, filename=None, file_hash=None, ref_cues=None, viewer_first=True):
     """How likely a candidate is to fit the file as it is: 0 the viewer's first, 1 a hash or line-count match, 2 its
-    release (by name or group), 3 the same kind of source, 4 the rest, 9 machine-translated."""
-    return _tier(rank, c, groups(filename), source_kind(filename), (file_hash or "").lower(), ref_cues, viewer_first)
+    release (by name or group), 3 the same kind of source, 4 the rest, 9 machine-translated; a subtitle naming the file's
+    edition a tier up (1.5 from 2), one naming another 5."""
+    return _tier(rank, c, groups(filename), source_kind(filename), (file_hash or "").lower(), ref_cues, viewer_first,
+                 editions(filename))
 
 
 def order(candidates, filename=None, file_hash=None, skip=False, ref_cues=None, viewer_first=True):
@@ -94,14 +119,15 @@ def order(candidates, filename=None, file_hash=None, skip=False, ref_cues=None, 
     gs = groups(filename)
     kind = source_kind(filename)
     fh = (file_hash or "").lower()
+    eds = editions(filename)
     ranked = [(r, c) for r, c in enumerate(candidates) if not (skip and unwanted(c))]
-    return sorted(ranked, key=lambda rc: (_tier(rc[0], rc[1], gs, kind, fh, ref_cues, viewer_first), rc[0]))
+    return sorted(ranked, key=lambda rc: (_tier(rc[0], rc[1], gs, kind, fh, ref_cues, viewer_first, eds), rc[0]))
 
 
 def best_guess(candidates, filename=None, file_hash=None, skip=False):
     """The subtitle likeliest to fit the file as it is while nothing can be checked (a file that waits for the audio
     route, or a job still working): a hash match, then the file's release group, then its kind of source, else
-    the viewer's first; with `skip` never an AI-made, machine-translated or forced one. None when there is none."""
+    the viewer's first, each moved by the file's edition (`order`); with `skip` never an AI-made, machine-translated or forced one. None when there is none."""
     ranked = order(candidates, filename, file_hash, skip=skip, viewer_first=False)
     return ranked[0][1] if ranked else None
 

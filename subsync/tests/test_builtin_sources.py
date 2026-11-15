@@ -265,8 +265,8 @@ class ReviewFixesTest(SourcesBase):
 
 
 class ReleaseNameTest(SourcesBase):
-    """'s capture: TheSubtitleDB answers a release name with the closest title it has, which can be another film
-    (an Inception file name got Nomadland, score 0.57)."""
+    """Seen in a capture: TheSubtitleDB answers a release name with the closest title it has, which can be
+    another film (an Inception file name got Nomadland, score 0.57)."""
 
     def test_another_title_is_left_out(self):
         got = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb").search(

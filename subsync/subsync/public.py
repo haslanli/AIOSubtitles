@@ -18,10 +18,10 @@ from http.server import ThreadingHTTPServer
 from . import pages, ui
 from .addon import App, Handler
 from .aiosconfig import parse_languages
-from .settings import Settings
+from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
-from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh, set_languages,
-                     signup, store_only)
+from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh, set_audio,
+                     set_languages, signup, store_only)
 from .sources import Aios
 from .users import day_of
 from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
@@ -29,10 +29,21 @@ from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 log = logging.getLogger("subsync.public")
 
 
+def person_audio(record, settings):
+    """A person's answer for files with no subtitles of their own: off, pick or open. Everyone who hasn't
+    answered, the owner's account included, is on "pick" (the earlier pick-only rule); "open" is "pick" while
+    the instance allows no opened syncs (SUBSYNC_USER_OPENED_PER_DAY 0)."""
+    choice = record.get("audio")
+    if choice not in AUDIO_CHOICES:
+        return "pick"
+    return "pick" if choice == "open" and settings.user_opened_per_day <= 0 else choice
+
+
 def user_settings(env, record, token):
-    """A person's own settings: the service's, with their languages, their sync config, their Usenet config
-    and their own address. A record for stored copies only has no sync config: nothing to read through; one
-    with Usenet only has only the Usenet config."""
+    """A person's own settings: the service's, with their languages, their sync config, their Usenet config,
+    their own address and their own audio choice (the instance's audio route and limits, started as they chose;
+    the instance's SUBSYNC_AUDIO_WHEN is not theirs). A record for stored copies only has no sync config:
+    nothing to read through; one with Usenet only has only the Usenet config."""
     base = Settings(env).public_base
     own = dict(env)
     own.update({"SUBSYNC_LANGUAGES": ",".join(record["languages"]),
@@ -41,9 +52,10 @@ def user_settings(env, record, token):
                 "SUBSYNC_USENET_MANIFEST": record.get("usenet_link") or "",
                 "SUBSYNC_USENET_PASSWORD": record.get("usenet_password") or "",
                 "SUBSYNC_PUBLIC_BASE": f"{base}/u/{token}",
-                # the instance's audio route and audio limit, only ever after the person's pick
-                "SUBSYNC_AUDIO_ON_PICK": "on", "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
-    return Settings(own)
+                "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
+    s = Settings(own)
+    s.audio_when = person_audio(record, s)
+    return s
 
 
 class UserLimits:
@@ -75,6 +87,18 @@ class UserLimits:
     def after_read(self, n):
         if n:
             self.users.add_usage(self.token, nbytes=n)
+
+    def may_start_audio(self, opened=False):
+        """The person's audio syncs today are below SUBSYNC_USER_AUDIO_PER_DAY and, for one started as soon as a
+        file was opened, their opened ones below SUBSYNC_USER_OPENED_PER_DAY."""
+        used = self.users.audio_usage(self.token)
+        if used["syncs"] >= self.s.user_audio_per_day:
+            return False
+        return not opened or used["opened"] < self.s.user_opened_per_day
+
+    def audio_started(self, opened=False):
+        """A picked audio sync counts one; an opened one counts one of each."""
+        self.users.add_audio(self.token, opened)
 
     def usenet_counts(self):
         """This person's Usenet listings and the day's stop (worker.UsenetGate), in their usage rows."""
@@ -119,6 +143,12 @@ class StoreOnly:
     def after_read(self, n):
         pass
 
+    def may_start_audio(self, opened=False):
+        return False
+
+    def audio_started(self, opened=False):
+        pass
+
 
 class Pool:
     """The people with a running worker, by user id (never by token)."""
@@ -127,8 +157,9 @@ class Pool:
         self.s, self.env, self.store, self.users, self.clock = settings, dict(env), store, users, clock
         self.start_workers = start_workers
         self.turn = Turn(settings.syncs_at_once or 1)
-        # the audio route: its own places, half the turn's, and one speech detector for everyone
-        self.audio_turn = Turn(audio_places(self.turn.places))
+        # the audio route: its own places (SUBSYNC_AUDIO_AT_ONCE; auto is half the turn's), and
+        # one speech detector for everyone
+        self.audio_turn = Turn(audio_places(self.turn.places, settings.audio_at_once))
         self._vad, self._vad_lock = None, threading.Lock()
         # One set of built-in sources for everyone: answers, pauses and the sites' limits are shared
         from .extra import make_sources
@@ -415,7 +446,8 @@ class PublicHandler(Handler):
             result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout)
         except SignupError as e:
             return self._html(e.code, pages.signup_page(svc.s, error=e.message, field=e.field,
-                                                        order=_chosen(form, svc.s.max_languages)))
+                                                        order=_chosen(form, svc.s.max_languages),
+                                                        audio=form.get("audio")))
         return self._html(200, pages.result_page(result, svc.s), personal=True)
 
     def _configure(self, token, method):
@@ -450,6 +482,10 @@ class PublicHandler(Handler):
                 set_languages(svc.users, token, form_languages(form), svc.s.max_languages)
                 svc.pool.stop(token)          # the next request opens the record with the new languages
                 return self._see("languages")
+            if action == "audio":             # files with no subtitles of their own: off, on pick, when opened
+                set_audio(svc.users, token, form.get("audio"), svc.s)
+                svc.pool.stop(token)          # the next request opens the record with the new choice
+                return self._see("audio")
             if action == "refresh":
                 try:
                     result = refresh(svc.s, svc.users, token,

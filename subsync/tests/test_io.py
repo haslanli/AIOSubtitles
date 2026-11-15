@@ -1036,7 +1036,7 @@ class ParallelLanguagesTest(unittest.TestCase):
 
 
 class PlayedFileHashTest(ParallelLanguagesTest):
-    """Checklist 18a: a request that names the played file's hash (Stremio sends it) is checked against the file read; a
+    """A request that names the played file's hash (Stremio sends it) is checked against the file read; a
     listed row that turns out to be another file is not synced, so its copies never reach this file."""
     test_both_languages_published = None
 
@@ -1070,8 +1070,353 @@ class GuardCapTest(unittest.TestCase):
             g.after_read(900)
             with self.assertRaises(GuardStopped):
                 g.before_read(500)                               # over the job's cap
-            self.assertEqual(Settings({}).index_cap, 16 * 1024 * 1024)
+            self.assertEqual(Settings({}).index_cap, 32 * 1024 * 1024)   #
             self.assertFalse(Settings({}).audio_route)           # off unless asked for
+
+    def test_only_the_jobs_own_cap_is_a_cap_reached(self):
+        # A stop at the job's own byte cap says which cap; the day's budget is a plain stop
+        from subsync.reader import CapReached
+        self.assertTrue(issubclass(CapReached, GuardStopped))
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(d)
+            g = JobGuard(Safety(), store, 10 ** 9, 1000)
+            g.after_read(900)
+            with self.assertRaises(CapReached) as caught:
+                g.before_read(500)
+            self.assertEqual((caught.exception.cap, str(caught.exception)), (1000, "file byte cap"))
+            budget = JobGuard(Safety(), store, 1000, 10 ** 9)
+            with self.assertRaises(GuardStopped) as caught:
+                budget.before_read(1001)
+            self.assertNotIsInstance(caught.exception, CapReached)
+
+
+class CountedLimits:
+    """A person's limits that allow everything and count the files started."""
+    who = None
+
+    def __init__(self):
+        self.started = 0
+
+    def may_queue(self, queued):
+        return True
+
+    def may_start_file(self):
+        return True
+
+    def file_started(self):
+        self.started += 1
+
+    def before_read(self, length):
+        pass
+
+    def after_read(self, n):
+        pass
+
+
+def run_once(w, job):
+    """The job through one turn of the worker's loop, in this thread: what _loop does with how it ends (queued again
+    or not), then the loop stops."""
+    w.submit(job)
+    real = w.process
+
+    def process(j):
+        try:
+            real(j)
+        finally:
+            w.stop_flag = True
+    w.process = process
+    try:
+        w._loop("main")
+    finally:
+        w.process, w.stop_flag = real, False
+
+
+class CapReachedTest(unittest.TestCase):
+    """A file whose index is larger than the cap stops there for good under that cap: the job isn't
+    queued again, a new request reads nothing of the file and counts no file, its subtitle list and originals are still
+    set, and no "(Subsync)" entry is listed for it; a raised cap reads it again. Other stops are tried again as before."""
+    CAP_MB = str(200_000 / 2 ** 20)   # the start of tiny.mkv (188,024 bytes) fits; its index and hash reads don't
+
+    def setUp(self):
+        from unittest import mock
+        from subsync import sources
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        shutil.copy(TINY, self.dir)
+        self.srv = RangeServer(self.dir)
+        self.size = os.path.getsize(TINY)
+        # the listing's size is the file's: its first read asks for the file's start only, as for a real video
+        patcher = mock.patch.object(sources, "MIN_VIDEO_BYTES", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        srv = self.srv
+
+        class Aios:
+            lists = 0
+
+            def find_row(self, *a):
+                return {"url": srv.url("tiny.mkv")}
+
+            def subtitles(self, *a):
+                self.lists += 1
+                return [{"id": "e1", "url": srv.url("tiny.srt"), "lang": "eng", "release": ""}]
+        self.aios = Aios()
+        self.store = Store(os.path.join(self.dir, "store"))
+        self.job = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": self.size})
+
+    def tearDown(self):
+        self.srv.close()
+        shutil.rmtree(self.dir)
+
+    def worker(self, **env):
+        s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790",
+                           "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_INDEX_CAP_MB": self.CAP_MB}, **env))
+        w = Worker(s, self.store, self.aios, Safety(), limits=CountedLimits())
+        w._sync_all = lambda *a: None     # the index read is what is tested here, not the sync after it
+        return w
+
+    def test_an_index_over_the_cap_is_not_queued_again_and_not_read_again(self):
+        from subsync.addon import App
+        w = self.worker()
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            run_once(w, self.job)
+        read = list(self.srv.log)
+        self.assertEqual(read[0], (0, self.size))                # the start was read, then the index stopped at the cap
+        self.assertFalse(w.busy_with(self.job.alias))            # not queued again
+        self.assertEqual(sum("index larger than the cap" in line for line in logs.output), 1)
+        self.assertEqual(self.store.over_cap(self.job.alias), 200_000)
+        self.assertEqual(w.limits.started, 1)
+        # the next request: no "(Subsync)" entry but its "(original)" one, from the name-ranked guess, and the
+        # job it queues reads nothing and counts no file
+        app = App(w.s, self.store, w, Safety())
+        listed = app.subtitles("movie", "tt1", f"filename=tiny.mkv&videoSize={self.size}")
+        self.assertEqual([e for e in listed if str(e.get("id", "")).startswith("subsync-pick-")], [])
+        self.assertEqual([(e["label"], e["variantOf"]) for e in listed], [("English (original)", "e1")])
+        self.assertTrue(w.busy_with(self.job.alias))             # queued: its subtitle list is asked for again
+        with w.cv:
+            w.originals.clear()
+        lists = self.aios.lists
+        run_once(w, Job("movie", "tt1", dict(self.job.hints)))
+        self.assertEqual(self.srv.log, read)                     # nothing more read
+        self.assertEqual(w.limits.started, 1)                    # no new file counted
+        self.assertEqual(self.aios.lists, lists + 1)
+        self.assertEqual(w.originals[self.job.alias]["eng"]["id"], "e1")   # its original is still served
+        self.assertFalse(w.busy_with(self.job.alias))
+
+    def test_the_same_torrent_file_under_another_name_is_not_read_again(self):
+        # found in review: the mark was kept for the asked name only, so the same file of the same torrent
+        # asked under another name was read again up to the cap; the torrent's alias is marked too, and the other name
+        # once found
+        torrent = {"infoHash": "a" * 40, "fileIdx": 2}
+        self.aios.find_row = lambda *a: {"url": self.srv.url("tiny.mkv"), "streamData": {"torrent": torrent}}
+        w = self.worker()
+        run_once(w, self.job)
+        read = list(self.srv.log)
+        self.assertEqual(self.store.over_cap(f"bt:{'a' * 40}:2"), 200_000)
+        other = Job("movie", "tt1", {"filename": "Renamed.Release.mkv", "videoSize": self.size})
+        self.assertFalse(w.capped(other))                        # not known by this name before its row is listed
+        run_once(w, other)
+        self.assertEqual(self.srv.log, read)                     # nothing more read
+        self.assertEqual(w.limits.started, 1)                    # no new file counted
+        self.assertTrue(w.capped(Job("movie", "tt1", dict(other.hints))))   # its next listing has no "(Subsync)" entry
+
+    def test_a_raised_cap_reads_it_again(self):
+        run_once(self.worker(), self.job)
+        read = len(self.srv.log)
+        w = self.worker(SUBSYNC_INDEX_CAP_MB="32")
+        run_once(w, Job("movie", "tt1", dict(self.job.hints)))
+        self.assertGreater(len(self.srv.log), read)
+        self.assertIsNotNone(self.store.resolve(self.job.alias))  # its index was read
+        self.assertEqual(w.limits.started, 1)
+
+    def test_an_audio_job_stopped_at_its_audio_cap_leaves_the_index_readable(self):
+        # The audio route's own cap (SUBSYNC_FILE_CAP_GB) says nothing about the index: the file isn't marked
+        # over the cap, so its next index pass reads it; it waits for another pick, as when the person's day ran out
+        from subsync.reader import CapReached
+        w = self.worker(SUBSYNC_AUDIO_ROUTE="on")
+        audio = Job("movie", "tt1", dict(self.job.hints))
+        audio.audio = True
+
+        def stopped(job):
+            w.stop_flag = True                                   # one turn of the audio lane, then the loop ends
+            raise CapReached(w._cap(job))
+        w.process = stopped
+        w.submit(audio)
+        w._loop("audio")
+        self.assertIsNone(self.store.over_cap(self.job.alias))
+        self.assertFalse(w.capped(Job("movie", "tt1", dict(self.job.hints))))
+        self.assertFalse(w.busy_with(self.job.alias))            # not queued again
+        self.assertTrue(w.waits_for_pick(self.job.alias))
+
+    def test_a_stop_for_the_days_budget_is_tried_again(self):
+        w = self.worker(SUBSYNC_INDEX_CAP_MB="32", SUBSYNC_DAILY_BUDGET_GB="0.0001")   # 100,000 bytes
+        run_once(w, self.job)
+        self.assertTrue(w.busy_with(self.job.alias))             # queued again after SUBSYNC_RETRY_STOPPED_S
+        self.assertGreater(w.jobs[self.job.alias].not_before, time.time() + 500)
+        self.assertIsNone(self.store.over_cap(self.job.alias))
+
+
+# -- a first read that can't reach the file ------------------------------------------------------------
+import urllib.error  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from subsync import realdebrid, sources  # noqa: E402
+from subsync.reader import MAX_RE_RESOLVE  # noqa: E402
+
+
+class Flaky:
+    """realdebrid.urlopen with faults, against the local server: the first `faults` requests to the link fail as a
+    dropped connection does (URLError); with `moved`, the link answers as one that redirected to another address,
+    which never answers."""
+
+    def __init__(self, link, faults=0, moved=False):
+        self.real, self.link, self.faults, self.moved = realdebrid.urlopen, link, faults, moved
+        self.link_calls = 0
+
+    def __call__(self, request, timeout):
+        if request.full_url != self.link:       # the address the link pointed to
+            raise urllib.error.URLError(ConnectionResetError(54, "Connection reset by peer"))
+        self.link_calls += 1
+        if self.faults:
+            self.faults -= 1
+            raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        r = self.real(request, timeout)
+        if self.moved:
+            r.url = self.link + "?moved"
+        return r
+
+
+class ConnectionFaultTest(unittest.TestCase):
+    """A read that fails for want of a connection says so (ReadFailed.connection); an answer it can't use doesn't."""
+
+    def setUp(self):
+        self.srv = RangeServer(FIXTURES)
+        self.link = self.srv.url("tiny.mkv")
+
+    def tearDown(self):
+        self.srv.close()
+
+    def failed(self, reader, stream=False):
+        with self.assertRaises(ReadFailed) as caught:
+            b"".join(reader.stream(0, 1000)) if stream else reader.get(0, 1000)
+        return caught.exception
+
+    def test_kinds(self):
+        self.assertTrue(self.failed(RangeReader(self.link, "t", opener=Flaky(self.link, faults=1))).connection)
+        self.assertTrue(self.failed(RangeReader(self.link, "t", opener=Flaky(self.link, faults=1)), True).connection)
+
+        def timed_out(request, timeout):
+            raise TimeoutError("timed out")
+        self.assertTrue(self.failed(RangeReader(self.link, "t", opener=timed_out)).connection)
+
+        def blocked(request, timeout):
+            raise urllib.error.URLError(realdebrid.Blocked("a request to Real-Debrid"))
+        self.assertFalse(self.failed(RangeReader(self.link, "t", opener=blocked)).connection)
+        self.srv.fault = "403"
+        self.assertFalse(self.failed(RangeReader(self.link, "t")).connection)                 # Refused
+        self.srv.fault = "wrong-size"
+        self.assertFalse(self.failed(RangeReader(self.link, "t", size=1000)).connection)      # size differs
+        self.srv.fault = "ignore-range"
+        with self.assertRaises(ReadFailed) as caught:
+            RangeReader(self.link, "t").get(500, 100)                                         # range ignored
+        self.assertFalse(caught.exception.connection)
+
+
+class FirstReadRetryTest(unittest.TestCase):
+    """A first read that can't reach the file is tried once more READ_RETRY_S later in the same job,
+    as one of the link's look-ups; then the file backs off 10 minutes, 1, 6 and 24 hours. A refusal, an answer
+    of another size and a Usenet file are not tried again."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        shutil.copy(TINY, self.dir)
+        self.srv = RangeServer(self.dir)
+        self.link = self.srv.url("tiny.mkv")
+        self.size = os.path.getsize(TINY)
+        sized = mock.patch.object(sources, "MIN_VIDEO_BYTES", 1)    # the listing's size is the file's
+        sized.start()
+        self.addCleanup(sized.stop)
+        waits = mock.patch("subsync.worker.time.sleep")             # the wait is recorded, not waited
+        self.sleep = waits.start()
+        self.addCleanup(waits.stop)
+        link = self.link
+
+        class Aios:
+            def find_row(self, *a):
+                return {"url": link}
+
+            def subtitles(self, *a):
+                return [{"id": "e1", "url": link + ".srt", "lang": "eng", "release": ""}]
+        self.store = Store(os.path.join(self.dir, "store"))
+        s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_SIZE_SLACK_MB": "0"})
+        self.w = Worker(s, self.store, Aios(), Safety())
+        self.w._sync_all = lambda *a: None    # the reads are what is tested here, not the sync after them
+        self.job = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": self.size})
+
+    def tearDown(self):
+        self.srv.close()
+        shutil.rmtree(self.dir)
+
+    def run_with(self, opener=None, usenet=False):
+        with mock.patch.object(realdebrid, "urlopen", opener or realdebrid.urlopen):
+            if not usenet:
+                run_once(self.w, self.job)
+                return
+            stopped = []
+            self.w.usenet_gate = mock.Mock(stop=stopped.append)
+            self.job.usenet = True
+            self.w._process_row(self.job, dict(self.job.hints), {"url": self.link}, None)
+            return stopped
+
+    def backed_off_for(self):
+        row = self.store.db.execute("SELECT retry_at FROM files WHERE file_key=?", (self.job.alias,)).fetchone()
+        return None if row is None else round(row[0] - time.time(), -1)
+
+    def test_one_dropped_connection_is_tried_again_and_the_file_read_in_the_same_job(self):
+        from subsync.worker import READ_RETRY_S
+        flaky = Flaky(self.link, faults=1)
+        self.run_with(flaky)
+        self.assertEqual(READ_RETRY_S, 10)
+        self.sleep.assert_called_once_with(READ_RETRY_S)
+        self.assertEqual(self.srv.log[0], (0, self.size))          # the start, read on the second try
+        self.assertIsNotNone(self.store.resolve(self.job.alias))   # its index was read
+        self.assertFalse(self.store.file_blocked(self.job.alias))
+
+    def test_two_dropped_connections_back_the_file_off_for_ten_minutes(self):
+        flaky = Flaky(self.link, faults=2)
+        self.run_with(flaky)
+        self.sleep.assert_called_once()
+        self.assertEqual(flaky.link_calls, 2)
+        self.assertTrue(self.store.file_blocked(self.job.alias))
+        self.assertEqual(self.backed_off_for(), 600)
+
+    def test_a_refusal_is_not_tried_again(self):
+        self.srv.fault = "403"
+        self.run_with()
+        self.sleep.assert_not_called()
+        self.assertEqual(len(self.srv.headers), 1)
+        self.assertEqual(self.backed_off_for(), 3600)             # a refused file waits an hour first, as before
+
+    def test_an_answer_of_another_size_is_not_tried_again(self):
+        self.srv.fault = "wrong-size"
+        self.run_with()
+        self.sleep.assert_not_called()
+        self.assertEqual(len(self.srv.headers), 1)
+        self.assertEqual(self.backed_off_for(), 600)
+
+    def test_the_link_is_asked_at_most_one_plus_max_re_resolve_times_in_all(self):
+        flaky = Flaky(self.link, faults=1, moved=True)       # then every address it points to drops the connection
+        self.run_with(flaky)
+        self.sleep.assert_called_once()
+        self.assertEqual(flaky.link_calls, 1 + MAX_RE_RESOLVE)
+        self.assertTrue(self.store.file_blocked(self.job.alias))
+
+    def test_a_usenet_file_is_not_tried_again(self):
+        flaky = Flaky(self.link, faults=1)
+        stopped = self.run_with(flaky, usenet=True)
+        self.sleep.assert_not_called()
+        self.assertEqual(flaky.link_calls, 1)
+        self.assertEqual(stopped, ["the first read of a Usenet file failed"])   # Usenet stops for the day
+        self.assertEqual(self.backed_off_for(), 3600)
 
 
 class SelfTestTest(unittest.TestCase):
@@ -1102,7 +1447,7 @@ class SelfTestTest(unittest.TestCase):
         self.assertEqual(run(self.srv.url("tiny.mkv"), 1000, Settings({}))["error"], "cap")
 
     def test_the_cap_is_subsync_s_own_index_cap_unless_given(self):
-        # The wizard's 4 MB cap stopped a 7.3 MB index that subsync itself reads (16 MB)
+        # The wizard's 4 MB cap stopped a 7.3 MB index that subsync itself reads (16 MB then, 32 MB since)
         from subsync.selftest import run
         from subsync.settings import Settings
         out = run(self.srv.url("tiny.mkv"), None, Settings({}))

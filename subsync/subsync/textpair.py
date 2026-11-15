@@ -3,7 +3,7 @@
 The index gives the track's line times, not its words; a few of its lines are read (index.line_words): runs of RUN
 consecutive lines, RUNS_PER_TENTH runs in each tenth of the track's span, each run starting at a line of at least
 MIN_LINE_S (the longer lines carry more words), at most MAX_LINES lines in all. Their words are kept only as hashes of
-word pairs, in memory, for the job; never stored or shared ((3)).
+word pairs, in memory, for the job; never stored or shared.
 
 A subtitle line and a track line say the same thing when at least SAME of the track line's word pairs are in the
 subtitle line (cover) and at least SAME of the subtitle line's are in the track line (precision). A track line with
@@ -16,7 +16,9 @@ paired with no start of their own. Pairs never cross (the heaviest chain in both
 
 The confirmation (D2): a copy that passes by timing must also hold on its anchors, when it has at least MIN_ANCHORS:
 their median start error within the rule's own limit, and no tenth of the copy's span with at least TENTH_ANCHORS
-anchors whose median error is over TENTH_MS. It can only refuse.
+anchors whose median error is over TENTH_MS. With fewer than FEW_ANCHORS anchors in all, such a tenth refuses only with
+at least FEW_TENTH_ANCHORS anchors, or when the timing's own check finds that part weak too (Kingdom of Heaven
+DC's English, 21-22 anchors read from its PGS track, refused on about 3 of them in one tenth). It can only refuse.
 """
 import hashlib
 import re
@@ -31,6 +33,8 @@ MIN_LINE_S = 1.2
 MIN_ANCHORS = 20
 TENTH_ANCHORS = 3
 TENTH_MS = 500.0
+FEW_ANCHORS = 40          # under this many anchors in all (about 4 a tenth), a tenth's words alone refuse only
+FEW_TENTH_ANCHORS = 5     # with this many in it, else only where the timing is weak there too
 
 TAGS = re.compile(r"\{[^}]*\}|<[^>]*>|\\[Nnh]")
 WORD = re.compile(r"[^\W_]+", re.UNICODE)
@@ -188,8 +192,10 @@ def summary(anchors, errs):
     return out
 
 
-def confirm(anchors, errs, limit_ms):
-    """D2: (passes, why, summary). Fewer than MIN_ANCHORS anchors confirm nothing and refuse nothing."""
+def confirm(anchors, errs, limit_ms, timing_weak=()):
+    """D2: (passes, why, summary). Fewer than MIN_ANCHORS anchors confirm nothing and refuse nothing. timing_weak: the
+    (start, end) times of the parts the timing's own check found weak (its tenths are the copy's, not the anchors', so
+    they are matched by time). A tenth the FEW_ANCHORS rule spares is recorded in `spared_tenths`."""
     s = summary(anchors, errs)
     if len(errs) < MIN_ANCHORS:
         return True, "too few lines paired by their words to check", s
@@ -197,13 +203,19 @@ def confirm(anchors, errs, limit_ms):
         return False, "the lines' words disagree with the timing", s
     starts = [c for c, _, _ in errs]
     lo, hi = min(starts), max(starts)
-    weak = []
+    weak, spared = [], []
     for b in range(10):
         a, z = lo + (hi - lo) * b / 10, lo + (hi - lo) * (b + 1) / 10
         e = [abs(x) * 1000 for c, x, _ in errs if a <= c < z or (b == 9 and c == hi)]
         if len(e) >= TENTH_ANCHORS and statistics.median(e) > TENTH_MS:
-            weak.append(b)
+            if len(errs) < FEW_ANCHORS and len(e) < FEW_TENTH_ANCHORS and \
+                    not any(ta < z and a < tz for ta, tz in timing_weak):
+                spared.append(b)
+            else:
+                weak.append(b)
     s["weak_tenths"] = weak
+    if spared:
+        s["spared_tenths"] = spared
     if weak:
         return False, "a part of the runtime's words disagree with the timing", s
     return True, "the lines' words agree with the timing", s

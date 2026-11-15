@@ -1,0 +1,728 @@
+"""Each person's audio choice: off, on pick (the default) or as soon as a file is opened, behind the
+instance's audio route; the audio syncs a person may start a day and the audio places as settings; Usenet files in the
+audio route. Plain Python except where marked; no network beyond 127.0.0.1; every run bounded (ulimit -t)."""
+import os
+import sys
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from helpers import FIXTURES, RangeServer, TempDir  # noqa: E402
+from subsync import sources  # noqa: E402
+from subsync import worker as worker_mod  # noqa: E402
+from subsync.reader import ReadFailed  # noqa: E402
+from subsync.settings import Settings  # noqa: E402
+from subsync.store import Store  # noqa: E402
+from subsync.worker import Job, OverLimit, Safety, StoreAudioCounts, Worker, audio_places  # noqa: E402
+
+try:
+    import cryptography  # noqa: F401
+    HAVE_CRYPTOGRAPHY = True
+except ImportError:
+    HAVE_CRYPTOGRAPHY = False
+NEEDS = "cryptography is not installed (the image has it; tests run it in a venv)"
+KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+
+
+def wait_until(check, timeout=5.0):
+    t0 = time.time()
+    while not check() and time.time() - t0 < timeout:
+        time.sleep(0.02)
+    return check()
+
+
+# ---------------------------------------------------------------------------------------------------- the settings
+
+AUDIO_WHEN_TEXT = (
+    "Pick or open: when a file with no subtitle track of its own starts its audio sync, with SUBSYNC_AUDIO_ROUTE on. "
+    "pick (recommended): only after its \"(Subsync)\" entry is picked. open: as soon as an app asks for the file's "
+    "subtitles, if no synced copy exists, a subtitle exists to fit and the day's data has room, at most "
+    "SUBSYNC_USER_OPENED_PER_DAY a day; it reads 60–350 MB of files nobody may watch. A public instance ignores it: "
+    "each person chooses on their settings page.")
+AUDIO_PER_DAY_TEXT = (
+    "Audio syncs one person may start a day (UTC), picked or opened. Each reads about 60–350 MB of a file's sound and "
+    "keeps a processor busy for one to three minutes, and its copy then serves everyone who plays that file. 20 by "
+    "default; recommended: keep it, so the processors are shared fairly while the daily data limit bounds the "
+    "reads. 0 stops new audio syncs and keeps the copies already made. Past it, that person's files wait for a "
+    "pick the next day.")
+OPENED_PER_DAY_TEXT = (
+    "Of those, how many may start as soon as a file is opened, for people who chose that (UTC day). 5 by default; "
+    "recommended: keep it low, since apps also ask for files people only browse or that they prepare next. 0 "
+    "removes that answer from the pages; people who had chosen it then sync when they pick.")
+AUDIO_AT_ONCE_TEXT = (
+    "Audio syncs running at the same time, for everyone together. auto (the default, recommended) is half of "
+    "SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them. A higher number finishes picked "
+    "files sooner when many come together but makes every other file wait longer; it can't be more than "
+    "SUBSYNC_SYNCS_AT_ONCE. A self-hosted install syncs one at a time whatever it says.")
+
+
+class SettingsTest(unittest.TestCase):
+    def test_the_defaults(self):
+        s = Settings({})
+        self.assertEqual((s.audio_when, s.user_audio_per_day, s.user_opened_per_day, s.audio_at_once),
+                         ("pick", 20, 5, "auto"))
+        self.assertEqual(s.audio_choice, "off")                        # the audio route itself stays off by default
+        self.assertEqual(Settings({"SUBSYNC_AUDIO_ROUTE": "on"}).audio_choice, "pick")
+
+    def test_when_and_the_old_on_pick_setting(self):
+        when = lambda **env: Settings(dict({"SUBSYNC_AUDIO_ROUTE": "on"}, **env)).audio_choice  # noqa: E731
+        self.assertEqual(when(SUBSYNC_AUDIO_WHEN="open"), "open")
+        self.assertEqual(when(SUBSYNC_AUDIO_WHEN=" Pick "), "pick")
+        self.assertEqual(when(SUBSYNC_AUDIO_ON_PICK="off"), "open")     # still read: off means open
+        self.assertEqual(when(SUBSYNC_AUDIO_ON_PICK="on"), "pick")
+        self.assertEqual(when(SUBSYNC_AUDIO_ON_PICK="off", SUBSYNC_AUDIO_WHEN="pick"), "pick")   # the new one decides
+        self.assertEqual(Settings({"SUBSYNC_AUDIO_WHEN": "open"}).audio_choice, "off")       # the route decides first
+
+    def test_the_counts_and_places(self):
+        s = Settings({"SUBSYNC_USER_AUDIO_PER_DAY": "0", "SUBSYNC_USER_OPENED_PER_DAY": "0", "SUBSYNC_AUDIO_AT_ONCE": "3"})
+        self.assertEqual((s.user_audio_per_day, s.user_opened_per_day, s.audio_at_once), (0, 0, 3))
+        self.assertEqual(Settings({"SUBSYNC_AUDIO_AT_ONCE": " AUTO "}).audio_at_once, "auto")
+        self.assertIsNone(Settings({"SUBSYNC_AUDIO_AT_ONCE": "0"}).audio_at_once)
+        self.assertEqual([audio_places(n) for n in (1, 2, 3, 4, 8)], [1, 1, 1, 2, 4])          # auto: as before
+        self.assertEqual([audio_places(4, 3), audio_places(4, 1), audio_places(None, "auto")], [3, 1, 1])
+
+    def test_the_conflicts(self):
+        public = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_SYNCS_AT_ONCE": "2"}
+        # the person's choice replaces "on pick must stay on": the old setting no longer stops a public instance
+        self.assertEqual(Settings(dict(public, SUBSYNC_AUDIO_ON_PICK="off")).conflicts(), [])
+        self.assertEqual(Settings(dict(public, SUBSYNC_AUDIO_AT_ONCE="2")).conflicts(), [])
+        over = Settings(dict(public, SUBSYNC_AUDIO_AT_ONCE="3")).conflicts()
+        self.assertEqual(len(over), 1)
+        self.assertIn("SUBSYNC_AUDIO_AT_ONCE", over[0])
+        self.assertIn("SUBSYNC_SYNCS_AT_ONCE (2)", over[0])
+        # self-hosted: one audio lane whatever it says, so a larger number is not refused
+        self.assertEqual(Settings({"SUBSYNC_SYNCS_AT_ONCE": "2", "SUBSYNC_AUDIO_AT_ONCE": "3"}).conflicts(), [])
+        for env in ({"SUBSYNC_AUDIO_AT_ONCE": "half"}, {"SUBSYNC_AUDIO_WHEN": "always"}):
+            with self.subTest(env=env):
+                out = Settings(env).conflicts()
+                self.assertEqual(len(out), 1)
+                self.assertIn(next(iter(env)), out[0])
+
+    def test_the_texts(self):
+        from subsync import explain
+        for name, default, text in (("SUBSYNC_AUDIO_WHEN", "pick", AUDIO_WHEN_TEXT),
+                                    ("SUBSYNC_USER_AUDIO_PER_DAY", "20", AUDIO_PER_DAY_TEXT),
+                                    ("SUBSYNC_USER_OPENED_PER_DAY", "5", OPENED_PER_DAY_TEXT),
+                                    ("SUBSYNC_AUDIO_AT_ONCE", "auto", AUDIO_AT_ONCE_TEXT)):
+            with self.subTest(name=name):
+                self.assertEqual(explain.SETTINGS[name], (default, text))
+        for name in ("SUBSYNC_AUDIO_ROUTE", "SUBSYNC_AUDIO_ON_PICK", "SUBSYNC_PUBLIC"):
+            with self.subTest(name=name):
+                self.assertNotIn("only after a pick", explain.SETTINGS[name][1])
+                self.assertNotIn("must stay on", explain.SETTINGS[name][1])
+        self.assertIn("their own debrid service or Usenet", explain.SETTINGS["SUBSYNC_AUDIO_ROUTE"][1])
+
+
+# --------------------------------------------------------------------------------------- the self-hosted day counts
+
+class StoreCountsTest(unittest.TestCase):
+    def test_counted_in_the_stores_day_counters(self):
+        with TempDir() as d:
+            store = Store(d)
+            s = Settings({"SUBSYNC_USER_AUDIO_PER_DAY": "3", "SUBSYNC_USER_OPENED_PER_DAY": "1"})
+            counts = StoreAudioCounts(store, s)
+            self.assertTrue(counts.may_start_audio(opened=True))
+            counts.audio_started(opened=True)                      # an opened sync counts one of each
+            self.assertEqual((store.bytes_today("audio_syncs"), store.bytes_today("audio_opened")), (1, 1))
+            self.assertFalse(counts.may_start_audio(opened=True))   # the opened ones are used up
+            self.assertTrue(counts.may_start_audio(opened=False))
+            counts.audio_started()                                 # a picked one counts one
+            counts.audio_started()
+            self.assertEqual((store.bytes_today("audio_syncs"), store.bytes_today("audio_opened")), (3, 1))
+            self.assertFalse(counts.may_start_audio(opened=False))
+            s.user_audio_per_day = 0                                # read when asked: 0 stops new audio syncs
+            self.assertFalse(StoreAudioCounts(Store(d), s).may_start_audio())
+
+
+# --------------------------------------------------------------------------------------------- each person's record
+
+def record(audio=None):
+    out = {"instance": "https://aios.test", "sync_uuid": "u1", "sync_link": "https://aios.test/stremio/u1/E1/manifest.json",
+           "sync_password": "p1", "languages": ["eng"], "version": 1}
+    if audio is not None:
+        out["audio"] = audio
+    return out
+
+
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+class RecordTest(unittest.TestCase):
+    def setUp(self):
+        from subsync.users import Users, new_token
+        self.tmp = TempDir()
+        self.dir = self.tmp.__enter__()
+        self.addCleanup(self.tmp.__exit__, None, None, None)
+        self.t = [1_800_000_000.0]
+        self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
+                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_AUDIO_ROUTE": "on",
+                    "SUBSYNC_SYNCS_AT_ONCE": "4"}
+        self.users = Users(os.path.join(self.dir, "users.sqlite3"), Settings(self.env).secret_bytes(),
+                           clock=lambda: self.t[0])
+        self.addCleanup(self.users.close)
+        self.token = new_token()
+        self.users.create(self.token, record())
+
+    def test_a_missing_key_reads_pick_and_the_choice_reaches_the_worker(self):
+        from subsync.public import person_audio, user_settings
+        s = Settings(self.env)
+        self.assertEqual(person_audio(record(), s), "pick")             # everyone signed up before, the owner included
+        self.assertEqual([person_audio(record(a), s) for a in ("off", "pick", "open", "sometimes")],
+                         ["off", "pick", "open", "pick"])
+        none_opened = Settings(dict(self.env, SUBSYNC_USER_OPENED_PER_DAY="0"))
+        self.assertEqual(person_audio(record("open"), none_opened), "pick")   # the answer is gone: they sync on a pick
+        for audio, choice in ((None, "pick"), ("off", "off"), ("open", "open")):
+            with self.subTest(audio=audio):
+                # the instance's own SUBSYNC_AUDIO_ON_PICK or SUBSYNC_AUDIO_WHEN changes nothing for a person
+                env = dict(self.env, SUBSYNC_AUDIO_ON_PICK="off", SUBSYNC_AUDIO_WHEN="pick")
+                self.assertEqual(user_settings(env, record(audio), self.token).audio_choice, choice)
+        self.assertEqual(user_settings(dict(self.env, SUBSYNC_AUDIO_ROUTE="off"), record("open"),
+                                       self.token).audio_choice, "off")
+
+    def test_the_day_table_counts_per_utc_day_and_goes_with_the_person(self):
+        import sqlite3
+        self.assertEqual(self.users.audio_usage(self.token), {"syncs": 0, "opened": 0})
+        self.users.add_audio(self.token)
+        self.users.add_audio(self.token, opened=True)
+        self.assertEqual(self.users.audio_usage(self.token), {"syncs": 2, "opened": 1})
+        self.t[0] += 86400                                              # the next UTC day starts at zero
+        self.assertEqual(self.users.audio_usage(self.token), {"syncs": 0, "opened": 0})
+        self.users.add_audio(self.token)
+        db = sqlite3.connect(os.path.join(self.dir, "users.sqlite3"))
+        self.addCleanup(db.close)
+        # a table of its own: the usage table keeps its four columns, so an older image still opens the database
+        self.assertEqual([r[1] for r in db.execute("PRAGMA table_info(usage)")], ["id", "day", "files", "bytes"])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM audio_usage").fetchone()[0], 2)
+        self.assertTrue(self.users.delete(self.token))
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM audio_usage").fetchone()[0], 0)
+        from subsync.users import new_token
+        other = new_token()
+        self.users.create(other, record())
+        self.users.add_audio(other, opened=True)
+        self.t[0] += 200 * 86400                                        # unused for longer than the keep days
+        self.assertEqual(self.users.expire(180), 1)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM audio_usage").fetchone()[0], 0)
+
+    def test_the_persons_limits(self):
+        from subsync.public import StoreOnly, UserLimits
+        limits = UserLimits(Settings(dict(self.env, SUBSYNC_USER_AUDIO_PER_DAY="3", SUBSYNC_USER_OPENED_PER_DAY="1")),
+                            self.users, self.token)
+        self.assertTrue(limits.may_start_audio(opened=True))
+        limits.audio_started(opened=True)                               # counts one of each
+        self.assertEqual(self.users.audio_usage(self.token), {"syncs": 1, "opened": 1})
+        self.assertFalse(limits.may_start_audio(opened=True))
+        limits.audio_started()                                          # a picked one counts one
+        limits.audio_started()
+        self.assertEqual(self.users.audio_usage(self.token), {"syncs": 3, "opened": 1})
+        self.assertFalse(limits.may_start_audio())
+        self.assertFalse(StoreOnly().may_start_audio())
+
+    def test_the_audio_places_come_from_the_setting(self):
+        from subsync.public import Pool
+        for at_once, places in (("auto", 2), ("3", 3), ("1", 1)):
+            with self.subTest(at_once=at_once):
+                env = dict(self.env, SUBSYNC_AUDIO_AT_ONCE=at_once)
+                pool = Pool(Settings(env), env, Store(self.dir), self.users, start_workers=False)
+                self.addCleanup(pool.close)
+                self.assertEqual((pool.turn.places, pool.audio_turn.places), (4, places))
+                self.assertIs(pool.app(self.token).worker.audio_turn, pool.audio_turn)
+
+    def test_the_settings_action_saves_the_choice(self):
+        from subsync.signup import SignupError, set_audio
+        s = Settings(self.env)
+        self.assertEqual(set_audio(self.users, self.token, "open", s), "open")
+        self.assertEqual(self.users.open(self.token)["audio"], "open")
+        self.assertEqual(set_audio(self.users, self.token, "off", s), "off")
+        for value, settings in (("sometimes", s), ("", s), (None, s),
+                                ("open", Settings(dict(self.env, SUBSYNC_USER_OPENED_PER_DAY="0")))):
+            with self.subTest(value=value):
+                with self.assertRaises(SignupError):
+                    set_audio(self.users, self.token, value, settings)
+                self.assertEqual(self.users.open(self.token)["audio"], "off")
+        with self.assertRaises(SignupError):                           # an instance without the audio route
+            set_audio(self.users, self.token, "pick", Settings(dict(self.env, SUBSYNC_AUDIO_ROUTE="off")))
+
+
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+class ConfigureTest(unittest.TestCase):
+    """The settings page's "audio" action: saved like the languages, and the person's worker starts again with it."""
+
+    def setUp(self):
+        import test_public_http as harness
+        self.harness = harness
+        self.case = harness.Base()
+        self.case.start(SUBSYNC_AUDIO_ROUTE="on")
+        self.addCleanup(self.case.tearDown)
+
+    def post(self, token, **fields):
+        h = self.harness
+        return h.http(f"{self.case.base}/u/{token}/configure", h.form(**fields))
+
+    def test_saved_and_applied(self):
+        c = self.case
+        _, _, _, _, token = c.sign_up()
+        self.assertEqual(c.pool.app(token).s.audio_choice, "pick")      # nothing chosen yet: on pick
+        code, _, headers = self.post(token, action="audio", audio="open")
+        self.assertEqual((code, headers["Location"]), (303, "configure?done=audio"))
+        self.assertEqual(c.users.open(token)["audio"], "open")
+        self.assertEqual(c.pool.app(token).s.audio_choice, "open")      # the worker uses it from now on
+        code, _, _ = self.post(token, action="audio", audio="loud")
+        self.assertEqual(code, 400)
+        self.assertEqual(c.users.open(token)["audio"], "open")
+
+
+# ------------------------------------------------------------------------------------------------- the worker's side
+
+class Listing:
+    """A sync config with one row and a fixed subtitle list."""
+
+    def __init__(self, row=None, subtitles=()):
+        self.row, self.subs, self.base, self.config_sources = row, list(subtitles), "https://aios.test/stremio/u/e", set()
+
+    def find_row(self, *a):
+        return self.row
+
+    def subtitles(self, *a):
+        return [dict(c) for c in self.subs]
+
+
+class Limits:
+    """A person's limits (public.UserLimits' methods), with today's data left and today's audio syncs."""
+
+    def __init__(self, who="a" * 16, queue=3, left=10 ** 12, per_day=20, opened_per_day=5, room=True):
+        self.who, self.queue, self.left, self.room = who, queue, left, room
+        self.per_day, self.opened_per_day = per_day, opened_per_day
+        self.started, self.read, self.syncs, self.opened = 0, 0, 0, 0
+
+    def may_queue(self, queued):
+        return queued < self.queue
+
+    def may_start_file(self):
+        return True
+
+    def file_started(self):
+        self.started += 1
+
+    def has_room(self, n):
+        return self.room and n <= self.left
+
+    def before_read(self, length):
+        if length > self.left:
+            raise OverLimit("bytes per day")
+
+    def after_read(self, n):
+        self.read += n
+        self.left -= n
+
+    def may_start_audio(self, opened=False):
+        return self.syncs < self.per_day and (not opened or self.opened < self.opened_per_day)
+
+    def audio_started(self, opened=False):
+        self.syncs += 1
+        self.opened += bool(opened)
+
+
+SUB = {"id": "os-1", "lang": "eng", "release": "", "hash": "", "hash_match": False, "ai": False}
+
+
+class Base(unittest.TestCase):
+    choice = "open"
+
+    def setUp(self):
+        self.tmp = TempDir()
+        self.dir = self.tmp.__enter__()
+        self.addCleanup(self.tmp.__exit__, None, None, None)
+        self.store = Store(self.dir)
+        self.workers = []
+        self.addCleanup(lambda: [w.stop() for w in self.workers])
+        self.srv = RangeServer(FIXTURES)
+        self.addCleanup(self.srv.close)
+        self.size = os.path.getsize(os.path.join(FIXTURES, "tiny-nosub.mp4"))
+        self.hints = {"filename": "tiny-nosub.mp4", "videoSize": self.size}
+        self.alias = Job("movie", "tt1", self.hints).alias
+
+    def settings(self, choice=None, **env):
+        s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC_BASE": "http://x.test", "SUBSYNC_PUBLIC": "on",
+                           "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_EXTRA_SOURCES": ""}, **env))
+        s.audio_when = choice or self.choice          # the person's own choice (public.user_settings sets it)
+        return s
+
+    def subs(self, *langs, **extra):
+        return [dict(SUB, id=f"os-{lang}", lang=lang, url=self.srv.url("tiny.srt"), **extra) for lang in langs or ("eng",)]
+
+    def worker(self, limits=None, settings=None, subs=None, row=None, **kw):
+        listing = Listing(row or {"url": self.srv.url("tiny-nosub.mp4")}, self.subs() if subs is None else subs)
+        w = Worker(settings or self.settings(), self.store, listing, Safety(), limits=limits, **kw)
+        self.workers.append(w)
+        return w
+
+    def first_pass(self, w):
+        w.process(Job("movie", "tt1", self.hints))
+        return w
+
+    def queued_audio(self, w):
+        return [(j.alias, j.audio, j.opened) for j in w.jobs.values()]
+
+    def file_key(self):
+        return self.store.resolve(self.alias)
+
+
+class OpenedTest(Base):
+    """"as soon as a file is opened" starts where a file with no usable track would wait for a pick, when every
+    point holds; when one fails the file waits for a pick, as "when I pick it" does."""
+
+    def test_every_point_holds_the_audio_sync_starts_at_once(self):
+        limits = Limits()
+        w = self.first_pass(self.worker(limits))
+        self.assertEqual(self.queued_audio(w), [(self.alias, True, True)])   # an audio job, on the audio lane
+        self.assertFalse(w.waits_for_pick(self.alias))
+        self.assertEqual((limits.syncs, limits.opened), (0, 0))               # counted when it starts, not before
+        self.assertEqual(w._next("audio").alias, self.alias)
+
+    def test_point_1_a_file_with_its_own_track_is_synced_from_it(self):
+        srv_file = "tiny.mkv"
+        w = self.worker(Limits(), row={"url": self.srv.url(srv_file)})
+        w._sync_all = lambda *a: None
+        w.process(Job("movie", "tt1", {"filename": srv_file, "videoSize": os.path.getsize(os.path.join(FIXTURES, srv_file))}))
+        self.assertEqual(len(w.jobs), 0)
+        self.assertFalse(w.waits_for_pick(f"name:{srv_file}|{os.path.getsize(os.path.join(FIXTURES, srv_file))}"))
+
+    def test_point_2_a_copy_or_an_audio_verdict_in_every_language_waits_for_a_pick(self):
+        for outcome in ("synced", "keep_original"):
+            with self.subTest(outcome=outcome):
+                self.store.db.execute("DELETE FROM pickable")
+                self.store.db.execute("DELETE FROM results")
+                self.store.db.execute("DELETE FROM offers")
+                w = self.first_pass(self.worker(Limits()))          # the file is known now; its job is dropped below
+                w.jobs.clear()
+                w.queue.clear()
+                key = self.store.put(self.file_key(), "a" * 64, "eng", 0, outcome, "x", route="audio", body="1\n",
+                                     fmt="srt", candidate_id="os-eng", original="1\n")
+                if outcome == "synced":
+                    self.store.set_offers(self.file_key(), "eng", [key])
+                w2 = self.first_pass(self.worker(Limits()))
+                self.assertEqual(len(w2.jobs), 0)
+                self.assertTrue(w2.waits_for_pick(self.alias))
+
+    def test_point_2_one_language_without_a_copy_is_enough(self):
+        s = self.settings(SUBSYNC_LANGUAGES="eng,spa")
+        w = self.first_pass(self.worker(Limits(), settings=s, subs=self.subs("eng", "spa")))
+        w.jobs.clear()
+        w.queue.clear()
+        key = self.store.put(self.file_key(), "a" * 64, "eng", 0, "synced", "x", route="audio", body="1\n", fmt="srt",
+                             candidate_id="os-eng", original="1\n")
+        self.store.set_offers(self.file_key(), "eng", [key])
+        w2 = self.first_pass(self.worker(Limits(), settings=s, subs=self.subs("eng", "spa")))
+        self.assertEqual(self.queued_audio(w2), [(self.alias, True, True)])
+
+    def test_point_3_no_subtitle_to_fit_in_the_languages_without_a_copy_waits_for_a_pick(self):
+        s = self.settings(SUBSYNC_LANGUAGES="eng,spa")
+        subs = self.subs("eng") + [dict(SUB, id="os-spa", lang="spa", url=self.srv.url("tiny.srt"), ai=True)]
+        w = self.first_pass(self.worker(Limits(), settings=s, subs=self.subs("eng")))
+        w.jobs.clear()
+        w.queue.clear()
+        key = self.store.put(self.file_key(), "a" * 64, "eng", 0, "synced", "x", route="audio", body="1\n", fmt="srt",
+                             candidate_id="os-eng", original="1\n")
+        self.store.set_offers(self.file_key(), "eng", [key])
+        w2 = self.first_pass(self.worker(Limits(), settings=s, subs=subs))   # Spanish: only an AI-made one
+        self.assertEqual(len(w2.jobs), 0)
+        self.assertTrue(w2.waits_for_pick(self.alias))
+
+    def test_point_4_no_room_in_the_day_or_the_counts_used_up_waits_for_a_pick(self):
+        for limits in (Limits(room=False), Limits(per_day=0), Limits(opened_per_day=0)):
+            with self.subTest(room=limits.room, per_day=limits.per_day, opened=limits.opened_per_day):
+                self.store.db.execute("DELETE FROM pickable")
+                w = self.first_pass(self.worker(limits))
+                self.assertEqual(len(w.jobs), 0)
+                self.assertTrue(w.waits_for_pick(self.alias))
+        w = self.worker(Limits())
+        w._audio_need = lambda alias: w.s.daily_budget       # the service's day: no room once the index was read
+        self.store.db.execute("DELETE FROM pickable")
+        self.first_pass(w)
+        self.assertEqual(len(w.jobs), 0)
+        self.assertTrue(w.waits_for_pick(self.alias))
+
+    def test_point_5_never_real_debrid(self):
+        rd = {"url": "https://real-debrid.com/d/x", "name": "x", "streamData": {
+            "type": "debrid", "filename": "tiny-nosub.mp4", "size": self.size, "service": {"id": "realdebrid", "cached": True}}}
+
+        class RealDebridOnly(Listing):
+            def find_row(self, type_, video_id, hints):
+                return sources.Aios("").match([rd], hints)
+        w = Worker(self.settings(), self.store, RealDebridOnly(None, self.subs()), Safety(), limits=Limits())
+        self.workers.append(w)
+        self.first_pass(w)
+        self.assertEqual((len(w.jobs), self.file_key(), self.srv.log), (0, None, []))   # nothing read, nothing started
+        self.assertFalse(w.waits_for_pick(self.alias))
+
+    def test_a_pick_before_the_first_pass_ended_counts_as_picked(self):
+        w = self.worker(Limits())
+        w.picked_early[self.alias] = time.time()
+        self.first_pass(w)
+        self.assertEqual(self.queued_audio(w), [(self.alias, True, False)])
+
+    def test_the_audio_job_checks_again_when_it_starts_and_counts_both(self):
+        limits = Limits()
+        w = self.first_pass(self.worker(limits))
+        w._sync_all = lambda *a: None                   # the audio fit itself runs in the image's tests
+        job = w.jobs.pop(self.alias)
+        w.queue.clear()
+        w.process(job)
+        self.assertEqual((limits.syncs, limits.opened, limits.started), (1, 1, 1))   # one file, one audio sync, opened
+        self.assertGreater(limits.read, 0)
+        w.process(job)                                  # the same job again (stopped and queued again): not counted twice
+        self.assertEqual((limits.syncs, limits.opened), (1, 1))
+        limits.per_day = 1
+        again = Job("movie", "tt1", self.hints)
+        again.audio = again.opened = True
+        w.process(again)                                # a new one past the day's count: nothing read, it waits
+        self.assertEqual(limits.syncs, 1)
+        self.assertTrue(w.waits_for_pick(self.alias))
+
+
+class PickedTest(Base):
+    choice = "pick"
+
+    def test_a_picked_sync_counts_one_and_checks_the_count(self):
+        limits = Limits(per_day=1)
+        w = self.first_pass(self.worker(limits))
+        self.assertTrue(w.waits_for_pick(self.alias))
+        self.assertEqual(len(w.jobs), 0)                 # "when I pick it": nothing starts on the first pass
+        w._sync_all = lambda *a: None
+        self.assertTrue(w.pick(self.alias))
+        job = w.jobs.pop(self.alias)
+        w.queue.clear()
+        self.assertEqual((job.audio, job.opened), (True, False))
+        w.process(job)
+        self.assertEqual((limits.syncs, limits.opened), (1, 0))
+        with w.cv:
+            w._put_waiting(Job("movie", "tt1", self.hints))
+        self.assertFalse(w.pick(self.alias))            # today's audio syncs are used up: it waits for another pick
+        self.assertTrue(w.waits_for_pick(self.alias))
+        self.assertEqual(len(w.jobs), 0)
+
+    def test_an_open_person_can_still_pick(self):
+        limits = Limits(opened_per_day=0)
+        w = self.first_pass(self.worker(limits, settings=self.settings("open")))
+        self.assertTrue(w.waits_for_pick(self.alias))
+        self.assertTrue(w.pick(self.alias))
+        self.assertEqual(self.queued_audio(w), [(self.alias, True, False)])
+
+
+class OffTest(Base):
+    """A person whose choice is off: no pick entry and no audio job; their files with no track get the "(original)"
+    entry and any copy someone made; their first pass doesn't mark the file judged for others."""
+    choice = "off"
+
+    def app(self, w):
+        from subsync.addon import App
+        return App(w.s, self.store, w, Safety())
+
+    def test_the_first_pass_starts_nothing_and_lists_the_original(self):
+        w = self.first_pass(self.worker(Limits()))
+        self.assertEqual(len(w.jobs), 0)
+        self.assertFalse(w.waits_for_pick(self.alias))
+        self.assertFalse(w.pick(self.alias))
+        self.assertIsNone(self.store.judged_all(self.file_key(), ["eng"], w.s.rule_id, 0))   # others can still pick it
+        subs = self.app(w).subtitles("movie", "tt1", f"filename=tiny-nosub.mp4&videoSize={self.size}")
+        self.assertEqual([s["label"] for s in subs], ["English (original)"])
+        self.assertEqual(len(w.jobs), 0)                 # read lately: not queued again
+
+    def test_no_audio_lane_in_public_mode(self):
+        w = self.worker(Limits())
+        w.start()
+        self.assertIsNone(getattr(w, "audio_worker", None))
+
+    def test_stored_copies_still_listed_and_a_pick_entry_never(self):
+        w = self.first_pass(self.worker(Limits(), settings=self.settings(SUBSYNC_LANGUAGES="eng,spa"),
+                                        subs=self.subs("eng", "spa")))
+        key = self.store.put(self.file_key(), "a" * 64, "eng", 0, "synced", "x", route="audio", body="1\n", fmt="srt",
+                             candidate_id="os-eng", original="1\n")
+        self.store.set_offers(self.file_key(), "eng", [key])
+        self.store.judged_put(self.file_key(), ["eng"], w.s.rule_id)    # someone else's audio sync of English
+        with w.cv:   # a file this person waited on before they turned it off (its row is kept 7 days)
+            w._put_waiting(Job("movie", "tt1", self.hints))
+        subs = self.app(w).subtitles("movie", "tt1", f"filename=tiny-nosub.mp4&videoSize={self.size}")
+        self.assertEqual([s["label"] for s in subs], ["English (synced)", "Spanish (original)"])
+        self.assertEqual(len(w.jobs), 0)                 # Spanish isn't judged, but reading again can't help them
+        self.assertFalse(w.pick(self.alias))
+        self.assertEqual(len(w.jobs), 0)
+
+    def test_a_file_read_for_someone_else_gets_no_first_pass_of_theirs(self):
+        other = self.first_pass(self.worker(Limits(who="b" * 16), settings=self.settings("pick")))
+        self.assertTrue(other.waits_for_pick(self.alias))
+        w = self.worker(Limits())
+        self.app(w).subtitles("movie", "tt1", f"filename=tiny-nosub.mp4&videoSize={self.size}")
+        self.assertEqual(len(w.jobs), 0)
+        picker = self.worker(Limits(who="c" * 16), settings=self.settings("pick"))
+        self.app(picker).subtitles("movie", "tt1", f"filename=tiny-nosub.mp4&videoSize={self.size}")
+        self.assertEqual([(j.alias, j.audio) for j in picker.jobs.values()], [(self.alias, False)])
+
+
+class SelfHostedTest(Base):
+    """Self-hosted "open" (SUBSYNC_AUDIO_WHEN=open, or the old SUBSYNC_AUDIO_ON_PICK=off) takes the same path: an audio
+    job on the audio lane, the room checked, counted in the store's day counters."""
+
+    def self_hosted(self, **env):
+        return Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC_BASE": "http://x.test", "SUBSYNC_AUDIO_ROUTE": "on",
+                              "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_EXTRA_SOURCES": ""}, **env))
+
+    def test_open_uses_the_audio_lane_the_room_check_and_the_stores_counts(self):
+        for env in ({"SUBSYNC_AUDIO_WHEN": "open"}, {"SUBSYNC_AUDIO_ON_PICK": "off"}):
+            with self.subTest(env=env):
+                self.store.db.execute("DELETE FROM budget")
+                w = self.first_pass(self.worker(settings=self.self_hosted(**env)))
+                self.assertEqual(self.queued_audio(w), [(self.alias, True, True)])
+                self.assertFalse(w.audio_allowed(Job("movie", "tt1", self.hints)))   # the first pass: index only
+                w._sync_all = lambda *a: None
+                w.process(w.jobs.pop(self.alias))
+                w.queue.clear()
+                self.assertEqual((self.store.bytes_today("audio_syncs"), self.store.bytes_today("audio_opened")), (1, 1))
+
+    def test_no_room_in_the_day_waits_for_a_pick(self):
+        w = self.worker(settings=self.self_hosted(SUBSYNC_AUDIO_WHEN="open"))
+        w._audio_need = lambda alias: w.s.daily_budget       # the day has no room once the index was read
+        self.first_pass(w)
+        self.assertEqual(len(w.jobs), 0)
+        self.assertTrue(w.waits_for_pick(self.alias))
+
+    def test_the_days_count_reached_waits_for_a_pick(self):
+        w = self.worker(settings=self.self_hosted(SUBSYNC_AUDIO_WHEN="open", SUBSYNC_USER_OPENED_PER_DAY="1"))
+        self.store.add_bytes("audio_opened", 1)
+        self.first_pass(w)
+        self.assertEqual(len(w.jobs), 0)
+        self.assertTrue(w.waits_for_pick(self.alias))
+
+
+# ---------------------------------------------------------------------------------------------- Usenet in the route
+
+class Redirect:
+    """A Usenet service's link: each look-up (a fresh one could fetch the NZB again) redirects to the file."""
+
+    def __init__(self, target):
+        self.target, self.hits = target, 0
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                outer.hits += 1
+                self.send_response(302)
+                self.send_header("Location", outer.target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/playback/1"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class UsenetTest(Base):
+    """A Usenet file with no usable track now waits for a pick like a debrid one; the audio
+    job reuses its first pass's row and the address it resolved."""
+    choice = "pick"
+
+    def setUp(self):
+        super().setUp()
+        from test_usenet import Counts, FakeDebrid, FakeUsenet, row
+        self.link = Redirect(self.srv.url("tiny-nosub.mp4"))
+        self.addCleanup(self.link.close)
+        self.counts = Counts()
+        self.usenet = FakeUsenet([row(url=self.link.url, name="tiny-nosub.mp4", size=self.size)], subs=self.subs())
+        self.limits = Limits()
+        self.w = Worker(self.settings(), self.store, FakeDebrid(self.subs()), Safety(), limits=self.limits,
+                        usenet=self.usenet, usenet_gate=worker_mod.UsenetGate(self.store, 10, self.counts, who="w"))
+        self.workers.append(self.w)
+
+    def picked(self):
+        self.w.process(Job("movie", "tt1", self.hints))
+        self.assertTrue(self.w.waits_for_pick(self.alias))
+        self.assertTrue(self.w.pick(self.alias))
+        self.w.queue.clear()
+        return self.w.jobs.pop(self.alias)
+
+    def test_a_usenet_file_with_no_track_waits_for_a_pick_and_the_pick_reuses_its_row_and_address(self):
+        job = self.picked()
+        self.assertIsNone(self.store.judged_all(self.file_key(), ["eng"], self.w.s.rule_id, 0))
+        self.assertEqual((self.usenet.listings, self.counts.n, self.link.hits), (1, 1, 1))
+        read = self.limits.read
+        self.w._sync_all = lambda *a: None
+        self.w.process(job)
+        self.assertTrue(job.usenet and job.audio)
+        self.assertGreater(self.limits.read, read)                     # the audio job read the file again
+        self.assertEqual((self.usenet.listings, self.counts.n, self.link.hits), (1, 1, 1))       # nothing asked again
+        self.assertEqual(self.w._cap(job), self.w.s.file_cap)           # the audio route's cap, not the index cap
+
+    def test_after_the_rows_hour_a_pick_lists_again_only_through_the_gate(self):
+        job = self.picked()
+        when, kept_row, address = self.w.usenet_rows[self.alias]
+        self.w.usenet_rows[self.alias] = (when - worker_mod.UNLISTED_S - 1, kept_row, address)
+        self.counts.stopped_ = True                                     # Usenet stopped for the day: nothing listed
+        self.w._sync_all = lambda *a: None
+        self.w.process(job)
+        self.assertEqual(self.usenet.listings, 1)
+        self.assertTrue(self.w.waits_for_pick(self.alias))              # it keeps waiting
+        self.counts.stopped_ = False
+        self.assertTrue(self.w.pick(self.alias))
+        self.w.queue.clear()
+        self.w.process(self.w.jobs.pop(self.alias))
+        self.assertEqual((self.usenet.listings, self.counts.n), (2, 2))  # listed again, counted
+
+    def test_a_read_that_fails_during_the_audio_sync_doesnt_stop_usenet(self):
+        job = self.picked()
+
+        def failing(*a):
+            raise ReadFailed("short reply")
+        self.w._sync_all = failing
+        self.w.submit(job)
+        self.w.start()
+        self.assertTrue(wait_until(lambda: self.w.waits_for_pick(self.alias)))   # it waits for another pick
+        self.assertFalse(self.counts.stopped_)
+        self.assertFalse(self.store.file_blocked(self.alias))
+
+    def test_an_index_read_that_fails_in_the_audio_job_doesnt_stop_usenet(self):
+        job = self.picked()
+        self.link.target = self.srv.url("gone.mp4")
+        self.w.usenet_rows[self.alias] = self.w.usenet_rows[self.alias][:2] + (self.srv.url("gone.mp4"),)
+        self.w.process(job)
+        self.assertFalse(self.counts.stopped_)
+        self.assertFalse(self.store.file_blocked(self.alias))
+        self.assertTrue(self.w.waits_for_pick(self.alias))
+        self.assertLessEqual(self.link.hits, 1 + 1 + worker_mod.USENET_MAX_RE_RESOLVE)   # its link asked at most twice
+
+
+# --------------------------------------------------------------------------------------------------- the start lines
+
+class StartLineTest(unittest.TestCase):
+    def public(self, **env):
+        return Settings(dict({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on"}, **env))
+
+    def test_the_public_line(self):
+        from subsync.__main__ import public_start_line
+        self.assertIn("2 files at once; audio route allowed: each person off / on pick / when opened, up to 1 GB a file, "
+                      "1 at a time, 20 a person a day (5 opened);", public_start_line(self.public(), 2, 1))
+        self.assertIn("audio route allowed: each person off / on pick, up to 0.5 GB a file, 3 at a time, 7 a person a "
+                      "day;", public_start_line(self.public(SUBSYNC_AUDIO_BUDGET_GB="0.5", SUBSYNC_USER_OPENED_PER_DAY="0",
+                                                            SUBSYNC_USER_AUDIO_PER_DAY="7"), 4, 3))
+        self.assertIn("; audio route off;", public_start_line(self.public(SUBSYNC_AUDIO_ROUTE="off"), 1, 1))
+
+    def test_the_self_hosted_line(self):
+        from subsync.__main__ import start_line
+        s = Settings({"SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng,rus"})
+        self.assertEqual(start_line(s, False), "listening on 8790; languages eng,rus; audio route on pick, up to 1 GB a "
+                                               "file, 1 at a time, 20 a day; Usenet off")
+        s = Settings({"SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_WHEN": "open", "SUBSYNC_USENET": "on"})
+        self.assertIn("audio route when opened, up to 1 GB a file, 1 at a time, 20 a day (5 opened); Usenet on, 10 "
+                      "listings a day", start_line(s, True))
+        self.assertIn("; audio route off;", start_line(Settings({}), False))
+
+
+if __name__ == "__main__":
+    unittest.main()

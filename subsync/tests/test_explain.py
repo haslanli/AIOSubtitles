@@ -62,6 +62,44 @@ class ExplainTest(unittest.TestCase):
                                      else 125)
                 self.assertIsNone(REGISTER_NOTE.search(text))
 
+    def test_the_read_failure_rule(self):
+        # The owner's approved words
+        self.assertEqual(dict(explain.RULES)["A file that can't be reached is tried again later"],
+                         "A file that can't be reached on its first read is tried once more 10 seconds later; if it "
+                         "still fails, it waits 10 minutes, then 1, 6 and 24 hours, and then isn't read again.")
+        self.assertIn("a file's first read is then tried once more 10 seconds later, and a failed file is tried again "
+                      "10 minutes, 1, 6 and 24 hours later", explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
+
+    def test_the_original_entry_and_the_language_check_rules(self):
+        # The approved words
+        rules = dict(explain.RULES)
+        self.assertEqual(rules["A language with no synced copy is listed with its original"],
+                         "A language that has subtitles but no synced copy for a file is listed once, as \"<Language> "
+                         "(original)\": the subtitle, unchanged, that fit the file best when it was checked, or else the "
+                         "likeliest by its release name, and only if its text is in that language. It isn't synced; a "
+                         "synced copy, when there is one, is listed instead.")
+        self.assertTrue(rules["Which subtitles are tried first"].endswith(
+            " A subtitle whose text isn't in the language it is listed under (judged by its letters and common words "
+            "once it has about 300 words) is never synced, offered or served as that language."))
+        names = [name for name, _ in explain.RULES]
+        self.assertEqual(names.index("A language with no synced copy is listed with its original"),
+                         names.index("A copy is offered only after it passes the check") + 1)
+
+    def test_the_edition_order_and_usenet_files_in_the_audio_route(self):
+        # The edition sentence (a draft for the owner); the audio route reads Usenet files too
+        rules = dict(explain.RULES)
+        self.assertIn(" A subtitle that names the same edition as the file (Director's Cut, Extended, Theatrical, …) is "
+                      "tried before others of its kind; one that names another edition is tried last. ",
+                      rules["Which subtitles are tried first"])
+        self.assertIn("(the file's index and its subtitle track, usually a few MB; with the audio route, short parts of "
+                      "the sound of a file without a track)", rules["Usenet: only parts of a file, only when you turn it on"])
+        self.assertIn("reads the few MB it needs (more for audio syncs).", explain.QUESTIONS["USENET"][1])
+        self.assertIn("the most it reads of one file, through your debrid service or Usenet:",
+                      explain.QUESTIONS["AUDIO_BUDGET"][1])
+        self.assertNotIn("Usenet, never", rules["Public mode: files without a subtitle track"])
+        self.assertIn("through your own debrid service or Usenet", rules["Public mode: files without a subtitle track"])
+        self.assertIn("(SUBSYNC_AUDIO_AT_ONCE)", rules["Public mode: files without a subtitle track"])
+
     def test_the_real_debrid_rule_gives_the_reason_the_setup_stops_with(self):
         rules = dict(explain.RULES)
         self.assertIn("Remote Traffic", rules["Real-Debrid is never used"])
@@ -73,16 +111,16 @@ APPROVED = {
     "SUBSYNC_USER_FILES_PER_DAY":
         "New files read per person per day (UTC). Files already in the shared store don't count, and neither does "
         "serving a copy. Past it, that person gets only copies the store already has until the next day; nobody else "
-        "is affected. 60 is a long day of episodes; it keeps one person, or a leaked link, from using up the "
-        "service's daily reads.",
+        "is affected. 200 is more than anyone watches in a day, with room for the files apps open without playing "
+        "them; it keeps one person, or a leaked link, from using up the service's daily reads.",
     "SUBSYNC_USER_DAILY_MB":
-        # with the audio route's sentence
+        # with the audio route's sentence; 10,000 and 32 MB
         "Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes "
-        "about 1 MB, a few MB when the track's lines are pictures; 1,000 is 60 files at the most one file's index may "
-        "take (16 MB), so those reads never stop someone before the file limit. With the audio route on, a file synced "
-        "from its sound takes about 60–350 MB, so 1,000 MB covers about three to five a day; such a sync starts only "
-        "when what is left of the day likely covers it, so it rarely stops half-way; if it does, the file waits for "
-        "another pick. Past the limit, that person gets only copies already in the store until the next day.",
+        "about 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's index "
+        "may take (32 MB) with room to spare, so those reads never stop someone before the file limit. A file the "
+        "audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; such a sync "
+        "starts only when what is left of the day likely covers it, so it rarely stops half-way; if it does, the file "
+        "waits for another pick. Past the limit, that person gets only copies already in the store until the next day.",
     "SUBSYNC_MAX_LANGUAGES":
         "How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they "
         "play: its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: "
@@ -120,9 +158,9 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(s.syncs_at_once, available_cpus())
         self.assertEqual(s.active_workers, 100)
         self.assertEqual(s.max_connections, 256)
-        self.assertEqual(s.user_files_per_day, 60)
-        self.assertEqual(s.user_daily_bytes, 1000 * 1024 * 1024)
-        self.assertEqual(s.daily_budget, int(50e9))
+        self.assertEqual(s.user_files_per_day, 200)                  #
+        self.assertEqual(s.user_daily_bytes, 10000 * 1024 * 1024)
+        self.assertEqual(s.daily_budget, int(100e9))                 # 100 GB a day
         self.assertEqual(s.max_users, 200)
 
     def test_the_documented_defaults_are_the_ad446_ones(self):
@@ -130,8 +168,8 @@ class LimitsTest(unittest.TestCase):
             "SUBSYNC_SYNCS_AT_ONCE", "SUBSYNC_ACTIVE_WORKERS", "SUBSYNC_MAX_CONNECTIONS", "SUBSYNC_USER_FILES_PER_DAY",
             "SUBSYNC_USER_DAILY_MB", "SUBSYNC_DAILY_BUDGET_GB")}
         self.assertEqual(documented, {"SUBSYNC_SYNCS_AT_ONCE": "auto", "SUBSYNC_ACTIVE_WORKERS": "100",
-                                      "SUBSYNC_MAX_CONNECTIONS": "256", "SUBSYNC_USER_FILES_PER_DAY": "60",
-                                      "SUBSYNC_USER_DAILY_MB": "1000", "SUBSYNC_DAILY_BUDGET_GB": "50"})
+                                      "SUBSYNC_MAX_CONNECTIONS": "256", "SUBSYNC_USER_FILES_PER_DAY": "200",
+                                      "SUBSYNC_USER_DAILY_MB": "10000", "SUBSYNC_DAILY_BUDGET_GB": "100"})
 
     def test_the_approved_limit_texts(self):
         for name, text in APPROVED.items():
@@ -147,9 +185,19 @@ class LimitsTest(unittest.TestCase):
     def test_no_text_names_an_old_default(self):
         texts = [text for _, text in explain.SETTINGS.values()] + [text for _, text in explain.RULES]
         for text in texts:
-            for old in ("40 is several days", "so 2 suits", "40 files and 500 MB"):
+            for old in ("40 is several days", "so 2 suits", "40 files and 500 MB", "60 files and 1,000 MB",
+                        "60 is a long day", "1,000 is 60 files", "(16 MB)", "Recommended: 16.", "50 is far above"):
                 self.assertNotIn(old, text)
-        self.assertIn("60 files and 1,000 MB", dict(explain.RULES)["Public mode: limits per person"])
+        self.assertIn("200 files and 10,000 MB", dict(explain.RULES)["Public mode: limits per person"])
+
+    def test_the_index_cap_text(self):
+        # 32 MB, and a file whose index is over the cap isn't read again until the cap is raised
+        default, text = explain.SETTINGS["SUBSYNC_INDEX_CAP_MB"]
+        self.assertEqual(default, "32")
+        self.assertIn("Recommended: 32.", text)
+        self.assertIn("A file whose index is larger keeps its original subtitles and isn't read again until the cap is "
+                      "raised.", text)
+        self.assertIn("100 is far above normal use", explain.SETTINGS["SUBSYNC_DAILY_BUDGET_GB"][1])
 
     def test_public_mode_says_setup_turns_it_on(self):
         text = explain.SETTINGS["SUBSYNC_PUBLIC"][1]

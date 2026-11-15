@@ -253,6 +253,31 @@ class SignupTest(unittest.TestCase):
         with self.assertRaises(self.signup.SignupError):
             self.signup.set_languages(self.users, result.token, "Klingon")
 
+    def test_the_answer_for_files_with_no_subtitles_of_their_own(self):
+        # Saved with the record when the instance asks it (its audio route on); one it doesn't offer is refused
+        # before anything is made; without the field, nothing is saved and the person reads "pick"
+        def run(s, **extra):
+            uuid = self.fake.add(viewer(), PASSWORD)
+            return self.signup.signup(s, self.users, self.form(uuid, **extra), api_factory=self.api, timeout=10)
+        env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
+               "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_AUDIO_ROUTE": "on"}
+        on = Settings(env)
+        for answer in ("off", "pick", "open", " Open "):
+            with self.subTest(answer=answer):
+                result = run(on, audio=answer)
+                self.assertEqual(self.users.open(result.token)["audio"], answer.strip().lower())
+        self.assertNotIn("audio", self.users.open(run(on).token))
+        self.assertNotIn("audio", self.users.open(run(self.s, audio="open").token))     # not asked: route off
+        people = self.users.count()
+        for answer, s in (("loud", on), ("", on), ("open", Settings(dict(env, SUBSYNC_USER_OPENED_PER_DAY="0")))):
+            with self.subTest(refused=answer):
+                writes = len(self.fake.writes())
+                with self.assertRaises(self.signup.SignupError) as caught:
+                    run(s, audio=answer)
+                self.assertEqual(caught.exception.field, "audio")
+                self.assertEqual(len(self.fake.writes()), writes)
+        self.assertEqual(self.users.count(), people)
+
     def test_signup_with_prowlarr_naming_the_usenet_engine(self):   # refused before the fix
         _, result = self.run_signup(viewer(services=(TORBOX, AIOS_USENET),
                                            presets=(TORRENTIO, PROWLARR, OSV3, NEWZNAB)))

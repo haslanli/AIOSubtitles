@@ -1,4 +1,4 @@
-"""The source folder's./setup (§6): builds the image here, then runs setup inside it on state/; --update first
+"""The source folder's ./setup: builds the image here, then runs setup inside it on state/; --update first
 fetches the folder's newer commit with git, and a failed build puts the folder back. Real git in throwaway folders
 (the "origin" is a local folder, so nothing leaves this machine); docker and uname are stand-ins."""
 import os

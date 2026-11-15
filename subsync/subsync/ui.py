@@ -211,17 +211,33 @@ def gauge(value, unit, share, full=False):
 
 # ------------------------------------------------------------------------------------------- the installer's parts
 
-def radio_row(name, value, title, text, checked=False, tag=None):
-    """A way to choose, one of a few: the whole row is a radio button; the picked one takes the chosen blue."""
+def radio_row(name, value, title, text, checked=False, tag=None, note=None, invalid=False):
+    """A way to choose, one of a few: the whole row is a radio button; the picked one takes the chosen blue. `text`:
+    its words under the title (none when empty). `note`: words shown under them only while this row is the one
+    picked; the stylesheet hides them otherwise, so it works without the script, and a browser that can't tell shows
+    them. `invalid`: the answer has a problem (its group is described by the problem's message, radio_group)."""
     rid = f"{name}-{value}"
+    refs = described(f"{rid}-help" if text else None, f"{rid}-note" if note else None)
     return (f"<label class=\"way\"><input type=\"radio\" name=\"{e(name)}\" id=\"{e(rid)}\" value=\"{e(value)}\""
-            f"{' checked' if checked else ''} aria-describedby=\"{e(rid)}-help\"><div><div class=\"head\"><b>{e(title)}</b>"
-            + (f"<i>{e(tag)}</i>" if tag else "") + f"</div><span id=\"{e(rid)}-help\">{e(text)}</span></div></label>")
+            f"{' checked' if checked else ''}" + (f" aria-describedby=\"{e(refs)}\"" if refs else "")
+            + (" aria-invalid=\"true\"" if invalid else "")
+            + f"><div><div class=\"head\"><b>{e(title)}</b>" + (f"<i>{e(tag)}</i>" if tag else "") + "</div>"
+            + (f"<span id=\"{e(rid)}-help\">{e(text)}</span>" if text else "")
+            + (f"<span class=\"if-chosen\" id=\"{e(rid)}-note\">{e(note)}</span>" if note else "") + "</div></label>")
 
 
-def radio_group(legend, rows):
-    return (f"<fieldset class=\"ways\"><legend>{e(legend)}</legend><div class=\"options\">" + "".join(rows)
-            + "</div></fieldset>")
+def radio_group(legend, rows, help_text=None, id=None, labelled_by=None, described_by=None, error_id=None):
+    """One of a few ways, as radio rows under their question. `legend`: the question (None: `labelled_by`, the id of
+    a heading that names the group, as a settings row's does); `help_text`: its explanation under the question, named
+    "<id>-help"; `id`: the group's id (a problem's link goes to it); `described_by`: the id of an explanation shown
+    elsewhere on the page; `error_id`: the id of the problem's message (its rows marked `invalid`), read first."""
+    help_id = described_by or (f"{id}-help" if help_text and id else None)
+    refs = described(error_id, help_id)
+    attrs = ((f" id=\"{e(id)}\"" if id else "") + (f" aria-labelledby=\"{e(labelled_by)}\"" if labelled_by else "")
+             + (f" aria-describedby=\"{e(refs)}\"" if refs else ""))
+    return (f"<fieldset class=\"ways\"{attrs}>" + (f"<legend>{e(legend)}</legend>" if legend else "")
+            + (f"<p class=\"help\" id=\"{e(help_id)}\">{e(help_text)}</p>" if help_text and help_id else "")
+            + "<div class=\"options\">" + "".join(rows) + "</div></fieldset>")
 
 
 def step_frame(steps, current, content, rail_label, done=False, back=True):

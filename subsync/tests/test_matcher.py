@@ -344,6 +344,105 @@ class TextConfirmTest(unittest.TestCase):
         self.assertTrue(self.confirm(cand, 200.0)[0])
 
 
+class TextConfirmFewAnchorsTest(unittest.TestCase):
+    """With fewer than 40 anchors in all, a tenth's words alone refuse a copy only with at least 5 anchors in it, or
+    when that part is weak by timing too (the timing gate's weak tenths, matched by time). Kingdom of Heaven DC's English:
+    21-22 anchors read from its PGS track, refused on tenth 3 alone (about 3 anchors), no tenth weak by timing."""
+
+    @staticmethod
+    def errs(total, off, tenth=3, off_s=0.8):
+        """`total` anchors over 0-1000 s: `off` of them in `tenth` with `off_s` errors, the rest 20 ms off in the others."""
+        out = [(tenth * 100.0 + 10.0 + 80.0 * k / max(1, off - 1), off_s, None) for k in range(off)]
+        out += [(0.0, 0.02, None), (1000.0, -0.02, None)]
+        others = [b for b in range(10) if b != tenth]
+        for j in range(total - off - 2):
+            out.append((others[j % 9] * 100.0 + 10.0 + 7.0 * (j // 9), 0.02 if j % 2 else -0.02, None))
+        return sorted(out)
+
+    def confirm(self, total, off, timing_weak=()):
+        errs = self.errs(total, off)
+        self.assertEqual(len(errs), total)
+        return textpair.confirm([{"kind": "line"}] * total, errs, 200.0, timing_weak)
+
+    def test_few_anchors_and_three_off_in_one_tenth_pass(self):
+        ok, why, s = self.confirm(21, 3)
+        self.assertTrue(ok, why)
+        self.assertEqual(s["weak_tenths"], [])
+        self.assertEqual(s["spared_tenths"], [3])
+
+    def test_many_anchors_and_three_off_in_one_tenth_still_refuse(self):
+        ok, why, s = self.confirm(45, 3)
+        self.assertFalse(ok)
+        self.assertEqual(s["weak_tenths"], [3])
+        self.assertIn("part of the runtime", why)
+
+    def test_a_tenth_weak_by_both_refuses(self):
+        ok, _, s = self.confirm(25, 3, timing_weak=[(300.0, 400.0)])
+        self.assertFalse(ok)
+        self.assertEqual(s["weak_tenths"], [3])
+
+    def test_five_off_in_one_tenth_refuse(self):
+        self.assertFalse(self.confirm(25, 5)[0])
+
+    def test_four_off_with_the_timing_sound_pass(self):
+        self.assertTrue(self.confirm(25, 4)[0])
+
+    def test_the_timing_tenths_are_matched_by_time(self):
+        self.assertTrue(self.confirm(25, 3, timing_weak=[(700.0, 800.0)])[0])
+        self.assertFalse(self.confirm(25, 3, timing_weak=[(390.0, 480.0)])[0])     # overlaps the tenth
+
+
+class PipelineFewAnchorsTest(unittest.TestCase):
+    """through judge_copy: the timing being confirmed hands its gate's weak tenths to the word check."""
+
+    def setUp(self):
+        base = dialogue(300, 31)
+        cues = [(s, d) for s, d, _ in base]
+        picks = textpair.pick(cues)
+        lo, hi = cues[picks[0]][0], cues[picks[-1]][0]
+        self.at = lambda s: (s - lo) / (hi - lo)
+        by = {}
+        for i in picks:
+            by.setdefault(min(9, int(self.at(cues[i][0]) * 10)), []).append(i)
+        self.off = [i for i in by[3] if 0.32 < self.at(cues[i][0]) < 0.38][:3]
+        self.assertEqual(len(self.off), 3)
+        keep = {picks[0], picks[-1], *self.off}
+        for b in range(10):
+            if b != 3:
+                keep.update(by[b][:3])
+        self.lines = [(s, d, t if i in keep else "Yes.") for i, (s, d, t) in enumerate(base)]   # words only there
+        self.text = srt([(s + 9.0, s + d + 9.0, t) for s, d, t in self.lines])                   # 9 s off
+        self.index = WordIndex(self.lines)
+
+    def judge(self, moved):
+        """The copy with every line in place, but `moved` {line index: seconds}, judged as a one-shift copy is."""
+        lines = pipeline.parse(self.text)
+        ref = pipeline.choose_reference(self.index, len(lines), "eng")
+        gate, recall = pipeline.reference_gate(ref, len(lines))
+        new = [dict(l, s=s + moved.get(i, 0.0), e=s + d + moved.get(i, 0.0))
+               for i, (l, (s, d, _)) in enumerate(zip(lines, self.lines))]
+        words = pipeline.TextCheck(self.index, ref, lines, "eng", True)
+        out = {"gate_original": pipeline.gate_lines(gate, lines)}
+        return pipeline.judge_copy(out, self.text, lines, new, ref, gate, recall, snap=False, better={}, words=words,
+                                   may_read=True)
+
+    def test_three_anchors_off_with_the_timing_sound_pass(self):
+        r = self.judge({i: 0.8 for i in self.off})
+        self.assertEqual(r["outcome"], "synced", r.get("reason"))
+        self.assertGreaterEqual(r["text"]["anchors"], textpair.MIN_ANCHORS)
+        self.assertLess(r["text"]["anchors"], textpair.FEW_ANCHORS)
+        self.assertEqual(r["text"]["spared_tenths"], [3])
+
+    def test_three_anchors_off_where_the_timing_is_weak_refuse(self):
+        part = {i: 0.35 for i, (s, _, _) in enumerate(self.lines) if 0.3 <= self.at(s) < 0.4}
+        part.update({i: 0.8 for i in self.off})
+        r = self.judge(part)
+        self.assertTrue(r["better"]["pass"])                       # "clearly better" by timing, a 200 ms tenth weak
+        self.assertTrue(r["gate_synced"]["weak_tenths"])
+        self.assertEqual(r["outcome"], "keep_original")
+        self.assertEqual(r["reason"], "a part of the runtime's words disagree with the timing")
+
+
 class TrackWordsReadTest(unittest.TestCase):
     """The track's words read from each line's block (Matroska) or sample (MP4): one bounded read each."""
 

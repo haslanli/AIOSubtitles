@@ -250,7 +250,8 @@ class App:
         if method == 'POST':
             chosen = [code for code in form.get('LANGUAGES', []) if code]
             e.answers['LANGUAGES'] = ', '.join(chosen)
-            e.answers['AUDIO'] = 'yes' if one.get('AUDIO') else 'no'
+            if one.get('AUDIO'):                    # one of three answers; a form without it keeps the last
+                e.answers['AUDIO'] = one['AUDIO']
             if getattr(e, 'usenet_services', None):
                 e.answers['USENET'] = 'yes' if one.get('USENET') else 'no'
             if offer:
@@ -264,7 +265,7 @@ class App:
         filled = e.prefill()
         text = e.answers.get('LANGUAGES') or filled.get('LANGUAGES') or 'English'
         languages = [three for _, _, three in (plan.parse_languages(text)[0] or [])] or ['eng']
-        audio = str(e.answers.get('AUDIO') or filled.get('AUDIO')) == 'yes'
+        audio = plan.audio_answer(e.answers.get('AUDIO') or filled.get('AUDIO')) or 'no'
         usenet = str(e.answers.get('USENET') or filled.get('USENET')) == 'yes' \
             if getattr(e, 'usenet_services', None) else None
         address = e.answers.get('PUBLIC_ADDRESS') or filled.get('PUBLIC_ADDRESS') or \

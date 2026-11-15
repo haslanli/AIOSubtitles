@@ -3,7 +3,8 @@
 Setup writes public mode's lines of state/subsync.env, makes the service's secret once and never shows it, and
 runs subsync on 127.0.0.1 only: the hoster's own web server sends their https address to it; setup shows the one rule
 that needs and checks the address before it says done. No Wyzie Subs key (public mode refuses it); the audio route
-only when the host chooses it, and then only after a person's pick.
+only when the host chooses it, and then each person chooses on their settings page when it starts, with
+its limits asked next.
 """
 import secrets
 import urllib.error
@@ -14,9 +15,9 @@ from installer import limits, plan
 
 LIMITS = limits.hosting(audio=True)
 PORT = plan.SUBSYNC_PORT
-# the audio route's question on this route; its explanation is SUBSYNC_AUDIO_ROUTE's own ((2))
-AUDIO_QUESTION = ('Let people sync files that carry no subtitles of their own, by listening to the audio, when they '
-                  'pick them?')
+# the audio route's question on this route: allow it or remove it completely; its explanation is
+# explain.QUESTIONS['SUBSYNC_AUDIO_ROUTE'], under the setting's own name as the answers file has it
+AUDIO_QUESTION = 'Offer syncing files that have no subtitles of their own, from their audio?'
 ADDRESS_WORDS = 'The web address of your public instance, with https, like https://subtitles.example.com.'   # the address question's own words
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
@@ -58,7 +59,7 @@ def public_env(answers, secret, limit_values):
         'SUBSYNC_SUBSOURCE_KEY': answers.get('SUBSYNC_SUBSOURCE_KEY', ''),
         # whether people may turn Usenet on for themselves (with their own services, through their AIOStreams)
         'SUBSYNC_USENET': 'on' if str(answers.get('SUBSYNC_USENET', '')).lower() in ('yes', 'on', 'true') else 'off',
-        # whether files with no subtitle track of their own are synced from their sound, after a person's pick
+        # whether files with no subtitle track of their own may be synced from their sound, as each person chooses
         'SUBSYNC_AUDIO_ROUTE': 'on' if str(answers.get('SUBSYNC_AUDIO_ROUTE', '')).lower() in ('yes', 'on', 'true')
         else 'off',
     }

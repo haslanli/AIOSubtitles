@@ -33,29 +33,30 @@ AIOS_CONFIG_PASSWORD=
 # still read only once.
 LANGUAGES=English
 
-# Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, unless
-# you often watch such files; most files have a track. Off: those files keep their original subtitles, and subsync
-# reads about 1 MB of each file. On: after you pick such a file's "<Language> (Subsync)" entry, subsync reads short
-# audio parts of it, up to the limit you choose next (1 GB recommended; counted in the daily limit and in your
-# debrid service's traffic), and the copy is there the next time you open the file; files with too high a bitrate
-# for that limit keep their originals.
+# Some files carry no subtitle track, so subsync can time a subtitle to them only by listening to their speech: it
+# reads short parts of the sound (about 60–350 MB a file, at most the audio limit you choose next) and keeps one
+# processor busy for one to three minutes. When I pick the file (recommended with two or more processors): only
+# after you choose the file's "<Language> (Subsync)" entry, so only files you watch are read. As soon as a file is
+# opened: when your app asks for the file's subtitles, so files you only browse or that it prepares next are read
+# too (at most 5 a day). No: those files keep their original subtitles and subsync reads about 1 MB of each.
 AUDIO=no
 
 # Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a second
-# config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it needs.
-# Recommended if you play from Usenet and your indexer's daily limit isn't tight. The cost: at most 10 extra
-# searches a day through your indexers (usually none, because your AIOStreams reuses the search you just made),
-# fetching a release's NZB when your Usenet service doesn't have it yet, and some Usenet data per file (more than
-# the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and everyone who plays
-# the same release, because one sync serves all of them. Off: nothing on Usenet is searched or read.
+# config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it needs
+# (more for audio syncs). Recommended if you play from Usenet and your indexer's daily limit isn't tight. The cost:
+# at most 10 extra searches a day through your indexers (usually none, because your AIOStreams reuses the search you
+# just made), fetching a release's NZB when your Usenet service doesn't have it yet, and some Usenet data per file
+# (more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and everyone
+# who plays the same release, because one sync serves all of them. Off: nothing on Usenet is searched or read.
 USENET=no
 
-# Asked only with the audio route on: the most it reads of one file, through your debrid service: 0.5, 1, 2 or 4 GB.
-# Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, re-encodes); remuxes
-# usually carry image subtitles and need no audio. Higher: very high-quality files such as 4K remuxes get synced
-# too, but each can cost that much data and take longer than the 14 seconds an app waits, so the copy comes the next
-# time you open the file. Lower: less data on a metered connection; more high-bitrate files keep their originals.
-# Smaller files are read only as far as needed. A change makes subsync judge again the files it kept as originals.
+# Asked only with the audio route on: the most it reads of one file, through your debrid service or Usenet: 0.5, 1,
+# 2 or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, re-encodes);
+# remuxes usually carry image subtitles and need no audio. Higher: very high-quality files such as 4K remuxes get
+# synced too, but each can cost that much data and take longer than the 14 seconds an app waits, so the copy comes
+# the next time you open the file. Lower: less data on a metered connection; more high-bitrate files keep their
+# originals. Smaller files are read only as far as needed. A change makes subsync judge again the files it kept as
+# originals.
 AUDIO_BUDGET=1
 
 # Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, which
@@ -116,6 +117,15 @@ TEST_READ=no
 # rule it needs. It goes into every personal link, so choose one you will keep: changing it later breaks the links
 # people already added to their AIOStreams.
 HOST_ADDRESS=
+
+# Off by default. Off removes it completely: no one's audio is read and the pages don't offer it; such files keep
+# their original subtitles. On: each person chooses on their settings page: off, when they pick a file's
+# "(AIOSubtitles)" entry (the default), or as soon as a file is opened. Each sync reads about 60–350 MB of the
+# file's sound through that person's own debrid service or Usenet and keeps about one processor busy for one to
+# three minutes, within the limits you set next. Recommended: on, if your server has two or more processors; one
+# sync serves everyone who plays that file. The reads count in each person's daily data and the service's daily
+# total; nothing goes through Real-Debrid.
+SUBSYNC_AUDIO_ROUTE=no
 
 # Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, leaving
 # your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.

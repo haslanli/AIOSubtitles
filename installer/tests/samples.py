@@ -1,6 +1,6 @@
-"""Every screen and state of the setup page with made-up values, for the tests and the screen checks (the installer
-plan's §8). The rows are the engine's own words with sample values. Returns {name: (html, the values put in)}: the
-values are the only words a screen may show besides the approved ones."""
+"""Every screen and state of the setup page with made-up values, for the tests and the screen checks. The rows are the
+engine's own words with sample values. Returns {name: (html, the values put in)}: the values are the only words a
+screen may show besides the approved ones."""
 from installer import engine, hosting, limits, screens, update
 from subsync import realdebrid
 
@@ -46,11 +46,12 @@ def every_state():
     rd = [('ok', 'Config found', None), ('ok', 'Debrid services: Real-Debrid', None)]
     add('config-rd-only', screens.config(rd, 'x', stop=(realdebrid.REAL_DEBRID_ONLY, engine.RD_WAY_OUT_PAGE)),
         'x', *[r[1] for r in rd], realdebrid.REAL_DEBRID_ONLY, engine.RD_WAY_OUT_PAGE)
-    add('choices', screens.choices(['eng'], False, f'{PUBLIC}/subsync'), f'{PUBLIC}/subsync')
-    add('choices-four', screens.choices(['eng', 'spa', 'rus', 'fre'], True, f'{PUBLIC}/subsync',
+    add('choices', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync'), f'{PUBLIC}/subsync')
+    add('choices-audio-open', screens.choices(['eng'], 'open', f'{PUBLIC}/subsync'), f'{PUBLIC}/subsync')   #
+    add('choices-four', screens.choices(['eng', 'spa', 'rus', 'fre'], 'pick', f'{PUBLIC}/subsync',
                                         offer_opensubtitles=True), f'{PUBLIC}/subsync')
     lang_problem = ('LANGUAGES', '"Klingon" is not a language AIOSubtitles knows.')
-    add('choices-problem', screens.choices(['eng'], False, f'{PUBLIC}/subsync', problem=lang_problem),
+    add('choices-problem', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', problem=lang_problem),
         f'{PUBLIC}/subsync', lang_problem[1])
     add('limits', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50'}))
     add('limits-audio', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'AUDIO_BUDGET': '1'}, audio=True))
@@ -68,9 +69,9 @@ def every_state():
     add('review', screens.review(sections), *words)
     add('review-sign-in', screens.review(sections, cache=True, sign_in=True), *words)
     # Usenet: the question, its stop, its number, the third config, a Usenet-only config, the check line
-    add('choices-usenet', screens.choices(['eng'], False, f'{PUBLIC}/subsync', usenet=True), f'{PUBLIC}/subsync')
+    add('choices-usenet', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', usenet=True), f'{PUBLIC}/subsync')
     no_usenet = (engine.NO_USENET, engine.NO_USENET_WAY_OUT_PAGE)
-    add('choices-usenet-stop', screens.choices(['eng'], False, f'{PUBLIC}/subsync', usenet=False, stop=no_usenet),
+    add('choices-usenet-stop', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', usenet=False, stop=no_usenet),
         f'{PUBLIC}/subsync', *no_usenet)
     add('limits-usenet', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50',
                                                      'SUBSYNC_USENET_LISTINGS_PER_DAY': '10'}, usenet=True))
@@ -127,6 +128,9 @@ def every_state():
     add('host-limits', screens.limits('host', {}))
     add('host-limits-usenet', screens.limits('host', {}, usenet=True))
     add('host-limits-audio', screens.limits('host', {}, usenet=True, audio=True))                 #
+    places = ('SUBSYNC_AUDIO_AT_ONCE', 'A whole number from 1 to 4 (the files synced at a time), or auto.')
+    add('host-limits-audio-problem', screens.limits('host', {'SUBSYNC_AUDIO_AT_ONCE': '5'}, problem=places, audio=True),
+        '5', places[1])                                                                          #
     add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'},
                                               problem=('SUBSYNC_SYNCS_AT_ONCE', 'A whole number from 1, or auto.')),
         'A whole number from 1, or auto.')

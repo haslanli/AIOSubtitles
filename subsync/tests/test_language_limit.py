@@ -16,11 +16,12 @@ try:
 except ImportError:
     HAVE_CRYPTOGRAPHY = False
 
-# T1 rewritten with the installer plan (T3)
-T1 = ("How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they "
-      "play: its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: 4, "
-      "the most the pages offer; lower it only when the server can't keep up. A lower limit applies when people next "
-      "save their languages; until then they keep the ones they have.")
+# the approved text, rewritten with the installer plan
+MAX_LANGUAGES_TEXT = (
+    "How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they "
+    "play: its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: 4, "
+    "the most the pages offer; lower it only when the server can't keep up. A lower limit applies when people next "
+    "save their languages; until then they keep the ones they have.")
 TODAY = explain.PUBLIC_FIELDS["languages"]
 ONE = ("The language you want synced subtitles in, like English. It gets up to three synced choices for every file you "
        "play. You can change it later; a change applies from the next file you play.")
@@ -45,7 +46,7 @@ class SettingTest(unittest.TestCase):
                 self.assertIn("SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.", s.conflicts())
 
     def test_explanation_t1(self):
-        self.assertEqual(explain.SETTINGS["SUBSYNC_MAX_LANGUAGES"], ("4", T1))
+        self.assertEqual(explain.SETTINGS["SUBSYNC_MAX_LANGUAGES"], ("4", MAX_LANGUAGES_TEXT))
         group = dict(explain.GROUPS)["Public mode (one service for many people)"]
         self.assertIn("SUBSYNC_MAX_LANGUAGES", group)
 

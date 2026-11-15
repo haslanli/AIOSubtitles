@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FIXTURES, RangeServer, TempDir  # noqa: E402
+from helpers import FIXTURES, FakeDownloads, RangeServer, TempDir, dialogue_srt, local_network_only  # noqa: E402
 from subsync import audiofit  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -104,11 +104,10 @@ class StartTest(unittest.TestCase):
     def test_public_mode_starts_with_the_audio_route_on(self):
         self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on"}).conflicts(), [])
 
-    def test_public_mode_refuses_the_audio_route_on_any_request(self):
-        out = Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_ON_PICK": "off"}).conflicts()
-        self.assertEqual(len(out), 1)
-        self.assertIn("SUBSYNC_AUDIO_ON_PICK=on", out[0])
-        # off route, or self-hosted: on-pick off is allowed as before
+    def test_the_instances_on_pick_setting_no_longer_stops_public_mode(self):
+        # Each person's own choice replaces it (had refused it off); test_audio_choice has the rest
+        self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on",
+                                   "SUBSYNC_AUDIO_ON_PICK": "off"}).conflicts(), [])
         self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ON_PICK": "off"}).conflicts(), [])
         self.assertEqual(Settings({"SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_ON_PICK": "off"}).conflicts(), [])
 
@@ -228,7 +227,7 @@ class OwnFirstPassTest(Base):
         self.assertEqual([(j.alias, j.audio) for j in b.jobs.values()], [(ALIAS, False)])
 
     def test_also_when_its_languages_were_judged_without_the_audio_route(self):
-        # a Usenet pass of the same file (or one with the route off) marks its languages judged: no copy came of it
+        # a pass with the route off marks its languages judged: no copy came of it
         self.read_lately(False)
         b = self.worker(Limits(who="b" * 16))
         self.store.judged_put(self.FILE, ["eng"], b.s.rule_id)
@@ -236,7 +235,7 @@ class OwnFirstPassTest(Base):
         self.assertEqual([(j.alias, j.audio) for j in b.jobs.values()], [(ALIAS, False)])
         b.jobs.clear()
         b.queue.clear()
-        b.unpickable[ALIAS] = time.time()       # this person's own pass found it can't be picked: not again for an hour
+        b.s.audio_when = "off"                  # someone whose choice is off can't pick or open it: no pass
         self.app(b).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
         self.assertEqual(len(b.jobs), 0)
 
@@ -299,8 +298,8 @@ class RoomTest(Base):
         self.assertEqual(len(w.jobs), 0)
 
     def test_the_room_counts_a_margin_over_the_planned_windows(self):
-        # T2: a file read up to 2.44 times its planned windows (each subtitle places its own);: 2.5 times,
-        # at most the per-file limit, plus the index
+        # a test run read a file up to 2.44 times its planned windows (each subtitle places its own), so the
+        # limit is 2.5 times, at most the per-file limit, plus the index
         self.facts()
         w = self.waiting(Limits())
         self.assertEqual(w._audio_need(ALIAS), int(2.5 * 315_000_000) + 1_000_000)
@@ -442,43 +441,107 @@ class CopyFromTheStoreTest(Base):
         self.assertEqual(app.text_of(key), SYNCED)
 
 
-# ----------------------------------------------------------------------------------------------- the texts ((2))
+class OriginalEntryPublicTest(Base):
+    """The "(original)" entry in public mode: its address names only the file; its download
+    serves the subtitle from the downloading person's own list, never another person's address or text."""
+    FILE = "f" * 16 + "-5"
+    A_URL, B_URL, B_OTHER = "https://a.test/c1.srt", "https://b.test/c1.srt", "https://b.test/c9.srt"
 
+    def setUp(self):
+        super().setUp()
+        self.downloads = FakeDownloads({self.A_URL: dialogue_srt("eng"), self.B_URL: dialogue_srt("eng", start=31.0),
+                                        self.B_OTHER: dialogue_srt("eng", start=32.0)})
+        for patcher in (self.downloads.patch(), local_network_only()):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.store = Store(os.path.join(self.dir, "public"), keep_texts=False)
+        a = self.worker(Limits(who="a" * 16), Listing(subtitles=[{"id": "c1", "url": self.A_URL, "lang": "eng"}]))
+        a._candidates(job(), dict(job().hints))           # person A's list, and A's judging kept c1
+        a._set_originals(ALIAS, [{"id": "c1", "url": self.A_URL, "lang": "eng"}], "b.mp4", None)
+        rule = a.s.rule_id
+        self.store.file_read(self.FILE, 5, "f" * 16, True, {"rule": rule, "reference": True})
+        self.store.alias(ALIAS, self.FILE)
+        self.store.judged_put(self.FILE, ["eng"], rule)
+        self.store.kept_original_put(self.FILE, "eng", "c1", 0.6)
+
+    def download(self, app, url):
+        import urllib.request
+        from subsync.addon import serve
+        server = serve(app, 0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            path = url.replace("http://x.test", f"http://127.0.0.1:{server.server_address[1]}")
+            with urllib.request.urlopen(path, timeout=10) as r:
+                return r.read().decode()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def person_b(self, *subs):
+        from subsync.addon import App
+        b = self.worker(Limits(who="b" * 16), Listing(subtitles=list(subs)))
+        return b, App(b.s, self.store, b, Safety())
+
+    def test_your_entry_serves_the_subtitle_from_your_own_list(self):
+        import json
+        b, app = self.person_b({"id": "c1", "url": self.B_URL, "lang": "eng"})
+        subs = app.subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual([(s["label"], s["variantOf"]) for s in subs], [("English (original)", "c1")])
+        self.assertNotIn("a.test", json.dumps(subs))
+        self.assertEqual(len(b.jobs), 0)                                    # judged lately: nothing queued
+        self.assertEqual(self.download(app, subs[0]["url"]), dialogue_srt("eng", start=31.0))
+        self.assertNotIn(self.A_URL, self.downloads.asked)
+        self.assertEqual(len(b.jobs), 0)
+
+    def test_without_that_subtitle_in_your_list_your_own_likeliest_one(self):
+        b, app = self.person_b({"id": "c9", "url": self.B_OTHER, "lang": "eng"})
+        subs = app.subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual(self.download(app, subs[0]["url"]), dialogue_srt("eng", start=32.0))
+        self.assertEqual(self.downloads.asked, [self.B_OTHER])
+
+
+# --------------------------------------------------------------------------------------------------- the texts
+
+# The audio route as each person chooses it, Usenet included (drafts shown again with the rest (6))
 T_A1 = ("Your answer to ./setup's audio question, on or off: whether files with no subtitle track of their own are synced "
-        "from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each, only after someone picks their "
-        "\"(Subsync)\" entry (\"(AIOSubtitles)\" on a public instance). Recommended: off on your own install unless you "
-        "often watch such files; on a public instance, on if the server has two or more processors. Off: they keep "
-        "their original subtitles and subsync reads about 1 MB per file. On a public instance each person's audio reads "
-        "go through their own debrid service and count in their daily data, and one sync serves everyone who plays the "
-        "same file.")
-T_A2 = ("On a public instance it must stay on: AIOSubtitles doesn't start with it off, so nobody's audio is read for a "
-        "file they only opened.")
-# the two public-instance additions kept short, so each explanation stays within 125 words ((2))
-T_A3 = "runs audio syncs only after a pick,"
+        "from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each, after someone picks their "
+        "\"(Subsync)\" entry or, with SUBSYNC_AUDIO_WHEN=open, as soon as they are opened; on a public instance each "
+        "person chooses. Recommended: off on your own install unless you often watch such files; on a public instance, "
+        "on if the server has two or more processors. Off: they keep their original subtitles and subsync reads about 1 "
+        "MB per file. On a public instance each person's audio reads go through their own debrid service or Usenet and "
+        "count in their daily data, and one sync serves everyone who plays the same file.")
+T_A2 = ("The setting SUBSYNC_AUDIO_WHEN replaced, still read while that one isn't set: on means pick, off means open. "
+        "Recommended: leave it out and set SUBSYNC_AUDIO_WHEN instead. A public instance ignores both: each person "
+        "chooses on their settings page.")
+# the two public-instance additions kept short, so each explanation stays within 125 words
+T_A3 = "lets each person choose their audio syncs,"
 T_A4 = "On a public instance it counts in each person's daily data (SUBSYNC_USER_DAILY_MB)."
 T_A5 = ("Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes "
-        "about 1 MB, a few MB when the track's lines are pictures; 1,000 is 60 files at the most one file's index may "
-        "take (16 MB), so those reads never stop someone before the file limit. With the audio route on, a file synced "
-        "from its sound takes about 60–350 MB, so 1,000 MB covers about three to five a day; such a sync starts "
-        "only when what is left of the day likely covers it, so it rarely stops half-way; if it does, the file waits "
-        "for another pick. Past the limit, that person gets only copies already in the store until the next day.")
-T_A6 = ("With the audio route on, a file with no usable subtitle track of its own is synced from its sound only after "
-        "you pick its \"<Language> (AIOSubtitles)\" entry: never for a file you only open or browse, never "
-        "in the background, never for a file played from Usenet, never through Real-Debrid. AIOSubtitles then reads "
-        "short parts of the file's sound through your own debrid service, about 60–350 MB and at most the instance's "
-        "audio limit, and works for one to three minutes; your app gets the original subtitle at once, and the synced "
-        "copy is there the next time you open the file, for everyone who plays it. It starts only when your day's data "
-        "and the service's likely have room, so it rarely stops half-way; otherwise, or if it does, the file waits for "
-        "another pick. "
-        "The service syncs one such file at a time per two processors, so with two or more, other files "
-        "aren't held up.")
-T_A9 = ("A file with no subtitle track of its own is synced from its sound, only after you pick its \"(AIOSubtitles)\" "
-        "entry: that reads about 60–350 MB of it through your debrid service, and the copy is there the next time you "
-        "open the file.")
-T_A10 = ("; for a file with no subtitle track of its own, only after you pick its \"(AIOSubtitles)\" entry, short parts "
-         "of its sound (about 60–350 MB, at most 1 GB), used only to time the subtitles and not kept;")
-T_A11 = ("A file with no subtitle track of its own takes one to three minutes after you pick its \"(AIOSubtitles)\" "
-         "entry; its copy is there the next time you open it.")
+        "about 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's index "
+        "may take (32 MB) with room to spare, so those reads never stop someone before the file limit. A file the "
+        "audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; such a sync "
+        "starts only when what is left of the day likely covers it, so it rarely stops half-way; if it does, the file "
+        "waits for another pick. Past the limit, that person gets only copies already in the store until the next day.")
+# Each person chooses (off, on their pick, as soon as a file is opened), Usenet files too, the instance's number
+# of audio syncs at once
+T_A6 = ("With the audio route on, a file with no usable subtitle track can be synced from its sound, as you choose on "
+        "your settings page: off; after you pick its \"<Language> (AIOSubtitles)\" entry (the default); or, where the "
+        "instance offers it, as soon as your app asks for its subtitles, if no synced copy exists and a subtitle exists "
+        "to fit. Never through Real-Debrid. AIOSubtitles reads short parts of the sound through your own debrid service "
+        "or Usenet, about 60–350 MB, at most the instance's audio limit, and works one to three minutes; your app gets "
+        "the original at once, and the synced copy is there next time, for everyone who plays the file. It "
+        "starts only when your day's data and audio syncs, and the service's data, likely have room; otherwise, or if it "
+        "stops half-way, the file waits for another pick. The service runs a set number of these at once "
+        "(SUBSYNC_AUDIO_AT_ONCE), so other files aren't held up.")
+T_A9 = ("A file with no subtitle track of its own can be synced from its sound, when you choose: by default only after "
+        "you pick its \"(AIOSubtitles)\" entry. That reads about 60–350 MB of it through your debrid service or Usenet, "
+        "and the copy is there the next time you open the file.")
+T_A10 = ("; for a file with no subtitle track of its own, as you choose on your settings page (by default only after you "
+         "pick its \"(AIOSubtitles)\" entry), short parts of its sound (about 60–350 MB, at most 1 GB) through your own "
+         "debrid service or Usenet, used only to time the subtitles and not kept;")
+T_A11 = ("A file with no subtitle track of its own takes one to three minutes once its sync from the sound starts (by "
+         "default after you pick its \"(AIOSubtitles)\" entry; you choose on your settings page); its copy is there the "
+         "next time you open it.")
 
 
 class TextsTest(unittest.TestCase):
@@ -489,7 +552,7 @@ class TextsTest(unittest.TestCase):
 
     def test_the_settings_say_how_the_audio_route_works_on_a_public_instance(self):
         self.assertEqual(self.settings["SUBSYNC_AUDIO_ROUTE"], T_A1)
-        self.assertTrue(self.settings["SUBSYNC_AUDIO_ON_PICK"].endswith(" " + T_A2))
+        self.assertEqual(self.settings["SUBSYNC_AUDIO_ON_PICK"], T_A2)
         self.assertNotIn("keeps the audio route off", self.settings["SUBSYNC_PUBLIC"])
         self.assertIn("SUBSYNC_PUBLIC_BASE, " + T_A3 + " and shares", self.settings["SUBSYNC_PUBLIC"])
         self.assertTrue(self.settings["SUBSYNC_AUDIO_BUDGET_GB"].endswith(" " + T_A4))
@@ -596,9 +659,10 @@ class PublicStartTest(Base):
     def test_the_start_line_says_whether_and_how_the_audio_route_runs(self):
         from subsync.__main__ import public_start_line
         on = public_start_line(self.settings(SUBSYNC_TRUSTED_PROXY="gateway, 127.0.0.1"), 2, 1)
-        self.assertIn("2 files at once; audio route on after a pick, up to 1 GB a file, 1 at a time;", on)
+        self.assertIn("2 files at once; audio route allowed: each person off / on pick / when opened, up to 1 GB a file, "
+                      "1 at a time, 20 a person a day (5 opened);", on)
         half = public_start_line(self.settings(SUBSYNC_AUDIO_BUDGET_GB="0.5"), 4, 2)
-        self.assertIn("audio route on after a pick, up to 0.5 GB a file, 2 at a time", half)
+        self.assertIn("up to 0.5 GB a file, 2 at a time", half)
         self.assertIn("audio route off", public_start_line(self.settings(SUBSYNC_AUDIO_ROUTE="off"), 1, 1))
         self.assertIn("1 file at once", public_start_line(self.settings(SUBSYNC_AUDIO_ROUTE="off"), 1, 1))
 
@@ -634,11 +698,11 @@ class PoolTest(unittest.TestCase):
         self.addCleanup(pool.close)
         return pool
 
-    def test_each_person_gets_the_instances_audio_route_only_after_a_pick(self):
+    def test_each_person_gets_the_instances_audio_route_after_a_pick_unless_they_chose_otherwise(self):
         from subsync.public import user_settings
         s = user_settings(dict(self.env, SUBSYNC_AUDIO_ON_PICK="off"), record(), self.tokens[0])
         self.assertTrue(s.audio_route)
-        self.assertTrue(s.audio_on_pick)                     # never on a plain request, whatever the environment says
+        self.assertEqual(s.audio_choice, "pick")             # their own choice, never the environment's
         self.assertEqual(s.audio_budget, 500_000_000)
         self.assertFalse(user_settings(dict(self.env, SUBSYNC_AUDIO_ROUTE="off"), record(), self.tokens[0]).audio_route)
 

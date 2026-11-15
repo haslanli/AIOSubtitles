@@ -27,10 +27,10 @@ D3, D5. Speech-run ends: a subtitle's line ends trail the speech by its author's
 minimum display), unknown in advance, so an end can't move a whole fit; but where the fit changes shift, the line after
 which it changes is chosen by onsets and ends alike, each end measured against the subtitle's own lag (the median of its
 ends against speech-run ends under the fit; END_WEIGHT an end). The held-out check counts onsets only. Close
-calls: when the first verdict keeps the original with held-out numbers within CLOSE of's, or passes on fewer than
-CLOSE_MATCHED matched lines, or a shift change rests on fewer than 2 fit windows, up to `extra` more windows (two
-thirds held-out, a third fit windows, in the largest gaps between the windows read) are read, 4 at a time, as many as
-the audio budget leaves, and the file is judged again on all of them; that verdict is the result.
+calls: when the first verdict keeps the original with held-out numbers within CLOSE of the pass numbers, or
+passes on fewer than CLOSE_MATCHED matched lines, or a shift change rests on fewer than 2 fit windows, up to `extra`
+more windows (two thirds held-out, a third fit windows, in the largest gaps between the windows read) are read, 4 at a
+time, as many as the audio budget leaves, and the file is judged again on all of them; that verdict is the result.
 """
 import bisect
 import statistics
@@ -52,7 +52,7 @@ MIN_WINDOW_LINES = 5  # a window whose usual place holds fewer of the subtitle's
 COST = 1.25         # a window's read costs about 1.25 x its length at the average byte rate (Cues, interleaving)
 PARALLEL_READS = 4  # planned windows read at once (AudioFit.prefetch)
 END_WEIGHT = 0.5    # a line end that lands counts half an onset where a shift change is placed
-CLOSE = 0.2         # a verdict within 20 % of's numbers is a close call
+CLOSE = 0.2         # a verdict within 20 % of the pass numbers is a close call
 CLOSE_MATCHED = 40  # a pass on fewer matched lines is a close call
 
 

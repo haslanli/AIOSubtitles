@@ -1,5 +1,5 @@
 """Setup's Docker work from inside its container: the helper on the machine's network, joining AIOStreams'
-network, the ownership check (OD18), the new version's start check, and putting a database copy back."""
+network, the ownership check, the new version's start check, and putting a database copy back."""
 import base64
 import io
 import json
@@ -78,7 +78,7 @@ class Join(unittest.TestCase):
 
 
 class Guard(unittest.TestCase):
-    """What Docker has under setup's names that this install didn't make (OD18)."""
+    """What Docker has under setup's names that this install didn't make."""
 
     def docker(self, containers='', volumes='', networks=''):
         def listing(text):

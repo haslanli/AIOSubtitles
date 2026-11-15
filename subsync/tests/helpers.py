@@ -306,3 +306,62 @@ class FakeAiostreams:
     def close(self):
         self.server.shutdown()
         self.server.server_close()
+
+
+# Ten lines of everyday dialogue per language, written for these tests (the language check)
+DIALOGUE = {
+    "eng": ["I don't know what you want from me.", "We have to go back to the house before it gets dark.",
+            "Is that your car out there?", "She said she would call him when they got home.",
+            "Come on, just tell me the truth.", "Why are you looking at me like that?",
+            "There is nothing left for us here.", "Okay, let's get out of here now.", "He was right about all of it.",
+            "I think we should wait for them."],
+    "spa": ["No sé qué quieres de mí.", "Tenemos que volver a la casa antes de que oscurezca.",
+            "¿Es tu coche el que está ahí fuera?", "Ella dijo que lo llamaría cuando llegaran a casa.",
+            "Vamos, dime la verdad.", "¿Por qué me miras así?", "Ya no hay nada para nosotros aquí.",
+            "Bueno, vámonos de aquí ahora.", "Él tenía razón en todo eso.", "Yo creo que debemos esperar a los demás."],
+    "vie": ["Tôi không biết anh muốn gì ở tôi.", "Chúng ta phải về nhà trước khi trời tối.",
+            "Đó có phải là xe của anh ở ngoài kia không?", "Cô ấy nói sẽ gọi cho anh ta khi họ về đến nhà.",
+            "Thôi nào, cứ nói thật với tôi đi.", "Sao anh lại nhìn tôi như vậy?",
+            "Ở đây không còn gì cho chúng ta nữa.", "Được rồi, chúng ta đi khỏi đây thôi.",
+            "Ông ấy đã đúng về tất cả mọi chuyện.", "Tôi nghĩ chúng ta nên đợi họ."],
+    "rus": ["Я не знаю, чего ты от меня хочешь.", "Нам нужно вернуться домой, пока не стемнело.",
+            "Это твоя машина там снаружи?", "Она сказала, что позвонит ему, когда они вернутся домой.",
+            "Ну же, просто скажи мне правду.", "Почему ты так на меня смотришь?",
+            "Здесь для нас больше ничего не осталось.", "Ладно, давай уйдём отсюда.", "Он был прав во всём.",
+            "Я думаю, нам стоит их подождать."],
+}
+
+
+def dialogue_srt(lang, n=120, start=30.0, step=3.0):
+    """An SRT of `n` lines of DIALOGUE[lang] in turn (at least 300 words from n=60 on), one every `step` seconds."""
+    out = []
+    for i in range(n):
+        s = start + i * step
+        out.append(f"{i + 1}\n{_ts(s)} --> {_ts(s + 2.0)}\n{DIALOGUE[lang][i % len(DIALOGUE[lang])]}\n")
+    return "\n".join(out)
+
+
+def _ts(t):
+    ms = int(round(t * 1000))
+    return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
+
+
+class FakeDownloads:
+    """subsync.worker.fetch_subtitle for tests: the bytes of each known address, a failure for any other; every
+    address asked is recorded in `asked`. `hold` (a threading.Event), when set on an address, makes its download wait
+    for it."""
+
+    def __init__(self, files=None):
+        self.files = {url: (text.encode("utf-8") if isinstance(text, str) else text) for url, text in (files or {}).items()}
+        self.asked, self.hold = [], {}
+
+    def __call__(self, url, timeout=30, headers=None):
+        self.asked.append(url)
+        if url in self.hold:
+            self.hold[url].wait(10)
+        if url not in self.files:
+            raise OSError("no such subtitle")
+        return self.files[url]
+
+    def patch(self):
+        return mock.patch("subsync.worker.fetch_subtitle", self)

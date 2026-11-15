@@ -13,6 +13,9 @@ aliases    file hints (AIOS videoHash, or file name + size) -> file key, so a li
 budget     bytes received per UTC day
 pickable   files that wait for the viewer's pick before the audio route may start (kept across a restart)
 originals  per file hint: the original subtitle per language (the pick entries' fallback, kept across a restart)
+over_cap   per file hint: the byte cap a job of the file stopped at; it isn't read again under that cap
+kept_original  per (file, language) with nothing passing: the original its "<Language> (original)" entry serves,
+           by candidate id (none when every subtitle of the language is in another language), and its measure
 
 In public mode (keep_texts=False) no subtitle text is kept: a synced row stores how its copy was made from the
 original (subs.timing_recipe: new timings only) under recipes/, and each person's copy is rebuilt from the original their
@@ -20,7 +23,9 @@ own list gives (addon.App.text_of), because the subtitle sites' terms don't allo
 others.
 
 Lifetimes: synced/in_sync rows live 180 days after last served; keep_original is retried after 30 days
-(or when ALGO_VERSION changes, which changes the key); read_failed backs off 1 h / 6 h / 24 h, then stops.
+(or when ALGO_VERSION changes, which changes the key), and a kept_original row goes after 30 days unless the file is
+judged again; a file that couldn't be read backs off 10 min / 1 h / 6 h / 24 h, a refused one (and one neither
+MKV nor MP4, or a Usenet file) 1 h / 6 h / 24 h, then it stops.
 """
 import gzip
 import json
@@ -38,7 +43,9 @@ log = logging.getLogger("subsync.store")
 DAY = 86400
 KEEP_SERVED_S = 180 * DAY
 RETRY_KEEP_ORIGINAL_S = 30 * DAY
-READ_FAILED_BACKOFF_S = (3600, 6 * 3600, 24 * 3600)
+READ_FAILED_BACKOFF_S = (600, 3600, 6 * 3600, 24 * 3600)   # a file that couldn't be read
+# a refused file, one neither MKV nor MP4, and a Usenet file whose first read failed: an hour first, as before
+REFUSED_BACKOFF_S = (3600, 6 * 3600, 24 * 3600)
 KEEP_PICKABLE_S = 7 * DAY
 JUDGED_FOR_S = DAY            # a file judged for every language asked within this long is not read again
 
@@ -65,6 +72,9 @@ CREATE TABLE IF NOT EXISTS offers (file_key TEXT NOT NULL, lang TEXT NOT NULL, p
 CREATE TABLE IF NOT EXISTS judged (file_key TEXT NOT NULL, lang TEXT NOT NULL, rule TEXT NOT NULL, at REAL NOT NULL,
   PRIMARY KEY (file_key, lang));
 CREATE TABLE IF NOT EXISTS usenet_misses (key TEXT PRIMARY KEY, at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS over_cap (alias TEXT PRIMARY KEY, cap INTEGER NOT NULL, at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS kept_original (file_key TEXT NOT NULL, lang TEXT NOT NULL, candidate_id TEXT, measure REAL,
+  at REAL NOT NULL, PRIMARY KEY (file_key, lang));
 """
 USENET_MISSES_KEPT_S = 2 * DAY
 
@@ -132,7 +142,7 @@ class Store:
             for root, _, names in os.walk(os.path.join(self.root, "bodies")):
                 for n in names:
                     os.remove(os.path.join(root, n))
-        if keys or texts:   # counted before anything was removed ('s start said 0 texts for 21)
+        if keys or texts:   # counted before anything was removed (at the first deploy it said 0 texts for 21)
             log.info("public mode: %d stored subtitle text%s dropped (%d row%s to judge again)", texts,
                      "" if texts == 1 else "s", len(keys), "" if len(keys) == 1 else "s")
         return len(keys)
@@ -200,8 +210,19 @@ class Store:
             elif outcome == "in_sync" and rank == 0 and offer:
                 # the subtitle a viewer sees first is fine as it is: no synced copy to offer
                 self.db.execute("DELETE FROM last_good WHERE file_key=? AND lang=?", (file_key, lang))
+            elif outcome == "keep_original":
+                # judged again and no longer passing (another pass rule, the language check): no longer offered
+                self.db.execute("DELETE FROM last_good WHERE key=?", (key,))
+                self.db.execute("DELETE FROM offers WHERE key=?", (key,))
         self.enforce_cap()
         return key
+
+    def results_of(self, file_key, lang):
+        """Every stored result of a file and language: candidate_id, outcome, reason, detail."""
+        with self.lock:
+            rows = self.db.execute("SELECT candidate_id, outcome, reason, detail FROM results WHERE file_key=? AND lang=?",
+                                   (file_key, lang)).fetchall()
+        return [{"candidate_id": c, "outcome": o, "reason": r, "detail": json.loads(d or "{}")} for c, o, r, d in rows]
 
     def last_good(self, file_key, lang):
         with self.lock:
@@ -270,13 +291,14 @@ class Store:
             row = self.db.execute("SELECT detail FROM files WHERE file_key=?", (file_key,)).fetchone()
         return json.loads(row[0] or "{}") if row else None
 
-    def file_failed(self, alias):
-        """A read failure for a file (by alias, since a file that can't be read has no hash): 1 h / 6 h / 24 h,
-        then never again. Returns the retry time, or None when it stops."""
+    def file_failed(self, alias, backoff=READ_FAILED_BACKOFF_S):
+        """A read failure for a file (by alias, since a file that can't be read has no hash): the waits of `backoff`
+        in turn (10 min / 1 h / 6 h / 24 h; REFUSED_BACKOFF_S 1 h / 6 h / 24 h), then never again. Returns the retry
+        time, or None when it stops."""
         with self.lock:
             row = self.db.execute("SELECT fails FROM files WHERE file_key=?", (alias,)).fetchone()
             fails = (row[0] if row else 0) + 1
-            retry = self.clock() + READ_FAILED_BACKOFF_S[fails - 1] if fails <= len(READ_FAILED_BACKOFF_S) else None
+            retry = self.clock() + backoff[fails - 1] if fails <= len(backoff) else None
             self.db.execute("INSERT OR REPLACE INTO files (file_key, fails, retry_at, read_at) VALUES (?,?,?,?)",
                             (alias, fails, retry if retry is not None else float("inf"), self.clock()))
         return retry
@@ -285,6 +307,35 @@ class Store:
         with self.lock:
             row = self.db.execute("SELECT retry_at FROM files WHERE file_key=? AND fails>0", (alias,)).fetchone()
         return bool(row and row[0] is not None and row[0] > self.clock())
+
+    # -- a file over the job's byte cap -------------------------------------------------------------
+    def cap_reached(self, alias, cap):
+        """A job of the file (by alias, since its index wasn't read) stopped at this byte cap. A new table, so an older
+        image still opens the store."""
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO over_cap VALUES (?,?,?)", (alias, int(cap), self.clock()))
+
+    def over_cap(self, alias):
+        """The byte cap a job of the file stopped at, or None."""
+        with self.lock:
+            row = self.db.execute("SELECT cap FROM over_cap WHERE alias=?", (alias,)).fetchone()
+        return row[0] if row else None
+
+    # -- the original kept for a file and language with nothing passing ------------------------------------
+    def kept_original_put(self, file_key, lang, candidate_id, measure=None):
+        """The original a file's "<Language> (original)" entry serves: a candidate id (None: every subtitle of the
+        language is in another language) and its measure (its share of lines within 200 ms as it is; None for the
+        likeliest by name). A new table, so an older image still opens the store."""
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO kept_original VALUES (?,?,?,?,?)",
+                            (file_key, lang, candidate_id, measure, self.clock()))
+
+    def kept_original(self, file_key, lang):
+        """{"candidate_id", "measure", "at"} or None."""
+        with self.lock:
+            row = self.db.execute("SELECT candidate_id, measure, at FROM kept_original WHERE file_key=? AND lang=?",
+                                  (file_key, lang)).fetchone()
+        return {"candidate_id": row[0], "measure": row[1], "at": row[2]} if row else None
 
     # -- Usenet: a file not found there ---------------------------------------------------------------------------
     def usenet_missed(self, key):
@@ -408,6 +459,7 @@ class Store:
             self.db.execute("DELETE FROM pickable WHERE created < ?", (now - KEEP_PICKABLE_S,))
             self.db.execute("DELETE FROM originals WHERE updated < ?", (now - KEEP_PICKABLE_S,))
             self.db.execute("DELETE FROM judged WHERE at < ?", (now - 2 * JUDGED_FOR_S,))
+            self.db.execute("DELETE FROM kept_original WHERE at < ?", (now - RETRY_KEEP_ORIGINAL_S,))
         return len(old)
 
     def stats(self):

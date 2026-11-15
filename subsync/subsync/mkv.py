@@ -126,7 +126,7 @@ def uncompressed(payload, comp):
 
 
 def read_lines(want, one):
-    """D1,: `one(item)` -> (start, a line's text or block payload, or None) for each item, WORD_READS_AT_ONCE
+    """D1: `one(item)` -> (start, a line's text or block payload, or None) for each item, WORD_READS_AT_ONCE
     at once; {start: value}. A refused read or a stopped job ends every read not started yet and is raised (`one`
     raises it and sets `stop` itself)."""
     from .reader import Refused, Stopped

@@ -21,8 +21,8 @@ class PublicSettingsTest(unittest.TestCase):
         self.assertEqual(s.invite, "")
         self.assertEqual(s.max_users, 200)
         self.assertEqual(s.signups_per_hour, 5)
-        self.assertEqual(s.user_files_per_day, 60)
-        self.assertEqual(s.user_daily_bytes, 1000 * 1024 * 1024)
+        self.assertEqual(s.user_files_per_day, 200)                  #
+        self.assertEqual(s.user_daily_bytes, 10000 * 1024 * 1024)
         self.assertEqual(s.user_queue, 3)
         self.assertEqual(s.active_workers, 100)
         self.assertEqual(s.worker_idle_s, 1800)
@@ -110,12 +110,13 @@ class PublicSettingsTest(unittest.TestCase):
         self.assertEqual(Settings({}).missing(),
                          ["SUBSYNC_SOURCE_MANIFEST", "SUBSYNC_SOURCE_PASSWORD", "SUBSYNC_PUBLIC_BASE"])
 
-    def test_the_audio_route_in_public_mode_only_after_a_pick(self):
-        # Allowed in public mode, but never on a plain request (SUBSYNC_AUDIO_ON_PICK off)
+    def test_the_audio_route_in_public_mode_as_each_person_chooses(self):
+        # public mode kept the audio route to a pick; each person's own choice now replaces the
+        # instance's, so the old setting no longer stops a public instance (test_audio_choice has the rest)
         self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on"}).conflicts(), [])
         self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on"}).conflicts(), [])
-        self.assertEqual(len(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on",
-                                       "SUBSYNC_AUDIO_ON_PICK": "off"}).conflicts()), 1)
+        self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_ROUTE": "on",
+                                   "SUBSYNC_AUDIO_ON_PICK": "off"}).conflicts(), [])
         self.assertEqual(Settings({"SUBSYNC_AUDIO_ROUTE": "on"}).conflicts(), [])
 
 
@@ -639,14 +640,14 @@ class PoolTest(unittest.TestCase):
         from subsync.public import UserLimits
         from subsync.worker import OverLimit
         limits = UserLimits(self.settings, self.users, self.tokens[0])
-        for _ in range(60):
+        for _ in range(200):
             self.assertTrue(limits.may_start_file())
             limits.file_started()
-        self.assertFalse(limits.may_start_file())                 # the 61st file of the day
-        limits.after_read(1000 * 1024 * 1024 - 10)
+        self.assertFalse(limits.may_start_file())                 # the 201st file of the day
+        limits.after_read(10000 * 1024 * 1024 - 10)
         limits.before_read(10)
         with self.assertRaises(OverLimit):
-            limits.before_read(11)                                 # past 1,000 MB
+            limits.before_read(11)                                 # past 10,000 MB
         self.assertTrue(limits.may_queue(2))
         self.assertFalse(limits.may_queue(3))
         other = UserLimits(self.settings, self.users, self.tokens[1])
@@ -691,10 +692,10 @@ class StartupTest(unittest.TestCase):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test"})
         self.assertIn("SUBSYNC_SECRET_KEY", out)
 
-    def test_main_refuses_public_mode_with_the_audio_route_on_any_request(self):
+    def test_main_refuses_more_audio_places_than_places(self):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test", "SUBSYNC_SECRET_KEY": KEY,
-                             "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_ON_PICK": "off"})
-        self.assertIn("audio route runs only after a pick", out)
+                             "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_SYNCS_AT_ONCE": "2", "SUBSYNC_AUDIO_AT_ONCE": "3"})
+        self.assertIn("SUBSYNC_AUDIO_AT_ONCE can't be more than SUBSYNC_SYNCS_AT_ONCE (2)", out)
         self.assertNotIn(KEY, out)
 
     def test_requirements_pin_both_platforms(self):
@@ -771,7 +772,7 @@ class PublicTextsTest(unittest.TestCase):
         from subsync import pages
         s = Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY, "SUBSYNC_PUBLIC_BASE": "https://x.test"})
         record = {"languages": ["eng"]}
-        for nbytes, shown in ((0, " 0 MB of 1000 MB read"), (20 * 1024, " 0.1 MB of"), (351 * 1024, " 0.3 MB of"),
+        for nbytes, shown in ((0, " 0 MB of 10000 MB read"), (20 * 1024, " 0.1 MB of"), (351 * 1024, " 0.3 MB of"),
                               (5 * 1024 * 1024, " 5.0 MB of"), (12 * 1024 * 1024, " 12 MB of")):
             with self.subTest(nbytes=nbytes):
                 html = pages.settings_page(s, record, {"files": 1, "bytes": nbytes}, "https://x.test/u/t/manifest.json")
@@ -808,7 +809,7 @@ class PublicTextsTest(unittest.TestCase):
         self.assertIn("(about 1 MB per file, a few MB when the track's lines are pictures; up to 1 GB per file with "
                       "the audio route)", settings["SUBSYNC_DAILY_BUDGET_GB"])
         self.assertIn("Reading a file's subtitle track takes about 1 MB, a few MB when the track's lines are "
-                      "pictures; 1,000 is 60 files", settings["SUBSYNC_USER_DAILY_MB"])
+                      "pictures; 10,000 is 200 files", settings["SUBSYNC_USER_DAILY_MB"])
 
 
 if __name__ == "__main__":

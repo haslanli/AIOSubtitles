@@ -115,6 +115,8 @@ def subsync_env(s):
         'SUBSYNC_LANGUAGES': ','.join(three for _, _, three in s['languages']),
         'SUBSYNC_URL_REWRITE': s.get('rewrite', ''),
         'SUBSYNC_AUDIO_ROUTE': 'on' if s['audio'] else 'off',
+        # When it starts, written only for "as soon as a file is opened" (pick is subsync's default)
+        'SUBSYNC_AUDIO_WHEN': 'open' if s['audio'] and s.get('audio_when') == 'open' else '',
         'SUBSYNC_AUDIO_BUDGET_GB': s.get('audio_budget') if s['audio'] else '',
         'SUBSYNC_SUBDL_KEY': s.get('subdl_key', ''),
         'SUBSYNC_WYZIE_KEY': s.get('wyzie_key', ''),
@@ -123,6 +125,35 @@ def subsync_env(s):
 
 
 AUDIO_BUDGETS = ('0.5', '1', '2', '4')   # GB per file the audio route may read: ./setup's choices (explain.py)
+
+# The personal route's audio question, one of three answers (its explanation: explain.QUESTIONS['AUDIO'])
+AUDIO_QUESTION = 'Sync files that have no subtitles of their own, from their audio?'
+AUDIO_ANSWERS = (('no', 'No'), ('pick', 'Yes, when I pick the file'), ('open', 'Yes, as soon as a file is opened'))
+# setup also took yes or no here before, as answers files may still say
+_YES, _NO = ('y', 'yes', 'on', 'true'), ('n', 'no', 'off', 'false')
+# A number for AUDIO in an answers file: the yes/no question took 1 for yes and 0 for no, and the terminal's numbers
+# now start with 1 = No, so a number could mean either; it is refused rather than read either way (engine.ask_audio)
+AUDIO_NUMBER_REFUSED = ('AUDIO in an answers file takes no, pick or open, not a number: the question had two answers '
+                        'before (1 was yes), so a number could mean either.')
+
+
+def audio_answer(text):
+    """An answer to the audio question in words: no, pick or open; the earlier yes/no question's yes reads as pick
+    (when I pick the file, what it did). None otherwise (a number is the terminal's way to choose: Asker.choose)."""
+    value = str(text or '').strip().lower()
+    if value in ('pick', 'open'):
+        return value
+    return 'pick' if value in _YES else 'no' if value in _NO else None
+
+
+def audio_when_of(env):
+    """When the audio route starts as state/subsync.env has it, read as subsync reads it: SUBSYNC_AUDIO_WHEN, else
+    the setting it replaced (SUBSYNC_AUDIO_ON_PICK: anything but on means open); pick otherwise."""
+    when = str(env.get('SUBSYNC_AUDIO_WHEN') or '').strip().lower()
+    if when in ('pick', 'open'):
+        return when
+    return 'pick' if str(env.get('SUBSYNC_AUDIO_ON_PICK', 'on')).strip().lower() in ('1', 'on', 'true', 'yes') \
+        else 'open'
 
 
 def _gigabytes(text):

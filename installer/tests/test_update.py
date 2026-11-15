@@ -1,4 +1,4 @@
-"""Updates as a newer image (§5): only when asked; the databases copied first; the new version checked
+"""Updates as a newer image: only when asked; the databases copied first; the new version checked
 while the old one keeps running; then the switch, checked, and put back when it fails, with the databases from
 before the update when the old version needs them; a rollback on request. Docker is a stand-in that knows which image
 the service runs and whether that one answers."""
@@ -208,7 +208,8 @@ class EngineUpdate(unittest.TestCase):
         self.assertEqual(self.running, OLD)
 
     def test_an_old_version_that_answers_but_cant_read_the_data_gets_the_copy_back(self):
-        # the run of: the new version broke the people's database; the old one answered /health on it anyway
+        # as a test run found: the new version broke the people's database; the old one answered /health on
+        # it anyway
         self.install()
         self.answers[NEW] = False
         self.readable = lambda image: image == OLD and 'restore' in self.kinds()

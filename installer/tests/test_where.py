@@ -1,4 +1,4 @@
-"""Where setup runs: what setup reads about its own container, and the./setup it writes into the
+"""Where setup runs: what setup reads about its own container, and the ./setup it writes into the
 image route's folder."""
 import json
 import os

@@ -36,9 +36,13 @@ CREATE TABLE IF NOT EXISTS usage (id TEXT NOT NULL, day TEXT NOT NULL, files INT
   bytes INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, day));
 CREATE TABLE IF NOT EXISTS usenet_usage (id TEXT NOT NULL, day TEXT NOT NULL, listings INTEGER NOT NULL DEFAULT 0,
   stopped INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, day));
+CREATE TABLE IF NOT EXISTS audio_usage (id TEXT NOT NULL, day TEXT NOT NULL, syncs INTEGER NOT NULL DEFAULT 0,
+  opened INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, day));
 """
-# usenet_usage is a table of its own: the usage table keeps its four columns, so the image before Usenet,
-# whose usage insert names none, still works on this database (the way back after a deploy)
+# usenet_usage and audio_usage (audio syncs started, and of those started as soon as a file was opened) are
+# tables of their own: the usage table keeps its four columns, so an earlier image, whose usage insert names none,
+# still works on this database (the way back after a deploy)
+DAY_TABLES = ("usage", "usenet_usage", "audio_usage")
 
 
 def new_token():
@@ -119,8 +123,8 @@ class Users:
         uid = self.user_id(token)
         with self.lock:
             cur = self.db.execute("DELETE FROM users WHERE id=?", (uid,))
-            self.db.execute("DELETE FROM usage WHERE id=?", (uid,))
-            self.db.execute("DELETE FROM usenet_usage WHERE id=?", (uid,))
+            for table in DAY_TABLES:
+                self.db.execute(f"DELETE FROM {table} WHERE id=?", (uid,))
         return cur.rowcount == 1
 
     def touch(self, token):
@@ -138,10 +142,10 @@ class Users:
             gone = [uid for (uid,) in self.db.execute("SELECT id FROM users WHERE seen_day < ?", (cutoff,))]
             for uid in gone:
                 self.db.execute("DELETE FROM users WHERE id=?", (uid,))
-                self.db.execute("DELETE FROM usage WHERE id=?", (uid,))
-                self.db.execute("DELETE FROM usenet_usage WHERE id=?", (uid,))
-            self.db.execute("DELETE FROM usage WHERE day < ?", (day_of(self.clock() - 40 * DAY),))
-            self.db.execute("DELETE FROM usenet_usage WHERE day < ?", (day_of(self.clock() - 40 * DAY),))
+                for table in DAY_TABLES:
+                    self.db.execute(f"DELETE FROM {table} WHERE id=?", (uid,))
+            for table in DAY_TABLES:
+                self.db.execute(f"DELETE FROM {table} WHERE day < ?", (day_of(self.clock() - 40 * DAY),))
         return len(gone)
 
     # -- usage per UTC day -------------------------------------------------------------------------------------
@@ -174,3 +178,18 @@ class Users:
             row = self.db.execute("SELECT listings, stopped FROM usenet_usage WHERE id=? AND day=?",
                                   (self.user_id(token), day_of(self.clock()))).fetchone()
         return {"listings": row[0], "stopped": bool(row[1])} if row else {"listings": 0, "stopped": False}
+
+    # -- audio syncs per UTC day --------------------------------------------------------------------------
+    def add_audio(self, token, opened=False):
+        """An audio sync started: one more today, and with `opened` one more of those started as soon as a file was
+        opened."""
+        with self.lock:
+            self.db.execute("INSERT INTO audio_usage (id, day, syncs, opened) VALUES (?,?,1,?) ON CONFLICT(id, day) DO "
+                            "UPDATE SET syncs=syncs+1, opened=opened+excluded.opened",
+                            (self.user_id(token), day_of(self.clock()), 1 if opened else 0))
+
+    def audio_usage(self, token):
+        with self.lock:
+            row = self.db.execute("SELECT syncs, opened FROM audio_usage WHERE id=? AND day=?",
+                                  (self.user_id(token), day_of(self.clock()))).fetchone()
+        return {"syncs": row[0], "opened": row[1]} if row else {"syncs": 0, "opened": 0}

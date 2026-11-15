@@ -8,7 +8,7 @@ without the script; the installing page loads itself again every 2 seconds while
 """
 from installer import hosting
 from installer import limits as limit_list
-from installer import update
+from installer import plan, update
 from subsync import explain, ui
 from subsync.aiosconfig import LANGUAGES
 from subsync.ui import e
@@ -50,7 +50,7 @@ REMOVE_TEXT = ("This takes subsync out of your config (1 entry), deletes subsync
 INSTALLER_WORDS = (
     TITLE, QUESTION, *[w for way in WAYS for w in way[1:]], *INTRO, *BEFORE,
     *PERSONAL, *HOSTING, RAIL,
-    *[lim.label for lim in limit_list.personal(audio=True, usenet=True) + limit_list.hosting()],
+    *[lim.label for lim in limit_list.personal(audio=True, usenet=True) + limit_list.hosting(audio=True)],
     *[heading for heading, _ in limit_list.HOSTING],
     'GB', 'MB', 'files',
     'Save these changes',
@@ -63,7 +63,7 @@ INSTALLER_WORDS = (
     # the terminal setup's questions and lines, as labels and headings
     'What address do you open AIOStreams at?', 'More than one AIOStreams runs here. Which one do your apps use?',
     'Config ID (or paste your Stremio link)', 'Its password', 'Which subtitle languages should be synced?',
-    'Also sync files that carry no subtitles of their own, by listening to the audio?', 'SubDL API key (optional)',
+    'SubDL API key (optional)',
     'Wyzie Subs API key (optional)', "subsync's address for your apps",
     'Your config has no subtitle source, so there is nothing to sync yet. Add OpenSubtitles (free, no account needed)?',
     "Turn off AIOStreams' 5-minute subtitle cache for subsync?", 'AIOStreams sign-in (admin): username',
@@ -74,8 +74,8 @@ INSTALLER_WORDS = (
     'AIOStreams', 'languages', 'audio', 'config', "subsync's config", 'logs',
     # Usenet
     'Sync files you play from Usenet too?', 'Let people sync Usenet files too?', "subsync's Usenet config",
-    # the audio route on a public instance
-    hosting.AUDIO_QUESTION,
+    # the audio route: the personal route's question and its answers, a public instance's
+    plan.AUDIO_QUESTION, *[answer for _, answer in plan.AUDIO_ANSWERS], hosting.AUDIO_QUESTION,
     "subsync's Usenet config (new)", "subsync's Usenet config (update)",
     "subsync's Usenet config answers (no search made, to spare your indexer's daily calls)",
     "subsync's Usenet config doesn't answer. Run ./setup again, or send the output of ./setup --status with a bug report.",
@@ -220,9 +220,10 @@ def config(rows, config_id='', problem=None, stop=None):
 
 def choices(languages, audio, public_address, problem=None, offer_opensubtitles=False, add_opensubtitles=True,
             limit=4, usenet=None, stop=None):
-    """Your choices: the languages (the site's slots), the audio route, Usenet when the config has a Usenet service
-    subsync reads through (`usenet` not None), the optional keys, OpenSubtitles when the config has no subtitle
-    source, and subsync's address for your apps. `stop`: a config without a debrid service answered no to Usenet."""
+    """Your choices: the languages (the site's slots), the audio route (`audio`: the answer picked, no, pick or
+    open), Usenet when the config has a Usenet service subsync reads through (`usenet` not None), the optional
+    keys, OpenSubtitles when the config has no subtitle source, and subsync's address for your apps. `stop`: a config
+    without a debrid service answered no to Usenet."""
     error = _error(problem, 'LANGUAGES')
     langs = ('<div class="field"><span class="label" id="languages-l">Which subtitle languages should be synced?</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
@@ -230,8 +231,11 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
                                  'languages-help', 'languages-error' if error else None, name='LANGUAGES')
              + f'<p class="help" id="languages-help">{e(_explanation("LANGUAGES"))}</p></div>')
     usenet_box = (_choice('USENET', 'Sync files you play from Usenet too?', usenet),) if usenet is not None else ()
-    body = (_stop(stop) + langs + ui.choices(_choice('AUDIO', 'Also sync files that carry no subtitles of their own, by '
-                                                              'listening to the audio?', audio), *usenet_box)
+    audio_rows = [ui.radio_row('AUDIO', value, answer, '', checked=value == audio)
+                  for value, answer in plan.AUDIO_ANSWERS]
+    body = (_stop(stop) + langs + ui.radio_group(plan.AUDIO_QUESTION, audio_rows, help_text=_explanation('AUDIO'),
+                                                 id='audio')
+            + (ui.choices(*usenet_box) if usenet_box else '')
             + _input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
             + _input('WYZIE_KEY', 'Wyzie Subs API key (optional)', '', problem, kind='password', mono=True, reveal=True))
     if offer_opensubtitles:

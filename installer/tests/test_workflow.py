@@ -175,7 +175,7 @@ class WorkflowRules(unittest.TestCase):
             self.assertNotRegex(text, r'\bAD\d+|\bS4-\d+', name)
 
 
-    # -- the setup inside the image (§7) ------------------------------------------------------------
+    # -- the setup inside the image ---------------------------------------------------------------
     def test_the_image_builds_from_the_repository_root(self):
         self.assertNotIn('context: subsync', self.build)
         self.assertEqual(self.build.count('          context: .\n          file: subsync/Dockerfile\n'), 2)

@@ -150,8 +150,8 @@ class SyncConfig(unittest.TestCase):
         usenet = {'services': [{'id': 'nzbdav', 'enabled': True}], 'presets': [VIEWER['presets'][1]]}
         self.assertEqual(len(plan.sync_config_problems(plan.sync_config(usenet))), 2)
 
-    # AIOStreams refuses a config whose addon names, in its own Services choice, a service the config doesn't have
-    #; the sync config leaves the Usenet services out, so their names come out of each addon too
+    # AIOStreams refuses a config whose addon names, in its own Services choice, a service the config doesn't have;
+    # the sync config leaves the Usenet services out, so their names come out of each addon too
     def test_an_addon_keeps_only_the_services_the_sync_config_still_has(self):
         cases = [('prowlarr', s) for s in sorted(plan.USENET_SERVICES)] + [
             ('stremthruStore', 'stremthru_newz'), ('mediafusion', 'easynews'), ('library', 'nzbdav')]
@@ -271,6 +271,33 @@ class Files(unittest.TestCase):
         self.assertLessEqual(set(env), set(explain.WRITTEN_BY_SETUP))
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', plan.subsync_env(dict(self.S, audio=False, audio_budget='2')))
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', plan.subsync_env(dict(self.S, audio=True)))
+
+    def test_the_audio_answer_and_when_it_starts(self):
+        # One question, three answers; the earlier yes/no question's words read as before (yes: when I pick)
+        self.assertEqual(plan.AUDIO_ANSWERS, (('no', 'No'), ('pick', 'Yes, when I pick the file'),
+                                              ('open', 'Yes, as soon as a file is opened')))
+        for typed, value in (('no', 'no'), ('No', 'no'), ('n', 'no'), ('off', 'no'), ('false', 'no'),
+                             ('pick', 'pick'), ('yes', 'pick'), ('Y', 'pick'), ('on', 'pick'), ('true', 'pick'),
+                             ('open', 'open'), (' Open ', 'open')):
+            with self.subTest(typed=typed):
+                self.assertEqual(plan.audio_answer(typed), value)
+        for typed in ('', None, 'maybe', '1', '3'):          # a number is the terminal's own way to answer
+            with self.subTest(typed=typed):
+                self.assertIsNone(plan.audio_answer(typed))
+        # when state/subsync.env starts it, as subsync reads it (the setting SUBSYNC_AUDIO_WHEN replaced included)
+        for env, when in (({}, 'pick'), ({'SUBSYNC_AUDIO_WHEN': 'open'}, 'open'), ({'SUBSYNC_AUDIO_ON_PICK': 'off'}, 'open'),
+                          ({'SUBSYNC_AUDIO_ON_PICK': 'on'}, 'pick'), ({'SUBSYNC_AUDIO_ON_PICK': ''}, 'open'),
+                          ({'SUBSYNC_AUDIO_WHEN': 'pick', 'SUBSYNC_AUDIO_ON_PICK': 'off'}, 'pick')):
+            with self.subTest(env=env):
+                self.assertEqual(plan.audio_when_of(env), when)
+
+    def test_when_the_audio_route_starts_is_written_only_when_not_the_default(self):
+        env = plan.subsync_env(dict(self.S, audio=True, audio_when='open'))
+        self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_AUDIO_WHEN']), ('on', 'open'))
+        self.assertLessEqual(set(env), set(explain.WRITTEN_BY_SETUP))      # ./setup owns the line now
+        self.assertNotIn('SUBSYNC_AUDIO_WHEN', plan.subsync_env(dict(self.S, audio=True, audio_when='pick')))
+        self.assertNotIn('SUBSYNC_AUDIO_WHEN', plan.subsync_env(dict(self.S, audio=True)))
+        self.assertNotIn('SUBSYNC_AUDIO_WHEN', plan.subsync_env(dict(self.S, audio=False, audio_when='open')))
 
     def test_audio_limit_answers(self):
         for typed, value in (('1', '1'), ('0.5', '0.5'), ('.5', '0.5'), ('2 GB', '2'), ('4gb', '4'), ('1.0', '1')):

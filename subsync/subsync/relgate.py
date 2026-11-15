@@ -18,6 +18,10 @@ On Kingdom of Heaven's director's cut (1,099 sure starts of its PGS track): ever
 Russian, leaves at most 11 lines (159 s) uncovered; theatrical ones 36 to 111 lines (378 s and more); a theatrical
 subtitle aligned perfectly (the director's-cut subtitle without the lines a theatrical one lacks) 68 lines over 477 s.
 An opening or closing song the candidate leaves out (about 90 s) stays under MISSING_S.
+Against another language's track an untranslated stretch (a song, background talk, on-screen text) looks the same, while
+a subtitle for another cut can't keep its lines paired under one shift (those after the extra scene are off by its
+length): there a candidate as it is or moved by one shift that pairs ONE_SHIFT_PAIRED of its lines is not refused for a
+missing scene (relgate.aligned).
 """
 import bisect
 import statistics
@@ -35,6 +39,7 @@ LOOSE_MS = 500
 END_MS = 300       # recorded: the share of line ends within this of the release's
 MISSING_LINES = 20
 MISSING_S = 150.0
+ONE_SHIFT_PAIRED = 0.90   # across languages, under one shift: a missing scene doesn't refuse a candidate pairing this share
 BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5, "cross_median_ms": 300.0, "cross_paired": 0.75}
 
 
@@ -205,13 +210,17 @@ def clearly_better(original, copy, rule=None, min_span=None, ref_recall=1.0):
     return True, "clearly better than the original"
 
 
-def aligned(g, rule=None, min_span=None, ref_recall=1.0):
+def aligned(g, rule=None, min_span=None, ref_recall=1.0, one_shift=False):
     """Against another language's track (the subtitle's own language has none): two translations never start their lines
     at the same moments (Breaking Bad S01E02's Russian against the English track: 245-267 ms median after alass), so no
     per-line bar can hold, but the alignment itself can be judged: at least `cross_paired` of the lines pair (translations
     of a third language split lines differently: Amelie's Russian against the English track, 81-82 %), a median error of
     at most `cross_median_ms`, at least half of the lines pairing in every tenth of the runtime (a loosely timed
     translation can have a tenth under half within 500 ms: Breaking Bad's Russian), no missing scene, and the span.
+    one_shift: `g` measures the subtitle as it is or moved by one steady offset (not alass's or a sectioned fit); then a
+    missing scene doesn't refuse it when at least ONE_SHIFT_PAIRED of its lines pair (scaled by the recall like the other
+    pairing minimums): an untranslated stretch, not another cut (MobLand S02E08's Russian against the
+    en-GB track, one shift of 60 ms, 97 % of its 624 lines paired).
     Returns (ok, why)."""
     rule = dict(BETTER, **(rule or {}))
     recall = max(0.0, min(1.0, ref_recall))
@@ -223,7 +232,7 @@ def aligned(g, rule=None, min_span=None, ref_recall=1.0):
         return False, "median error too large"
     if g.get("unpaired_tenths"):
         return False, "a part of the runtime does not fit"
-    if g.get("missing_scene"):
+    if g.get("missing_scene") and not (one_shift and g["paired"] >= ONE_SHIFT_PAIRED * recall):
         return False, "a scene of the release is missing (another cut)"
     if min_span is not None and g.get("span", 0.0) < min_span:
         return False, "covers too little of the runtime"

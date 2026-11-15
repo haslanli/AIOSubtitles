@@ -21,7 +21,7 @@ from . import alass as alass_mod
 from . import imageref, imagetext, refine, sections, shift, textpair
 from .audiofit import fit_tracks
 from .langs import lang3
-from .relgate import WITHIN_SHARE, aligned, clearly_better, relgate
+from .relgate import MIN_PAIRED, TENTHS, WITHIN_SHARE, aligned, clearly_better, relgate
 from .subs import dialogue_ends, dialogue_starts, parse, plain_srt, timing_srt, write_like
 
 MIN_LINES = 10
@@ -112,10 +112,48 @@ def image_reference(index, track):
     return kept[track["number"]]
 
 
+AGREE_MARGIN_MS = 50   # a track of the subtitle's language agreeing better than this with the file's other tracks (in
+                       # median start offset) is the reference before one with more lines
+
+
+def track_agreement(index, track):
+    """How far a text track's line starts sit from those of the file's other plain tracks (not forced,
+    not SDH or dub): the median, over the tracks that pair with at least MIN_PAIRED of its lines (relgate), of their
+    median start offset, in ms; None when none does. From the index already in hand: worked out once per file and track
+    and kept on its index."""
+    kept = index.__dict__.setdefault("track_agreement", {}) if hasattr(index, "__dict__") else {}
+    key = track["number"]
+    if key not in kept:
+        mine = [s for s, _ in track["cues"]]
+        offsets = []
+        for t in text_references(index):
+            if t["number"] == key or t["forced"] or is_secondary(t):
+                continue
+            g = relgate([s for s, _ in t["cues"]], mine)
+            if g["paired"] >= MIN_PAIRED and "median_ms" in g:
+                offsets.append(g["median_ms"])
+        kept[key] = statistics.median(offsets) if offsets else None
+    return kept[key]
+
+
+def agreeing(index, tracks):
+    """Of several tracks in the subtitle's language (most lines first), the first whose timing agrees with the file's
+    other plain tracks within AGREE_MARGIN_MS of the best agreeing one (Game of Thrones S01E01: es-419, not es-ES, which
+    runs about 167 ms early against English and es-419); the first when none can be compared."""
+    scores = [track_agreement(index, t) for t in tracks]
+    known = [v for v in scores if v is not None]
+    if not known:
+        return tracks[0]
+    best = min(known)
+    return next(t for t, v in zip(tracks, scores) if v is not None and v <= best + AGREE_MARGIN_MS)
+
+
 def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain=True, fallback=FALLBACK_REFERENCE):
     """A text track first; with image_ref, else an image track whose cue times read as subtitles. The
     returned track's "cues" are line (start, duration) pairs; "route" says which kind it is. With prefer_plain, a plain
-    track of the language beats an SDH one (on Game of Thrones S01E01 the SDH track trails the speech). With no
+    track of the language beats an SDH one (on Game of Thrones S01E01 the SDH track trails the speech). Of
+    several tracks in the subtitle's language (plain ones, with prefer_plain), the one whose timing agrees with the
+    file's other tracks, else the one with the most lines. With no
     track in the subtitle's language, one in a `fallback` language comes first (Frieren's Russian was checked against a
     Portuguese track, a few lines longer than the English one AutoSync and the scoring use)."""
     want = lang3(cand_lang)
@@ -124,7 +162,13 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
     if usable:
         usable.sort(key=lambda t: (lang3(t["language"]) != want, lang3(t["language"]) not in fallback,
                                    prefer_plain and is_secondary(t), -len(t["cues"])))
-        return dict(usable[0], route="cues")
+        first = usable[0]
+        if lang3(first["language"]) == want:
+            plain = bool(prefer_plain and is_secondary(first))
+            same = [t for t in usable if lang3(t["language"]) == want and bool(prefer_plain and is_secondary(t)) == plain]
+            if len(same) > 1:
+                first = agreeing(index, same)
+        return dict(first, route="cues")
     if not image_ref or not hasattr(index, "image_tracks"):
         return None
     images = []
@@ -300,9 +344,10 @@ class TextCheck:
             self.anchors = textpair.match(self.lines, track)
         return {a["c"][0]: track.lines[a["t"][0]]["s"] - self.lines[a["c"][0]]["s"] for a in self.anchors}
 
-    def check(self, timed, limit_ms, may_read):
+    def check(self, timed, limit_ms, may_read, gate=None):
         """The confirmation of `timed` (the subtitle's lines, re-timed, same count and order): None when there are no
-        words to check against, else the textpair summary with ok and why."""
+        words to check against, else the textpair summary with ok and why. gate: relgate's result for `timed`, whose
+        weak tenths the word check weighs."""
         if not self.on:
             return None
         track = track_words(self.index, self.ref, may_read)
@@ -314,18 +359,31 @@ class TextCheck:
         ordered = [dial[j] for j in self.order]
         anchors = [a for a in self.anchors if not any(ordered[i].get("drop") for i in a["c"])]   # lines left out
         errs = textpair.errors(anchors, ordered, track)
-        ok, why, s = textpair.confirm(anchors, errs, limit_ms)
+        ok, why, s = textpair.confirm(anchors, errs, limit_ms, timing_weak(gate, timed))
         return dict(s, ok=ok, why=why, limit_ms=limit_ms)
+
+
+def timing_weak(g, timed):
+    """The (start, end) times of the tenths relgate found weak for this timing (under half of their lines within 200 ms;
+    those under half within 500 ms are among them), on its own tenths: the span of the dialogue lines it measured."""
+    weak = sorted(set((g or {}).get("weak_tenths") or []) | set((g or {}).get("weak_tenths_500") or []))
+    starts = dialogue_starts([l for l in timed if not l.get("drop")])
+    if not weak or not starts:
+        return []
+    lo, hi = min(starts), max(starts)
+    return [(lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS) for b in weak]
 
 
 def original_fits(g, cross, better, recall):
     """An original in sync as it is: the gate, or against another language's track (with the rule) an alignment that is
-    sound and needs no shift (its lines are not steadily off by more than MIN_SHIFT_S)."""
+    sound and needs no shift (its lines are not steadily off by more than MIN_SHIFT_S); as it is, it is under one shift
+    (relgate.aligned's one_shift)."""
     if g["pass"]:
         return True
     if not (cross and better):
         return False
-    return aligned(g, better, MIN_SPAN, recall)[0] and abs(g.get("signed_median_ms") or 0.0) <= MIN_SHIFT_S * 1000
+    return aligned(g, better, MIN_SPAN, recall, one_shift=True)[0] and \
+        abs(g.get("signed_median_ms") or 0.0) <= MIN_SHIFT_S * 1000
 
 
 def magnet(text, lines, ref, gate, snap_within, cross=False):
@@ -401,11 +459,11 @@ def section_checks(out, best, groups, ref, recall, snap_within, better):
 
 
 def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=0.95, better=None, how="", cross=False,
-               words=None, may_read=False, groups=None):
+               words=None, may_read=False, groups=None, one_shift=False):
     """A re-timed copy (alass's, or one shift's) against the release track: passes as it is, or snapped to the release's
     lines, or as clearly better than the original; against another language's track (`cross`), when its alignment is
-    sound (relgate.aligned), snapped onto that track's lines. Else the original is kept. `out` holds gate_original; `how`
-    names the re-timing in the reason. A copy offered unsnapped is re-centred on the reference first.
+    sound (relgate.aligned; `one_shift`: `new` is the subtitle moved by one shift), snapped onto that track's lines. Else
+    the original is kept. `out` holds gate_original; `how` names the re-timing in the reason. A copy offered unsnapped is re-centred on the reference first.
     words: a TextCheck; a pass is then confirmed by the lines' words (D2: 100 ms for the main rule, 200 ms for
     "clearly better"), reading them when `may_read` or for a "clearly better" pass (D1: timing hasn't settled it)."""
     dial = dialogue_starts(lines)
@@ -426,7 +484,7 @@ def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=
             out["refined"] = True
     why = "passes against the release track" + how + (" (snapped)" if out.get("refined") else "")
     if best is None and better is not None and cross:   # snapped onto the other language's lines, like AutoSync's magnet
-        ok, note = aligned(out["gate_synced"], better, MIN_SPAN, recall)
+        ok, note = aligned(out["gate_synced"], better, MIN_SPAN, recall, one_shift=one_shift)
         out["aligned"] = {"pass": ok, "why": note}
         if ok:
             best = snapped or new
@@ -447,7 +505,8 @@ def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=
             return dict(out, outcome="keep_original", reason=note + how)
     if words is not None and not out.get("aligned"):
         clearly = bool((out.get("better") or {}).get("pass"))
-        chk = words.check(best, 200.0 if clearly else 100.0, may_read or clearly)
+        chk = words.check(best, 200.0 if clearly else 100.0, may_read or clearly,
+                          out["gate_snapped"] if best is snapped else out["gate_synced"])
         if chk is not None:
             out["text"] = chk
             if not chk["ok"]:
@@ -478,7 +537,7 @@ def shift_sync(index, text, ext, lang, snap=True, snap_within=0.95, splits=True,
            "reference": {"track": ref["number"], "language": ref["language"], "codec": ref["codec"], "cues": len(ref["cues"])},
            "shift_fit": {"scale": round(scale, 6), "offset_s": round(offset, 3), "votes": votes}}
     return judge_copy(out, text, lines, new, ref, gate, recall, snap, snap_within, better, how=" (one shift)",
-                      cross=is_cross(ref, lang), words=TextCheck(index, ref, lines, lang, text_pairing))
+                      cross=is_cross(ref, lang), words=TextCheck(index, ref, lines, lang, text_pairing), one_shift=True)
 
 
 STACKED_OVERLAP_S = 0.5   # a line that starts this long before the previous one ends is on screen with it
@@ -542,7 +601,7 @@ def check_original(index, text, lang, splits=True, image_ref=False, prefer_plain
     out = {"in_sync": fits, "route": ref["route"], "reference": reference, "gate_original": g,
            "lines": len(lines), "dialogue": len(dial), "cross": cross and not g["pass"]}
     if fits:    # D2 with the words already read for this file, if any (an original in sync reads nothing)
-        chk = TextCheck(index, ref, lines, lang, text_pairing).check(lines, 100.0, False)
+        chk = TextCheck(index, ref, lines, lang, text_pairing).check(lines, 100.0, False, g)
         if chk is not None:
             out["text"] = chk
             out["in_sync"] = fits = chk["ok"]
@@ -576,7 +635,7 @@ def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=
         words = TextCheck(index, ref, lines, lang, text_pairing)
         fits = original_fits(out["gate_original"], cross, better, recall)
         if fits:
-            chk = words.check(lines, 100.0, unsettled)
+            chk = words.check(lines, 100.0, unsettled, out["gate_original"])
             if chk is not None:
                 out["text_original"] = chk
                 fits = chk["ok"]

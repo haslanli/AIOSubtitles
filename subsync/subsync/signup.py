@@ -26,6 +26,7 @@ from . import explain, realdebrid
 from .aiosconfig import (AiosApi, AiosError, is_subsync_preset, new_key, parse_languages, sync_config,
                          sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins,
                          without_subsync)
+from .settings import AUDIO_CHOICES
 from .users import new_token
 
 log = logging.getLogger("subsync.signup")
@@ -450,8 +451,28 @@ def rebuild(settings, record, token, api, password, force=False, force_usenet=Fa
     return True
 
 
+def _audio_answer(choice, settings):
+    """One of the answers this instance offers for files with no subtitles of their own: off, pick, and open
+    while it allows opened syncs (SUBSYNC_USER_OPENED_PER_DAY above 0). SignupError otherwise."""
+    choice = str(choice or "").strip().lower()
+    allowed = AUDIO_CHOICES if settings.user_opened_per_day > 0 else tuple(c for c in AUDIO_CHOICES if c != "open")
+    if choice not in allowed:
+        raise SignupError("Choose one of the answers for files with no subtitles of their own.", field="audio")
+    return choice
+
+
+def form_audio(settings, form):
+    """The sign-up's answer for files with no subtitles of their own: None when this instance doesn't ask it
+    (its audio route is off) or the form leaves it out (the person then reads "pick", as everyone signed up before);
+    refused when it is none of the answers offered."""
+    if not settings.audio_route or form.get("audio") is None:
+        return None
+    return _audio_answer(form.get("audio"), settings)
+
+
 def signup(settings, users, form, api_factory=public_api, timeout=30):
     langs = _languages(form.get("languages"), settings.max_languages)
+    audio = form_audio(settings, form)              # refused before anything is read or made
     instance, uuid = parse_link(form.get("link"))
     password = _password(form)
     api = api_factory(instance, timeout)
@@ -463,6 +484,8 @@ def signup(settings, users, form, api_factory=public_api, timeout=30):
     clean_up = form.get("add_addon") == "on" and form.get("clean_up") == "on"
     want = wants_usenet(settings, form)
     record = {"instance": instance, "main_uuid": uuid, "languages": langs, "version": 1}
+    if audio:
+        record["audio"] = audio
     base = without_builtin_twins(viewer)[0] if clean_up else viewer
     has_sync = _has_sync(base, manifest_url)
     usenet, services, why = _usenet_for(base, manifest_url, not has_sync) if want else (None, [], None)
@@ -633,6 +656,22 @@ def set_languages(users, token, text, limit=4):
         record["languages"] = _languages(text, limit)
         users.update(token, record)
     return record["languages"]
+
+
+def set_audio(users, token, choice, settings):
+    """Saves a person's answer for files with no subtitles of their own: off, pick or open; open only while
+    the instance allows opened syncs (SUBSYNC_USER_OPENED_PER_DAY above 0), and none on an instance without the audio
+    route. No call to AIOStreams."""
+    if not settings.audio_route:
+        raise SignupError("This service doesn't sync files from their sound.")
+    choice = _audio_answer(choice, settings)
+    with users.locked(token):
+        record = users.open(token)
+        if record is None:
+            raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
+        record["audio"] = choice
+        users.update(token, record)
+    return choice
 
 
 def delete(settings, users, token, form, api_factory=public_api, timeout=30):

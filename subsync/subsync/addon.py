@@ -11,9 +11,17 @@ GET  /file/<id>.<srt|ass>                      a synced copy
 GET  /pending/<token>/<lang>.srt               a pending entry
 GET  /pick/<token>/<lang>.srt                  a "<Language> (Subsync)" entry ("(AIOSubtitles)" in public mode):
      the synced copy when there is one (waiting
-     up to SUBSYNC_PICK_WAIT_MS for a job working on the file), else a redirect to the original; for a language that
+     up to SUBSYNC_PICK_WAIT_MS for a job working on the file), else the original's text; for a language that
      has no subtitle at all a one-line note; 503 while the file's subtitle list is still unknown. With the audio
      route on (pick mode) the download also starts the audio route for a file that needs it.
+GET  /original/<token>/<lang>.srt              a "<Language> (original)" entry: listed for a language that has
+     subtitles but no synced copy, on a file that neither waits for a pick nor has a job on it; one original unchanged,
+     the one the file's judging measured best as it is, else the likeliest by name. It starts no job and reads nothing
+     of the file.
+     Every original these routes serve is downloaded from this person's own subtitle list and sent as text, only if
+     the language check doesn't refuse it (else the next that passes, else the note). A pick or pending entry
+     stops waiting for the job ORIGINAL_DOWNLOAD_S early while that original isn't downloaded; when SUBSYNC_PICK_WAIT_MS
+     still ends first, a redirect to the original's own address in this person's list (503 when a player can't use it).
 GET  /notice.srt                               public mode: what the person must do, while the daily check (recheck.py)
      found something only they can fix; listed as one "AIOSubtitles: action needed" entry after the others
 GET  /health, /status
@@ -59,7 +67,12 @@ SUB_ROUTE = re.compile(r"^/subtitles/(movie|series)/([^/]+?)(?:/([^/]*))?\.json$
 FILE_ROUTE = re.compile(r"^/file/(v\d+_[0-9a-f]{16}-\d+_[0-9a-f]{16})\.(srt|ass)$")
 PENDING_ROUTE = re.compile(r"^/pending/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 PICK_ROUTE = re.compile(r"^/pick/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
+ORIGINAL_ROUTE = re.compile(r"^/original/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 REPROCESS_S = 24 * 3600
+# A pick or pending entry stops waiting for the job this long before its deadline while the original it would serve
+# isn't downloaded yet, so that download has time (a subtitle file is tens of KB; a slow site's first answer takes a
+# second or two); past the deadline, the redirect to the original's own address as before
+ORIGINAL_DOWNLOAD_S = 3.0
 
 
 def file_id(key):
@@ -77,6 +90,23 @@ def token(alias):
 def alias_of(tok):
     return base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4)).decode()
 
+
+def as_srt(text):
+    """A subtitle's text as the ".srt" routes send it: SRT as it is, ASS and WebVTT written as SRT."""
+    if is_ass(text) or text.lstrip("\ufeff").startswith("WEBVTT"):
+        return to_srt(parse(text))
+    return text
+
+
+def no_subtitle_note(lang):
+    """An error here reaches the viewer as an HTTP 502 through AIOMetadata; say it plainly instead."""
+    return f"1\n00:00:01,000 --> 00:00:08,000\nNo {lang_name(lang)} subtitle was found for this file.\n"
+
+
+# What a pick, pending or "(original)" answer sent, now that an original comes as text with 200 like a
+# synced copy: "copy" (a synced copy), "original" (an original sent unchanged), "guess" (a waiting file's anchored
+# guess) or "note" (the "No <Language> subtitle was found" note); a redirect has none
+SERVED = "X-AIOSubtitles-Served"
 
 REFUSALS_FOR_NOTICE = 3   # reads refused in a row before a person is told their debrid service refuses them
 
@@ -165,9 +195,9 @@ class App:
         return file_key, out
 
     def subtitles(self, type_, video_id, extras):
-        """The entries for a file, plus (audio route on, started by a pick) one "<Language> (Subsync)" entry per language
-        for a file that has no subtitle track of its own, or whose tracks are not known yet: downloading it is the
-        viewer's pick. It serves the synced copy when there is one, else the original."""
+        """The entries for a file, plus (audio route on, and the viewer's choice not off) one "<Language>
+        (Subsync)" entry per language for a file that has no subtitle track of its own, or whose tracks are not known
+        yet: downloading it is the viewer's pick. It serves the synced copy when there is one, else the original."""
         t0 = time.time()
         out = self._with_pick_entries(type_, video_id, extras)
         if self.action() is not None:     # public mode: one entry after the others while only the person can fix something
@@ -179,16 +209,22 @@ class App:
 
     def _with_pick_entries(self, type_, video_id, extras):
         out = self._subtitles(type_, video_id, extras)
-        pick_mode = self.s.audio_route and self.s.audio_on_pick
-        if not pick_mode and self.s.pending_entry:
-            return out   # the pending "(synced)" entries cover a file being worked on
+        pick_mode = self.s.audio_choice != "off"   # on pick or when opened, a pick entry starts it too
         job = Job(type_, video_id, parse_extras(extras))
         if not (job.hints.get("filename") or job.hints.get("videoHash")):
             return out
         # Also with the audio route off, a file subsync works on now gets the entry (its download serves the copy
-        # once the job has it); in pick mode a file that waits for the viewer's pick gets it too
-        if not ((pick_mode and self.worker.waits_for_pick(job.alias)) or self.worker.busy_with(job.alias)):
-            return out
+        # once the job has it); in pick mode a file that waits for the viewer's pick gets it too.: a file whose
+        # index is over the cap gets none, since a pick could only serve the original
+        if self.worker.capped(job) or not ((pick_mode and self.worker.waits_for_pick(job.alias))
+                                           or self.worker.busy_with(job.alias)):
+            return out + self._original_entries(job, out)
+        if not pick_mode and self.s.pending_entry:
+            return out   # the pending "(synced)" entries cover a file being worked on
+        if not pick_mode and self._no_track(job):
+            # a viewer whose choice is off (the audio route off, or their own answer): a file known to have no
+            # track of its own gets no copy from this job, and a pick starts nothing, so its original is listed as such
+            return out + self._original_entries(job, out)
         # This answer is kept by AIOStreams (5 minutes) and by players (AIOMetadata: an hour), so the entry must be in
         # the first one, when the file's subtitle list is usually not known yet: then every language gets it, and the
         # download waits for the list. Once the list is known, only languages that have a subtitle get it.
@@ -203,6 +239,47 @@ class App:
                         "lang": lang, "label": f"{lang_name(lang)} ({PICK_NAME[self.s.public]})",
                         "variantOf": original["id"] if original else "original"})
         return out
+
+    def _no_track(self, job):
+        """The file's first read found no subtitle track of its own to judge against (False while it isn't read)."""
+        file_key = self.store.resolve(job.alias, f"name:{job.hints['filename']}|{job.hints.get('videoSize')}"
+                                      if job.hints.get("filename") else None)
+        detail = self.store.file_detail(file_key) if file_key else None
+        return (detail or {}).get("reference") is False
+
+    def kept_choice(self, alias, lang):
+        """The kept original of a file and language: (True, candidate id or None) when the file's judging chose
+        one (None: every subtitle of the language is in another language), (False, None) when it chose none."""
+        file_key = self.store.resolve(alias)
+        kept = self.store.kept_original(file_key, lang) if file_key else None
+        return (True, kept["candidate_id"]) if kept else (False, None)
+
+    def _original_entries(self, job, out):
+        """One "<Language> (original)" entry for each language asked for that has subtitles and no synced copy
+        here: the original the file's judging kept, else (a file not judged) this person's likeliest by name. Its
+        address names only the file; the subtitle comes from this person's own list when it is downloaded."""
+        have = {e["lang"] for e in out}
+        file_key = self.store.resolve(job.alias, f"name:{job.hints['filename']}|{job.hints.get('videoSize')}"
+                                      if job.hints.get("filename") else None)
+        originals = None
+        entries = []
+        tok = token(job.alias)
+        for lang in self.s.languages:
+            if lang in have:
+                continue
+            kept = self.store.kept_original(file_key, lang) if file_key else None
+            if kept is not None:
+                chosen = kept["candidate_id"]
+            else:
+                if originals is None:
+                    originals = self.worker.known_originals(job.alias) or {}
+                chosen = (originals.get(lang) or {}).get("id")
+            if chosen:
+                entries.append({"id": f"subsync-original-{lang}", "url": f"{self.s.public_base}/original/{tok}/{lang}.srt",
+                                "lang": lang, "label": f"{lang_name(lang)} (original)", "variantOf": chosen})
+        if entries:   # its download fetches this person's list again when it isn't known any more
+            self.worker.remember(job)
+        return entries
 
     def _subtitles(self, type_, video_id, extras):
         hints = parse_extras(extras)
@@ -227,14 +304,16 @@ class App:
                 recent = False   # read under another pass rule: judge its subtitles again now
             judged = self.store.judged_all(file_key, self.s.languages, self.s.rule_id, time.time() - REPROCESS_S) \
                 if recent else None
-            if judged is False:
-                recent = False   # read lately, but not for every language asked here (another person's, in public mode)
-            elif recent and self.s.audio_route and detail.get("reference") is False \
-                    and not self.worker.waits_for_pick(job.alias) and not self.worker.recently_unpickable(job.alias) \
+            no_track = detail.get("reference") is False
+            if judged is False and not (no_track and self.s.audio_route and self.s.audio_choice == "off"):
+                # read lately, but not for every language asked here (another person's, in public mode); for a
+                # person whose choice is off, a file with no track can't gain from another read
+                recent = False
+            elif recent and self.s.audio_choice != "off" and no_track and not self.worker.waits_for_pick(job.alias) \
                     and not self.store.audio_judged(file_key, self.s.languages):
                 # A file with no subtitle track of its own, read lately for someone else and not judged by the
                 # audio route yet: the waiting file is each person's own, so this person gets their own first pass
-                # (an index read) and can pick it
+                # (an index read) and can pick it, or open it; never someone whose choice is off
                 recent = False
         if not recent and not self.worker.recently_unlisted(job.alias):
             job = self.worker.submit(job) or job
@@ -242,8 +321,8 @@ class App:
             return out
         if not self.s.pending_entry:
             # AIOStreams lists subtitle addons in the order they answer, and players keep the first few per language
-            # (AIOMetadata: 3): an answer held back for the job arrives after the other addons' and its entries are cut
-            #. The "(Subsync)" entry needs no result, so answer at once.
+            # (AIOMetadata: 3): an answer held back for the job arrives after the other addons' and its entries
+            # are cut. The "(Subsync)" entry needs no result, so answer at once.
             return out
         # A file being synced now: the Cues route takes a fraction of a second, so wait up to SUBSYNC_PENDING_WAIT_MS
         # for it and list what is ready (players and AIOStreams may keep this answer a while).
@@ -280,6 +359,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def _subtitle(self, body, served):
+        """A pick, pending or "(original)" route's subtitle as SRT, saying what it is (SERVED), readable by a web player
+        too."""
+        return self._send(200, body, "application/x-subrip; charset=utf-8",
+                          {"Cache-Control": "no-store", SERVED: served, "Access-Control-Expose-Headers": SERVED})
 
     def _json(self, obj, code=200, cache=None):
         self._send(code, json.dumps(obj), headers={"Cache-Control": cache} if cache else None)
@@ -333,15 +418,27 @@ class Handler(BaseHTTPRequestHandler):
                     alias = alias_of(m.group(1))
                 except ValueError:
                     return self._send(404, b"")
-                key, original = app.worker.wait_for(alias, m.group(2), app.s.pending_wait)
+                deadline = time.time() + app.s.pick_wait
+                key, original = self._wait_for(app, alias, m.group(2), min(time.time() + app.s.pending_wait, deadline),
+                                               deadline)
                 body = app.text_of(key)
                 if body is not None:
                     app.store.served(key)
-                    return self._send(200, to_srt(parse(body)) if is_ass(body) else body,
-                                      "application/x-subrip; charset=utf-8", {"Cache-Control": "no-store"})
-                if original:
-                    return self._send(302, b"", "text/plain", {"Location": original, "Cache-Control": "no-store"})
+                    return self._subtitle(to_srt(parse(body)) if is_ass(body) else body, "copy")
+                if original:   # the original's text once it is checked, never a redirect to it
+                    return self._original(app, alias, m.group(2), deadline)
                 return self._send(503, b"", "text/plain", {"Retry-After": "1", "Cache-Control": "no-store"})
+            m = ORIGINAL_ROUTE.match(path)
+            if m:
+                try:
+                    alias = alias_of(m.group(1))
+                except ValueError:
+                    return self._send(404, b"")
+                kept, first = app.kept_choice(alias, m.group(2))
+                if kept and first is None:   # every subtitle of the language is in another language
+                    return self._subtitle(no_subtitle_note(m.group(2)), "note")
+                return self._original(app, alias, m.group(2), time.time() + app.s.pick_wait, first,
+                                      unknown=None if kept else 404)
             if path == "/notice.srt" and keyed:
                 text = app.notice_text()
                 if text is None:   # fixed since the list that holds this entry was made (apps keep lists a while)
@@ -358,11 +455,12 @@ class Handler(BaseHTTPRequestHandler):
                 deadline = time.time() + app.s.pick_wait
                 left = lambda: max(0.0, deadline - time.time())   # noqa: E731
                 started = app.worker.pick(alias)   # pick mode: the audio route, which takes minutes, starts now
-                app.worker.prioritize(alias)       # this file's queued job goes first
+                # This file's queued job goes first, and this language gets alass sooner in it
+                app.worker.prioritize(alias, lang)
                 if not started and app.worker.busy_reading(alias):
                     # the Cues route takes seconds, the audio route minutes: the language's final result, else the best
-                    # pass published by the deadline
-                    app.worker.wait_for(alias, lang, left(), final=True)
+                    # pass published by the deadline (less the original's download time while it isn't downloaded)
+                    self._wait_for(app, alias, lang, deadline, deadline, final=True)
                 file_key = app.store.resolve(alias)
                 good = app.store.last_good(file_key, lang) if file_key else None
                 # While best fit still judges, the best slot is empty but the first pass is published
@@ -370,8 +468,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = app.text_of(key)
                 if body is not None:
                     app.store.served(key)
-                    return self._send(200, to_srt(parse(body)) if is_ass(body) else body,
-                                      "application/x-subrip; charset=utf-8", {"Cache-Control": "no-store"})
+                    return self._subtitle(to_srt(parse(body)) if is_ass(body) else body, "copy")
                 originals = app.worker.wait_for_originals(alias, left())
                 if originals is None:
                     originals = app.worker.known_originals(alias)
@@ -383,19 +480,43 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, b"")
                 provisional = app.worker.provisional_for(alias, lang)   # a waiting file's anchored guess
                 if provisional:
-                    return self._send(200, provisional, "application/x-subrip; charset=utf-8", {"Cache-Control": "no-store"})
-                original = (originals.get(lang) or {}).get("url")
-                if original:
-                    return self._send(302, b"", "text/plain", {"Location": original, "Cache-Control": "no-store"})
-                # An error here reaches the viewer as an HTTP 502 through AIOMetadata; say it plainly instead
-                note = f"1\n00:00:01,000 --> 00:00:08,000\nNo {lang_name(lang)} subtitle was found for this file.\n"
-                return self._send(200, note, "application/x-subrip; charset=utf-8", {"Cache-Control": "no-store"})
+                    return self._subtitle(provisional, "guess")
+                if (originals.get(lang) or {}).get("url"):   # the original's text once it is checked
+                    # Nothing passed by the deadline: the downloaded original that measured best against the
+                    # file's own track, when it beats the name-ranked guess
+                    return self._original(app, alias, lang, deadline, app.worker.measured_original(alias, lang))
+                return self._subtitle(no_subtitle_note(lang), "note")
             return self._send(404, b"")
         except (BrokenPipeError, ConnectionResetError):
             return None
         except Exception as e:
             log.warning("request failed: %s", type(e).__name__)
             return self._send(500, b"")
+
+    @staticmethod
+    def _wait_for(app, alias, lang, end, deadline, final=False):
+        """Worker.wait_for until `end` (a time), stopping ORIGINAL_DOWNLOAD_S before `deadline` while the original the
+        answer may serve still has to be downloaded, so it gets that time; once it is downloaded, until `end`."""
+        got = app.worker.wait_for(alias, lang, max(0.0, min(end, deadline - ORIGINAL_DOWNLOAD_S) - time.time()), final)
+        if time.time() < end and not app.worker.original_needs_download(alias, lang):
+            got = app.worker.wait_for(alias, lang, max(0.0, end - time.time()), final)
+        return got
+
+    def _original(self, app, alias, lang, deadline, first=None, unknown=None):
+        """An original's text from this person's own list, checked (Worker.original_for). When the deadline came first:
+        a redirect to that original's own address in this person's list (as 1.4.0 answered), or, when a player can't
+        use that address, 503, so the player asks again and gets the download it started. Else the one-line note (or
+        `unknown`'s code when this person has no subtitle of the language listed for the file)."""
+        text, why, address = app.worker.original_for(alias, lang, deadline, first)
+        if text is not None:
+            return self._subtitle(as_srt(text), "original")
+        if why == "late":
+            if address:
+                return self._send(302, b"", "text/plain", {"Location": address, "Cache-Control": "no-store"})
+            return self._send(503, b"", "text/plain", {"Retry-After": "1", "Cache-Control": "no-store"})
+        if why == "unknown" and unknown:
+            return self._send(unknown, b"")
+        return self._subtitle(no_subtitle_note(lang), "note")
 
 def serve(app, port):
     Handler.app = app

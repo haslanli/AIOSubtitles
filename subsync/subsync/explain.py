@@ -31,7 +31,8 @@ RULES = [
      "debrid service from your service list."),
     ("Usenet: only parts of a file, only when you turn it on",
      "With Usenet on, AIOSubtitles also syncs files you play from Usenet. It reads only what it needs (the file's index "
-     "and its subtitle track, usually a few MB) through a Usenet service in your AIOStreams that can stream part of a "
+     "and its subtitle track, usually a few MB; with the audio route, short parts of the sound of a file without a "
+     "track) through a Usenet service in your AIOStreams that can stream part of a "
      "file: AIOStreams' own Usenet streaming, NzbDAV, AltMount, Easynews, or TorBox Usenet for releases TorBox already "
      "has. It never uses Stremio's NNTP streams, never makes TorBox download a release, and never searches or reads "
      "anything in the background. Off, a file you play from Usenet gets a synced copy only when your debrid service "
@@ -46,6 +47,9 @@ RULES = [
     ("Only MKV and MP4 files",
      "subsync reads the subtitle tracks of MKV and MP4 files only, the formats nearly all streaming releases use. Other "
      "files (AVI, M2TS and the like) keep their original subtitles, after one small read that shows the format."),
+    ("A file that can't be reached is tried again later",
+     "A file that can't be reached on its first read is tried once more 10 seconds later; if it still fails, it waits "
+     "10 minutes, then 1, 6 and 24 hours, and then isn't read again."),
     ("A copy is offered only after it passes the check",
      "Each synced copy is checked against the file itself before it is offered: at least 90 % of its lines must start "
      "within 200 ms (a fifth of a second) of the file's own subtitle track, spread over the whole film (95 % when its "
@@ -55,6 +59,10 @@ RULES = [
      "Line ends are measured and recorded, but don't decide. Files without a subtitle track are checked against their "
      "speech instead (the audio route). A copy that fails is never offered: you get the original subtitles, as without "
      "subsync."),
+    ("A language with no synced copy is listed with its original",
+     "A language that has subtitles but no synced copy for a file is listed once, as \"<Language> (original)\": the "
+     "subtitle, unchanged, that fit the file best when it was checked, or else the likeliest by its release name, and "
+     "only if its text is in that language. It isn't synced; a synced copy, when there is one, is listed instead."),
     ("At most four languages",
      "./setup syncs up to four languages. Each one is a separate sync for every file you play, with its own subtitle "
      "downloads and a few seconds of work, though the video file is read only once."),
@@ -106,20 +114,20 @@ RULES = [
      "time you open the file, it is there."),
     ("Public mode: limits per person",
      "Each person can have a few files waiting and read a set number of new files and megabytes a day (UTC), by "
-     "default 3 waiting, 60 files and 1,000 MB, and the whole service reads at most its own daily total; files already "
+     "default 3 waiting, 200 files and 10,000 MB, and the whole service reads at most its own daily total; files already "
      "synced for someone don't count. Past a limit, you get only copies already synced for someone until the next day, "
      "and nobody else is affected. Sign-up attempts are limited per internet address, and the service takes a set "
      "number of people. Your settings page shows today's use."),
     ("Public mode: files without a subtitle track",
-     "With the audio route on, a file with no usable subtitle track of its own is synced from its sound only after you "
-     "pick its \"<Language> (AIOSubtitles)\" entry: never for a file you only open or browse, never in the "
-     "background, never for a file played from Usenet, never through Real-Debrid. AIOSubtitles then reads short parts "
-     "of the file's sound through your own debrid service, about 60–350 MB and at most the instance's audio limit, and "
-     "works for one to three minutes; your app gets the original subtitle at once, and the synced copy is there the "
-     "next time you open the file, for everyone who plays it. It starts only when your day's data and the service's "
-     "likely have room, so it rarely stops half-way; otherwise, or if it does, the file waits for another pick. "
-     "The service syncs one "
-     "such file at a time per two processors, so with two or more, other files aren't held up."),
+     "With the audio route on, a file with no usable subtitle track can be synced from its sound, as you choose on "
+     "your settings page: off; after you pick its \"<Language> (AIOSubtitles)\" entry (the default); or, where the "
+     "instance offers it, as soon as your app asks for its subtitles, if no synced copy exists and a subtitle exists "
+     "to fit. Never through Real-Debrid. AIOSubtitles reads short parts of the sound through your own debrid service "
+     "or Usenet, about 60–350 MB, at most the instance's audio limit, and works one to three minutes; your app gets "
+     "the original at once, and the synced copy is there next time, for everyone who plays the file. It "
+     "starts only when your day's data and audio syncs, and the service's data, likely have room; otherwise, or if it "
+     "stops half-way, the file waits for another pick. The service runs a set number of these at once "
+     "(SUBSYNC_AUDIO_AT_ONCE), so other files aren't held up."),
     ("Public mode: what is kept, and for how long",
      "AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: "
      "the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password, and "
@@ -142,9 +150,12 @@ RULES = [
     ("Which subtitles are tried first",
      "For each language, AIOSubtitles tries first the subtitle your config lists first, then the ones made for your "
      "exact file (matched by its fingerprint or torrent, or with as many lines as the file's own track), then those "
-     "of your release, then the rest. Among equally likely ones, your config's addons come first, then OpenSubtitles, "
+     "of your release, then the rest. A subtitle that names the same edition as the file (Director's Cut, Extended, "
+     "Theatrical, …) is tried before others of its kind; one that names another edition is tried last. Among equally "
+     "likely ones, your config's addons come first, then OpenSubtitles, "
      "TheSubtitleDB, SubDL, SubSource, Gestdown and Wyzie. With no subtitle addon in your config, no subtitle has a "
-     "place of its own as your first."),
+     "place of its own as your first. A subtitle whose text isn't in the language it is listed under (judged by its "
+     "letters and common words once it has about 300 words) is never synced, offered or served as that language."),
     ("A failing subtitle site is paused",
      "A site AIOSubtitles searches itself that fails three times within ten minutes (no answer, or an error) is skipped "
      "for ten minutes, then tried with one request: if it answers, it is used again; if not, it waits another ten "
@@ -199,17 +210,19 @@ QUESTIONS = {
         "file; the video file is still read only once."),
     "AUDIO": (
         "no",
-        "Also sync files that have no subtitle track of their own, by listening to their speech. Recommended: no, "
-        "unless you often watch such files; most files have a track. Off: those files keep their original subtitles, "
-        "and subsync reads about 1 MB of each file. On: after you pick such a file's \"<Language> (Subsync)\" entry, "
-        "subsync reads short audio parts of it, up to the limit you choose next (1 GB recommended; counted in the "
-        "daily limit and in your debrid service's traffic), and the copy is there the next time you open the file; "
-        "files with too high a bitrate for that limit keep their originals."),
+        "Some files carry no subtitle track, so subsync can time a subtitle to them only by listening to their speech: "
+        "it reads short parts of the sound (about 60–350 MB a file, at most the audio limit you choose next) and keeps "
+        "one processor busy for one to three minutes. When I pick the file (recommended with two or more processors): "
+        "only after you choose the file's \"<Language> (Subsync)\" entry, so only files you watch are read. As soon as "
+        "a file is opened: when your app asks for the file's subtitles, so files you only browse or that it prepares "
+        "next are read too (at most 5 a day). No: those files keep their original subtitles and subsync reads about 1 "
+        "MB of each."),
     "USENET": (
         "no",
         "Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a "
         "second config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it "
-        "needs. Recommended if you play from Usenet and your indexer's daily limit isn't tight. The cost: at most 10 "
+        "needs (more for audio syncs). Recommended if you play from Usenet and your indexer's daily limit isn't "
+        "tight. The cost: at most 10 "
         "extra searches a day through your indexers (usually none, because your AIOStreams reuses the search you just "
         "made), fetching a release's NZB when your Usenet service doesn't have it yet, and some Usenet data per file "
         "(more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and "
@@ -217,8 +230,8 @@ QUESTIONS = {
         "or read."),
     "AUDIO_BUDGET": (
         "1",
-        "Asked only with the audio route on: the most it reads of one file, through your debrid service: 0.5, 1, 2 "
-        "or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, "
+        "Asked only with the audio route on: the most it reads of one file, through your debrid service or Usenet: "
+        "0.5, 1, 2 or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, "
         "re-encodes); remuxes usually carry image subtitles and need no audio. Higher: very high-quality files such "
         "as 4K remuxes get synced too, but each can cost that much data and take longer than the 14 seconds an app "
         "waits, so the copy comes the next time you open the file. Lower: less data on a metered connection; more "
@@ -282,6 +295,15 @@ QUESTIONS = {
         "sign up, and their apps download synced files from it. Your web server sends it to this machine; setup shows "
         "the one rule it needs. It goes into every personal link, so choose one you will keep: changing it later "
         "breaks the links people already added to their AIOStreams."),
+    "SUBSYNC_AUDIO_ROUTE": (
+        "no",
+        "Off by default. Off removes it completely: no one's audio is read and the pages don't offer it; such files "
+        "keep their original subtitles. On: each person chooses on their settings page: off, when they pick a file's "
+        "\"(AIOSubtitles)\" entry (the default), or as soon as a file is opened. Each sync reads about 60–350 MB of "
+        "the file's sound through that person's own debrid service or Usenet and keeps about one processor busy for one "
+        "to three minutes, within the limits you set next. Recommended: on, if your server has two or more "
+        "processors; one sync serves everyone who plays that file. The reads count in each person's daily data and "
+        "the service's daily total; nothing goes through Real-Debrid."),
     "REMOVE_OPENSUBTITLES": (
         "yes",
         "Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, "
@@ -333,12 +355,19 @@ GROUPS = [
         "SUBSYNC_AUDIO_ROUTE": (
             "off",
             "Your answer to ./setup's audio question, on or off: whether files with no subtitle track of their own are "
-            "synced from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each, only after someone picks "
-            "their \"(Subsync)\" entry (\"(AIOSubtitles)\" on a public instance). Recommended: off on your own install "
-            "unless you often watch such files; on a public instance, on if the server has two or more processors. Off: "
-            "they keep their original subtitles and subsync reads about 1 MB per file. On a public instance each "
-            "person's audio reads go through their own debrid service and count in their daily data, and one sync "
-            "serves everyone who plays the same file."),
+            "synced from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each, after someone picks their "
+            "\"(Subsync)\" entry or, with SUBSYNC_AUDIO_WHEN=open, as soon as they are opened; on a public instance each "
+            "person chooses. Recommended: off on your own install unless you often watch such files; on a public "
+            "instance, on if the server has two or more processors. Off: they keep their original subtitles and subsync "
+            "reads about 1 MB per file. On a public instance each person's audio reads go through their own debrid "
+            "service or Usenet and count in their daily data, and one sync serves everyone who plays the same file."),
+        "SUBSYNC_AUDIO_WHEN": (
+            "pick",
+            "Pick or open: when a file with no subtitle track of its own starts its audio sync, with SUBSYNC_AUDIO_ROUTE "
+            "on. pick (recommended): only after its \"(Subsync)\" entry is picked. open: as soon as an app asks for the "
+            "file's subtitles, if no synced copy exists, a subtitle exists to fit and the day's data has room, at most "
+            "SUBSYNC_USER_OPENED_PER_DAY a day; it reads 60–350 MB of files nobody may watch. A public instance ignores "
+            "it: each person chooses on their settings page."),
         "SUBSYNC_USENET": (
             "off",
             "Off by default. On your own install: on, subsync also syncs files you play from Usenet, through a second "
@@ -380,9 +409,9 @@ GROUPS = [
     }),
     ("Limits and safety", {
         "SUBSYNC_DAILY_BUDGET_GB": (
-            "50",
+            "100",
             "The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until "
-            "the next day and new files keep their original subtitles. 50 is far above normal use (about 1 MB per file, "
+            "the next day and new files keep their original subtitles. 100 is far above normal use (about 1 MB per file, "
             "a few MB when the track's lines are pictures; up to 1 GB per file with the audio route), so it only "
             "catches something going wrong. Lower it if your "
             "debrid service or server has a tight traffic limit."),
@@ -393,16 +422,28 @@ GROUPS = [
             "Lower it if your indexer's daily limit is tight; 0 turns Usenet off. On a public instance this is per "
             "person, through each person's own indexers."),
         "SUBSYNC_INDEX_CAP_MB": (
-            "16",
+            "32",
             "The most subsync reads of one file to find its subtitle tracks (the start, the index, and 64 KB at each "
-            "end), in MB. Most files need about 1 MB; files with very many tracks need more, and one needing more than "
-            "this keeps its original subtitles. Recommended: 16. Higher: a few more such files get copies, each costing "
-            "that much more data."),
+            "end), in MB. Most files need about 1 MB; files with very many tracks need more. A file whose index is "
+            "larger keeps its original subtitles and isn't read again until the cap is raised. Recommended: 32. "
+            "Higher: a few more such files get copies, each costing that much more data."),
         "SUBSYNC_FILE_CAP_GB": (
             "6",
             "The most subsync reads of one file in all when the audio route works on it, in GB: an outer safety limit, "
             "since the audio limit (SUBSYNC_AUDIO_BUDGET_GB, at most 4 GB from ./setup) normally stops first. "
             "Recommended: 6. 0 removes it, which is not recommended."),
+        "SUBSYNC_USER_AUDIO_PER_DAY": (
+            "20",
+            "Audio syncs one person may start a day (UTC), picked or opened. Each reads about 60–350 MB of a file's "
+            "sound and keeps a processor busy for one to three minutes, and its copy then serves everyone who plays "
+            "that file. 20 by default; recommended: keep it, so the processors are shared fairly while the daily data "
+            "limit bounds the reads. 0 stops new audio syncs and keeps the copies already made. Past it, that person's "
+            "files wait for a pick the next day."),
+        "SUBSYNC_USER_OPENED_PER_DAY": (
+            "5",
+            "Of those, how many may start as soon as a file is opened, for people who chose that (UTC day). 5 by "
+            "default; recommended: keep it low, since apps also ask for files people only browse or that they prepare "
+            "next. 0 removes that answer from the pages; people who had chosen it then sync when they pick."),
         "SUBSYNC_403_BACKOFF_S": (
             "900",
             "After a debrid service refuses a read (HTTP 403 or 429, usually a per-account limit), subsync stops all "
@@ -416,8 +457,9 @@ GROUPS = [
             "that is still on."),
         "SUBSYNC_READ_TIMEOUT_S": (
             "60",
-            "How long one read of a file may wait for an answer, in seconds, before it counts as failed; a failed file "
-            "is tried again 1, 6 and 24 hours later. Recommended: 60. Shorter: slow services fail more often."),
+            "How long one read of a file may wait for an answer, in seconds, before it counts as failed; a file's first "
+            "read is then tried once more 10 seconds later, and a failed file is tried again 10 minutes, 1, 6 and 24 "
+            "hours later. Recommended: 60. Shorter: slow services fail more often."),
         "SUBSYNC_SIZE_SLACK_MB": (
             "5.5",
             "How far a file's listed size may be from its real size and still be taken for the same file, in MB; "
@@ -599,11 +641,9 @@ GROUPS = [
     ("When the audio route works", {
         "SUBSYNC_AUDIO_ON_PICK": (
             "on",
-            "With the audio route on: on, subsync reads a file's audio only after you pick its \"(Subsync)\" entry, "
-            "which shows you are playing it; off, on any subtitle request, including the ones AIOMetadata sends for a "
-            "version you never play. Recommended: on: no audio is read for files you only browse. Off: copies come "
-            "sooner, at up to 1 GB read for every file merely opened. On a public instance it must stay on: "
-            "AIOSubtitles doesn't start with it off, so nobody's audio is read for a file they only opened."),
+            "The setting SUBSYNC_AUDIO_WHEN replaced, still read while that one isn't set: on means pick, off means "
+            "open. Recommended: leave it out and set SUBSYNC_AUDIO_WHEN instead. A public instance ignores both: each "
+            "person chooses on their settings page."),
         "SUBSYNC_PICK_WAIT_MS": (
             "14000",
             "How long your app's download of a \"(Subsync)\" entry waits for the synced copy, in ms, before it gets the "
@@ -714,10 +754,9 @@ GROUPS = [
             "web page with their AIOStreams link and password and gets a personal addon link; subsync then works "
             "through a separate sync config it makes on their AIOStreams. Leave it off for your own install; setup "
             "turns it on when you host a public instance. On, the service needs SUBSYNC_SECRET_KEY and "
-            "SUBSYNC_PUBLIC_BASE, runs audio syncs only after a pick, and shares how each copy was synced (its "
-            "timing, never "
-            "its text) between everyone playing the same file, so the more people use it, the more files are ready "
-            "when someone presses play. It holds other people's links, so it needs a server you keep up to date and "
+            "SUBSYNC_PUBLIC_BASE, lets each person choose their audio syncs, and shares how each copy was synced (its "
+            "timing, never its text) between everyone playing the same file, so the more people use it, the more files "
+            "are ready when someone presses play. It holds other people's links, so it needs a server you keep up to date and "
             "backed up."),
         "SUBSYNC_SECRET_KEY": (
             "",
@@ -743,17 +782,17 @@ GROUPS = [
             "the service or someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is "
             "stricter, higher helps many people behind one shared address."),
         "SUBSYNC_USER_FILES_PER_DAY": (
-            "60",
+            "200",
             "New files read per person per day (UTC). Files already in the shared store don't count, and neither does "
             "serving a copy. Past it, that person gets only copies the store already has until the next day; nobody "
-            "else is affected. 60 is a long day of episodes; it keeps one person, or a leaked link, from using up the "
-            "service's daily reads."),
+            "else is affected. 200 is more than anyone watches in a day, with room for the files apps open without "
+            "playing them; it keeps one person, or a leaked link, from using up the service's daily reads."),
         "SUBSYNC_USER_DAILY_MB": (
-            "1000",
+            "10000",
             "Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track "
-            "takes about 1 MB, a few MB when the track's lines are pictures; 1,000 is 60 files at the most one file's "
-            "index may take (16 MB), so those reads never stop someone before the file limit. With the audio route on, "
-            "a file synced from its sound takes about 60–350 MB, so 1,000 MB covers about three to five a day; "
+            "takes about 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's "
+            "index may take (32 MB) with room to spare, so those reads never stop someone before the file limit. A "
+            "file the audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; "
             "such a sync starts only when what is left of the day likely covers it, so it rarely stops half-way; if it "
             "does, the file waits for another pick. Past the limit, that person gets only copies already in the store "
             "until the next day."),
@@ -815,6 +854,12 @@ GROUPS = [
             "AIOStreams shared by many people limits how many requests one address may make, so give a number when the "
             "processors are many and that AIOStreams is shared. A torrent's file is never read twice at once: whoever "
             "plays it second waits for the first one's work and reads nothing."),
+        "SUBSYNC_AUDIO_AT_ONCE": (
+            "auto",
+            "Audio syncs running at the same time, for everyone together. auto (the default, recommended) is half of "
+            "SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them. A higher number finishes "
+            "picked files sooner when many come together but makes every other file wait longer; it can't be more than "
+            "SUBSYNC_SYNCS_AT_ONCE. A self-hosted install syncs one at a time whatever it says."),
     }),
 ]
 
@@ -870,6 +915,14 @@ PUBLIC_FIELDS = {
         "them and nothing is removed. It works only together with adding AIOSubtitles; to undo it, add the addons "
         "again on AIOStreams' configure page."),
     "usenet": QUESTIONS["USENET"][1],      # the same text as the installer question
+    # The answer for files with no subtitles of their own, with the instance's audio limit and daily count
+    # (audio_help); each answer's own words are in PUBLIC_AUDIO_ANSWERS
+    "audio": (
+        "Some files carry no subtitle track, so a subtitle can only be timed to them by listening to their speech: "
+        "AIOSubtitles reads short parts of the file's sound through your own debrid service (or Usenet, if you turned "
+        "it on), about 60–350 MB a file and at most {limit}, and works one to three minutes; the synced copy then "
+        "serves everyone who plays the same file, you included next time. These syncs count in your daily data, at "
+        "most {per_day} a day."),
     "invite": "The code you were given. AIOSubtitles is open only to invited people for now.",
     "refresh": (
         "Your AIOStreams password, used now to read your config again and rebuild AIOSubtitles' own config from it, for "
@@ -909,6 +962,30 @@ USENET_WHY = {
     "nntp": USENET_NO_SERVICE,
     "none": USENET_NO_SERVICE,
 }
+
+
+# What each answer for files with no subtitles of their own does, under the answer ("{opened}": the instance's
+# SUBSYNC_USER_OPENED_PER_DAY); the pages offer "open" only while that is above 0
+PUBLIC_AUDIO_ANSWERS = {
+    "off": ("Such files keep their original subtitles, you still get copies others made, and nothing of their sound is "
+            "read for you."),
+    "pick": ("It starts only when you choose the file's \"<Language> (AIOSubtitles)\" entry in your app, so only files "
+             "you watch are read."),
+    "open": ("It starts when your app asks for the file's subtitles, before you choose anything, if no synced copy "
+             "exists yet, a subtitle exists to fit and your day's data has room; apps also ask for files you only open "
+             "or that they prepare next, so it can read files you never watch (at most {opened} a day)."),
+}
+
+
+def audio_help(settings):
+    """The explanation of the answer for files with no subtitles of their own, with the instance's audio limit and
+    the audio syncs a person may start a day."""
+    return PUBLIC_FIELDS["audio"].format(limit=audio_limit_words(settings), per_day=settings.user_audio_per_day)
+
+
+def audio_answer_help(answer, settings):
+    """What one answer ("off", "pick" or "open") does, with the opened syncs a person may start a day."""
+    return PUBLIC_AUDIO_ANSWERS[answer].format(opened=settings.user_opened_per_day)
 
 
 def usenet_help(per_day):
@@ -1027,16 +1104,21 @@ PUBLIC_NOTICE_DONE = "AIOSubtitles: nothing needs doing any more. This entry goe
 PUBLIC_TEXTS["privacy"] = " ".join(f"{lead} {text}".strip() for _, lead, text in PRIVACY_PARTS)
 
 # The audio route on the public pages, shown only when the instance has it on: the intro's sentence,
-# the privacy page's words on what is read ("{limit}": the instance's audio limit), the signed-up page's note.
+# the privacy page's words on what is read ("{limit}": the instance's audio limit), the signed-up page's note; and
+# the note under the answer "as soon as a file is opened", shown while it is the one picked. Each person
+# chooses when (PUBLIC_FIELDS["audio"]), so these name the default and leave the answers to the settings page.
 PUBLIC_AUDIO = {
-    "intro": ("A file with no subtitle track of its own is synced from its sound, only after you pick its "
-              "\"(AIOSubtitles)\" entry: that reads about 60–350 MB of it through your debrid service, and the copy is "
-              "there the next time you open the file."),
-    "privacy": ("; for a file with no subtitle track of its own, only after you pick its \"(AIOSubtitles)\" entry, "
-                "short parts of its sound (about 60–350 MB, at most {limit}), used only to time the subtitles and not "
-                "kept;"),
-    "next": ("A file with no subtitle track of its own takes one to three minutes after you pick its "
-             "\"(AIOSubtitles)\" entry; its copy is there the next time you open it."),
+    "intro": ("A file with no subtitle track of its own can be synced from its sound, when you choose: by default only "
+              "after you pick its \"(AIOSubtitles)\" entry. That reads about 60–350 MB of it through your debrid "
+              "service or Usenet, and the copy is there the next time you open the file."),
+    "privacy": ("; for a file with no subtitle track of its own, as you choose on your settings page (by default only "
+                "after you pick its \"(AIOSubtitles)\" entry), short parts of its sound (about 60–350 MB, at most "
+                "{limit}) through your own debrid service or Usenet, used only to time the subtitles and not kept;"),
+    "next": ("A file with no subtitle track of its own takes one to three minutes once its sync from the sound starts "
+             "(by default after you pick its \"(AIOSubtitles)\" entry; you choose on your settings page); its copy is "
+             "there the next time you open it."),
+    "opened_note": ("This reads about 60–350 MB of each opened file that has no subtitle track, even one you don't "
+                    "watch."),
 }
 PRIVACY_TRACK_END = "doesn't keep)"     # the privacy page's audio words follow the subtitle track's size
 
@@ -1125,6 +1207,7 @@ PUBLIC_TEXTS.update({
     "reset": "Resets at 00:00 UTC, {when}. Files that already have a synced copy don't count.",
     "limit_reached": "Until 00:00 UTC you get only copies already synced for someone; nobody else is affected.",
     "languages_saved": "Languages saved: {names}. They apply from the next file you play.",
+    "audio_saved": "Saved for files with no subtitles of their own: {answer}. It applies from the next file you open.",
     "refreshed": "Refreshed: AIOSubtitles' config on your AIOStreams now matches yours.",
     "to_stored": ("Refreshed: Real-Debrid is now the only debrid service in your config, so AIOSubtitles removed its own "
                   "config from your AIOStreams and offers stored copies only."),

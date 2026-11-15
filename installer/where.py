@@ -1,7 +1,7 @@
 """Where setup runs: always inside the AIOSubtitles image, on one of two routes.
 
   image   `docker run ... setup` in the folder the person made: the folder at /folder, its files in /folder/state, and
-          a./setup written into it that runs the same command again;
+          a ./setup written into it that runs the same command again;
   source  the source folder's own ./setup, which builds the image here first: only its state/ at /folder/state.
 
 Setup reads its own container through Docker's socket: the image it runs from (the service then runs exactly that

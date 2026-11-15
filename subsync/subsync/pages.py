@@ -35,12 +35,47 @@ UI_WORDS = (
     "Privacy · AIOSubtitles", "Not found · AIOSubtitles",
     # Usenet
     "Sync Usenet files too", "Usenet", "searches used today",
+    # files with no subtitles of their own: the question, its answers, the settings row's button
+    "Files with no subtitles of their own", "Off", "On, when I pick the file (recommended)",
+    "On, as soon as a file is opened (not recommended)", "Save answer",
 )
 LINK_PLACEHOLDER = "https://…/stremio/…/manifest.json"
+
+# The answers for files with no subtitles of their own, as the pages name them (value, answer, its tag); the
+# saved message names the answer without its tag
+AUDIO_LABEL = "Files with no subtitles of their own"
+AUDIO_ANSWERS = (("off", "Off", ""), ("pick", "On, when I pick the file", " (recommended)"),
+                 ("open", "On, as soon as a file is opened", " (not recommended)"))
 
 
 def language_names(codes):
     return ", ".join(_NAMES.get(c, c) for c in codes)
+
+
+def audio_answers(settings):
+    """The answers for files with no subtitles of their own this instance offers, as (value, answer): none
+    while its audio route is off; without "as soon as a file is opened" while it allows no opened syncs
+    (SUBSYNC_USER_OPENED_PER_DAY 0)."""
+    if not getattr(settings, "audio_route", False):
+        return ()
+    return tuple((value, answer + tag) for value, answer, tag in AUDIO_ANSWERS
+                 if value != "open" or settings.user_opened_per_day > 0)
+
+
+def _audio_group(settings, chosen, labelled=True, error_id=None):
+    """The answers as radio rows, `chosen` picked when the instance offers it, else "pick" (as public.person_audio
+    reads a record: no answer, an unknown one, or "open" while it isn't offered). `labelled`: under its own question
+    and explanation (the sign-up); otherwise named by the settings row's heading, its explanation beside it.
+    `error_id`: the id of the answer's problem message, as the other fields have it: the answers are marked by it and
+    their group described by it."""
+    answers = audio_answers(settings)
+    chosen = chosen if chosen in dict(answers) else "pick"
+    rows = [ui.radio_row("audio", value, answer, explain.audio_answer_help(value, settings), checked=value == chosen,
+                         note=explain.PUBLIC_AUDIO["opened_note"] if value == "open" else None, invalid=bool(error_id))
+            for value, answer in answers]
+    if labelled:
+        return ui.radio_group(AUDIO_LABEL, rows, help_text=explain.audio_help(settings), id="audio", error_id=error_id)
+    return ui.radio_group(None, rows, id="audio", labelled_by="audio-h", described_by="audio-help", error_id=error_id)
 
 
 def _problem(error, field, title, fields=(), extra=""):
@@ -87,9 +122,10 @@ def _screen(name, steps, fill, content, last=False):
             f"<div class=\"actions\">{action}</div></section>")
 
 
-def signup_page(settings, error=None, field=None, order=None):
+def signup_page(settings, error=None, field=None, order=None, audio=None):
     """The start page and the sign-up layer. After a problem the layer is open with the summary first and the field
-    marked; the languages keep their order; the link, the password and the invite code are never sent back."""
+    marked; the languages keep their order, and the answer for files with no subtitles of their own (`audio`)
+    stays picked; the link, the password and the invite code are never sent back."""
     order = ["eng"] if order is None else order
     limit = settings.max_languages or 4
     steps = STEPS if settings.invite else STEPS[1:]
@@ -115,11 +151,15 @@ def signup_page(settings, error=None, field=None, order=None):
                                                err("languages"))))
     usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day)),) \
         if usenet_allowed(settings) else ()
+    # With the instance's audio route on, each person answers for files with no subtitles of their own
+    asks_audio = bool(audio_answers(settings))
     screens.append(_screen("config", steps, 100, "<h2 class=\"q\">Your AIOStreams config</h2>" + ui.choices(
         ui.choice("add_addon", "Add AIOSubtitles to my AIOStreams config", explain.PUBLIC_FIELDS["add_addon"], checked=True),
         ui.choice("clean_up", "Remove the subtitle addons AIOSubtitles now searches itself",
-                  explain.PUBLIC_FIELDS["clean_up"], needs="add_addon"), *usenet), last=True))
-    fields = ("link", "password", "languages") + (("invite",) if settings.invite else ())
+                  explain.PUBLIC_FIELDS["clean_up"], needs="add_addon"), *usenet)
+        + (_audio_group(settings, audio, error_id=err("audio")) if asks_audio else ""), last=True))
+    fields = ("link", "password", "languages") + (("invite",) if settings.invite else ()) \
+        + (("audio",) if asks_audio else ())
     problem = _problem(error, field, "Sign-up didn't go through", fields,
                        extra=f"<p>{e(explain.PUBLIC_TEXTS['kept_note'])}</p>")
     # without the script the arrow is a plain link back to the start page
@@ -143,6 +183,7 @@ def signup_page(settings, error=None, field=None, order=None):
         return ui.page("AIOSubtitles", body, "start")
     # the layer comes back open, at the screen with the problem; the script takes it from there
     at = field if field in fields else ("invite" if settings.invite else "link")
+    at = "config" if at == "audio" else at
     return ui.page("AIOSubtitles", body, "start", body_attrs=f" data-open-at=\"{e(at)}\"", opened=True)
 
 
@@ -223,8 +264,8 @@ def _share(used, limit):
     return max(0.015, min(1.0, used / limit))
 
 
-DONE = ("languages", "refreshed", "refreshed-rd", "refreshed-manual", "forgot", "to-stored", "to-stored-manual", "stored",
-        "stored-manual")
+DONE = ("languages", "audio", "refreshed", "refreshed-rd", "refreshed-manual", "forgot", "to-stored",
+        "to-stored-manual", "stored", "stored-manual")
 
 
 def done_message(code, record):
@@ -232,6 +273,9 @@ def done_message(code, record):
     texts = explain.PUBLIC_TEXTS
     if code == "languages":
         return texts["languages_saved"].format(names=language_names(record["languages"])), None
+    if code == "audio":           # the answer just saved, without its tag
+        answers = {value: answer for value, answer, _ in AUDIO_ANSWERS}
+        return texts["audio_saved"].format(answer=answers.get(record.get("audio"), answers["pick"])), None
     if code == "refreshed":
         return texts["refreshed"], None
     if code == "refreshed-rd":
@@ -295,6 +339,20 @@ def _usenet_row(settings, record, usenet_usage):
                 f"<div class=\"controls\">{lines}</div>")
 
 
+def _audio_row(settings, record, error=None):
+    """The answer for files with no subtitles of their own, saved by the "audio" action like the languages (no
+    password, no call to AIOStreams); only with the instance's audio route on. `error`: its problem, shown in the row
+    as the Languages row shows its own."""
+    if not audio_answers(settings):
+        return ""
+    return _row("audio-h", AUDIO_LABEL,
+                (f"<p class=\"field-error\" id=\"audio-error\">{e(error)}</p>" if error else "")
+                + f"<p class=\"help\" id=\"audio-help\">{e(explain.audio_help(settings))}</p>",
+                _form("audio", _audio_group(settings, record.get("audio"), labelled=False,
+                                            error_id="audio-error" if error else None)
+                      + f"<div class=\"actions\">{ui.button('Save answer', 'primary', type='submit')}</div>"))
+
+
 def settings_page(settings, record, usage, manifest_url, message=None, error=None, notice=None, now=0, field=None,
                   state=None, usenet_usage=None):
     texts = explain.PUBLIC_TEXTS
@@ -309,7 +367,8 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
         + (ui.note("warn", explain.PUBLIC_STORE_ONLY[1], explain.PUBLIC_STORE_ONLY[0]) if stored else "") \
         + _state_note(record, state) \
         + (ui.note("warn", texts["limit_reached"], "Today's limit is reached") if full and not stored else "") \
-        + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages"))
+        + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages")
+                   + (("audio",) if audio_answers(settings) else ()))
     today = "" if stored else (
         "<section class=\"today\" aria-labelledby=\"today-h\"><h2 id=\"today-h\">Today</h2>"
         + ui.gauge(f"{usage['files']} of {files_limit}", "new files", _share(usage["files"], files_limit),
@@ -361,7 +420,8 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
     body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT)}<main><h1>Your AIOSubtitles</h1>"
             + (f"<div class=\"notes\" aria-live=\"polite\">{notes}</div>" if notes else "")
             + f"<div class=\"grid12 band\">{link}{today}</div>"
-            f"<div class=\"rows\">{languages}{_usenet_row(settings, record, usenet_usage)}{refresh}{delete}</div></main></div>")
+            f"<div class=\"rows\">{languages}{_audio_row(settings, record, error if field == 'audio' else None)}"
+            f"{_usenet_row(settings, record, usenet_usage)}{refresh}{delete}</div></main></div>")
     return ui.page("Settings · AIOSubtitles", body, "settings", personal=True)
 
 
