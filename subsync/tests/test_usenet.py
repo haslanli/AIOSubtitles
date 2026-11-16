@@ -627,7 +627,7 @@ class PublicUsenetTest(TempDirTest):
                          (True, None, ["nzbdav", "torbox"]))
         self.assertEqual(len(self.fake.configs), 3)
 
-    def test_a_refused_usenet_config_is_said_to_be_aiosubtitles_fault(self):   #
+    def test_a_refused_usenet_config_is_said_to_be_aiosubtitles_fault(self):
         answers = iter((None, "the Usenet config's reason"))     # the sync config is accepted, the Usenet one refused
         self.fake.refusal = lambda config: next(answers, None)
         with self.assertRaises(self.signup.SignupError) as e:

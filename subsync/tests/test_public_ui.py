@@ -882,7 +882,7 @@ class SignupMessagesTest(unittest.TestCase):
                 text = _plain(e, "Reading your AIOStreams config", own_password=True)
                 self.assertEqual(text, "Your AIOStreams didn't accept this password for this link. Type the password "
                                        "of this config: the one you set on AIOStreams' configure page, not the one "
-                                       "you sign in to AIOStreams with.")   #
+                                       "you sign in to AIOStreams with.")
                 # the service's own sync config refused: not the person's password, so not that message
                 self.assertNotIn("this password", _plain(e, "Updating AIOSubtitles' config on your AIOStreams"))
 

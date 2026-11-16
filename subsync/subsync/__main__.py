@@ -40,7 +40,7 @@ def main():
     extra = make_sources(s)
     lookup = make_lookup(s, store)
     usenet = gate = None
-    if s.usenet and s.usenet_manifest and s.usenet_listings_per_day > 0:   #
+    if s.usenet and s.usenet_manifest and s.usenet_listings_per_day > 0:
         usenet = Aios(s.usenet_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack,
                       password=s.usenet_password)
         gate = UsenetGate(store, s.usenet_listings_per_day, StoreUsenetCounts(store))

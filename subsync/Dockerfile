@@ -6,7 +6,7 @@
 # (1.7, by digest) that ADD --checksum below needs, whatever BuildKit the machine's Docker has (Compose v2 always builds
 # with BuildKit). Base images pinned by digest on 2026-11-09.
 # Built from the repository's root (docker build -f subsync/Dockerfile .): the image also carries setup (installer/,
-# VERSION), which runs inside it with `docker run... setup`, and Docker's command-line program and its Compose
+# VERSION), which runs inside it with `docker run ... setup`, and Docker's command-line program and its Compose
 # plugin, which setup uses through the Docker socket given to the setup container only (never to the service).
 # An image built for another processor under emulation (QEMU runs these tests hours slower) can leave them out with
 # --build-arg SUBSYNC_TESTS=skip; then run them on the machine the image is for, from the image, before using it.

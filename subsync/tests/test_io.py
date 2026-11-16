@@ -1070,7 +1070,7 @@ class GuardCapTest(unittest.TestCase):
             g.after_read(900)
             with self.assertRaises(GuardStopped):
                 g.before_read(500)                               # over the job's cap
-            self.assertEqual(Settings({}).index_cap, 32 * 1024 * 1024)   #
+            self.assertEqual(Settings({}).index_cap, 32 * 1024 * 1024)
             self.assertFalse(Settings({}).audio_route)           # off unless asked for
 
     def test_only_the_jobs_own_cap_is_a_cap_reached(self):
@@ -1447,7 +1447,7 @@ class SelfTestTest(unittest.TestCase):
         self.assertEqual(run(self.srv.url("tiny.mkv"), 1000, Settings({}))["error"], "cap")
 
     def test_the_cap_is_subsync_s_own_index_cap_unless_given(self):
-        # The wizard's 4 MB cap stopped a 7.3 MB index that subsync itself reads (16 MB then, 32 MB since)
+        # The wizard's 4 MB cap stopped a 7.3 MB index that subsync itself reads (16 MB then, 32 MB)
         from subsync.selftest import run
         from subsync.settings import Settings
         out = run(self.srv.url("tiny.mkv"), None, Settings({}))

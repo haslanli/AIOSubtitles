@@ -1,4 +1,4 @@
-""", as amended by: every subtitle is timed to the title's original-language track when the file has one
+""", as amended: every subtitle is timed to the title's original-language track when the file has one
 (Game of Thrones S01E01: Spanish to the English track, not to its own es-ES or es-419, which run 167–250 ms early against
 it): a plain text track first, else an image track (Kingdom of Heaven DC: Russian to the English PGS track), else a CC or
 SDH-only track, but only for a subtitle whose own language has no plain track (Dan Da Dan: its English and Spanish keep

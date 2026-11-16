@@ -152,7 +152,7 @@ class PublicHttpTest(Base):
         self.assertNotIn(PASSWORD, body.decode())
         self.assertNotIn(f"stremio/{uuid}", body.decode())
 
-    def test_signup_with_an_alias_link_over_http(self):   #
+    def test_signup_with_an_alias_link_over_http(self):
         uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
         self.fake.aliases["Home-TV"] = uuid
         code, body, _ = http(self.base + "/signup", form(link=f"{INSTANCE}/stremio/u/Home-TV/manifest.json",

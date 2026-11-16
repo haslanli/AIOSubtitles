@@ -506,7 +506,7 @@ class Flow(FlowFixture):
         self.assertIn('There is no config with that ID on this AIOStreams', out)
         self.assertFalse([1 for m, p, _ in self.aios.log if m == 'GET' and p == '/api/v1/user'])   # never asked
 
-    def test_an_alias_link_for_the_config(self):   #
+    def test_an_alias_link_for_the_config(self):
         self.aios.aliases['Home'] = UUID
         code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_ID=f'{PUBLIC}/stremio/u/Home/manifest.json',
                                         TEST_READ='no'))
@@ -541,7 +541,7 @@ class Flow(FlowFixture):
         del answers['TEST_READ']
         code, out = self.run_setup(answers)
         self.assertEqual(code, 0, out)
-        self.assertEqual([c for c in self.exec_calls if 'subsync.selftest' in c[0]], [])   #
+        self.assertEqual([c for c in self.exec_calls if 'subsync.selftest' in c[0]], [])
         self.assertIn('Do the test read now? [y/n]', out)
 
     def test_the_test_read_takes_the_smallest_ready_file_with_subsync_s_own_cap(self):

@@ -21,7 +21,7 @@ class PublicSettingsTest(unittest.TestCase):
         self.assertEqual(s.invite, "")
         self.assertEqual(s.max_users, 200)
         self.assertEqual(s.signups_per_hour, 5)
-        self.assertEqual(s.user_files_per_day, 200)                  #
+        self.assertEqual(s.user_files_per_day, 200)
         self.assertEqual(s.user_daily_bytes, 10000 * 1024 * 1024)
         self.assertEqual(s.user_queue, 3)
         self.assertEqual(s.active_workers, 100)

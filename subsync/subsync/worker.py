@@ -707,7 +707,7 @@ class Worker(threading.Thread):
         return None
 
     def prioritize(self, alias, lang=None):
-        """The viewer downloaded subsync's entry for this file: its queued job goes first.: and the
+        """The viewer downloaded subsync's entry for this file: its queued job goes first. And the
         entry's language `lang` is recorded on the file's text pass, queued or running, for alass sooner
         (_sync_language); the other languages' downloads go on as before. An audio job (a file with no track
         of its own) is left as it is."""
@@ -743,7 +743,7 @@ class Worker(threading.Thread):
         for lang, fetched in job.fetched.items():
             if lang == main:
                 continue
-            fetched = [(c, t) for c, t in fetched if not langcheck.refuses(t, lang)]   #
+            fetched = [(c, t) for c, t in fetched if not langcheck.refuses(t, lang)]
             got = pipeline.anchored_guess(main_text, [t for _, t in fetched])
             if got:
                 out[lang] = got["body"]

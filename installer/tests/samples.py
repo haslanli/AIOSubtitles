@@ -47,7 +47,7 @@ def every_state():
     add('config-rd-only', screens.config(rd, 'x', stop=(realdebrid.REAL_DEBRID_ONLY, engine.RD_WAY_OUT_PAGE)),
         'x', *[r[1] for r in rd], realdebrid.REAL_DEBRID_ONLY, engine.RD_WAY_OUT_PAGE)
     add('choices', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync'), f'{PUBLIC}/subsync')
-    add('choices-audio-open', screens.choices(['eng'], 'open', f'{PUBLIC}/subsync'), f'{PUBLIC}/subsync')   #
+    add('choices-audio-open', screens.choices(['eng'], 'open', f'{PUBLIC}/subsync'), f'{PUBLIC}/subsync')
     add('choices-four', screens.choices(['eng', 'spa', 'rus', 'fre'], 'pick', f'{PUBLIC}/subsync',
                                         offer_opensubtitles=True), f'{PUBLIC}/subsync')
     lang_problem = ('LANGUAGES', '"Klingon" is not a language AIOSubtitles knows.')
@@ -124,13 +124,13 @@ def every_state():
     add('host-signups', screens.host_signups('k7pm-2qra-9xwd'), 'k7pm-2qra-9xwd')
     add('host-choices', screens.host_choices())
     add('host-choices-usenet', screens.host_choices(usenet=True))
-    add('host-choices-audio', screens.host_choices(usenet=True, audio=True))                    #
+    add('host-choices-audio', screens.host_choices(usenet=True, audio=True))
     add('host-limits', screens.limits('host', {}))
     add('host-limits-usenet', screens.limits('host', {}, usenet=True))
-    add('host-limits-audio', screens.limits('host', {}, usenet=True, audio=True))                 #
+    add('host-limits-audio', screens.limits('host', {}, usenet=True, audio=True))
     places = ('SUBSYNC_AUDIO_AT_ONCE', 'A whole number from 1 to 4 (the files synced at a time), or auto.')
     add('host-limits-audio-problem', screens.limits('host', {'SUBSYNC_AUDIO_AT_ONCE': '5'}, problem=places, audio=True),
-        '5', places[1])                                                                          #
+        '5', places[1])
     add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'},
                                               problem=('SUBSYNC_SYNCS_AT_ONCE', 'A whole number from 1, or auto.')),
         'A whole number from 1, or auto.')

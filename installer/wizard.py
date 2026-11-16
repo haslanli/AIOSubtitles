@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """AIOSubtitles setup: adds subsync to the AIOStreams you already run. Start it with ./setup, which runs it inside the
-AIOSubtitles image (`docker run... setup`); the work of each step is in installer/engine.py, this is the
+AIOSubtitles image (`docker run ... setup`); the work of each step is in installer/engine.py, this is the
 command line.
 
   ./setup                  the setup page: install, or change your answers, update, remove (safe to run again)

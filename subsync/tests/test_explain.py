@@ -158,7 +158,7 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(s.syncs_at_once, available_cpus())
         self.assertEqual(s.active_workers, 100)
         self.assertEqual(s.max_connections, 256)
-        self.assertEqual(s.user_files_per_day, 200)                  #
+        self.assertEqual(s.user_files_per_day, 200)
         self.assertEqual(s.user_daily_bytes, 10000 * 1024 * 1024)
         self.assertEqual(s.daily_budget, int(100e9))                 # 100 GB a day
         self.assertEqual(s.max_users, 200)

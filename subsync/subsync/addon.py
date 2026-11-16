@@ -224,7 +224,7 @@ class App:
         if not (job.hints.get("filename") or job.hints.get("videoHash")):
             return out
         # Also with the audio route off, a file subsync works on now gets the entry (its download serves the copy
-        # once the job has it); in pick mode a file that waits for the viewer's pick gets it too.: a file whose
+        # once the job has it); in pick mode a file that waits for the viewer's pick gets it too. A file whose
         # index is over the cap gets none, since a pick could only serve the original
         if self.worker.capped(job) or not ((pick_mode and self.worker.waits_for_pick(job.alias))
                                            or self.worker.busy_with(job.alias)):
