@@ -358,8 +358,10 @@ class MkvIndex:
                         t["codec"] = v.decode(errors="replace")
                     elif cid == 0x22B59C:
                         t["language"] = v.decode(errors="replace")
+                        t["tagged"] = True        # a track without it is English by Matroska's rule, not by its tag
                     elif cid == 0x22B59D:
                         t["bcp47"] = v.decode(errors="replace")
+                        t["tagged"] = True
                     elif cid == 0x536E:
                         t["name"] = v.decode(errors="replace")
                     elif cid == 0x55AA:
@@ -564,10 +566,12 @@ class MkvIndex:
         return a, b
 
     def audio_tracks(self):
-        """Audio tracks in file order: {"index" (ffmpeg 0:a:N), "language", "default"}."""
+        """Audio tracks in file order: {"index" (ffmpeg 0:a:N), "language", "default", "name", "tagged" (whether the
+        file names its language; untagged is English by Matroska's rule)}."""
         audio = [t for t in self.tracks if t.get("type") == 2]
         default = self.audio_track_index()
-        return [{"index": i, "language": t.get("bcp47") or t.get("language", "und"), "default": i == default}
+        return [{"index": i, "language": t.get("bcp47") or t.get("language", "und"), "default": i == default,
+                 "name": t.get("name") or "", "tagged": bool(t.get("tagged"))}
                 for i, t in enumerate(audio)]
 
     def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024, track=None):

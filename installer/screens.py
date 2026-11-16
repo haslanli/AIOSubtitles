@@ -55,6 +55,9 @@ INSTALLER_WORDS = (
     'GB', 'MB', 'files',
     'Save these changes',
     'Web address', 'Trusted proxy', 'Secret key', 'SubSource API key (optional)',
+    # the original-language lookup: the TMDB key's questions, TMDB's notice and its logo's name
+    'TMDB API key (optional)', 'TMDB API key for everyone (optional)', hosting.TMDB_PERSONAL_QUESTION,
+    explain.TMDB_NOTICE, 'TMDB',
     'Updates', 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
     RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, REMOVE_HOST, REMOVE_HOST_TEXT,
     REMOVE_TEXT,
@@ -237,7 +240,8 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
                                                  id='audio')
             + (ui.choices(*usenet_box) if usenet_box else '')
             + _input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
-            + _input('WYZIE_KEY', 'Wyzie Subs API key (optional)', '', problem, kind='password', mono=True, reveal=True))
+            + _input('WYZIE_KEY', 'Wyzie Subs API key (optional)', '', problem, kind='password', mono=True, reveal=True)
+            + _tmdb('TMDB API key (optional)', problem))
     if offer_opensubtitles:
         body += ui.choices(_choice('ADD_OPENSUBTITLES', 'Your config has no subtitle source, so there is nothing to sync '
                                                         'yet. Add OpenSubtitles (free, no account needed)?',
@@ -344,11 +348,19 @@ def host_signups(invite, problem=None):
     return step('host', 'signups', body, _back_and_continue('host', 'signups'))
 
 
-def host_choices(problem=None, usenet=False, audio=False):
+def _tmdb(label, problem):
+    """The original-language lookup's TMDB key, with TMDB's logo and notice under it (its terms ask for them)."""
+    return (_input('TMDB_KEY', label, '', problem, kind='password', mono=True, reveal=True)
+            + ui.tmdb_credit(explain.TMDB_NOTICE))
+
+
+def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False):
     body = (_input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
             + _input('SUBSYNC_SUBSOURCE_KEY', 'SubSource API key (optional)', '', problem, kind='password', mono=True,
                      reveal=True)
-            + ui.choices(_choice('SUBSYNC_USENET', 'Let people sync Usenet files too?', usenet),
+            + _tmdb('TMDB API key for everyone (optional)', problem)
+            + ui.choices(_choice('SUBSYNC_TMDB_PERSONAL', hosting.TMDB_PERSONAL_QUESTION, tmdb_personal),
+                         _choice('SUBSYNC_USENET', 'Let people sync Usenet files too?', usenet),
                          _choice('SUBSYNC_AUDIO_ROUTE', hosting.AUDIO_QUESTION, audio)))
     return step('host', 'hostchoices', body, _back_and_continue('host', 'hostchoices'))
 

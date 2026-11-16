@@ -20,8 +20,8 @@ from .addon import App, Handler
 from .aiosconfig import parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
-from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh, set_audio,
-                     set_languages, signup, store_only)
+from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh,
+                     remove_tmdb_key, set_audio, set_languages, set_tmdb_key, signup, store_only)
 from .sources import Aios
 from .users import day_of
 from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
@@ -53,6 +53,9 @@ def user_settings(env, record, token):
                 "SUBSYNC_USENET_PASSWORD": record.get("usenet_password") or "",
                 "SUBSYNC_PUBLIC_BASE": f"{base}/u/{token}",
                 "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
+    instance = Settings(env)
+    if instance.public and instance.tmdb_personal:     # the person's own TMDB key, when the instance asks for one
+        own["SUBSYNC_TMDB_KEY"] = record.get("tmdb_key") or ""
     s = Settings(own)
     s.audio_when = person_audio(record, s)
     return s
@@ -164,6 +167,9 @@ class Pool:
         # One set of built-in sources for everyone: answers, pauses and the sites' limits are shared
         from .extra import make_sources
         self.extra = make_sources(settings)
+        # one original-language lookup for everyone: answers shared, each person's own TMDB key with their requests
+        from .origlang import make_lookup
+        self.lookup = make_lookup(settings, store)
         self.entries = {}          # user id -> {"app", "last", "day"}
         self.lock = threading.Lock()
         self.expired_day = None
@@ -180,7 +186,7 @@ class Pool:
             gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(), who=limits.who)
         safety = Safety(backoff_s=s.backoff_s)
         worker = Worker(s, self.store, aios, safety, vad_factory=self.vad, extra=self.extra, turn=self.turn,
-                        limits=limits, usenet=usenet, usenet_gate=gate, audio_turn=self.audio_turn)
+                        limits=limits, usenet=usenet, usenet_gate=gate, audio_turn=self.audio_turn, lookup=self.lookup)
         if start:
             worker.start()
         return App(s, self.store, worker, safety, state=record.get("state"), detail=record.get("state_detail"))
@@ -267,6 +273,8 @@ class Pool:
             entries, self.entries = list(self.entries.values()), {}
         for entry in entries:
             entry["app"].worker.stop()
+        if self.lookup is not None:   # lookups still waiting are dropped, so stopping isn't held up by them
+            self.lookup.close()
 
 
 # ------------------------------------------------------------------------------------------- the router
@@ -505,6 +513,14 @@ class PublicHandler(Handler):
             if action == "forget-password":
                 forget_password(svc.users, token)
                 return self._see("forgot")
+            if action == "tmdb-key" and pages.personal_tmdb(svc.s):
+                set_tmdb_key(svc.users, token, form.get("tmdb_key"), svc.s)   # checked with TMDB once
+                svc.pool.stop(token)          # the next request opens the record with it
+                return self._see("tmdb-key")
+            if action == "tmdb-key-remove":   # also after the instance stopped asking for keys
+                remove_tmdb_key(svc.users, token)
+                svc.pool.stop(token)
+                return self._see("tmdb-key-removed")
             if action == "delete-confirm":
                 return self._html(200, pages.delete_confirm_page(stored=store_only(record)), personal=True)
             if action == "delete":

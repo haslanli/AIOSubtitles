@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS usenet_misses (key TEXT PRIMARY KEY, at REAL NOT NULL
 CREATE TABLE IF NOT EXISTS over_cap (alias TEXT PRIMARY KEY, cap INTEGER NOT NULL, at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS kept_original (file_key TEXT NOT NULL, lang TEXT NOT NULL, candidate_id TEXT, measure REAL,
   at REAL NOT NULL, PRIMARY KEY (file_key, lang));
+CREATE TABLE IF NOT EXISTS title_language (title TEXT PRIMARY KEY, answer TEXT NOT NULL, at REAL NOT NULL, until REAL);
 """
 USENET_MISSES_KEPT_S = 2 * DAY
 
@@ -359,14 +360,16 @@ class Store:
                 self.db.execute("INSERT OR REPLACE INTO judged VALUES (?,?,?,?)", (file_key, lang, rule, now))
 
     def judged_all(self, file_key, langs, rule, since):
-        """Whether every one of langs was judged for the file under this rule at `since` or later. None: the file has
-        no judged rows at all (stored before this memory existed; the file's read time decides, as before)."""
+        """Whether every one of langs was judged for the file under this rule at `since` or later. `rule`: the rule, or a
+        test of a recorded rule (origlang.current). None: the file has no judged rows at all (stored before this memory
+        existed; the file's read time decides, as before)."""
         with self.lock:
             rows = dict((lang, (r, at)) for lang, r, at in self.db.execute(
                 "SELECT lang, rule, at FROM judged WHERE file_key=?", (file_key,)))
         if not rows:
             return None
-        return all(lang in rows and rows[lang][0] == rule and rows[lang][1] >= since for lang in langs)
+        ok = rule if callable(rule) else (lambda r: r == rule)
+        return all(lang in rows and ok(rows[lang][0]) and rows[lang][1] >= since for lang in langs)
 
     # -- files waiting for a pick, and their original subtitles ---------------------------------------------------
     def pickable_put(self, alias, type_, video_id, hints):
@@ -460,7 +463,29 @@ class Store:
             self.db.execute("DELETE FROM originals WHERE updated < ?", (now - KEEP_PICKABLE_S,))
             self.db.execute("DELETE FROM judged WHERE at < ?", (now - 2 * JUDGED_FOR_S,))
             self.db.execute("DELETE FROM kept_original WHERE at < ?", (now - RETRY_KEEP_ORIGINAL_S,))
+            self.db.execute("DELETE FROM title_language WHERE until IS NOT NULL AND until < ?", (now,))
         return len(old)
+
+    # -- titles' original languages (origlang.py): codes only, shared by everyone ------------------------------
+    def title_language(self, title, now):
+        """A title's kept answer while it is current (a found one always: it has no expiry), else None."""
+        with self.lock:
+            row = self.db.execute("SELECT answer FROM title_language WHERE title=? AND (until IS NULL OR until>?)",
+                                  (title, now)).fetchone()
+        try:
+            return json.loads(row[0]) if row else None
+        except ValueError:
+            return None
+
+    def title_language_put(self, title, answer, at, until):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO title_language VALUES (?,?,?,?)",
+                            (title, json.dumps(answer, sort_keys=True), at, until))
+
+    def title_languages_clear(self):
+        """Deletes every kept answer (the lookup switched off)."""
+        with self.lock:
+            self.db.execute("DELETE FROM title_language")
 
     def stats(self):
         with self.lock:

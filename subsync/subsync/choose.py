@@ -10,7 +10,8 @@ for this very release are the likeliest to be in sync already, so they go next:
 When the file's name gives an edition (Director's Cut or DC, Extended, Roadshow, Unrated, Theatrical), a subtitle naming
 the same one moves up a tier (not above a hash or line-count match) and one naming another goes after everything else
 (Kingdom of Heaven DC's theatrical WEB subtitle was the guess by its release group alone).
-Machine-translated subtitles go last; with `skip` AI-made, machine-translated and forced subtitles are left
+A release naming another season or episode than the file's loses its release-group and same-source credit (The
+Bear S01E01's guess was a season-3 subtitle by its release group alone). Machine-translated subtitles go last; with `skip` AI-made, machine-translated and forced subtitles are left
 out altogether, the viewer's first too. Ties keep the viewer's order, which is also the rank the store records.
 """
 import re
@@ -34,6 +35,8 @@ EDITION = {k: re.compile(rf"(?<![a-z0-9])(?:{v})(?![a-z0-9])", re.I) for k, v in
 SAME_EDITION_UP = 1      # tiers a subtitle naming the file's edition moves up,
 EDITION_FLOOR = 1.5      # but not above a hash or line-count match (1)
 OTHER_EDITION_TIER = 5   # a subtitle naming another edition: after the rest (4), before machine-translated ones (9)
+EPISODE = re.compile(r"(?<![a-z0-9])s(\d{1,2})[ ._-]?e(\d{1,3})(?![0-9])", re.I)
+SEASON = re.compile(r"(?<![a-z0-9])(?:s(\d{1,2})(?![0-9e])|season[ ._-]?(\d{1,2})(?![0-9]))", re.I)
 UNWANTED = re.compile(r"(?<![a-z])(ai[ ._-]?(translated|made|generated)|machine[ ._-]?translat\w*|auto[ ._-]?translat\w*|"
                       r"google[ ._-]?translat\w*|deepl|forced|foreign[ ._-]?parts?([ ._-]?only)?)(?![a-z])", re.I)
 
@@ -71,6 +74,28 @@ def editions(text):
     return {k for k, rx in EDITION.items() if rx.search(text or "")}
 
 
+def season_episode(text):
+    """(season, episode) a name gives: S01E01 gives (1, 1); S03 or "Season 3" gives (3, None); else (None, None)."""
+    m = EPISODE.search(text or "")
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = SEASON.search(text or "")
+    if m:
+        return int(m.group(1) or m.group(2)), None
+    return None, None
+
+
+def other_episode(release, ep):
+    """The release names another season than the file's (ep: the file's (season, episode)), or another episode
+    of the same season. A pack of the file's own season, or a name with no season, is not another."""
+    if not ep or ep[0] is None:
+        return False
+    rs, re_ = season_episode(release)
+    if rs is None:
+        return False
+    return rs != ep[0] or (ep[1] is not None and re_ is not None and re_ != ep[1])
+
+
 def source_kind(text):
     words = set(re.findall(r"[a-z0-9-]+", (text or "").lower().replace(".", " ").replace("_", " ")))
     for kind in ("remux", "bluray", "web", "tv", "dvd"):
@@ -79,12 +104,14 @@ def source_kind(text):
     return None
 
 
-def _release_tier(c, gs, kind, fh, ref_cues):
+def _release_tier(c, gs, kind, fh, ref_cues, ep=None):
     rel = " " + _norm(c.get("release")) + " "
     if (fh and c.get("hash") == fh) or c.get("hash_match"):   # hash_match: the source matched this file's hash
         return 1
     if ref_cues and c.get("cues") and abs(c["cues"] - ref_cues) <= 0.02 * ref_cues:
         return 1   # as many lines as the release's own track: most likely made from this release
+    if other_episode(c.get("release"), ep):
+        return 4   # another season or episode: no release-group or same-source credit
     if c.get("release_match") or (gs and any(f" {g} " in rel for g in gs)):
         return 2   # found by the file's release name (TheSubtitleDB), or it names the file's release group
     if kind and source_kind(c.get("release")) == kind:
@@ -92,12 +119,12 @@ def _release_tier(c, gs, kind, fh, ref_cues):
     return 4
 
 
-def _tier(rank, c, gs, kind, fh, ref_cues, viewer_first, eds=frozenset()):
+def _tier(rank, c, gs, kind, fh, ref_cues, viewer_first, eds=frozenset(), ep=None):
     if rank == 0 and viewer_first:
         return 0
     if c.get("ai"):
         return 9
-    tier = _release_tier(c, gs, kind, fh, ref_cues)
+    tier = _release_tier(c, gs, kind, fh, ref_cues, ep)
     theirs = editions(c.get("release")) if eds and tier > 1 else None
     if not theirs:     # no edition named by the file or the subtitle, or a hash or line-count match: as it is
         return tier
@@ -109,7 +136,7 @@ def tier_of(rank, c, filename=None, file_hash=None, ref_cues=None, viewer_first=
     release (by name or group), 3 the same kind of source, 4 the rest, 9 machine-translated; a subtitle naming the file's
     edition a tier up (1.5 from 2), one naming another 5."""
     return _tier(rank, c, groups(filename), source_kind(filename), (file_hash or "").lower(), ref_cues, viewer_first,
-                 editions(filename))
+                 editions(filename), season_episode(filename))
 
 
 def order(candidates, filename=None, file_hash=None, skip=False, ref_cues=None, viewer_first=True):
@@ -120,8 +147,9 @@ def order(candidates, filename=None, file_hash=None, skip=False, ref_cues=None, 
     kind = source_kind(filename)
     fh = (file_hash or "").lower()
     eds = editions(filename)
+    ep = season_episode(filename)
     ranked = [(r, c) for r, c in enumerate(candidates) if not (skip and unwanted(c))]
-    return sorted(ranked, key=lambda rc: (_tier(rc[0], rc[1], gs, kind, fh, ref_cues, viewer_first, eds), rc[0]))
+    return sorted(ranked, key=lambda rc: (_tier(rc[0], rc[1], gs, kind, fh, ref_cues, viewer_first, eds, ep), rc[0]))
 
 
 def best_guess(candidates, filename=None, file_hash=None, skip=False):

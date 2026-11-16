@@ -89,6 +89,21 @@ class Words(unittest.TestCase):
             self.assertNotIn(old, screens.INSTALLER_WORDS)
 
 
+class TmdbQuestion(unittest.TestCase):
+    def test_the_key_fields_with_tmdbs_notice(self):
+        notice = explain.TMDB_NOTICE
+        for name, label in (('choices', 'TMDB API key (optional)'), ('host-choices', 'TMDB API key for everyone (optional)')):
+            html, _ = samples.every_state()[name]
+            with self.subTest(screen=name):
+                self.assertIn(label, html)
+                self.assertIn('name="TMDB_KEY"', html)
+                self.assertIn(htmllib.escape(notice, quote=False), html)
+                self.assertIn('class="tmdb-logo"', html)
+        html, _ = samples.every_state()['host-choices']
+        self.assertIn('Let each person add their own TMDB key?', html)
+        self.assertIn(htmllib.escape(explain.SETTINGS['SUBSYNC_TMDB_PERSONAL'][1], quote=True), html)
+
+
 class AudioQuestion(unittest.TestCase):
     """The personal route's audio question, one of three answers, as the setup page asks it."""
 

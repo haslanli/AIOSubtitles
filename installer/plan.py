@@ -12,7 +12,7 @@ import urllib.parse
 from subsync import explain
 from subsync.aiosconfig import (  # noqa: F401  (the rules live in subsync, shared with the public sign-up)
     SUBSYNC_PRESET_NAME, SUBTITLE_PRESETS, USENET_PRESETS, USENET_SERVICES, SYNC_SETTINGS, LANGUAGES, UUID_RE,
-    parse_languages, language_names, config_id_from, new_key, debrid_names, is_subtitle_preset, is_subsync_preset,
+    parse_languages, language_names, config_id_from, alias_from, new_key, debrid_names, is_subtitle_preset, is_subsync_preset,
     subtitle_sources, stream_sources, free_instance_id, with_defaults, subsync_preset, opensubtitles_preset,
     _before_other_subtitles, viewer_change, without_subsync, sync_config, sync_config_problems, usenet_route,
     usenet_sync_config, _BY)
@@ -120,6 +120,7 @@ def subsync_env(s):
         'SUBSYNC_AUDIO_BUDGET_GB': s.get('audio_budget') if s['audio'] else '',
         'SUBSYNC_SUBDL_KEY': s.get('subdl_key', ''),
         'SUBSYNC_WYZIE_KEY': s.get('wyzie_key', ''),
+        'SUBSYNC_TMDB_KEY': s.get('tmdb_key', ''),
     }
     return {k: v for k, v in env.items() if v not in (None, '')}
 

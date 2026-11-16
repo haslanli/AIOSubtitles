@@ -125,6 +125,16 @@ def every_page():
         "deleted": pages.deleted_page({"sync_removed": True, "addon_removed": True}),
         "deleted-left": pages.deleted_page({}),
         "privacy": pages.privacy_page(s),
+        # TMDB (the original-language lookup): its credit where the instance uses it, a person's own key's row
+        "signup-tmdb": pages.signup_page(settings(SUBSYNC_TMDB_KEY="k")),
+        "privacy-tmdb": pages.privacy_page(settings(SUBSYNC_TMDB_KEY="k")),
+        "privacy-tmdb-personal": pages.privacy_page(settings(SUBSYNC_TMDB_PERSONAL="on")),
+        "privacy-lookup-off": pages.privacy_page(settings(SUBSYNC_ORIGINAL_LANGUAGE="off")),
+        "settings-tmdb-personal": pages.settings_page(settings(SUBSYNC_TMDB_PERSONAL="on"), RECORD, USAGE, LINK, now=0),
+        "settings-tmdb-kept": pages.settings_page(settings(SUBSYNC_TMDB_PERSONAL="on"), dict(RECORD, tmdb_key="x" * 32),
+                                                  USAGE, LINK, now=0, message=explain.PUBLIC_TEXTS["tmdb_saved"]),
+        "settings-tmdb-error": pages.settings_page(settings(SUBSYNC_TMDB_PERSONAL="on"), RECORD, USAGE, LINK, now=0,
+                                                   error=explain.PUBLIC_TEXTS["tmdb_refused"], field="tmdb_key"),
         # an instance with the audio route on: the pages say what it reads
         "signup-audio": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on")),
         "result-audio": pages.result_page(result(), settings(SUBSYNC_AUDIO_ROUTE="on")),
@@ -168,6 +178,12 @@ def approved_corpus():
     audio = settings(SUBSYNC_AUDIO_ROUTE="on")            # the audio route's words, as an instance with it on shows them
     texts += [explain.intro_text(audio), explain.next_text(audio)]
     texts += [(t[:1].upper() + t[1:]) for _, _, t in explain.privacy_parts(audio)]
+    # the original-language lookups' words, by what the instance uses (TMDB with its key, each person's, Wikidata
+    # only, none), and TMDB's notice and its logo's name
+    for env in ({"SUBSYNC_TMDB_KEY": "k"}, {"SUBSYNC_TMDB_PERSONAL": "on"}, {}, {"SUBSYNC_ORIGINAL_LANGUAGE": "off"},
+                {"SUBSYNC_TMDB_KEY": "k", "SUBSYNC_AUDIO_ROUTE": "on"}):
+        texts += [(t[:1].upper() + t[1:]) for _, _, t in explain.privacy_parts(settings(**env))]
+    texts.append(explain.TMDB_NOTICE)
     for title, text, _ in explain.PUBLIC_STATES.values():
         texts += [title, text.replace("{detail}", "Detail.")]
     for key, text in explain.PUBLIC_TEXTS.items():
@@ -865,7 +881,8 @@ class SignupMessagesTest(unittest.TestCase):
                               code=code)
                 text = _plain(e, "Reading your AIOStreams config", own_password=True)
                 self.assertEqual(text, "Your AIOStreams didn't accept this password for this link. Type the password "
-                                       "of this config: the one you set on AIOStreams' configure page.")
+                                       "of this config: the one you set on AIOStreams' configure page, not the one "
+                                       "you sign in to AIOStreams with.")   #
                 # the service's own sync config refused: not the person's password, so not that message
                 self.assertNotIn("this password", _plain(e, "Updating AIOSubtitles' config on your AIOStreams"))
 

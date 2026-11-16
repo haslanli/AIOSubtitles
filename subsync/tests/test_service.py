@@ -505,7 +505,8 @@ class PickTest(AddonTest):
         provisional = []
         self.worker._set_provisional = lambda job: provisional.append(sorted(job.fetched))
         self.worker._await_pick(self.job, self.cands(), "b.mp4", None)
-        self.assertEqual(sorted(fetched), [("eng", ["os-9"]), ("rus", ["os-r"])])   # the guess and the other's first tries
+        # the guess, then the main language's first tries for a consensus, and the other's first tries
+        self.assertEqual(sorted(fetched), [("eng", ["os-9", "os-8"]), ("rus", ["os-r"])])
         self.assertEqual(provisional, [["eng", "rus"]])
         self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
         self.assertNotIn(self.ALIAS, self.worker.judged)                              # the pick keeps waiting

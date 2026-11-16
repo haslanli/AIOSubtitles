@@ -18,10 +18,13 @@ PORT = plan.SUBSYNC_PORT
 # the audio route's question on this route: allow it or remove it completely; its explanation is
 # explain.QUESTIONS['SUBSYNC_AUDIO_ROUTE'], under the setting's own name as the answers file has it
 AUDIO_QUESTION = 'Offer syncing files that have no subtitles of their own, from their audio?'
+# asked when no TMDB key is given for everyone: let each person add their own (explain.SETTINGS['SUBSYNC_TMDB_PERSONAL'])
+TMDB_PERSONAL_QUESTION = 'Let each person add their own TMDB key?'
 ADDRESS_WORDS = 'The web address of your public instance, with https, like https://subtitles.example.com.'   # the address question's own words
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
-         'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE') \
+         'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_KEY',
+         'SUBSYNC_TMDB_PERSONAL') \
     + limits.names(LIMITS)
 _INVITE_LETTERS = 'abcdefghjkmnpqrstuvwxyz23456789'     # no 0/o, 1/l/i: easy to read out and type
 
@@ -57,6 +60,10 @@ def public_env(answers, secret, limit_values):
         'SUBSYNC_TRUSTED_PROXY': answers.get('SUBSYNC_TRUSTED_PROXY') or 'gateway',
         'SUBSYNC_SUBDL_KEY': answers.get('SUBDL_KEY', ''),
         'SUBSYNC_SUBSOURCE_KEY': answers.get('SUBSYNC_SUBSOURCE_KEY', ''),
+        # the original-language lookup's TMDB key for everyone; without one, whether each person may add their own
+        'SUBSYNC_TMDB_KEY': answers.get('TMDB_KEY', ''),
+        'SUBSYNC_TMDB_PERSONAL': 'on' if not answers.get('TMDB_KEY')
+        and str(answers.get('SUBSYNC_TMDB_PERSONAL', '')).lower() in ('yes', 'on', 'true') else 'off',
         # whether people may turn Usenet on for themselves (with their own services, through their AIOStreams)
         'SUBSYNC_USENET': 'on' if str(answers.get('SUBSYNC_USENET', '')).lower() in ('yes', 'on', 'true') else 'off',
         # whether files with no subtitle track of their own may be synced from their sound, as each person chooses

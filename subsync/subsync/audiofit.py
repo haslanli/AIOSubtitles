@@ -39,7 +39,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from .langs import lang3
+from .langs import lang3, same_language
 from .reader import Refused, Stopped
 from .vad import SR, SileroVad
 
@@ -84,6 +84,45 @@ def second_track(index):
     default = next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
     return next((t for t in tracks if default is not None and t is not default
                  and lang3(t.get("language")) != lang3(default.get("language"))), None)
+
+
+def _untagged(track):
+    return not track.get("tagged", True) or lang3(track.get("language")) == "und"
+
+
+def track_order(index, original=None):
+    """The audio tracks fit_tracks tries, in order, each once: with the title's original language known, first the
+    track in it (a track named as a commentary skipped; an untagged one, English by Matroska's rule, only for an English
+    original and only when no track is tagged with it), then the default track, then second_track's. Without an
+    original language, or with no track in it: the default, then second_track's, as before. [] when the file offers
+    no list of audio tracks (MP4: its one track)."""
+    tracks = (index.audio_tracks() or []) if hasattr(index, "audio_tracks") else []
+    if not tracks:
+        return []
+    default = next((t for t in tracks if t.get("default")), tracks[0])
+    order = []
+    if original:
+        talk = [t for t in tracks if "commentary" not in (t.get("name") or "").lower()]
+        first = next((t for t in talk if not _untagged(t) and same_language(t.get("language"), original)), None)
+        if first is None and same_language(original, "eng"):
+            first = next((t for t in talk if _untagged(t)), None)
+        if first is not None:
+            order.append(first)
+    for t in (default, second_track(index)):
+        if t is not None and all(o["index"] != t["index"] for o in order):
+            order.append(t)
+    return order
+
+
+def most_tracks(index, original=None):
+    """How many audio tracks fit_tracks may try on a file (the room check's estimate): with the original language
+    known, its order's length; unknown yet, the most any original language among the file's tracks would make (its
+    answer may come before the audio sync does)."""
+    if original:
+        return max(1, len(track_order(index, original)))
+    tracks = (index.audio_tracks() or []) if hasattr(index, "audio_tracks") else []
+    candidates = {lang3(t.get("language")) for t in tracks} | {None}
+    return max([1] + [len(track_order(index, c)) for c in candidates])
 
 
 class AudioBudget(Exception):
@@ -568,21 +607,31 @@ class AudioFit:
                 "audio_s": self.audio_s}
 
 
-def fit_tracks(index, lines, fit_class=None, **kw):
-    """The fit on the file's default audio track; when that keeps the original and the file has an audio
-    track in another language (a dual-audio release whose default is the dub), the fit on that track too. The first track
-    that gives a result wins; the rule is the same. Windows of both count toward the file's audio budget."""
+def fit_tracks(index, lines, fit_class=None, original=None, **kw):
+    """The fit on the file's audio tracks in track_order's order: with the title's original language known, its track
+    first (a dub as the default is then fitted only if the original's track keeps the original); else the default
+    track, and when that keeps the original and the file has a track in another language (a dual-audio release whose
+    default is the dub), that one too. The first track that gives a result wins; the rule is the same. Windows of
+    every track tried count toward the file's audio budget. A result on another track than the default names it."""
     fit_class = fit_class or AudioFit
-    fit = fit_class(index, lines, **kw).run()
-    if fit["decision"] != "keep_original":
-        return fit
-    other = second_track(index)
-    if other is None:
-        return fit
-    second = fit_class(index, lines, track=other["index"], **kw).run()
-    second["windows"] = (second.get("windows") or 0) + (fit.get("windows") or 0)
-    second["audio_s"] = (second.get("audio_s") or 0) + (fit.get("audio_s") or 0)
-    if second["decision"] == "keep_original":
-        return dict(fit, windows=second["windows"], audio_s=second["audio_s"],
-                    other_track={"index": other["index"], "language": other.get("language"), "why": second.get("why")})
-    return dict(second, audio_track=other["index"], audio_language=other.get("language"))
+    order = track_order(index, original)
+    if not order:
+        return fit_class(index, lines, **kw).run()
+    tried, windows, audio_s = [], 0, 0
+    for t in order:
+        fit = fit_class(index, lines, **kw).run() if t.get("default") else \
+            fit_class(index, lines, track=t["index"], **kw).run()
+        windows += fit.get("windows") or 0
+        audio_s += fit.get("audio_s") or 0
+        if fit["decision"] != "keep_original":
+            out = dict(fit, windows=windows, audio_s=audio_s) if tried else fit
+            if not t.get("default"):
+                out = dict(out, audio_track=t["index"], audio_language=t.get("language"))
+            return out
+        tried.append((t, fit))
+    first_track, first = tried[0]
+    if len(tried) == 1:
+        return first
+    other, why = tried[1]
+    return dict(first, windows=windows, audio_s=audio_s,
+                other_track={"index": other["index"], "language": other.get("language"), "why": why.get("why")})

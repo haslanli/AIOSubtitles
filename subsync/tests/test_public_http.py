@@ -69,7 +69,7 @@ class Base(unittest.TestCase):
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
         self.env = dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                         "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "",
+                         "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
                          "SUBSYNC_RECHECK_HOURS": "0"}, **env)
         self.s = Settings(self.env)
         self.store = Store(self.dir)
@@ -151,6 +151,23 @@ class PublicHttpTest(Base):
         self.assertEqual(code, 400)
         self.assertNotIn(PASSWORD, body.decode())
         self.assertNotIn(f"stremio/{uuid}", body.decode())
+
+    def test_signup_with_an_alias_link_over_http(self):   #
+        uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
+        self.fake.aliases["Home-TV"] = uuid
+        code, body, _ = http(self.base + "/signup", form(link=f"{INSTANCE}/stremio/u/Home-TV/manifest.json",
+                                                          password=PASSWORD, languages="English", add_addon="on"))
+        self.assertEqual(code, 200, body.decode())
+        self.assertIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
+        # an unknown alias: the plain text at the link field, and the page repeats neither the alias nor the password
+        code, body, _ = http(self.base + "/signup", form(link=f"{INSTANCE}/stremio/u/Old-Name/manifest.json",
+                                                          password=PASSWORD, languages="English"))
+        text = body.decode()
+        self.assertEqual(code, 400)
+        self.assertIn("Your AIOStreams doesn&#x27;t know this alias link", text)
+        self.assertIn('href="#link"', text)
+        for secret in ("Old-Name", "Home-TV", PASSWORD):
+            self.assertNotIn(secret, text)
 
     def test_user_manifest(self):
         _, _, _, _, token = self.sign_up()

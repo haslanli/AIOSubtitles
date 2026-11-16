@@ -17,8 +17,8 @@ AIOS_URL=http://127.0.0.1:3000
 
 # The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page
 # when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole install
-# link: setup takes the ID out of it and checks that the config exists. subsync is added to this config, and
-# subsync's own config is made from it.
+# link, or its alias link (…/stremio/u/<name>/…): setup takes the ID out of it and checks that the config exists.
+# subsync is added to this config, and subsync's own config is made from it.
 AIOS_CONFIG_ID=
 
 # The password you chose when you saved that config. Setup uses it to read the config and save the change, and
@@ -72,6 +72,15 @@ SUBDL_KEY=
 # file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this
 # machine, in state/, readable only by your user.
 WYZIE_KEY=
+
+# Optional: a TMDB API key or API Read Access Token, free for non-commercial use (on themoviedb.org: your account's
+# settings, API). With it, AIOSubtitles asks TMDB for each film's or series' original language, which TMDB knows for
+# nearly every title, so more subtitles are timed to the file's track in that language. Without it, only Wikidata is
+# asked, which knows about three films in four and half of all series; the rest are synced as if the language were
+# unknown. Cost: one request per film or series; it sends only the title's IMDb id. Risk: AIOSubtitles keeps each
+# answer with no time limit, though TMDB's terms allow 6 months, so TMDB could withdraw the key. Its logo and notice
+# are shown. Never shown or logged.
+TMDB_KEY=
 
 # Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds
 # Stremio's official OpenSubtitles addon to your config: free, no account, it lists every language, and subsync

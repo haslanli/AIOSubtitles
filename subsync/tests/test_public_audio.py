@@ -682,7 +682,7 @@ class PoolTest(unittest.TestCase):
         self.dir = self.tmp.__enter__()
         self.addCleanup(self.tmp.__exit__, None, None, None)
         self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_SYNCS_AT_ONCE": "2",
+                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off", "SUBSYNC_SYNCS_AT_ONCE": "2",
                     "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_BUDGET_GB": "0.5"}
         self.store = Store(self.dir)
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), Settings(self.env).secret_bytes())

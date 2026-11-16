@@ -98,6 +98,12 @@ def _language_limit(value):
     return int(value) if value.isdigit() and 1 <= int(value) <= 4 else None
 
 
+def _overrides(value):
+    """SUBSYNC_ORIGINAL_LANGUAGES as {IMDb id: language}; entries that aren't one are left out."""
+    from .origlang import parse_overrides
+    return parse_overrides(value)
+
+
 class Settings:
     def __init__(self, env=None):
         e = env if env is not None else os.environ
@@ -157,6 +163,17 @@ class Settings:
         self.subdl_download_url = g("SUBSYNC_SUBDL_DOWNLOAD_URL", "https://dl.subdl.com").rstrip("/")
         self.wyzie_url = g("SUBSYNC_WYZIE_URL", "https://sub.wyzie.io").rstrip("/")
         self.osv3plus_url = g("SUBSYNC_OSV3PLUS_URL", "https://opensubtitles.stremio.homes").rstrip("/")
+        # a title's original language (origlang.py): looked up by its id, so subtitles are timed to the file's track in
+        # it; TMDB with a key (the instance's, or in public mode each person's own), Wikidata always; an operator's
+        # list overrides any lookup
+        self.original_language = _on(g("SUBSYNC_ORIGINAL_LANGUAGE", "on"))
+        self.tmdb_key = g("SUBSYNC_TMDB_KEY", "").strip()
+        self.tmdb_personal = _on(g("SUBSYNC_TMDB_PERSONAL", "off"))
+        self.original_languages = _overrides(g("SUBSYNC_ORIGINAL_LANGUAGES", ""))
+        self.tmdb_url = g("SUBSYNC_TMDB_URL", "https://api.themoviedb.org/3").rstrip("/")
+        self.wikidata_url = g("SUBSYNC_WIKIDATA_URL", "https://query.wikidata.org/sparql")
+        self.kitsu_url = g("SUBSYNC_KITSU_URL", "https://kitsu.app/api/edge").rstrip("/")
+        self.anilist_url = g("SUBSYNC_ANILIST_URL", "https://graphql.anilist.co")
         # best fit: originals checked (no alass) for up to this many candidates; alass only on SUBSYNC_MAX_TRIES of them
         self.gate_tries = max(1, int(g("SUBSYNC_GATE_TRIES", "20")))
         self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB", "32")) * 1024 * 1024)
@@ -311,6 +328,9 @@ class Settings:
         if self.public and self.wyzie_key:
             out.append("Wyzie Subs isn't used in public mode (one free key per network, paused when used from servers): "
                        "remove SUBSYNC_WYZIE_KEY or turn public mode off.")
+        if self.public and self.tmdb_key and self.tmdb_personal:
+            out.append("SUBSYNC_TMDB_KEY and SUBSYNC_TMDB_PERSONAL can't both be set: set a key for everyone, or let "
+                       "each person add their own.")
         if self.syncs_at_once is None:
             out.append("SUBSYNC_SYNCS_AT_ONCE must be a whole number from 1, or auto.")
         if self.max_languages is None:

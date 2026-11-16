@@ -627,6 +627,16 @@ class PublicUsenetTest(TempDirTest):
                          (True, None, ["nzbdav", "torbox"]))
         self.assertEqual(len(self.fake.configs), 3)
 
+    def test_a_refused_usenet_config_is_said_to_be_aiosubtitles_fault(self):   #
+        answers = iter((None, "the Usenet config's reason"))     # the sync config is accepted, the Usenet one refused
+        self.fake.refusal = lambda config: next(answers, None)
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.run_signup(setup_of([TORBOX, NZBDAV], [TORRENTIO, PROWLARR, NEWZNAB, SUBS]))
+        self.assertEqual(e.exception.message, (
+            "Your AIOStreams didn't accept the config AIOSubtitles makes from yours. This is a fault in AIOSubtitles, "
+            "not in your config, and your own config wasn't changed. AIOStreams' reason: \"the Usenet config's reason\""))
+        self.assertEqual(len(self.fake.configs), 1)               # the sync config made a moment ago is gone again
+
     def test_usenet_stays_off_unless_ticked_and_allowed(self):
         v = setup_of([TORBOX, NZBDAV], [TORRENTIO, NEWZNAB, SUBS])
         for settings, extra in [(self.s, {"usenet": ""}), (self.settings(SUBSYNC_USENET="off"), {})]:

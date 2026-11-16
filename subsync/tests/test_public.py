@@ -550,7 +550,7 @@ class PoolTest(unittest.TestCase):
         self.dir = self.tmp.__enter__()
         self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
                     "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_ACTIVE_WORKERS": "2",
-                    "SUBSYNC_EXTRA_SOURCES": ""}
+                    "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off"}
         self.settings = Settings(self.env)
         self.clock = Clock()
         self.store = Store(self.dir)

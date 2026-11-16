@@ -20,7 +20,7 @@ import time
 from . import alass as alass_mod
 from . import imageref, imagetext, refine, sections, shift, textpair
 from .audiofit import fit_tracks
-from .langs import lang3
+from .langs import lang3, same_language
 from .relgate import MIN_PAIRED, TENTHS, WITHIN_SHARE, aligned, clearly_better, relgate
 from .subs import dialogue_ends, dialogue_starts, parse, plain_srt, timing_srt, write_like
 
@@ -159,6 +159,30 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
     want = lang3(cand_lang)
     fallback = {lang3(x) for x in fallback}
     usable = [t for t in text_references(index) if not t["forced"] and len(t["cues"]) >= 0.5 * n_dialogue]
+    original = getattr(index, "original_language", None)
+    if original:
+        # with the title's original language known (origlang.py looks it up by the title's id), a track in it is every
+        # language's reference (Game of Thrones: Spanish to the English track, not to its own es-ES or es-419, which run
+        # 167-250 ms early against it): a plain text track first; else, with image references on, an image track
+        # (Kingdom of Heaven DC: Russian to the English PGS track); else a CC or SDH-only track, only for a subtitle
+        # whose own language has no plain track (Dan Da Dan: its English and Spanish keep their own). With none of
+        # these, the rules below
+        # one language by its family too (Cantonese tagged yue against TMDB's Chinese, Norwegian nob against nor)
+        own = [t for t in usable if same_language(t["language"], original)]
+        plain = [t for t in own if not is_secondary(t)]
+        if plain:
+            plain.sort(key=lambda t: -len(t["cues"]))
+            return dict(agreeing(index, plain) if len(plain) > 1 else plain[0], route="cues")
+        if image_ref and hasattr(index, "image_tracks"):
+            mine = [t for t in index.image_tracks() if not t["forced"] and same_language(t["language"], original)]
+            for t in sorted(mine, key=lambda t: -len(t["cues"])):
+                ref = image_reference(index, t)
+                if ref["plausible"] and len(ref["cues"]) >= MIN_IMAGE_SHARE * n_dialogue:
+                    return dict(t, cues=ref["cues"], image=ref["stats"], route="image")
+        own_plain = [t for t in usable if lang3(t["language"]) == want and not is_secondary(t)]
+        if own and not own_plain:
+            own.sort(key=lambda t: -len(t["cues"]))
+            return dict(own[0], route="cues")
     if usable:
         usable.sort(key=lambda t: (lang3(t["language"]) != want, lang3(t["language"]) not in fallback,
                                    prefer_plain and is_secondary(t), -len(t["cues"])))
@@ -580,6 +604,54 @@ def anchored_guess(main_text, texts):
     return best
 
 
+CONSENSUS_MIN = 5          # distinct subtitles agreeing with each other before a guess by name is replaced
+CONSENSUS_NEAR_MS = 100    # their line starts agree within this (relgate's median start offset)
+CONSENSUS_FAR_S = 1.0      # only a guess at least this far from them by one steady offset (Primer's was 9.3 s)
+
+
+def _agree(a, b):
+    g = relgate(a, b)
+    return g["paired"] >= MIN_PAIRED and g.get("median_ms", float("inf")) <= CONSENSUS_NEAR_MS
+
+
+def consensus_guess(guess_text, texts):
+    """For a file with no subtitle track, the main language's guess by name can be timed for another
+    release (Primer's YTS MP4: 9.3 s off while eight other English subtitles agreed within 100 ms). Of `texts` (that
+    language's downloads, in try order), the first of the largest group of distinct subtitles whose line starts agree
+    within CONSENSUS_NEAR_MS (at least MIN_PAIRED of them paired, relgate), when the group holds at least CONSENSUS_MIN
+    and the guess lines up with it (ANCHOR_SHARE of its lines after one shift, shift.best_shift) at least CONSENSUS_FAR_S
+    away or on another frame rate. A guess inside the group, a little off it, or lining up with nothing is kept.
+    Returns {"index", "group", "offset_s", "scale"} or None."""
+    guess = dialogue_starts(parse(guess_text)) if guess_text else []
+    if len(guess) < MIN_LINES:
+        return None
+    starts, seen = [], set()
+    for i, text in enumerate(texts):
+        lines = parse(text)
+        dial = dialogue_starts(lines)
+        if len(dial) < MIN_LINES or broken_timing(lines):
+            continue
+        key = tuple(round(x, 2) for x in dial)
+        if key in seen:          # the same subtitle from two sources counts once
+            continue
+        seen.add(key)
+        starts.append((i, dial))
+    best = None
+    for i, a in starts:
+        group = sum(1 for j, b in starts if j != i and _agree(a, b)) + 1
+        if best is None or group > best[1]:     # ties: the earlier in try order
+            best = (i, group, a)
+    if best is None or best[1] < CONSENSUS_MIN:
+        return None
+    i, group, rep = best
+    if _agree(rep, guess):
+        return None
+    scale, offset, votes = shift.best_shift(guess, rep)
+    if votes / len(guess) < ANCHOR_SHARE or (scale == 1.0 and abs(offset) < CONSENSUS_FAR_S):
+        return None
+    return {"index": i, "group": group, "offset_s": round(offset, 2), "scale": scale}
+
+
 def check_original(index, text, lang, splits=True, image_ref=False, prefer_plain=True, snap_within=None, better=None,
                    fallback=FALLBACK_REFERENCE, text_pairing=False):
     """The fast path: is this subtitle in sync as it is, against the release's own text (or image) track? A gate
@@ -678,9 +750,11 @@ def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=
     if audio_lock is not None:   # one audio fit at a time: it reads the file through a shared reader
         with audio_lock:
             fit = fit_tracks(index, lines, vad=vad, lead=audio_lead, ffmpeg=ffmpeg, better=audio_better,
+                             original=getattr(index, "original_language", None),
                              budget=audio_budget, extra=audio_extra)
     else:
         fit = fit_tracks(index, lines, vad=vad, lead=audio_lead, ffmpeg=ffmpeg, better=audio_better,
+                         original=getattr(index, "original_language", None),
                          budget=audio_budget, extra=audio_extra)
     out = dict(base, route="audio", model=fit.get("model"), gate_original=fit.get("gate_old"),
                gate_synced=fit.get("gate_new"), windows=fit.get("windows"), audio_s=fit.get("audio_s"))

@@ -156,7 +156,7 @@ class RecordTest(unittest.TestCase):
         self.addCleanup(self.tmp.__exit__, None, None, None)
         self.t = [1_800_000_000.0]
         self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_AUDIO_ROUTE": "on",
+                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off", "SUBSYNC_AUDIO_ROUTE": "on",
                     "SUBSYNC_SYNCS_AT_ONCE": "4"}
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), Settings(self.env).secret_bytes(),
                            clock=lambda: self.t[0])
@@ -717,7 +717,8 @@ class StartLineTest(unittest.TestCase):
         from subsync.__main__ import start_line
         s = Settings({"SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng,rus"})
         self.assertEqual(start_line(s, False), "listening on 8790; languages eng,rus; audio route on pick, up to 1 GB a "
-                                               "file, 1 at a time, 20 a day; Usenet off")
+                                               "file, 1 at a time, 20 a day; Usenet off; original language from "
+                                               "Wikidata only")
         s = Settings({"SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_WHEN": "open", "SUBSYNC_USENET": "on"})
         self.assertIn("audio route when opened, up to 1 GB a file, 1 at a time, 20 a day (5 opened); Usenet on, 10 "
                       "listings a day", start_line(s, True))

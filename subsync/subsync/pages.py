@@ -38,6 +38,8 @@ UI_WORDS = (
     # files with no subtitles of their own: the question, its answers, the settings row's button
     "Files with no subtitles of their own", "Off", "On, when I pick the file (recommended)",
     "On, as soon as a file is opened (not recommended)", "Save answer",
+    # a person's own TMDB key (when the instance asks each person for one), and TMDB's logo's name
+    "Original languages", "Your TMDB key (optional)", "Save key", "Remove key", "TMDB",
 )
 LINK_PLACEHOLDER = "https://…/stremio/…/manifest.json"
 
@@ -177,7 +179,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
             f"<h1>{_headline()}</h1><section class=\"what\">{_intro(settings)}</section>"
             f"<section class=\"need\" aria-labelledby=\"need-h\"><h2 id=\"need-h\">Before you start</h2>{before}"
             f"<p class=\"small\">{e(tries)}</p><div class=\"go\">{opener}</div></section>"
-            "<div class=\"page-end\" aria-hidden=\"true\"></div></main></div>"
+            "</main>" + _foot(settings) + "<div class=\"page-end\" aria-hidden=\"true\"></div></div>"
             f"<div class=\"dock\">{opener}</div>{layer}")
     if not error:
         return ui.page("AIOSubtitles", body, "start")
@@ -234,7 +236,7 @@ def result_page(result, settings=None):
             f"</h2>{ui.dots(done)}{left}</section><section aria-labelledby=\"next-h\"><h2 id=\"next-h\">What happens next</h2>"
             f"<p>{e(explain.next_text(settings))}</p>"
             + ui.link_button("Open your settings page", _settings_link(result.manifest_url), "secondary", arrow=True)
-            + f"<p class=\"after\">{e(texts['settings_link'])}</p></section></div></main></div>")
+            + f"<p class=\"after\">{e(texts['settings_link'])}</p></section></div></main>{_foot(settings)}</div>")
     return ui.page("Signed up · AIOSubtitles", body, "done", personal=True)
 
 
@@ -284,6 +286,10 @@ def done_message(code, record):
         return None, " ".join((texts["refresh_manual"],) + explain.PUBLIC_MANUAL_STEPS)
     if code == "forgot":
         return texts["forgot"], None
+    if code == "tmdb-key":
+        return texts["tmdb_saved"], None
+    if code == "tmdb-key-removed":
+        return texts["tmdb_removed"], None
     # stored copies only: moved there by this refresh, or still there (the page's note says the rest)
     manual = " ".join((texts["not_added"],) + explain.PUBLIC_MANUAL_STEPS)
     if code in ("to-stored", "to-stored-manual"):
@@ -339,6 +345,28 @@ def _usenet_row(settings, record, usenet_usage):
                 f"<div class=\"controls\">{lines}</div>")
 
 
+def personal_tmdb(settings):
+    """Whether this instance asks each person for their own TMDB key (and looks original languages up at all)."""
+    return bool(settings.public and settings.tmdb_personal and settings.original_language)
+
+
+def _tmdb_row(settings, record, error=None):
+    """A person's own TMDB key: while the instance asks each person for one, a box to save it (checked with TMDB once);
+    once one is kept, a button to delete it, also after the instance stopped asking. The key itself is never shown."""
+    asks, kept = personal_tmdb(settings), bool(record.get("tmdb_key"))
+    if not (asks or kept):
+        return ""
+    remove = _form("tmdb-key-remove", "<div class=\"actions\">" + ui.button("Remove key", "secondary", type="submit")
+                   + "</div>", cls="forget") if kept else ""
+    # the explanation on the left, as the other rows have it; the box is described by it
+    save = _form("tmdb-key", ui.field("tmdb_key", "Your TMDB key (optional)", "", kind="password", mono=True,
+                                      reveal=True, error=error, attrs="autocomplete=\"off\" spellcheck=\"false\" required")
+                 + f"<div class=\"actions\">{ui.button('Save key', 'primary', type='submit')}</div>", cls="") if asks else ""
+    return _row("tmdb-h", "Original languages",
+                f"<p class=\"help\" id=\"tmdb_key-help\">{e(explain.PUBLIC_FIELDS['tmdb_key'])}</p>",
+                "<div class=\"controls\">" + save + remove + "</div>")
+
+
 def _audio_row(settings, record, error=None):
     """The answer for files with no subtitles of their own, saved by the "audio" action like the languages (no
     password, no call to AIOStreams); only with the instance's audio route on. `error`: its problem, shown in the row
@@ -368,7 +396,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
         + _state_note(record, state) \
         + (ui.note("warn", texts["limit_reached"], "Today's limit is reached") if full and not stored else "") \
         + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages")
-                   + (("audio",) if audio_answers(settings) else ()))
+                   + (("audio",) if audio_answers(settings) else ()) + (("tmdb_key",) if personal_tmdb(settings) else ()))
     today = "" if stored else (
         "<section class=\"today\" aria-labelledby=\"today-h\"><h2 id=\"today-h\">Today</h2>"
         + ui.gauge(f"{usage['files']} of {files_limit}", "new files", _share(usage["files"], files_limit),
@@ -421,15 +449,22 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
             + (f"<div class=\"notes\" aria-live=\"polite\">{notes}</div>" if notes else "")
             + f"<div class=\"grid12 band\">{link}{today}</div>"
             f"<div class=\"rows\">{languages}{_audio_row(settings, record, error if field == 'audio' else None)}"
-            f"{_usenet_row(settings, record, usenet_usage)}{refresh}{delete}</div></main></div>")
+            f"{_usenet_row(settings, record, usenet_usage)}"
+            f"{_tmdb_row(settings, record, error if field == 'tmdb_key' else None)}{refresh}{delete}</div></main>"
+            f"{_foot(settings)}</div>")
     return ui.page("Settings · AIOSubtitles", body, "settings", personal=True)
 
 
 # ------------------------------------------------------------------------------------------- delete, privacy, errors
 
-def _letter(title, heading, content, personal=False, start="/"):
+def _foot(settings):
+    """TMDB's logo and notice under the page, where the instance uses TMDB (its own key or each person's)."""
+    return ui.footer(explain.TMDB_NOTICE) if settings is not None and explain.tmdb_used(settings) else ""
+
+
+def _letter(title, heading, content, personal=False, start="/", settings=None):
     body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT, start)}<main class=\"letter\"><h1>{e(heading)}</h1>{content}</main>"
-            "</div>")
+            f"{_foot(settings)}</div>")
     return ui.page(title, body, "letter", personal=personal)
 
 
@@ -467,7 +502,7 @@ def privacy_page(settings):
         f"<p>{e(text[:1].upper() + text[1:])}</p></section>" for i, (head, _, text) in enumerate(explain.privacy_parts(settings)))
     content = (f"<div class=\"body\">{sections}<section aria-labelledby=\"privacy-q\"><h2 id=\"privacy-q\">Questions</h2>"
                f"<p><a class=\"mono\" href=\"{e(explain.CONTACT)}\">{e(explain.CONTACT)}</a></p></section></div>")
-    return _letter("Privacy · AIOSubtitles", "What AIOSubtitles reads and keeps", content)
+    return _letter("Privacy · AIOSubtitles", "What AIOSubtitles reads and keeps", content, settings=settings)
 
 
 def not_found_page():

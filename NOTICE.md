@@ -16,5 +16,10 @@ subsync's Docker image includes these third-party parts, unmodified:
 | FFmpeg (Debian package) | LGPL-2.1+/GPL-2.0+ | decodes short audio windows (audio route only) |
 | Python 3.13 base image | PSF | |
 
+TMDB's "alt short" logo (themoviedb.org/about/logos-attribution) is drawn in the pages where TMDB is used, with TMDB's
+notice, as TMDB's API terms ask: AIOSubtitles uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise
+approved by TMDB. Titles' original languages also come from Wikidata (CC0) and, for anime, AniList and Kitsu; only a
+title's id is sent to them.
+
 AIOStreams is a separate project (viren070/AIOStreams); subsync talks to it over HTTP and doesn't include any of it.
 Subtitles come from the sources in your own AIOStreams config (for example OpenSubtitles) under their own terms.

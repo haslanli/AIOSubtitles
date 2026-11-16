@@ -114,6 +114,14 @@ class GateTest(unittest.TestCase):
             refused(self, lambda: realdebrid.GuardedRedirects().redirect_request(
                 urllib.request.Request("http://public.test/"), _Closable(), 302, "Found", {}, "http://inside.test/x"))
 
+    def test_an_alias_lookup_passes_the_gate(self):   # the lookup opens through the same gate
+        from subsync.aiosconfig import AiosApi, AiosError
+        net.configure(public_only=True, resolver=resolver_answering("10.0.0.5"))
+        with local_network_only():
+            with self.assertRaises(AiosError) as e:
+                AiosApi("https://aios.test", timeout=5).alias_config_id("fam")
+        self.assertIn("Can't reach", e.exception.message)
+
     def test_other_schemes_are_refused(self):
         net.configure(public_only=True, resolver=resolver_answering("93.184.216.34"))
         for url in ("file:///etc/passwd", "ftp://ftp.test/x", "data:text/plain,hello"):

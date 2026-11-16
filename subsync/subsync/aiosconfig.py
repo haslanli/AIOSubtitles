@@ -7,6 +7,7 @@ Standard library only, so ./setup imports it too.
 """
 import base64
 import copy
+import http.client
 import http.cookiejar
 import json
 import re
@@ -121,6 +122,18 @@ def config_id_from(text):
     """A config ID typed as is, or found in a pasted Stremio/Jellyfin link (…/stremio/<id>/…)."""
     m = UUID_RE.search(text or '')
     return m.group(0).lower() if m else None
+
+
+MAX_ALIAS = 200   # longer than any alias AIOStreams makes (a person's own: 64 characters)
+
+
+def alias_from(text):
+    """The alias of a pasted alias link (…/stremio/u/<alias>/…), as written: AIOStreams looks an instance-wide alias up
+    as it is, case included. None for anything else, an empty or overlong alias included."""
+    path = urllib.parse.urlsplit((text or '').strip()).path
+    _, sep, rest = path.partition('/stremio/u/')
+    alias = urllib.parse.unquote(rest.split('/')[0]) if sep else ''
+    return alias if alias and len(alias) <= MAX_ALIAS and not re.search(r'[\x00-\x1f\x7f]', alias) else None
 
 
 def new_key(nbytes=18):
@@ -426,9 +439,24 @@ UA = 'AIOSubtitles/1.0 (setup)'   # starts with "AIO": stock AIOStreams then inc
 
 
 class AiosError(Exception):
-    def __init__(self, message, fix=None, code=None):
+    """`detail`: AIOStreams' own words for a refusal, when it gave some (shown by the public sign-up for a refused
+    config)."""
+
+    def __init__(self, message, fix=None, code=None, detail=None):
         super().__init__(message)
-        self.message, self.fix, self.code = message, fix, code
+        self.message, self.fix, self.code, self.detail = message, fix, code, detail
+
+
+class _Unfollowed(urllib.request.HTTPRedirectHandler):
+    """Ahead of the request gate's own redirect handler: a redirect comes back as it is and is never followed."""
+    handler_order = 400
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+ALIAS_REDIRECTS = (301, 302, 303, 307, 308)
+_CONFIG_ID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
 
 def _plain(code, message):
@@ -443,6 +471,15 @@ def _plain(code, message):
     if code == 'RATE_LIMIT_EXCEEDED' or 'too many' in (message or '').lower():
         return 'AIOStreams is limiting requests from this machine (it allows 10 new configs an hour); try again later.'
     return message or code or 'AIOStreams gave an error without a message.'
+
+
+def _error_code(body):
+    """AIOStreams' error code in an answer's body ({"error": {"code": …}}), or None."""
+    try:
+        err = json.loads(body).get('error')
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        return None
+    return err.get('code') if isinstance(err, dict) else None
 
 
 class AiosApi:
@@ -515,7 +552,7 @@ class AiosApi:
         if isinstance(err, str):
             err = {'message': err}
         message = _plain(err.get('code'), err.get('message') or (body or {}).get('detail'))
-        return AiosError(f'{doing}: {message}', code=err.get('code') or status)
+        return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=err.get('message'))
 
     # ------------------------------------------------------------------------------------------- reads
 
@@ -532,6 +569,56 @@ class AiosApi:
         /api/v1/user?uuid= with 200 or 400). None when this AIOStreams can't tell (another answer)."""
         status, _ = self.call('HEAD', '/api/v1/user?' + urllib.parse.urlencode({'uuid': uuid}), timeout=15, raw=True)
         return {200: True, 400: False}.get(status)
+
+    def alias_config_id(self, alias):
+        """The config ID behind an alias link (…/stremio/u/<alias>/…): AIOStreams answers it, without a password, with
+        a redirect to the config's full link. The redirect is read, never followed, and only the ID is kept: the rest of
+        that link holds the config's encrypted password and is dropped at once (never logged, stored or shown). Raises
+        AiosError: code ALIAS_UNKNOWN when this AIOStreams doesn't know the alias, ALIAS_NO_CONFIG when its answer
+        holds no config ID on this AIOStreams, and the usual "Can't reach" one when it can't be reached."""
+        url = f'{self.base}/stremio/u/{urllib.parse.quote(alias, safe="")}/manifest.json'
+        req = urllib.request.Request(url, method='GET', headers={'User-Agent': self.user_agent,
+                                                                 'Accept': 'application/json'})
+        wait_at_most = min(self.timeout, self.max_timeout or self.timeout, 15)
+        location, body = None, b''
+        try:
+            realdebrid.check(url)
+            net.check_scheme(url)
+            with net.build_opener(_Unfollowed()).open(req, timeout=wait_at_most) as r:
+                status = r.status
+        except urllib.error.HTTPError as e:
+            status, location = e.code, (e.headers.get('Location') if e.headers else None)
+            try:   # only a refusal's body is read: a redirect's would hold the encrypted password, and may never come
+                body = (e.read(64 * 1024) or b'') if status == 400 else b''
+            except (OSError, ValueError, http.client.HTTPException):
+                body = b''
+            finally:
+                e.close()
+        except realdebrid.Blocked:
+            raise AiosError('Stopped a request to Real-Debrid: AIOSubtitles never uses Real-Debrid.',
+                            'Give the address of your AIOStreams, not of Real-Debrid.') from None
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise AiosError(f'Can\'t reach AIOStreams at {self.base} ({getattr(e, "reason", e)}).',
+                            'Check the address, and that AIOStreams is running (docker ps).') from None
+        if status in ALIAS_REDIRECTS and location:
+            found = self._config_id_in(location)
+            if found:
+                return found
+        elif status == 404 or (status == 400 and _error_code(body) == 'USER_INVALID_DETAILS'):
+            raise AiosError('This AIOStreams doesn\'t know that alias.', code='ALIAS_UNKNOWN')
+        raise AiosError('This AIOStreams gave no config for that alias.', code='ALIAS_NO_CONFIG')
+
+    def _config_id_in(self, location):
+        """The config ID in a redirect's target (/stremio/<id>/<encrypted password>/…), only on this AIOStreams' own
+        host (a relative target, or one naming that host); None otherwise."""
+        target = urllib.parse.urlsplit(location)
+        if target.netloc and (target.hostname or '').lower() != (urllib.parse.urlsplit(self.base).hostname or '').lower():
+            return None
+        _, sep, rest = target.path.partition('/stremio/')
+        pieces = rest.split('/')
+        if sep and len(pieces) >= 3 and _CONFIG_ID.match(pieces[0]) and pieces[1]:
+            return pieces[0].lower()
+        return None
 
     def get_config(self, uuid, password):
         status, body = self.call('GET', '/api/v1/user', auth=(uuid, password))

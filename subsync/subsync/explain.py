@@ -63,6 +63,14 @@ RULES = [
      "A language that has subtitles but no synced copy for a file is listed once, as \"<Language> (original)\": the "
      "subtitle, unchanged, that fit the file best when it was checked, or else the likeliest by its release name, and "
      "only if its text is in that language. It isn't synced; a synced copy, when there is one, is listed instead."),
+    ("Subtitles are timed to the film's original language",
+     "AIOSubtitles looks up each film's or series' original language by the title's id: at TMDB when a TMDB key is "
+     "set, and at Wikidata (for anime, AniList). When the file has a subtitle track in that language, every subtitle, "
+     "in any language, is checked and timed against it, because it follows the original speech: a plain track first, "
+     "then a picture track (with SUBSYNC_IMAGE_REF on); one for the hearing impaired only for a language with no plain "
+     "track of its own. A file with no subtitle track is fitted to its original-language sound first. Until the "
+     "language is known, or when the file has no such track, each subtitle is checked against its own language's "
+     "track as before."),
     ("At most four languages",
      "./setup syncs up to four languages. Each one is a separate sync for every file you play, with its own subtitle "
      "downloads and a few seconds of work, though the video file is read only once."),
@@ -194,8 +202,8 @@ QUESTIONS = {
         "",
         "The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure "
         "page when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the "
-        "whole install link: setup takes the ID out of it and checks that the config exists. subsync is added to this "
-        "config, and subsync's own config is made from it."),
+        "whole install link, or its alias link (…/stremio/u/<name>/…): setup takes the ID out of it and checks that the "
+        "config exists. subsync is added to this config, and subsync's own config is made from it."),
     "AIOS_CONFIG_PASSWORD": (
         "",
         "The password you chose when you saved that config. Setup uses it to read the config and save the change, and "
@@ -250,6 +258,15 @@ QUESTIONS = {
         "isn't asked. Cost: one search per language for each file you play, plus a download per subtitle tried (at "
         "most two per file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, "
         "readable only by your user."),
+    "TMDB_KEY": (
+        "",
+        "Optional: a TMDB API key or API Read Access Token, free for non-commercial use (on themoviedb.org: your "
+        "account's settings, API). With it, AIOSubtitles asks TMDB for each film's or series' original language, which "
+        "TMDB knows for nearly every title, so more subtitles are timed to the file's track in that language. Without "
+        "it, only Wikidata is asked, which knows about three films in four and half of all series; the rest are synced "
+        "as if the language were unknown. Cost: one request per film or series; it sends only the title's IMDb id. "
+        "Risk: AIOSubtitles keeps each answer with no time limit, though TMDB's terms allow 6 months, so TMDB could "
+        "withdraw the key. Its logo and notice are shown. Never shown or logged."),
     "ADD_OPENSUBTITLES": (
         "yes",
         "Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds "
@@ -401,6 +418,7 @@ GROUPS = [
             "and files keep their original subtitles."),
         "SUBSYNC_SUBDL_KEY": ("", QUESTIONS["SUBDL_KEY"][1]),
         "SUBSYNC_WYZIE_KEY": ("", QUESTIONS["WYZIE_KEY"][1]),
+        "SUBSYNC_TMDB_KEY": ("", QUESTIONS["TMDB_KEY"][1]),
         "SUBSYNC_PORT": (
             "8790",
             "The port subsync listens on: inside its container, or on the machine itself when AIOStreams uses host "
@@ -606,6 +624,22 @@ GROUPS = [
             "0.75",
             "For \"clearly better\" against another language's track: the share of the copy's lines that must pair "
             "(0.75 = 75 %). Recommended: 0.75. " + _THRESHOLD),
+        "SUBSYNC_ORIGINAL_LANGUAGE": (
+            "on",
+            "On (recommended): AIOSubtitles looks up each film's or series' original language, so subtitles are timed "
+            "to the file's track in that language, which follows the original speech. The lookup sends only the "
+            "title's id, from this server, once per title (the answer is kept with no time limit), and never delays a "
+            "sync: a file read "
+            "before the answer comes is checked again on its next play. Off: nothing is looked up, every subtitle is "
+            "checked against its own language's track (else SUBSYNC_FALLBACK_REFERENCE's) as before, and the answers "
+            "already kept are deleted."),
+        "SUBSYNC_ORIGINAL_LANGUAGES": (
+            "",
+            "Optional: titles whose original language you set yourself, which then is never looked up, as IMDb "
+            "id=language pairs separated by commas, like tt1375666=en,tt2788316=ja (two- or three-letter codes). Use "
+            "it when a lookup gives a wrong language for a title you know. Empty (recommended): every title is looked "
+            "up. A wrong entry times that title's subtitles to the wrong track, so fewer of its copies pass the "
+            "check."),
         "SUBSYNC_FALLBACK_REFERENCE": (
             "eng",
             "When a file has no track in a subtitle's language, the languages whose track it is checked against first, "
@@ -726,6 +760,22 @@ GROUPS = [
             "https://v3-cinemeta.strem.io",
             "The address of Cinemeta, Stremio's catalogue, which subsync asks for a series' TheTVDB number before it "
             "searches Gestdown. Change it only if it moves."),
+        "SUBSYNC_TMDB_URL": (
+            "https://api.themoviedb.org/3",
+            "The address of TMDB's API, which AIOSubtitles asks for a film's or series' original language when a TMDB "
+            "key is set. Change it only if it moves."),
+        "SUBSYNC_WIKIDATA_URL": (
+            "https://query.wikidata.org/sparql",
+            "The address of Wikidata's query service, which AIOSubtitles asks for a film's or series' original "
+            "language. Change it only if it moves; Wikidata has announced new addresses for 2026–2027."),
+        "SUBSYNC_KITSU_URL": (
+            "https://kitsu.app/api/edge",
+            "The address of Kitsu's API, which AIOSubtitles asks for an anime's MyAnimeList number when the anime is "
+            "known only by its Kitsu number, to look up where it comes from. Change it only if it moves."),
+        "SUBSYNC_ANILIST_URL": (
+            "https://graphql.anilist.co",
+            "The address of AniList's API, which AIOSubtitles asks which country an anime comes from: its original "
+            "language is Japanese unless AniList names China, Taiwan, Hong Kong or Korea. Change it only if it moves."),
         "SUBSYNC_OSV3PLUS_URL": (
             "https://opensubtitles.stremio.homes",
             "The address of OpenSubtitles V3+, a source subsync searches itself. Change it only if the service moves."),
@@ -748,6 +798,14 @@ GROUPS = [
             "The address of Wyzie Subs' API, used only with a Wyzie key. Change it only if the service moves."),
     }),
     ("Public mode (one service for many people)", {
+        "SUBSYNC_TMDB_PERSONAL": (
+            "off",
+            "For a public instance with no TMDB key of its own. On: each person may add their own free TMDB key on "
+            "their settings page; it is used to look up the original language of the films and series they play, and "
+            "the answers are shared with everyone. Without one, their titles are looked up on Wikidata only, unless "
+            "someone else's key found them already. Off (recommended if you set a key): the service's own key, if any, "
+            "is used for everyone. Each person's key is stored encrypted in their record, opens only with their "
+            "personal link, and is never shown or logged."),
         "SUBSYNC_PUBLIC": (
             "off",
             "Public mode: one AIOSubtitles service for many people, like aiosubtitles.com. Each person signs up on its "
@@ -924,6 +982,13 @@ PUBLIC_FIELDS = {
         "serves everyone who plays the same file, you included next time. These syncs count in your daily data, at "
         "most {per_day} a day."),
     "invite": "The code you were given. AIOSubtitles is open only to invited people for now.",
+    "tmdb_key": (
+        "Optional: your own free TMDB API key (on themoviedb.org: your account's settings, API). AIOSubtitles uses it to "
+        "look up the original language of the films and series you play, so their subtitles are timed to the file's "
+        "track in that language; it sends only the title's IMDb id, and the answers are shared with everyone. Without "
+        "it, your titles are looked up on Wikidata only. It is stored encrypted in your record, opens only with your "
+        "personal link, and is never shown; Remove key deletes it at once (the encrypted backups keep it up to 30 days "
+        "more)."),
     "refresh": (
         "Your AIOStreams password, used now to read your config again and rebuild AIOSubtitles' own config from it, for "
         "example after you added or removed a service, to make that config again if it is gone, and to put "
@@ -1013,6 +1078,12 @@ def languages_help(limit):
 
 # the other texts of the public pages
 PUBLIC_TEXTS = {
+    # a person's own TMDB key on the settings page, when the instance asks each person for one
+    "tmdb_saved": "Your TMDB key is saved. It is used for the next title looked up for you.",
+    "tmdb_removed": "Your TMDB key is deleted.",
+    "tmdb_refused": ("TMDB didn't accept this key. Copy it again from themoviedb.org (your account's settings, API) and "
+                     "paste it here."),
+    "tmdb_unreachable": "TMDB didn't answer, so the key wasn't saved. Try again in a few minutes.",
     "intro": (
         "AIOSubtitles gives you subtitles that are in sync with the file you play. It works through your AIOStreams: "
         "for each file you play, it reads that file's own subtitle track (about 1 MB; a few MB when the track's lines "
@@ -1137,14 +1208,55 @@ def intro_text(settings):
     return text[:at] + " " + PUBLIC_AUDIO["intro"] + text[at:]
 
 
+# TMDB's notice (its terms ask for it, with its logo, wherever TMDB's data is used: ui.tmdb_credit), and the privacy
+# page's sentence on the original-language lookups, by what the instance uses: TMDB with its own key, TMDB with each
+# person's own key, Wikidata only, or no lookup at all (Cinemeta, asked for a series' TheTVDB number, in every one)
+TMDB_NOTICE = "AIOSubtitles uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB."
+_LOOKUP = ("To time subtitles to the original speech, AIOSubtitles also looks up each title's original language by its "
+           "id alone (IMDb, or for anime MyAnimeList or Kitsu), from its own server: at {where}; for series it asks "
+           "Cinemeta for TheTVDB's number the same way. The answers are kept with no time limit and shared by "
+           "everyone.")
+PRIVACY_LOOKUP = {
+    "tmdb": _LOOKUP.format(where="TMDB, Wikidata, and for anime AniList and Kitsu"),
+    "personal": _LOOKUP.format(where="TMDB with your own key if you added one, Wikidata, and for anime AniList and Kitsu"),
+    "wikidata": _LOOKUP.format(where="Wikidata, and for anime AniList and Kitsu"),
+    "off": "For series, AIOSubtitles asks Cinemeta for TheTVDB's number by the title's id alone, from its own server.",
+}
+PRIVACY_TMDB_STORED = "your TMDB key if you added one, "      # in "What is stored", when each person may add one
+_STORED_AT = "your languages, "
+
+
+def lookup_kind(settings):
+    """Which of PRIVACY_LOOKUP's sentences the instance's settings make true."""
+    if not getattr(settings, "original_language", True):
+        return "off"
+    if getattr(settings, "tmdb_key", ""):
+        return "tmdb"
+    if getattr(settings, "public", False) and getattr(settings, "tmdb_personal", False):
+        return "personal"
+    return "wikidata"
+
+
+def tmdb_used(settings):
+    """Whether the instance uses TMDB (its own key, or each person's): then TMDB's logo and notice are shown."""
+    return lookup_kind(settings) in ("tmdb", "personal")
+
+
 def privacy_parts(settings):
-    """The privacy page's parts, with the audio route's words on what is read when the instance has it on."""
-    if not getattr(settings, "audio_route", False):
-        return PRIVACY_PARTS
-    words = PUBLIC_AUDIO["privacy"].format(limit=audio_limit_words(settings))
+    """The privacy page's parts: the audio route's words on what is read when the instance has it on, the lookups'
+    sentence after the subtitle sites', and a person's own TMDB key among what is stored when they may add one."""
     head, lead, text = PRIVACY_PARTS[0]
-    at = text.index(PRIVACY_TRACK_END) + len(PRIVACY_TRACK_END)
-    return ((head, lead, text[:at] + words + text[at:]),) + PRIVACY_PARTS[1:]
+    if getattr(settings, "audio_route", False):
+        words = PUBLIC_AUDIO["privacy"].format(limit=audio_limit_words(settings))
+        at = text.index(PRIVACY_TRACK_END) + len(PRIVACY_TRACK_END)
+        text = text[:at] + words + text[at:]
+    kind = lookup_kind(settings)
+    parts = [(head, lead, text + " " + PRIVACY_LOOKUP[kind])] + list(PRIVACY_PARTS[1:])
+    if kind == "personal":
+        head, lead, text = parts[1]
+        at = text.index(_STORED_AT) + len(_STORED_AT)
+        parts[1] = (head, lead, text[:at] + PRIVACY_TMDB_STORED + text[at:])
+    return tuple(parts)
 
 
 def next_text(settings):

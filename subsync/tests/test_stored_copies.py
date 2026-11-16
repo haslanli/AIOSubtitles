@@ -191,7 +191,7 @@ class StoredCopiesServedTest(unittest.TestCase):
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
         self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "",
+                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
                     "SUBSYNC_RECHECK_HOURS": "0"}
         self.s = Settings(self.env)
         self.store = Store(self.dir)

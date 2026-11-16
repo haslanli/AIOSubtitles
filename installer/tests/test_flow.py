@@ -75,6 +75,8 @@ class FakeAios:
         self.gated, self.signed_in, self.subsync_up, self.throttle = gated, False, False, 0
         self.head_check = True      # stock 2.37: HEAD /api/v1/user?uuid= says whether a config exists
         self.sizes = [1000]         # the ready files the sync config lists
+        self.aliases = {}           # alias links (stock: /stremio/u/<alias>/… redirects to the full link)
+        self.alias_answer = None    # 'ok_200': the alias route answers a page instead
         self.setting = {'*': 300}
         self.log = []
         outer = self
@@ -133,6 +135,17 @@ class FakeAios:
                     return self._json(200, {'success': True, 'data': {'settings': [
                         {'key': 'resources.cache.subtitle.ttl', 'value': outer.setting, 'source': 'database', 'env': 'SUBTITLE_CACHE_TTL'}]}})
                 parts = path.split('/')
+                if len(parts) > 4 and parts[1] == 'stremio' and parts[2] == 'u':
+                    found = outer.aliases.get(urllib.parse.unquote(parts[3]))
+                    if outer.alias_answer == 'ok_200':
+                        return self._json(200, {'id': 'a.page'})
+                    if not found:
+                        return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_DETAILS'}})
+                    self.send_response(302)
+                    self.send_header('Location', f"/stremio/{found}/ENC-{found[:4]}/" + '/'.join(parts[4:]))
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
                 if len(parts) > 4 and parts[1] == 'stremio':
                     uuid, resource = parts[2], parts[4]
                     if resource == 'manifest.json' and uuid in outer.users:   # each config's manifest
@@ -493,6 +506,30 @@ class Flow(FlowFixture):
         self.assertIn('There is no config with that ID on this AIOStreams', out)
         self.assertFalse([1 for m, p, _ in self.aios.log if m == 'GET' and p == '/api/v1/user'])   # never asked
 
+    def test_an_alias_link_for_the_config(self):   #
+        self.aios.aliases['Home'] = UUID
+        code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_ID=f'{PUBLIC}/stremio/u/Home/manifest.json',
+                                        TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(self.state / 'secrets.env')['VIEWER_UUID'], UUID)
+        asked = ('GET', '/stremio/u/Home/manifest.json', engine.Aios(self.aios.url).user_agent)
+        self.assertEqual(self.aios.log.count(asked), 1)
+        after = self.aios.log[self.aios.log.index(asked) + 1]
+        self.assertNotEqual(after[1], f'/stremio/{UUID}/ENC-{UUID[:4]}/manifest.json')     # the redirect not followed
+
+    def test_an_alias_link_that_gives_no_config(self):
+        for answer, words in ((None, "This AIOStreams doesn't know that alias. Check the link, or paste the config ID "
+                                     "or the full install link."),
+                              ('ok_200', "Setup couldn't get the config from that alias link. Paste the config ID, or "
+                                         "the full link: open the alias link in a browser and copy the address it "
+                                         "takes you to.")):
+            with self.subTest(answer=answer):
+                self.aios.alias_answer = answer
+                code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_ID=f'{PUBLIC}/stremio/u/gone/manifest.json'))
+                self.assertEqual(code, 1, out)
+                self.assertIn(words, ' '.join(out.split()))
+                self.assertFalse([1 for m, p, _ in self.aios.log if m == 'GET' and p == '/api/v1/user'])   # never asked
+
     def test_without_the_head_check_the_id_is_taken_as_given(self):
         self.aios.head_check = False                                   # an AIOStreams without it: no false "unknown"
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
@@ -568,11 +605,24 @@ class Flow(FlowFixture):
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps them
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_SUBDL_KEY'], 'subdl-secret-key')
 
+    def test_a_tmdb_key_reaches_subsync_and_is_never_shown(self):
+        # the original-language lookup: an optional TMDB key, asked like the source keys, kept on a re-run
+        code, out = self.run_setup(dict(self.ANSWERS, TMDB_KEY='tmdb-secret-key'))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_TMDB_KEY'], 'tmdb-secret-key')
+        self.assertNotIn('tmdb-secret-key', out)
+        self.assertIn('TMDB API key (optional)', out)
+        self.assertIn('not endorsed, certified, or otherwise approved by TMDB', out)      # TMDB's notice by the question
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps it
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_TMDB_KEY'], 'tmdb-secret-key')
+        self.assertNotIn('tmdb-secret-key', out)
+
     def test_without_keys_nothing_is_written(self):
         self.run_setup(self.ANSWERS)
         env = engine.read_kv(self.state / 'subsync.env')
         self.assertNotIn('SUBSYNC_SUBDL_KEY', env)
         self.assertNotIn('SUBSYNC_WYZIE_KEY', env)
+        self.assertNotIn('SUBSYNC_TMDB_KEY', env)
 
     def test_short_rate_limit_is_waited_out(self):
         self.aios.throttle = 2

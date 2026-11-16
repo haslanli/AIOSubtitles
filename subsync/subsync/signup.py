@@ -12,6 +12,7 @@ itself; unticking deletes it. The record keeps the sync config's own link and pa
 Errors come back as SignupError with a plain message that never repeats the link or the password.
 """
 import collections
+import contextlib
 import hashlib
 import hmac
 import json
@@ -23,7 +24,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (AiosApi, AiosError, is_subsync_preset, new_key, parse_languages, sync_config,
+from .aiosconfig import (MAX_ALIAS, AiosApi, AiosError, is_subsync_preset, new_key, parse_languages, sync_config,
                          sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins,
                          without_subsync)
 from .settings import AUDIO_CHOICES
@@ -42,11 +43,13 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class SignupError(Exception):
-    """A plain message for the page; `field` names the form field it is about (the page marks it), or None."""
+    """A plain message for the page; `field` names the form field it is about (the page marks it), or None.
+    `refused`: AIOStreams' own reason when it refused a config AIOSubtitles made (sign-up and Refresh then say so
+    plainly, _refusal_explained)."""
 
-    def __init__(self, message, code=400, field=None):
+    def __init__(self, message, code=400, field=None, refused=None):
         super().__init__(message)
-        self.message, self.code, self.field = message, code, field
+        self.message, self.code, self.field, self.refused = message, code, field, refused
 
 
 @dataclass
@@ -72,8 +75,34 @@ def public_api(instance, timeout):
 
 # ------------------------------------------------------------------------------------------- what people type
 
+UNKNOWN_ALIAS = ("Your AIOStreams doesn't know this alias link: its alias may have been changed or removed. Copy the "
+                 "install link again from AIOStreams' configure page.")
+NO_CONFIG_FROM_ALIAS = ("AIOSubtitles couldn't get your config's full link from this alias link. Open the alias link in "
+                        "your browser: AIOStreams takes you to the full link, which has /stremio/ and a long code in it. "
+                        "Copy that address and paste it here.")
+REFUSED_CONFIG = ("Your AIOStreams didn't accept the config AIOSubtitles makes from yours. This is a fault in "
+                  "AIOSubtitles, not in your config, and your own config wasn't changed. AIOStreams' reason: \"{}\"")
+NOT_A_LINK = ("That isn't an AIOStreams config link: it should look like https://…/stremio/<config id>/…/manifest.json. "
+              "Copy it again from AIOStreams' configure page.")
+
+
+def _variant_query(query):
+    """A query of only a variant selection (?v=<ids>, AIOStreams 2.33+)."""
+    pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+    return len(pairs) == 1 and pairs[0][0] == "v" and bool(pairs[0][1].strip())
+
+
+def _install_tail(tail, bare=False):
+    """What may follow the config part of an install link: manifest.json, after a variant selection (v/<ids>) or not;
+    `bare`: nothing at all too (a full link without manifest.json, taken as before)."""
+    return tail == ["manifest.json"] or (bare and not tail) or (
+        len(tail) == 3 and tail[0] == "v" and tail[1] and tail[2] == "manifest.json")
+
+
 def parse_link(text):
-    """(instance address, config id) from an AIOStreams config link (https only)."""
+    """(instance address, config id, None) from an AIOStreams install link, or (instance address, None, alias) from an
+    alias link (…/stremio/u/<alias>/…, looked up by _config_id); https only. Either may carry a variant selection
+    (…/v/<ids>/manifest.json or ?v=<ids>), which AIOSubtitles doesn't use: it reads the config itself."""
     text = (text or "").strip()
     if not text or len(text) > MAX_LINK or _CONTROL.search(text):
         raise SignupError("Paste the link of your AIOStreams config: the one that ends in /manifest.json.", field="link")
@@ -84,17 +113,52 @@ def parse_link(text):
     if parts.username is not None or parts.password is not None:
         raise SignupError("Paste the link without a name or password in its address: the one AIOStreams' configure "
                           "page gives.", field="link")
-    if parts.query or parts.fragment or not parts.hostname:
+    if (parts.query and not _variant_query(parts.query)) or parts.fragment or not parts.hostname:
         raise SignupError("That isn't an AIOStreams config link: copy it again from AIOStreams' configure page.",
                           field="link")
     prefix, sep, rest = parts.path.partition("/stremio/")
     pieces = rest.split("/")
-    if not sep or len(pieces) < 2 or not _UUID.match(pieces[0]) or not pieces[1] or (
-            len(pieces) > 2 and pieces[2:] != ["manifest.json"]):
-        raise SignupError("That isn't an AIOStreams config link: it should look like "
-                          "https://…/stremio/<config id>/…/manifest.json. Copy it again from AIOStreams' configure page.",
-                          field="link")
-    return f"https://{parts.netloc}{prefix.rstrip('/')}", pieces[0].lower()
+    instance = f"https://{parts.netloc}{prefix.rstrip('/')}"
+    if sep and len(pieces) >= 3 and pieces[0] == "u" and pieces[1] and _install_tail(pieces[2:]):
+        alias = urllib.parse.unquote(pieces[1])
+        if len(alias) > MAX_ALIAS or _CONTROL.search(alias):
+            raise SignupError(UNKNOWN_ALIAS, field="link")
+        return instance, None, alias
+    if not sep or len(pieces) < 2 or not _UUID.match(pieces[0]) or not pieces[1] or not _install_tail(pieces[2:], True):
+        raise SignupError(NOT_A_LINK, field="link")
+    return instance, pieces[0].lower(), None
+
+
+def _config_id(api, uuid, alias):
+    """The config id of a pasted link: as it was given, or, for an alias link, looked up on the person's AIOStreams
+    (one request, no password, the redirect not followed)."""
+    if alias is None:
+        return uuid
+    try:
+        return api.alias_config_id(alias)
+    except AiosError as e:
+        if e.code == "ALIAS_UNKNOWN":
+            raise SignupError(UNKNOWN_ALIAS, field="link") from None
+        if e.code == "ALIAS_NO_CONFIG":
+            raise SignupError(NO_CONFIG_FROM_ALIAS, field="link") from None
+        raise SignupError(_plain(e, "Opening your alias link"), field="link") from None
+
+
+@contextlib.contextmanager
+def _refusal_explained():
+    """Sign-up and Refresh: a config of AIOSubtitles' that AIOStreams refused is AIOSubtitles' fault, and said so
+. The daily rebuild keeps its own words for its notice."""
+    try:
+        yield
+    except SignupError as e:
+        if e.refused is None:
+            raise
+        raise SignupError(REFUSED_CONFIG.format(e.refused)) from None
+
+
+def _refused(e):
+    """AIOStreams' reason when it refused a config (USER_INVALID_CONFIG), else None."""
+    return e.detail if str(e.code) == "USER_INVALID_CONFIG" and e.detail else None
 
 
 def _password(form):
@@ -134,7 +198,7 @@ def form_languages(form):
 
 WRONG_PASSWORD_CODES = ("USER_INVALID_DETAILS", "USER_INVALID_PASSWORD", "USER_NOT_FOUND")
 WRONG_PASSWORD = ("Your AIOStreams didn't accept this password for this link. Type the password of this config: the one "
-                  "you set on AIOStreams' configure page.")
+                  "you set on AIOStreams' configure page, not the one you sign in to AIOStreams with.")
 
 
 def _plain(e, doing, own_password=False):
@@ -323,7 +387,7 @@ def _new_sync(api, instance, sync):
     try:
         sync_uuid, sync_encrypted = api.create_config(sync, sync_password)
     except AiosError as e:
-        raise SignupError(_plain(e, "Making AIOSubtitles' config on your AIOStreams")) from None
+        raise SignupError(_plain(e, "Making AIOSubtitles' config on your AIOStreams"), refused=_refused(e)) from None
     except (KeyError, TypeError, ValueError):
         raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know when making its config.")
     try:
@@ -348,7 +412,8 @@ def _put_sync(api, record, sync, gone=False, kind="sync"):
             return record[f"{kind}_uuid"], record[f"{kind}_link"], record[f"{kind}_password"]
         except AiosError as e:
             if str(e.code) not in WRONG_PASSWORD_CODES:
-                raise SignupError(_plain(e, "Updating AIOSubtitles' config on your AIOStreams")) from None
+                raise SignupError(_plain(e, "Updating AIOSubtitles' config on your AIOStreams"),
+                                  refused=_refused(e)) from None
     return _new_sync(api, record["instance"], sync)
 
 
@@ -471,11 +536,17 @@ def form_audio(settings, form):
 
 
 def signup(settings, users, form, api_factory=public_api, timeout=30):
+    with _refusal_explained():
+        return _signup(settings, users, form, api_factory, timeout)
+
+
+def _signup(settings, users, form, api_factory, timeout):
     langs = _languages(form.get("languages"), settings.max_languages)
     audio = form_audio(settings, form)              # refused before anything is read or made
-    instance, uuid = parse_link(form.get("link"))
+    instance, uuid, alias = parse_link(form.get("link"))
     password = _password(form)
     api = api_factory(instance, timeout)
+    uuid = _config_id(api, uuid, alias)
     viewer, metadata = _read_viewer(api, uuid, password)
     token = new_token()
     manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
@@ -541,16 +612,22 @@ def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
     config becomes theirs; on another AIOStreams their configs move there and the old ones are removed. The kept
     password follows the box (`keep_password`): ticked keeps this password, unticked deletes a kept one. Unticking the
     Usenet box removes the Usenet config."""
+    with _refusal_explained():
+        return _refresh(settings, users, token, form, api_factory, timeout)
+
+
+def _refresh(settings, users, token, form, api_factory, timeout):
     with users.locked(token):
         record = users.open(token)
         if record is None:
             raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
         link = (form.get("link") or "").strip()
-        instance, main_uuid = parse_link(link) if link else (record["instance"], record["main_uuid"])
+        instance, main_uuid, alias = parse_link(link) if link else (record["instance"], record["main_uuid"], None)
         password = _password(form)
         languages = (_languages(form.get("languages"), settings.max_languages)
                      if (form.get("languages") or "").strip() else None)
         api = api_factory(instance, timeout)
+        main_uuid = _config_id(api, main_uuid, alias)
         viewer, metadata = _read_viewer(api, main_uuid, password)
         manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
         moved = instance != record["instance"]
@@ -644,6 +721,42 @@ def forget_password(users, token):
         if record.pop("auto_password", None) is not None:
             users.update(token, record)
     log.info("a kept password was deleted")
+
+
+TMDB_KEY_SHAPE = re.compile(r"[A-Za-z0-9._-]{16,1024}")    # a v3 key (32 hex) or a Read Access Token (a JWT)
+
+
+def set_tmdb_key(users, token, key, settings, check=None):
+    """Saves a person's own TMDB key, when the instance asks each person for one: checked with TMDB once first (one
+    request with it), kept in their encrypted record, used for their original-language lookups. Never logged."""
+    from .origlang import check_key
+    key = (key or "").strip()
+    texts = explain.PUBLIC_TEXTS
+    if not TMDB_KEY_SHAPE.fullmatch(key):
+        raise SignupError(texts["tmdb_refused"], field="tmdb_key")
+    ok = (check or check_key)(settings, key)
+    if ok is None:
+        raise SignupError(texts["tmdb_unreachable"], field="tmdb_key")
+    if not ok:
+        raise SignupError(texts["tmdb_refused"], field="tmdb_key")
+    with users.locked(token):
+        record = users.open(token)
+        if record is None:
+            raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
+        record["tmdb_key"] = key
+        users.update(token, record)
+    log.info("a person's TMDB key was saved")
+
+
+def remove_tmdb_key(users, token):
+    """Deletes a person's own TMDB key at once; nothing else changes."""
+    with users.locked(token):
+        record = users.open(token)
+        if record is None:
+            raise SignupError("This link isn't signed up (any more). Sign up again on the start page.")
+        if record.pop("tmdb_key", None) is not None:
+            users.update(token, record)
+    log.info("a person's TMDB key was deleted")
 
 
 def set_languages(users, token, text, limit=4):

@@ -36,17 +36,22 @@ def main():
         return SileroVad()
 
     from .extra import make_sources
+    from .origlang import make_lookup
     extra = make_sources(s)
+    lookup = make_lookup(s, store)
     usenet = gate = None
     if s.usenet and s.usenet_manifest and s.usenet_listings_per_day > 0:   #
         usenet = Aios(s.usenet_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack,
                       password=s.usenet_password)
         gate = UsenetGate(store, s.usenet_listings_per_day, StoreUsenetCounts(store))
-    worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra, usenet=usenet, usenet_gate=gate)
+    worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra, usenet=usenet, usenet_gate=gate,
+                    lookup=lookup)
     worker.start()
     server = serve(App(s, store, worker, safety), s.port)
     def stop(*_):
         worker.stop_flag = True
+        if lookup is not None:     # lookups still waiting are dropped, so stopping isn't held up by them
+            lookup.close()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
@@ -69,7 +74,19 @@ def start_line(s, usenet):
         audio = (f"audio route {'when opened' if opened else 'on pick'}, up to {_audio_limit(s)} a file, 1 at a time, "
                  f"{s.user_audio_per_day} a day" + (f" ({s.user_opened_per_day} opened)" if opened else ""))
     return (f"listening on {s.port}; languages {','.join(s.languages)}; {audio}; Usenet "
-            + (f"on, {s.usenet_listings_per_day} listings a day" if usenet else "off"))
+            + (f"on, {s.usenet_listings_per_day} listings a day" if usenet else "off")
+            + f"; original language {_original_language(s)}")
+
+
+def _original_language(s):
+    """Where titles' original languages come from, never the key."""
+    if not s.original_language:
+        return "off"
+    if s.tmdb_key:
+        return "from TMDB and Wikidata"
+    if s.public and s.tmdb_personal:
+        return "from TMDB with each person's own key, and Wikidata"
+    return "from Wikidata only"
 
 
 
@@ -95,7 +112,7 @@ def public_start_line(s, places, audio_places):
         audio = "audio route off"
     return (f"public mode: listening on {s.port}; up to {s.max_users} people, {s.active_workers} active at once, "
             f"{places} file{'' if places == 1 else 's'} at once; {audio}; trusted proxy "
-            f"{', '.join(s.trusted_proxy) or 'none'}")
+            f"{', '.join(s.trusted_proxy) or 'none'}; original language {_original_language(s)}")
 
 
 def main_public(s):

@@ -48,6 +48,10 @@ NO_USENET_WAY_OUT_PAGE = ("Answer yes to the Usenet question, or add a debrid se
                           "configure page, then continue again.")
 NO_USENET_WAY_OUT = ("Answer yes to the Usenet question, or add a debrid service (TorBox, …) on AIOStreams' configure "
                      "page, then run ./setup again.")
+# an alias link at the config question
+ALIAS_UNKNOWN = "This AIOStreams doesn't know that alias. Check the link, or paste the config ID or the full install link."
+ALIAS_NO_CONFIG = ("Setup couldn't get the config from that alias link. Paste the config ID, or the full link: open the "
+                   "alias link in a browser and copy the address it takes you to.")
 
 
 # ------------------------------------------------------------------------------------------- state files
@@ -474,7 +478,15 @@ class Engine:
         self.out.step(3, 'The config your apps use')
 
         def check_id(value):
-            uuid = plan.config_id_from(value)
+            alias = plan.alias_from(value)       # an alias link (…/stremio/u/<name>/…) is looked up here
+            if alias:
+                try:
+                    uuid = self.aios.alias_config_id(alias)
+                except AiosError as e:
+                    return False, {'ALIAS_UNKNOWN': ALIAS_UNKNOWN, 'ALIAS_NO_CONFIG': ALIAS_NO_CONFIG}.get(
+                        e.code, e.message + (f' {e.fix}' if e.fix else '')), value
+            else:
+                uuid = plan.config_id_from(value)
             if not uuid:
                 return False, 'That has no config ID in it (it looks like 1a2b3c4d-1234-…).', value
             if self.aios.config_exists(uuid) is False:
@@ -591,6 +603,15 @@ class Engine:
             value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key))
             if value:
                 self.keys[key] = value
+        self.tmdb_key_question('TMDB API key (optional)')
+
+    def tmdb_key_question(self, label):
+        """The original-language lookup's optional TMDB key, with TMDB's notice under it (its terms ask for it)."""
+        value = self.ask.text('TMDB_KEY', label, secret=True, optional=True, current=self.keys.get('TMDB_KEY'))
+        if value:
+            self.keys['TMDB_KEY'] = value
+        self.out.note(explain.TMDB_NOTICE)
+        return value or self.keys.get('TMDB_KEY', '')
 
     def public_address(self):
         lan = lan_address()
@@ -822,7 +843,8 @@ class Engine:
             'addon_key': self.keys['ADDON_KEY'], 'languages': self.languages,
             'rewrite': plan.rewrite_rule(self.s['aios_public'], self.s['aios_internal']) if self.s['mode'] != 'remote' else '',
             'audio': self.audio, 'audio_when': self.audio_when, 'audio_budget': self.audio_budget,
-            'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', '')})
+            'subdl_key': self.keys.get('SUBDL_KEY', ''), 'wyzie_key': self.keys.get('WYZIE_KEY', ''),
+            'tmdb_key': self.keys.get('TMDB_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
         asked = limits.personal(audio=False, usenet=self.usenet)
@@ -1131,6 +1153,13 @@ class Engine:
             value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key))
             if value:
                 self.keys[key] = value
+        # the original-language lookup: a TMDB key for everyone, or (with none) each person's own, or Wikidata alone
+        self.host_tmdb_personal = False
+        if self.tmdb_key_question('TMDB API key for everyone (optional)'):
+            self.ask.answers.pop('SUBSYNC_TMDB_PERSONAL', None)     # a key for everyone: never each person's too
+        else:
+            kept = env_values().get('SUBSYNC_TMDB_PERSONAL', 'off').strip().lower() in ('on', 'yes', 'true', '1')
+            self.host_tmdb_personal = self.ask.yesno('SUBSYNC_TMDB_PERSONAL', hosting.TMDB_PERSONAL_QUESTION, kept)
         kept = env_values().get('SUBSYNC_USENET', 'off').strip().lower() in ('on', 'yes', 'true', '1')
         self.host_usenet = self.ask.yesno('SUBSYNC_USENET', 'Let people sync Usenet files too?', kept)
         kept = env_values().get('SUBSYNC_AUDIO_ROUTE', 'off').strip().lower() in ('on', 'yes', 'true', '1')
@@ -1163,6 +1192,8 @@ class Engine:
         answers = {'HOST_ADDRESS': self.address, 'SUBSYNC_TRUSTED_PROXY': self.trusted_proxy,
                    'SUBSYNC_PUBLIC_INVITE': self.invite, 'SUBDL_KEY': self.keys.get('SUBDL_KEY', ''),
                    'SUBSYNC_SUBSOURCE_KEY': self.keys.get('SUBSYNC_SUBSOURCE_KEY', ''),
+                   'TMDB_KEY': self.keys.get('TMDB_KEY', ''),
+                   'SUBSYNC_TMDB_PERSONAL': 'yes' if getattr(self, 'host_tmdb_personal', False) else 'no',
                    'SUBSYNC_USENET': 'yes' if getattr(self, 'host_usenet', False) else 'no',
                    'SUBSYNC_AUDIO_ROUTE': 'yes' if getattr(self, 'host_audio', False) else 'no'}
         env, kept = plan.merge_env(hosting.public_env(answers, self.secret, self.limit_values), env_values(),

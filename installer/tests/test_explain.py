@@ -69,6 +69,8 @@ class QuestionTexts(unittest.TestCase):
     def test_setup_names_the_program_without_the_command(self):
         self.assertIn("Asked only when setup can't find AIOStreams", explain.QUESTIONS['AIOS_URL'][1])
         self.assertIn("setup takes the ID out of it", explain.QUESTIONS['AIOS_CONFIG_ID'][1])
+        self.assertIn("You can paste the whole install link, or its alias link (…/stremio/u/<name>/…): setup takes the "
+                      "ID out of it", explain.QUESTIONS['AIOS_CONFIG_ID'][1])
         self.assertIn("(setup shows it)", explain.QUESTIONS['PUBLIC_ADDRESS'][1])
 
     def test_no_question_speaks_of_the_terminal(self):

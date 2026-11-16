@@ -32,6 +32,9 @@ a{color:var(--accent-link);text-underline-offset:3px;text-decoration-thickness:1
 [hidden]{display:none!important}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .mono{font-family:var(--mono)}
+.foot{padding:48px 0 40px}
+.tmdb-credit{display:flex;align-items:center;gap:12px;font-size:14px;line-height:1.5;color:var(--text-3);max-width:40em}
+.tmdb-logo{flex:none;width:68px;height:9px}
 
 /* ---------- page frame ---------- */
 .wrap{max-width:1440px;margin:0 auto;padding:0 var(--page)}

@@ -33,6 +33,16 @@ PROWLARR = {"type": "prowlarr", "instanceId": "prw", "enabled": True,   # its ow
             "options": {"name": "Prowlarr", "services": ["torbox", "aiostreams"]}}
 TESTER_ERROR = ("You have specified AIOStreams in your configuration for Prowlarr, but it is not enabled or has "
                 "missing credentials")   # what AIOStreams told a tester at sign-up
+# the texts for alias links and a config AIOStreams refuses, as approved
+UNKNOWN_ALIAS = ("Your AIOStreams doesn't know this alias link: its alias may have been changed or removed. Copy the "
+                 "install link again from AIOStreams' configure page.")
+NO_CONFIG_FROM_ALIAS = ("AIOSubtitles couldn't get your config's full link from this alias link. Open the alias link "
+                        "in your browser: AIOStreams takes you to the full link, which has /stremio/ and a long code in "
+                        "it. Copy that address and paste it here.")
+ALIAS_UNREACHABLE = ("Opening your alias link: AIOSubtitles can't reach your AIOStreams from the internet. Check the "
+                     "link, and that your AIOStreams can be opened from outside your home network.")
+REFUSED_CONFIG = ("Your AIOStreams didn't accept the config AIOSubtitles makes from yours. This is a fault in "
+                  "AIOSubtitles, not in your config, and your own config wasn't changed. AIOStreams' reason: \"{}\"")
 
 
 def viewer(services=(TORBOX,), presets=(TORRENTIO, OSV3, NEWZNAB)):
@@ -153,9 +163,156 @@ class SignupTest(unittest.TestCase):
                     self.signup.parse_link(link)
         uuid = "1a2b3c4d-1111-2222-3333-444455556666"
         self.assertEqual(self.signup.parse_link(f" https://aio.example.com/stremio/{uuid}/abc/manifest.json "),
-                         ("https://aio.example.com", uuid))
+                         ("https://aio.example.com", uuid, None))
         self.assertEqual(self.signup.parse_link(f"https://example.com/aio/stremio/{uuid.upper()}/abc/manifest.json"),
-                         ("https://example.com/aio", uuid))
+                         ("https://example.com/aio", uuid, None))
+
+    # -- alias links and variants ------------------------------------------------------------------
+    def test_link_shapes(self):
+        uuid = "1a2b3c4d-1111-2222-3333-444455556666"
+        base = "https://aio.example.com"
+        for link, parts in (
+                (f"{base}/stremio/u/Family.TV/manifest.json", (base, None, "Family.TV")),   # case kept (instance-wide)
+                ("https://example.com/aio/stremio/u/a%20b/manifest.json", ("https://example.com/aio", None, "a b")),
+                (f"{base}/stremio/u/fam/v/kids,tv/manifest.json", (base, None, "fam")),
+                (f"{base}/stremio/u/fam/manifest.json?v=kids", (base, None, "fam")),
+                (f"{base}/stremio/{uuid}/abc/v/kids/manifest.json", (base, uuid, None)),
+                (f"{base}/stremio/{uuid}/abc/manifest.json?v=kids%2Ctv", (base, uuid, None))):
+            with self.subTest(link=link):
+                self.assertEqual(self.signup.parse_link(link), parts)
+        for link in (f"{base}/stremio/u/manifest.json", f"{base}/stremio/u//manifest.json", f"{base}/stremio/u/fam",
+                     f"{base}/stremio/u/fam/configure", f"{base}/stremio/u/fam/v/a/b/manifest.json",
+                     f"{base}/stremio/{uuid}/abc/manifest.json?v=kids&x=1", f"{base}/stremio/{uuid}/abc/manifest.json?x=1",
+                     f"{base}/stremio/{uuid}/abc/manifest.json?v=", f"{base}/stremio/{uuid}/abc/v/manifest.json",
+                     f"{base}/stremio/{uuid}/abc/v//manifest.json", f"{base}/stremio/{uuid}/abc/w/kids/manifest.json"):
+            with self.subTest(link=link):
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.signup.parse_link(link)
+                self.assertEqual(e.exception.field, "link")
+
+    def test_an_overlong_alias_is_refused_without_asking(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.signup(self.s, self.users, dict(self.form(uuid), link=f"{INSTANCE}/stremio/u/{'a' * 201}/"
+                                                                               "manifest.json"), api_factory=self.api)
+        self.assertEqual((e.exception.message, e.exception.field), (UNKNOWN_ALIAS, "link"))
+        self.assertEqual(self.fake.requests, [])
+
+    def test_signup_with_an_alias_link_follows_the_config_behind_it(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        self.fake.aliases["Family.TV"] = uuid
+        self.fake.encrypted[uuid] = "SECRETencrypted42"
+        form = dict(self.form(uuid), link=f"{INSTANCE}/stremio/u/Family.TV/manifest.json")
+        result = self.signup.signup(self.s, self.users, form, api_factory=self.api)
+        record = self.users.open(result.token)
+        self.assertEqual((record["instance"], record["main_uuid"]), (INSTANCE, uuid))
+        self.assertEqual(self.fake.requests[0], ("GET", "/stremio/u/Family.TV/manifest.json"))
+        self.assertEqual(self.fake.alias_auth, [False])                     # asked without any password
+        self.assertFalse([p for _, p in self.fake.requests if "SECRETencrypted42" in p])   # the redirect not followed
+        self.assertTrue(result.added)
+        self.assertIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
+        self.assert_no_secret_anywhere("SECRETencrypted42", "Family.TV", f"{uuid}/SECRET")
+        import json
+        kept = json.dumps(self.users.open(result.token))                  # the decrypted record itself
+        self.assertNotIn("SECRETencrypted42", kept)
+        self.assertNotIn("Family.TV", kept)
+
+    def test_a_redirect_whose_body_never_comes_still_gives_the_config(self):
+        import socket
+        import threading
+        from subsync.aiosconfig import AiosApi
+        uuid = "1a2b3c4d-1111-2222-3333-444455556666"
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        done = threading.Event()
+
+        def stall():   # the headers of a redirect, then a body that is promised and never sent (held open)
+            conn, _ = listener.accept()
+            conn.recv(4096)
+            conn.sendall(f"HTTP/1.1 302 Found\r\nLocation: /stremio/{uuid}/SECRET/manifest.json\r\n"
+                         "Content-Length: 100000\r\n\r\nFound".encode())
+            done.wait(10)
+            conn.close()
+        threading.Thread(target=stall, daemon=True).start()
+        api = AiosApi(f"http://127.0.0.1:{listener.getsockname()[1]}", timeout=2, max_timeout=2)
+        try:
+            self.assertEqual(api.alias_config_id("fam"), uuid)
+        finally:
+            done.set()
+            listener.close()
+
+    def test_an_alias_link_with_a_variant(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        self.fake.aliases["fam"] = uuid
+        form = dict(self.form(uuid), link=f"{INSTANCE}/stremio/u/fam/v/kids/manifest.json")
+        result = self.signup.signup(self.s, self.users, form, api_factory=self.api)
+        self.assertEqual(self.users.open(result.token)["main_uuid"], uuid)
+        self.assertEqual(self.fake.requests[0], ("GET", "/stremio/u/fam/manifest.json"))
+
+    def test_an_absolute_redirect_on_the_same_host(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        self.fake.aliases["fam"], self.fake.alias_answer = uuid, "same_host"
+        result = self.signup.signup(self.s, self.users, dict(self.form(uuid), link=f"{INSTANCE}/stremio/u/fam/"
+                                                                                   "manifest.json"), api_factory=self.api)
+        self.assertEqual(self.users.open(result.token)["main_uuid"], uuid)
+
+    def test_an_unknown_alias(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        before = copy.deepcopy(self.fake.configs)
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.signup(self.s, self.users, dict(self.form(uuid), link=f"{INSTANCE}/stremio/u/nobody/"
+                                                                               "manifest.json"), api_factory=self.api)
+        self.assertEqual((e.exception.message, e.exception.field), (UNKNOWN_ALIAS, "link"))
+        self.assertEqual(self.fake.requests, [("GET", "/stremio/u/nobody/manifest.json")])
+        self.assertEqual(self.fake.configs, before)
+        self.assertEqual(self.users.count(), 0)
+
+    def test_an_alias_lookup_that_gives_no_config(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        self.fake.aliases["home"] = uuid
+        for answer in ("ok_200", "other_host", "no_id"):
+            with self.subTest(answer=answer):
+                self.fake.requests.clear()
+                self.fake.alias_answer = answer
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.signup.signup(self.s, self.users, dict(self.form(uuid), link=f"{INSTANCE}/stremio/u/home/"
+                                                                                       "manifest.json"),
+                                       api_factory=self.api)
+                self.assertEqual((e.exception.message, e.exception.field), (NO_CONFIG_FROM_ALIAS, "link"))
+                self.assertEqual(self.fake.requests, [("GET", "/stremio/u/home/manifest.json")])
+                self.assertEqual(len(self.fake.configs), 1)
+                self.assertEqual(self.users.count(), 0)
+
+    def test_an_aiostreams_that_cant_be_reached_at_the_alias_lookup(self):
+        import socket
+        from subsync.aiosconfig import AiosApi
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed = f"http://127.0.0.1:{s.getsockname()[1]}"
+        api = lambda base, timeout: AiosApi(closed, timeout=timeout, max_timeout=timeout, retry_wait_cap=5)  # noqa: E731
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.signup(self.s, self.users, dict(self.form("x"), link=f"{INSTANCE}/stremio/u/home/manifest.json"),
+                               api_factory=api)
+        self.assertEqual((e.exception.message, e.exception.field), (ALIAS_UNREACHABLE, "link"))
+
+    def test_refresh_with_an_alias_link(self):
+        uuid, result = self.run_signup(viewer())
+        moved = self.fake.add(viewer(), PASSWORD)
+        self.fake.aliases["moved"] = moved
+        self.signup.refresh(self.s, self.users, result.token,
+                            {"password": PASSWORD, "link": f"{INSTANCE}/stremio/u/moved/manifest.json"}, api_factory=self.api)
+        self.assertEqual(self.users.open(result.token)["main_uuid"], moved)
+
+    def test_refresh_with_an_unknown_alias_changes_nothing(self):
+        uuid, result = self.run_signup(viewer())
+        before = self.users.open(result.token)
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.refresh(self.s, self.users, result.token,
+                                {"password": PASSWORD, "link": f"{INSTANCE}/stremio/u/gone/manifest.json"},
+                                api_factory=self.api)
+        self.assertEqual((e.exception.message, e.exception.field), (UNKNOWN_ALIAS, "link"))
+        self.assertEqual(self.users.open(result.token), before)
 
     def test_a_link_with_a_name_and_password_in_it_is_refused(self):
         uuid = "1a2b3c4d-1111-2222-3333-444455556666"
@@ -182,6 +339,39 @@ class SignupTest(unittest.TestCase):
         with self.assertRaises(self.signup.SignupError):
             self.run_signup(viewer())
         self.assertEqual(self.users.count(), 0)
+
+    # -- a config AIOStreams refuses: AIOSubtitles' fault, said plainly -----------------------------------
+    def test_a_refused_sync_config_is_said_to_be_aiosubtitles_fault(self):
+        self.fake.refusal = lambda config: TESTER_ERROR
+        uuid = self.fake.add(viewer(), PASSWORD)
+        before = copy.deepcopy(self.fake.configs[uuid]["config"])
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.api)
+        self.assertEqual(e.exception.message, REFUSED_CONFIG.format(TESTER_ERROR))
+        self.assertEqual(self.fake.configs[uuid]["config"], before)      # their own config not changed
+        self.assertEqual(len(self.fake.configs), 1)                      # nothing left behind
+        self.assertEqual(self.users.count(), 0)
+
+    def test_a_refused_sync_config_at_refresh(self):
+        uuid, result = self.run_signup(viewer())
+        self.fake.configs[uuid]["config"]["presets"].append(dict(TORRENTIO, instanceId="tio2"))   # a change to follow
+        before = copy.deepcopy(self.fake.configs[uuid]["config"])
+        self.fake.refusal = lambda config: TESTER_ERROR
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD, "add_addon": "on"},
+                                api_factory=self.api)
+        self.assertEqual(e.exception.message, REFUSED_CONFIG.format(TESTER_ERROR))
+        self.assertEqual(self.fake.configs[uuid]["config"], before)
+
+    def test_the_daily_rebuild_keeps_its_words_for_a_refused_config(self):
+        uuid, result = self.run_signup(viewer())
+        self.fake.configs[uuid]["config"]["presets"].append(dict(TORRENTIO, instanceId="tio2"))
+        self.fake.refusal = lambda config: TESTER_ERROR
+        record = self.users.open(result.token)
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.rebuild(self.s, record, result.token, self.api(INSTANCE, 10), PASSWORD)
+        self.assertIn("AIOStreams refused the config: " + TESTER_ERROR, e.exception.message)
+        self.assertNotIn("fault in AIOSubtitles", e.exception.message)
 
     def test_a_sync_config_that_does_not_answer_is_removed(self):
         self.fake.fault = "no_manifest"

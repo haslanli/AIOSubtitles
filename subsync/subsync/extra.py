@@ -27,7 +27,7 @@ from .sourcestate import Health, Ledger
 from .sources import extras, release_info
 
 log = logging.getLogger("subsync.extra")
-USER_AGENT = "AIOSubtitles/1.5 (subsync)"
+USER_AGENT = "AIOSubtitles/1.6 (subsync)"
 TWO_LETTER = {"eng": "en", "rus": "ru", "jpn": "ja", "fre": "fr", "ger": "de", "spa": "es", "ita": "it", "por": "pt",
               "kor": "ko", "chi": "zh", "ukr": "uk", "pol": "pl", "dut": "nl", "swe": "sv", "tur": "tr", "ara": "ar",
               "heb": "he", "cze": "cs", "hun": "hu", "gre": "el", "fin": "fi", "dan": "da", "nor": "no", "rum": "ro",

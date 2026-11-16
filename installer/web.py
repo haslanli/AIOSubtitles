@@ -256,7 +256,7 @@ class App:
                 e.answers['USENET'] = 'yes' if one.get('USENET') else 'no'
             if offer:
                 e.answers['ADD_OPENSUBTITLES'] = 'yes' if one.get('ADD_OPENSUBTITLES') else 'no'
-            for key in ('SUBDL_KEY', 'WYZIE_KEY'):
+            for key in ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY'):
                 if one.get(key):
                     e.answers[key] = one[key]
             e.answers['PUBLIC_ADDRESS'] = one.get('PUBLIC_ADDRESS', '')
@@ -379,19 +379,21 @@ class App:
     def step_hostchoices(self, s, method, form, one):
         e = s.e
         if method == 'POST':
-            for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY'):
+            for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY'):
                 if one.get(key):
                     e.answers[key] = one[key]
+            e.answers['SUBSYNC_TMDB_PERSONAL'] = 'yes' if one.get('SUBSYNC_TMDB_PERSONAL') else 'no'
             e.answers['SUBSYNC_USENET'] = 'yes' if one.get('SUBSYNC_USENET') else 'no'
             e.answers['SUBSYNC_AUDIO_ROUTE'] = 'yes' if one.get('SUBSYNC_AUDIO_ROUTE') else 'no'
             if s.run('hostchoices', e.host_choices):
                 return self.go('hostlimits')
         chosen = {}
-        for key in ('SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE'):
+        for key in ('SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_PERSONAL'):
             chosen[key] = e.answers.get(key, '') == 'yes' if key in e.answers else \
                 engine.env_values().get(key, 'off').strip().lower() in ('on', 'yes', 'true', '1')
         return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=chosen['SUBSYNC_USENET'],
-                                              audio=chosen['SUBSYNC_AUDIO_ROUTE']))
+                                              audio=chosen['SUBSYNC_AUDIO_ROUTE'],
+                                              tmdb_personal=chosen['SUBSYNC_TMDB_PERSONAL']))
 
     def step_hostlimits(self, s, method, form, one):
         e = s.e

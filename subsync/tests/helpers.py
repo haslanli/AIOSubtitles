@@ -110,7 +110,12 @@ class FakeAiostreams:
     'refuse_save', 'hang' (answers after `hang_s`), 'html' (answers a web page), 'bad_config' (userData not an object),
     'no_manifest' (configs' manifests answer 404), 'rate_limited' (new configs answer 429, retry in an hour).
     `creates_left`: after that many new configs, the next ones are refused. Each config's stream and subtitle routes
-    answer `listings[uuid]` and `subtitle_lists[uuid]` and log every listing in `listed`."""
+    answer `listings[uuid]` and `subtitle_lists[uuid]` and log every listing in `listed`.
+    Alias links, as stock AIOStreams (routes/stremio/alias.ts): `aliases` maps an alias (as written, case kept) to a
+    config id; `/stremio/u/<alias>/<rest>` answers a 302 to `/stremio/<id>/<encrypted>/<rest>` (query kept), an unknown
+    alias 400 USER_INVALID_DETAILS. `alias_answer` makes it answer otherwise: 'ok_200' (a 200 page), 'other_host' (a
+    redirect to another host), 'no_id' (a redirect to a page with no config id), 'same_host' (an absolute redirect to
+    this host). `alias_auth` records whether each alias request carried an Authorization header."""
 
     STATUS = {"success": True, "data": {"version": "2.37.0", "settings": {"presets": [
         {"ID": "custom", "OPTIONS": [{"id": "timeout", "default": 7000}]},
@@ -127,6 +132,7 @@ class FakeAiostreams:
         self.listings, self.subtitle_lists, self.listed = {}, {}, []
         self.encrypted = {}            # config id -> the encrypted password its link carries (default "ENC" + id[:8])
         self.auth_ids = []             # the config ids each password-checked request named
+        self.aliases, self.alias_answer, self.alias_auth = {}, None, []
         self.inflight = self.max_inflight = 0
         self.lock = threading.Lock()
         outer = self
@@ -180,6 +186,8 @@ class FakeAiostreams:
                     return self.answer(200, "<html><body>Welcome</body></html>", "text/html")
                 if path == "/api/v1/status":
                     return self.answer(200, outer.STATUS)
+                if path.startswith("/stremio/u/") and self.command in ("GET", "HEAD"):
+                    return self.alias(path, query)
                 if path == "/api/v1/user":
                     uuid, password = self.auth()
                     if uuid:
@@ -242,6 +250,28 @@ class FakeAiostreams:
                         return self.answer(200, {"streams": outer.listings.get(parts[2], [])})
                     return self.answer(200, {"subtitles": outer.subtitle_lists.get(parts[2], [])})
                 return self.answer(404, {"success": False})
+
+            def alias(self, path, query):
+                import urllib.parse
+                parts = path.split("/")
+                outer.alias_auth.append(bool(self.headers.get("Authorization")))
+                if outer.alias_answer == "ok_200":
+                    return self.answer(200, "<html><body>A page</body></html>", "text/html")
+                found = outer.aliases.get(urllib.parse.unquote(parts[3])) if len(parts) > 4 and parts[3] else None
+                if not found:
+                    return self.answer(400, {"success": False, "error": {"code": "USER_INVALID_DETAILS",
+                                                                         "message": "Invalid UUID or password"}})
+                full = f"/stremio/{found}/{outer.enc(found)}/" + "/".join(parts[4:]) + (f"?{query}" if query else "")
+                location = {"other_host": "https://elsewhere.test" + full, "no_id": "/configure",
+                            "same_host": outer.url + full}.get(outer.alias_answer, full)
+                body = f"Found. Redirecting to {location}".encode()
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
 
             do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = handle_any
 

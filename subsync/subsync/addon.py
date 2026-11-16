@@ -40,7 +40,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import explain, srclimits
+from . import explain, origlang, srclimits
 from .langs import name as lang_name
 from .sources import parse_extras
 from .subs import apply_recipe, is_ass, parse, to_srt
@@ -63,6 +63,16 @@ MANIFEST = {
     "catalogs": [],
     "behaviorHints": {"configurable": False},
 }
+
+
+def manifest(settings):
+    """The addon's manifest; with a TMDB key, TMDB's notice in its description (TMDB's terms ask for it wherever its
+    data is used)."""
+    if settings.original_language and settings.tmdb_key:
+        return dict(MANIFEST, description=MANIFEST["description"] + " " + explain.TMDB_NOTICE)
+    return MANIFEST
+
+
 SUB_ROUTE = re.compile(r"^/subtitles/(movie|series)/([^/]+?)(?:/([^/]*))?\.json$")
 FILE_ROUTE = re.compile(r"^/file/(v\d+_[0-9a-f]{16}-\d+_[0-9a-f]{16})\.(srt|ass)$")
 PENDING_ROUTE = re.compile(r"^/pending/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
@@ -284,6 +294,7 @@ class App:
     def _subtitles(self, type_, video_id, extras):
         hints = parse_extras(extras)
         job = Job(type_, video_id, hints)
+        self.worker.start_lookup(video_id)     # the title's original language, in the background (origlang.py)
         aliases = [job.alias]
         if hints.get("filename") and hints.get("videoSize"):
             aliases.append(f"name:{hints['filename']}|{hints['videoSize']}")
@@ -299,10 +310,12 @@ class App:
             row = self.store.db.execute("SELECT read_at, detail FROM files WHERE file_key=?", (file_key,)).fetchone()
             recent = bool(row and row[0] and time.time() - row[0] < REPROCESS_S)
             detail = json.loads(row[1] or "{}") if row else {}
-            rule = detail.get("rule")
-            if recent and rule is not None and rule != self.s.rule_id:
-                recent = False   # read under another pass rule: judge its subtitles again now
-            judged = self.store.judged_all(file_key, self.s.languages, self.s.rule_id, time.time() - REPROCESS_S) \
+            rule, now_rule = detail.get("rule"), origlang.current(self.worker.rule_for(video_id))
+            if recent and rule is not None and not now_rule(rule):
+                # read under another pass rule, or before its title's original language was known: judge its
+                # subtitles again now
+                recent = False
+            judged = self.store.judged_all(file_key, self.s.languages, now_rule, time.time() - REPROCESS_S) \
                 if recent else None
             no_track = detail.get("reference") is False
             if judged is False and not (no_track and self.s.audio_route and self.s.audio_choice == "off"):
@@ -386,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             if not keyed and (path in ("/manifest.json", "/status") or path.startswith("/subtitles/")):
                 return self._send(404, b"")
             if path == "/manifest.json":
-                return self._json(MANIFEST, cache="max-age=3600")
+                return self._json(manifest(app.s), cache="max-age=3600")
             if path == "/status":
                 return self._json({"store": app.store.stats(), "queue": len(app.worker.jobs),
                                    "subtitle_requests": app.subtitle_requests,

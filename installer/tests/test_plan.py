@@ -62,6 +62,18 @@ class ConfigId(unittest.TestCase):
         self.assertEqual(plan.config_id_from(u.upper()), u)
         self.assertIsNone(plan.config_id_from('not one'))
 
+    def test_alias_from(self):   # an alias link's alias, as written
+        for text, alias in (('https://aio.example.com/stremio/u/Home/manifest.json', 'Home'),
+                            (' https://aio.example.com/aio/stremio/u/a%20b/v/kids/manifest.json ', 'a b'),
+                            ('https://aio.example.com/stremio/u/fam', 'fam'),
+                            ('https://aio.example.com/stremio/1a2b3c4d-1234-4abc-8def-0123456789ab/E/manifest.json', None),
+                            ('https://aio.example.com/stremio/u//manifest.json', None),
+                            ('https://aio.example.com/stremio/u/' + 'a' * 201 + '/manifest.json', None),
+                            ('https://aio.example.com/stremio/u/a%0Ab/manifest.json', None),
+                            ('1a2b3c4d-1234-4abc-8def-0123456789ab', None), ('', None), (None, None)):
+            with self.subTest(text=text):
+                self.assertEqual(plan.alias_from(text), alias)
+
 
 class ViewerChange(unittest.TestCase):
     def kinds(self, config):

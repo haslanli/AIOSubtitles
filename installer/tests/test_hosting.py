@@ -57,6 +57,26 @@ class Pieces(unittest.TestCase):
             self.assertEqual(s.conflicts(), [])
         self.assertEqual((s.subdl_key, s.subsource_key, s.invite), ('sd', 'ss', 'abcd-efgh-jkmn'))
 
+    def test_tmdb_for_everyone_or_each_persons_own(self):
+        # the original-language lookup's key on a public instance: the hoster's own for everyone, or each person's
+        base = {'HOST_ADDRESS': ADDRESS}
+        env = hosting.public_env(dict(base, TMDB_KEY='tk', SUBSYNC_TMDB_PERSONAL='yes'), hosting.new_secret(), {})
+        self.assertEqual(env['SUBSYNC_TMDB_KEY'], 'tk')
+        self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'off')          # a key for everyone: never both
+        env = hosting.public_env(dict(base, SUBSYNC_TMDB_PERSONAL='yes'), hosting.new_secret(), {})
+        self.assertNotIn('SUBSYNC_TMDB_KEY', env)
+        self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'on')
+        env = hosting.public_env(base, hosting.new_secret(), {})
+        self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'off')
+        self.assertTrue({'SUBSYNC_TMDB_KEY', 'SUBSYNC_TMDB_PERSONAL'} <= set(hosting.OWNED))
+        try:
+            from subsync.settings import Settings
+        except ImportError as e:
+            self.skipTest(f'subsync.settings needs {e.name}')
+        with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
+            for answers in (dict(base, TMDB_KEY='tk', SUBSYNC_TMDB_PERSONAL='yes'), dict(base, SUBSYNC_TMDB_PERSONAL='yes')):
+                self.assertEqual(Settings(hosting.public_env(answers, hosting.new_secret(), {})).conflicts(), [])
+
     def test_the_audio_route_and_its_limit_when_the_host_chooses_them(self):
         # A public instance may sync files without a subtitle track from their sound, after a pick
         answers = {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes'}
