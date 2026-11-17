@@ -553,6 +553,127 @@ class PickTest(AddonTest):
             pl.anchored_guess = real
         self.assertEqual(self.worker.provisional[self.ALIAS], {})
 
+    def test_an_anchored_guess_is_logged_without_its_subtitles_id(self):
+        # A subtitle a config lists without an id has its address as its id, and the log never holds a
+        # config's address: the guess is named by its place among the downloads and its source
+        from unittest import mock
+        import subsync.pipeline as pl
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
+        job = Job(self.job.type, self.job.video_id, self.job.hints)
+        main = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+        address = "https://subs.example/eyJjb25maWciOiJteSBvd24ifQ/subtitles/movie/tt9.srt"
+        job.fetched = {"eng": [({"id": "os-9"}, main)],
+                       "rus": [({"id": address, "url": address, "source": "config"}, main)]}
+        guess = {"index": 0, "body": "anchored", "share": 0.9}
+        with mock.patch.object(pl, "anchored_guess", lambda main_text, texts: guess), \
+                self.assertLogs("subsync.worker", "INFO") as logs:
+            self.worker._set_provisional(job)
+        self.assertEqual(self.worker.provisional[self.ALIAS], {"rus": "anchored"})
+        line = next(line for line in logs.output if "anchored" in line)
+        self.assertIn("candidate 1 of 1 (config) lines up with the eng guess", line)
+        self.assertNotIn("subs.example", line)
+        self.assertNotIn("http", line)
+
+    def test_a_refused_read_in_one_language_stops_the_others_reads_at_once(self):
+        # A job's languages judged in parallel read through the same account: the back-off starts when one
+        # language's read is refused, so the other's next read stops too, not only once every language ended
+        from subsync.reader import Refused
+        self.s.parallel_languages = True
+        job = Job(self.job.type, self.job.video_id, self.job.hints)
+        guard = JobGuard(self.safety, self.store, 10 ** 12)
+        refused, after = threading.Event(), []
+
+        def sync(lang, cands):
+            if lang == "eng":
+                time.sleep(0.2)                      # the other language reads meanwhile
+                refused.set()
+                raise Refused("HTTP 429")
+            for _ in range(20):                      # a read every 50 ms, each checked by the job's guard
+                guard.before_read(1)
+                after.append(refused.is_set())
+                guard.after_read(1)
+                time.sleep(0.05)
+            return "k-spa"
+        with self.assertRaises(Refused):
+            self.worker._sync_all(job, {"eng": [], "spa": []}, sync)
+        self.assertTrue(self.safety.backing_off())
+        self.assertLessEqual(sum(after), 1)          # at most a read checked as the refusal came
+        self.assertEqual(self.safety.refusals, 1)    # the back-off started once for the job
+
+    def test_a_refusal_ends_the_job_as_refused_whatever_the_other_language_raised(self):
+        # The job's end is handled as a refusal (the back-off, the file's own) when another language raised
+        # something else first
+        from subsync.reader import Refused
+        self.s.parallel_languages = True
+        job = Job(self.job.type, self.job.video_id, self.job.hints)
+
+        def sync(lang, cands):
+            if lang == "eng":
+                raise ValueError("bad subtitle")
+            time.sleep(0.2)
+            raise Refused("HTTP 403")
+        with self.assertRaises(Refused):
+            self.worker._sync_all(job, {"eng": [], "spa": []}, sync)
+        self.assertTrue(self.safety.backing_off())
+
+    def test_two_languages_that_need_the_audio_route_decide_once(self):
+        # A file whose track is too small: its languages, judged in parallel, each come to the decision; with
+        # a pick come during the first pass, its audio job is queued, and the file doesn't also wait for a pick
+        self.worker.picked_early[self.ALIAS] = time.time()
+        decided = threading.Event()
+
+        def room(alias):                             # the pick's language holds its decision while the other may decide
+            decided.wait(0.5)
+            return True
+        self.worker._audio_room = room
+        got = []
+
+        def decide():
+            got.append(self.worker._needs_pick(self.job))
+            decided.set()
+        langs = [threading.Thread(target=decide, daemon=True) for _ in range(2)]
+        for t in langs:
+            t.start()
+            time.sleep(0.1)
+        for t in langs:
+            t.join(3)
+        self.assertEqual(got, [True, True])
+        self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
+        self.assertNotIn(self.ALIAS, self.worker.pickable)
+
+    def test_an_original_replaced_after_its_download_failed_says_so(self):
+        # The log names why an original was replaced: its download failed, or its text is in another language
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
+        cands = [{"id": "os-9", "url": "http://opensubs/x.srt", "lang": "eng"},
+                 {"id": "os-8", "url": "http://opensubs/y.srt", "lang": "eng"}]
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            self.worker._recheck_original(self.ALIAS, "eng", cands, {}, set(), "b.mp4", None, failed={"os-9"})
+        self.assertEqual(self.worker.originals[self.ALIAS]["eng"]["id"], "os-8")
+        self.assertIn("original eng: its download failed, another served instead", logs.output[-1])
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            self.worker._recheck_original(self.ALIAS, "eng", cands, {}, {"os-8"}, "b.mp4", None)
+        self.assertIn("original eng: not English text, another served instead", logs.output[-1])
+
+    def test_the_fast_paths_downloads_go_fetch_at_once_at_a_time(self):
+        # The fast path's downloads keep to FETCH_AT_ONCE, as best fit's do
+        from unittest import mock
+        from subsync import worker as worker_mod
+        running, most, lock = [0], [0], threading.Lock()
+
+        def fetch(url, timeout=30, headers=None):
+            with lock:
+                running[0] += 1
+                most[0] = max(most[0], running[0])
+            time.sleep(0.1)
+            with lock:
+                running[0] -= 1
+            return X_TEXT.encode()
+        tries = [(r, {"id": f"s{r}", "url": f"http://subs.test/{r}.srt", "lang": "eng"}) for r in range(6)]
+        with mock.patch.object(worker_mod, "FETCH_AT_ONCE", 2), mock.patch.object(worker_mod, "fetch_subtitle", fetch):
+            got = self.worker._fetch_all(self.job, "eng", tries)
+        self.assertEqual([rank for rank, _, _ in got], list(range(6)))
+        self.assertEqual(most[0], 2)
+
     def test_the_audio_job_reuses_its_text_pass_list_and_downloads(self):
         calls = []
 
@@ -1031,6 +1152,44 @@ class OriginalEntryTest(unittest.TestCase):
         self.assertEqual(self.get("http://subsync:8790/original/!!!/eng.srt")[0], 404)
         self.assertEqual((len(self.worker.jobs), self.downloads.asked), (0, []))
 
+    def wait_for(self, check, timeout=3.0):
+        t0 = time.time()
+        while not check() and time.time() - t0 < timeout:
+            time.sleep(0.02)
+        return check()
+
+    def test_a_list_asked_again_on_a_requests_time_answers_late_and_is_kept_for_the_next_try(self):
+        # A person's list fetched again for an original keeps to the request's deadline: slower, the answer is
+        # "late" (the player asks again) and the list, once it comes, is kept for that next try
+        listed, slow = self.worker.aios.subtitles, threading.Event()
+
+        def slow_list(*a):
+            slow.wait(5)
+            return listed(*a)
+        self.worker.aios.subtitles = slow_list
+        self.worker.remember(self.job)
+        t0 = time.time()
+        self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 0.3), (None, "late", None))
+        self.assertLess(time.time() - t0, 1.5)
+        slow.set()
+        self.assertTrue(self.wait_for(lambda: self.ALIAS in self.worker.lists))
+        self.worker.aios.subtitles = lambda *a: self.fail("the list kept is used")
+        self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 3), (self.texts["e1"], None, None))
+
+    def test_a_download_an_earlier_try_started_is_waited_for_not_started_again(self):
+        # A player's next try while the download its first try started still runs (a slow site, a 429 retry)
+        # waits for that download: the site is asked, and its limit counted, once
+        self.worker._candidates(self.job, dict(self.job.hints))
+        self.worker.remember(self.job)
+        url = "http://subs.test/e1.srt"
+        self.downloads.hold[url] = release = threading.Event()
+        for _ in range(2):                           # the first try, then the player's next one after the 503
+            self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 0.3)[1], "late")
+        release.set()
+        self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 3), (self.texts["e1"], None, None))
+        self.assertEqual(self.downloads.asked.count(url), 1)
+        self.assertTrue(self.wait_for(lambda: not self.worker.fetching))
+
 
 class MeasuredPickTest(OriginalEntryTest):
     """A pick that nothing passed for by its deadline is served the downloaded original that measured best as it
@@ -1115,6 +1274,36 @@ class LanesTest(unittest.TestCase):
             w.stop_flag = True
             with w.cv:
                 w.cv.notify_all()
+
+    def test_a_lane_goes_on_when_the_store_fails_as_a_job_ends(self):
+        # A store write that fails while a job's end is handled (a refused file's mark) or in the hourly
+        # expiry (a full disk, a locked database) is logged; the lane runs the next job
+        import sqlite3
+        from subsync.reader import Refused
+        with TempDir() as d:
+            store, ran = Store(d), []
+
+            def full(*a, **k):
+                raise sqlite3.OperationalError("database or disk is full")
+            store.expire = store.file_failed = full
+
+            class W(Worker):
+                def process(self, job):
+                    ran.append(job.alias)
+                    if job.video_id == "tt1":
+                        raise Refused("HTTP 429")
+            w = W(Settings({"SUBSYNC_DATA": d}), store, FakeAios(), Safety())
+            w.submit(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1}))
+            w.submit(Job("movie", "tt2", {"filename": "b.mkv", "videoSize": 2}))
+            with self.assertLogs("subsync.worker", "WARNING") as logs:
+                w.start()
+                t0 = time.time()
+                while len(ran) < 2 and time.time() - t0 < 3:
+                    time.sleep(0.05)
+                w.stop()
+            self.assertEqual(ran, ["name:a.mkv|1", "name:b.mkv|2"])
+            self.assertFalse(w.busy_with("name:a.mkv|1"))
+            self.assertTrue(any("store expiry failed: OperationalError" in line for line in logs.output))
 
 
 class AddonKeyTest(unittest.TestCase):

@@ -11,11 +11,12 @@ Reads count toward a daily budget (default 100 GB, bytes received). Any HTTP 403
 """
 import contextlib
 import hashlib
+import http.client
 import logging
 import threading
 import time
 import urllib.error
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FutureTimeout
 
 from . import audiofit, choose, langcheck, pipeline, realdebrid, srclimits
@@ -26,7 +27,7 @@ from .mkv import NotMatroska
 from .mp4 import open_index
 from .reader import MAX_RE_RESOLVE, CapReached, RangeReader, ReadFailed, Refused, Stopped
 from .sources import bt_alias, expected_size, fetch_subtitle, plausible_size, same_hash
-from .store import JUDGED_FOR_S, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, result_key
+from .store import DAY, JUDGED_FOR_S, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, result_key
 from .subs import decode, fingerprint, is_ass, parse
 
 log = logging.getLogger("subsync.worker")
@@ -49,8 +50,9 @@ USENET_ROWS_ENTRIES = 200   # files found on Usenet
 LISTS_ENTRIES = 200         # files' subtitle lists
 FETCH_AT_ONCE = 4   # a language's subtitle downloads at once: one round (a picked language's alass after it)
 CONSENSUS_TRIES = 12   # a file with no track: the main language's downloads beside its guess, for a consensus
-# Originals downloaded on a request's own time (Worker.original_for) at once, in one pool for the worker's life: more
-# than one person's player asks for at a time; one that outlives its request ends there and is kept (fetched_subs)
+# Originals downloaded (and subtitle lists fetched again) on a request's own time (Worker.original_for) at once, in one
+# pool for the worker's life: more than one person's player asks for at a time; one that outlives its request ends
+# there and is kept (fetched_subs, lists)
 ORIGINAL_DOWNLOADS_AT_ONCE = 8
 # Usenet: fixed rules, explained in explain.RULES
 USENET_UNLISTED_S = 24 * 3600     # a file not found on Usenet isn't looked up there again for a day
@@ -60,6 +62,9 @@ USENET_MAX_RE_RESOLVE = 1         # its link is asked at most twice per job (a f
 # (each subtitle tried places its own windows), so a pick needs room for this many times them, at most the
 # per-file audio limit
 AUDIO_NEED_MARGIN = 2.5
+# Why every read stops for a while (Stopped): the refusal back-off (Safety), or the day's budget spent
+BACKING_OFF = "backing off after a refusal"
+BUDGET_SPENT = "daily budget spent"
 
 
 def put_bounded(d, key, value, limit):
@@ -158,13 +163,22 @@ class UsenetGate:
     def key_of(who, alias):
         return hashlib.sha256(f"usenet|{who}|{alias}".encode()).hexdigest()[:32]
 
+    def _shut(self, alias):
+        """No listing for this file now (lock held)."""
+        return self.per_day <= 0 or self.counts.stopped() or self.counts.listings() >= self.per_day \
+            or self.store.usenet_recently_missed(self.key_of(self.who, alias), USENET_UNLISTED_S)
+
+    def may_take(self, alias):
+        """Whether a listing for this file could be taken now, nothing counted: asked before the work a listing needs
+        first (the config's check), which take then repeats."""
+        with self._lock:
+            return not self._shut(alias)
+
     def take(self, alias):
         """A listing for this file, if one may be made now: checked and counted in one step, so two lanes can't both
         take the day's last one."""
         with self._lock:
-            if self.per_day <= 0 or self.counts.stopped() or self.counts.listings() >= self.per_day:
-                return False
-            if self.store.usenet_recently_missed(self.key_of(self.who, alias), USENET_UNLISTED_S):
+            if self._shut(alias):
                 return False
             self.counts.add_listing()
             return True
@@ -205,11 +219,17 @@ class OverLimit(Exception):
     """A person's own limit is reached (public mode): the job is dropped, not tried again later."""
 
 
+class BudgetSpent(Stopped):
+    """The day's budget can't cover a read (JobGuard): spent for the job until 00:00 UTC, when the day's reads count
+    from nothing again; a retry before then only checks that (README: the daily limit spent is a pause)."""
+
+
 class Turn:
     """Up to `places` holders at once, let in in the order they asked: in public mode every person's worker shares one,
     so the service works on that many files at once for everyone (SUBSYNC_SYNCS_AT_ONCE). `claim(key)` keeps one file
-    to one worker at a time, so the same file is never worked on twice at once; a worker takes its file's claim before
-    its place, so a place is never held while waiting for a claim of the same key."""
+    to one worker at a time, so the same file is never worked on twice at once. A place is never held while waiting
+    for a claim: a worker takes its file's claim before its place, and one it needs once it holds a place (the file's
+    torrent file, known from its listing) is waited for with its places given back (Worker._claim)."""
 
     def __init__(self, places=1):
         self.places = max(1, int(places or 1))
@@ -236,18 +256,29 @@ class Turn:
             self._cv.notify_all()
         return False
 
-    @contextlib.contextmanager
-    def claim(self, key):
+    def take(self, key, wait=True):
+        """Claims `key`, waiting while another holder has it; with wait=False, only if it is free now. Returns whether
+        it is claimed (give it back with release)."""
         with self._cv:
             while key in self._claims:
+                if not wait:
+                    return False
                 self._cv.wait()
             self._claims.add(key)
+            return True
+
+    def release(self, key):
+        with self._cv:
+            self._claims.discard(key)
+            self._cv.notify_all()
+
+    @contextlib.contextmanager
+    def claim(self, key):
+        self.take(key)
         try:
             yield
         finally:
-            with self._cv:
-                self._claims.discard(key)
-                self._cv.notify_all()
+            self.release(key)
 
 
 def audio_places(places, at_once="auto"):
@@ -274,6 +305,12 @@ class NoTurn:
     def claim(self, key):
         return contextlib.nullcontext()
 
+    def take(self, key, wait=True):
+        return True
+
+    def release(self, key):
+        pass
+
 
 class JobGuard:
     """Checked before every read of a job: the back-off, the day's budget, the job's own byte cap and (public mode) the
@@ -294,7 +331,7 @@ class JobGuard:
         with self._cv:
             while True:
                 if self.safety.backing_off():
-                    raise Stopped("backing off after a refusal")
+                    raise Stopped(BACKING_OFF)
                 try:
                     self._check(self.reserved + length)
                     break
@@ -307,7 +344,7 @@ class JobGuard:
     def _check(self, length):
         """Raises when reading `length` more bytes would pass a limit (cv held)."""
         if self.store.bytes_today("read") + length > self.daily_budget:
-            raise Stopped("daily budget spent")
+            raise BudgetSpent(BUDGET_SPENT)
         if self.file_cap and self.bytes + length > self.file_cap:
             raise CapReached(self.file_cap)
         if self.limits is not None:
@@ -344,6 +381,11 @@ class Job:
         # Languages whose entry was downloaded while this job was queued or running -> when (Worker.prioritize),
         # for alass sooner; they no longer hold the other languages' downloads back
         self.picked = {}
+        self.stopped = False      # stopped by the back-off or the day's budget, queued again: its retry checks them
+        self.budget_until = 0.0   # stopped by the day's budget: spent for it until then (00:00 UTC, BudgetSpent)
+        self.file_counted = False  # counted in the person's new files today (public mode): once, also when queued again
+        self.refused_wait = None  # the back-off its refused read started (Worker._refused): once per job
+        self.places = ()          # the places it works in while it holds them (Worker._places), given back for a wait
 
     def again(self):
         """A new job of the same file (its type, id and hints), with none of this one's state."""
@@ -413,6 +455,7 @@ class Worker(threading.Thread):
         self.lists = {}           # alias -> (time, candidates): a text pass's subtitle list, for the audio job that follows
         self.by_id = {}           # (candidate id, language) -> candidate, from this person's lists (public mode's recipes)
         self.fetched_subs = {}    # subtitle url -> (time, bytes): downloads shared by a file's text pass and audio job
+        self.fetching = {}        # subtitle url -> Future of its download running now (_fetch_one): waited for, once
         self.unlisted = {}        # alias -> when a file was last not found in the listing
         # alias -> (when, row, address) of a file found on Usenet: a retry or its audio job doesn't list again,
         # and the audio job reads at the address its first pass resolved, so the NZB isn't fetched again
@@ -424,7 +467,11 @@ class Worker(threading.Thread):
         self.last_expire = 0.0
         self.vad_lock = threading.Lock()
         self.audio_lock = threading.Lock()     # one audio fit at a time (shared reader)
-        # the originals' downloads on a request's own time (original_for), timed out there; threads start when needed
+        # whether a file waits for a pick or its audio job starts (_needs_pick) is decided one at a time: a job's
+        # languages, judged in parallel, may each come to it
+        self.pick_lock = threading.Lock()
+        # the originals' downloads and subtitle lists on a request's own time (original_for), timed out there; threads
+        # start when needed
         self.original_pool = ThreadPoolExecutor(max_workers=ORIGINAL_DOWNLOADS_AT_ONCE, thread_name_prefix="subsync-original")
 
     # -- queue -------------------------------------------------------------------------------------------------
@@ -565,27 +612,30 @@ class Worker(threading.Thread):
         """A file with no usable subtitle track of its own, read index-only: it waits for the viewer's pick. True when
         its audio job is queued now: the pick came already, or the viewer chose "as soon as a file is opened"
         and _may_open holds; either starts exactly as a pick does, with room in the day's data and today's audio syncs
-        left. Otherwise, or when it can't start now, the file waits for a pick."""
-        if self._audio_queued(job.alias):
-            return True
-        early = False
-        while True:
-            with self.cv:   # read and dropped in one step: pick() writes it, under the lock, from a request's thread
-                at = self.picked_early.pop(job.alias, None)
-            # its entry was downloaded while this read ran
-            early = early or (at is not None and time.time() - at <= PICKED_EARLY_S)
-            opened = not early and self._may_open(job)
-            start = (early or opened) and self._audio_room(job.alias) and self._may_start_audio(opened)
-            with self.cv:
-                if not start and job.alias in self.picked_early:
-                    continue   # a pick came while this was decided (the file wasn't waiting yet): as one that came before
-                self.picked_early.pop(job.alias, None)
-                again = job.again()
-                again.audio, again.opened = True, opened
-                if not start or self._submit(again) is None:   # queued, or waiting, in one step
-                    self._put_waiting(job)
-                    return False
-            break
+        left. Otherwise, or when it can't start now, the file waits for a pick. Decided one at a time (pick_lock): the
+        job's languages, judged in parallel, each come here, and one must find the audio job another queued, never put
+        the file waiting beside it."""
+        with self.pick_lock:
+            if self._audio_queued(job.alias):
+                return True
+            early = False
+            while True:
+                with self.cv:   # read and dropped in one step: pick() writes it, under the lock, from a request thread
+                    at = self.picked_early.pop(job.alias, None)
+                # its entry was downloaded while this read ran
+                early = early or (at is not None and time.time() - at <= PICKED_EARLY_S)
+                opened = not early and self._may_open(job)
+                start = (early or opened) and self._audio_room(job.alias) and self._may_start_audio(opened)
+                with self.cv:
+                    if not start and job.alias in self.picked_early:
+                        continue   # a pick came while this was decided (the file wasn't waiting yet): as one before
+                    self.picked_early.pop(job.alias, None)
+                    again = job.again()
+                    again.audio, again.opened = True, opened
+                    if not start or self._submit(again) is None:   # queued, or waiting, in one step
+                        self._put_waiting(job)
+                        return False
+                break
         log.info("%s %s: the audio route starts", "opened" if opened else "picked", job.label)
         return True
 
@@ -724,7 +774,11 @@ class Worker(threading.Thread):
 
     def busy_with(self, alias):
         with self.cv:
-            return alias in self.jobs or self._running(alias) is not None
+            return self._busy(alias)
+
+    def _busy(self, alias):
+        """A job of the file is queued or running (cv held)."""
+        return alias in self.jobs or self._running(alias) is not None
 
     def busy_reading(self, alias):
         """A job works on the file now that gives its result in seconds (not the audio route, which takes minutes)."""
@@ -735,48 +789,27 @@ class Worker(threading.Thread):
     def wait_for(self, alias, lang, timeout, final=False):
         """Wait up to timeout for a language's result on a queued file: (result key or None, original URL or None). The
         first published pass ends the wait; with `final`, only the language's final result (every candidate judged) does,
-        and on timeout the best pass published so far is returned."""
-        end = time.time() + timeout
+        and on timeout the best pass published so far is returned. The waits here time out on the monotonic clock
+        (Condition.wait_for): a step of the wall clock never stretches them."""
+        def published():
+            return lang in self.done.get(alias, {}) and (not final or lang in self.judged.get(alias, ()))
         with self.cv:
-            while True:
-                got = self.done.get(alias, {})
-                original = (self.originals.get(alias, {}).get(lang) or {}).get("url")
-                if lang in got and (not final or lang in self.judged.get(alias, ())):
-                    return got[lang], original
-                if not (alias in self.jobs or self._running(alias) is not None):
-                    return got.get(lang), original
-                left = end - time.time()
-                if left <= 0:
-                    return got.get(lang), original
-                self.cv.wait(left)
+            self.cv.wait_for(lambda: published() or not self._busy(alias), timeout)
+            return self.done.get(alias, {}).get(lang), (self.originals.get(alias, {}).get(lang) or {}).get("url")
 
     def wait_for_file(self, alias, timeout):
         """Wait up to timeout for a queued file's languages; returns {lang: {"url", "id"} of the original} once its
         subtitle list is known (None while it isn't)."""
-        end = time.time() + timeout
         with self.cv:
-            while True:
-                busy = alias in self.jobs or self._running(alias) is not None
-                done = self.done.get(alias, {})
-                if not busy or all(lang in done for lang in self.s.languages):
-                    break
-                left = end - time.time()
-                if left <= 0:
-                    break
-                self.cv.wait(left)
+            self.cv.wait_for(lambda: not self._busy(alias)
+                             or all(lang in self.done.get(alias, {}) for lang in self.s.languages), timeout)
             return self.originals.get(alias)
 
     def wait_for_originals(self, alias, timeout):
         """The file's original subtitles per language once its subtitle list is known, waiting up to timeout while its
         job is queued or running (None if still unknown)."""
-        end = time.time() + timeout
         with self.cv:
-            while alias not in self.originals:
-                busy = alias in self.jobs or self._running(alias) is not None
-                left = end - time.time()
-                if not busy or left <= 0:
-                    break
-                self.cv.wait(left)
+            self.cv.wait_for(lambda: alias in self.originals or not self._busy(alias), timeout)
             return self.originals.get(alias)
 
     def _running(self, alias):
@@ -827,8 +860,11 @@ class Worker(threading.Thread):
             got = pipeline.anchored_guess(main_text, [t for _, t in fetched])
             if got:
                 out[lang] = got["body"]
-                log.info("anchored %s %s: candidate %s lines up with the %s guess (%.0f %%)", job.label, lang,
-                         fetched[got["index"]][0]["id"][:40], main, 100 * got["share"])
+                # named by its place among the downloads and its source, never its id: a subtitle a config lists without
+                # one has its address as its id, and the log never holds a config's address (README)
+                log.info("anchored %s %s: candidate %d of %d (%s) lines up with the %s guess (%.0f %%)", job.label,
+                         lang, got["index"] + 1, len(fetched), fetched[got["index"]][0].get("source") or "config", main,
+                         100 * got["share"])
         with self.cv:   # a language the audio route has judged keeps its verdict, not a guess
             judged = self.judged.get(job.alias) or set()
             put_bounded(self.provisional, job.alias, {lang: body for lang, body in out.items() if lang not in judged},
@@ -903,77 +939,154 @@ class Worker(threading.Thread):
         self._loop("main")
 
     def _loop(self, lane):
+        """A lane's jobs, one at a time, until stop(). Nothing a job or the store raises ends it: a store write that
+        fails while a job's end is handled (a full disk, a locked database) is logged, and the next job runs."""
         while not self.stop_flag:
             job = self._next(lane)
             if job is None:
                 break
-            # an audio job that ends without its sync (stopped before it read, the day's data or its cap ran out, a read
-            # failed or was refused, anything else went wrong): its file waits for another pick, as the pick promised
-            unfinished = False
             try:
-                # an audio job takes its audio place before a place of the turn, so a held place never waits
-                with self.turn.claim(job.alias), (self.audio_turn if lane == "audio" else NoTurn()), self.turn:
-                    if self.stop_flag:   # stopped while it waited for its turn: nothing is read
-                        unfinished = True
-                    else:
-                        self.process(job)
-            except OverLimit as e:
-                log.info("over the limit %s: %s", job.label, e)
-                unfinished = True   # the person's day ran out (in an audio sync, the file waits again)
-            except CapReached as e:
-                # The file needs more than the job's own byte cap: not queued again, and not read again
-                # while the cap is not raised (capped). An audio job stopped at the audio route's cap says nothing
-                # about the index, so the file isn't marked: it waits for another pick, as when the day runs out
-                if job.audio:
-                    log.info("stopped %s at the audio cap (%.0f MB): it waits for another pick", job.label,
-                             e.cap / 2 ** 20)
-                    unfinished = True
-                else:
-                    for alias in {job.alias, job.bt} - {None}:   # its torrent file too, as _process_row records aliases
-                        self.store.cap_reached(alias, e.cap)
-                    log.info("index larger than the cap %s (%.0f MB): originals kept", job.label, e.cap / 2 ** 20)
-            except Stopped as e:
-                log.info("stopped %s: %s", job.label, e)
-                job.not_before = time.time() + self.s.retry_stopped_s
-                self._requeue(job)
-            except Refused as e:
-                # most likely a per-account limit: every read waits; this file backs off 1 h / 6 h / 24 h, but a Usenet
-                # file in its audio sync doesn't (only a first read backs a Usenet file off)
-                wait = self.safety.refused()
-                if not (job.audio and job.usenet):
-                    self.store.file_failed(job.alias, REFUSED_BACKOFF_S)
-                unfinished = True
-                log.warning("refused %s (%s): no reads for %d s", job.label, e, wait)
-            except ReadFailed as e:
-                if job.audio:
-                    # A read that fails during the audio sync ends the job (a Usenet file's doesn't stop Usenet:
-                    # only a first read does), and the file waits for another pick
-                    log.info("read failed %s during the audio sync (%s): it waits for another pick", job.label, e)
-                    unfinished = True
-                else:
-                    log.warning("failed %s: %s", job.label, type(e).__name__)
-            except Exception as e:  # never let one file stop the worker
+                self._run(job, lane)
+            except Exception as e:   # raised while its end was handled: the job is over all the same
                 log.warning("failed %s: %s", job.label, type(e).__name__)
-                unfinished = True
-            finally:
-                with self.cv:
-                    if unfinished and job.audio:   # in the same step as its job ends: never neither busy nor waiting
-                        self._put_waiting(job.again())
-                    if lane == "audio":
-                        self.current_audio = None
-                    else:
-                        self.current = None
-                    self.done.setdefault(job.alias, {})
-                    for lang in self.s.languages:
-                        self.done[job.alias].setdefault(lang, None)
-                    self.cv.notify_all()
-                    for results in (self.done, self.judged, self.originals):
-                        if job.alias in results:   # this file's are the newest now
-                            results[job.alias] = results.pop(job.alias)
-                        trim_oldest(results, RESULTS_ENTRIES)
             if time.time() - self.last_expire > EXPIRE_EVERY_S:
                 self.last_expire = time.time()
-                self.store.expire()
+                try:
+                    self.store.expire()
+                except Exception as e:   # never let housekeeping stop the lane
+                    log.warning("store expiry failed: %s", type(e).__name__)
+
+    def _run(self, job, lane):
+        """A job of the lane, from its file's claim and its places to the handling of how it ended."""
+        # an audio job that ends without its sync (stopped before it read, the day's data or its cap ran out, a read
+        # failed or was refused, anything else went wrong): its file waits for another pick, as the pick promised
+        unfinished = False
+        try:
+            # the file's claim: never two workers on the same file under the same name at once (one under another name
+            # is known by its listed row: the torrent file's claim, process)
+            with self.turn.claim(job.alias), self._places(job, lane):
+                if self.stop_flag:   # stopped while it waited for its turn: nothing is read
+                    unfinished = True
+                else:
+                    self.process(job)
+        except OverLimit as e:
+            log.info("over the limit %s: %s", job.label, e)
+            unfinished = True   # the person's day ran out (in an audio sync, the file waits again)
+        except CapReached as e:
+            # The file needs more than the job's own byte cap: not queued again, and not read again
+            # while the cap is not raised (capped). An audio job stopped at the audio route's cap says nothing
+            # about the index, so the file isn't marked: it waits for another pick, as when the day runs out
+            if job.audio:
+                log.info("stopped %s at the audio cap (%.0f MB): it waits for another pick", job.label,
+                         e.cap / 2 ** 20)
+                unfinished = True
+            else:
+                for alias in {job.alias, job.bt} - {None}:   # its torrent file too, as _process_row records aliases
+                    self.store.cap_reached(alias, e.cap)
+                log.info("index larger than the cap %s (%.0f MB): originals kept", job.label, e.cap / 2 ** 20)
+        except Stopped as e:
+            log.info("stopped %s: %s", job.label, e)
+            # its retry checks the pause first, so nothing is listed, asked or counted again while it lasts
+            job.stopped = True
+            if isinstance(e, BudgetSpent):
+                job.budget_until = (time.time() // DAY + 1) * DAY
+            job.not_before = time.time() + self.s.retry_stopped_s
+            self._requeue(job)
+        except Refused as e:
+            # most likely a per-account limit: every read waits (from when the refusal was seen, _refused); this file
+            # backs off 1 h / 6 h / 24 h for this viewer, but a Usenet file in its audio sync doesn't (only a
+            # first read backs a Usenet file off)
+            unfinished = True
+            wait = self._refused(job)
+            if not (job.audio and job.usenet):
+                self.store.file_failed(self._refusal_key(job.alias), REFUSED_BACKOFF_S)
+            log.warning("refused %s (%s): no reads for %d s", job.label, e, wait)
+        except ReadFailed as e:
+            if job.audio:
+                # A read that fails during the audio sync ends the job (a Usenet file's doesn't stop Usenet:
+                # only a first read does), and the file waits for another pick
+                log.info("read failed %s during the audio sync (%s): it waits for another pick", job.label, e)
+                unfinished = True
+            else:
+                log.warning("failed %s: %s", job.label, type(e).__name__)
+        except Exception as e:  # never let one file stop the worker
+            log.warning("failed %s: %s", job.label, type(e).__name__)
+            unfinished = True
+        finally:
+            with self.cv:   # one step: never neither busy nor waiting
+                if lane == "audio":
+                    self.current_audio = None
+                else:
+                    self.current = None
+                self.done.setdefault(job.alias, {})
+                for lang in self.s.languages:
+                    self.done[job.alias].setdefault(lang, None)
+                self.cv.notify_all()
+                for results in (self.done, self.judged, self.originals):
+                    if job.alias in results:   # this file's are the newest now
+                        results[job.alias] = results.pop(job.alias)
+                    trim_oldest(results, RESULTS_ENTRIES)
+                if unfinished and job.audio:   # last: a store write that fails here leaves the rest done
+                    self._put_waiting(job.again())
+
+    @contextlib.contextmanager
+    def _places(self, job, lane):
+        """The places a job works in, taken in order: an audio job's audio place before a place of the turn, so a held
+        place never waits for another. Kept on the job while held, so a wait that isn't work gives them back
+        (_given_back)."""
+        places = (self.audio_turn, self.turn) if lane == "audio" else (self.turn,)
+        with contextlib.ExitStack() as held:
+            for place in places:
+                held.enter_context(place)
+            job.places = places
+            try:
+                yield
+            finally:
+                job.places = ()
+
+    @contextlib.contextmanager
+    def _given_back(self, job):
+        """The job's places given back for a wait that isn't work (another worker's claim, the pause before a read is
+        tried again), so nobody else's file waits for a place held idle; taken again, in the same order, after."""
+        places, job.places = job.places, ()
+        for place in reversed(places):
+            place.__exit__(None, None, None)
+        try:
+            yield
+        finally:
+            for place in places:
+                place.__enter__()
+            job.places = places
+
+    @contextlib.contextmanager
+    def _claim(self, job, key):
+        """Turn.claim(key) for a job that holds its places already (its file's torrent file, known from its listing):
+        when another worker has it, the places are given back while it waits (Turn's rule)."""
+        if not self.turn.take(key, wait=False):
+            with self._given_back(job):
+                self.turn.take(key)
+        try:
+            yield
+        finally:
+            self.turn.release(key)
+
+    def _refused(self, job):
+        """A read of the job was refused (HTTP 403/429): every read waits (Safety's back-off), started once per job as
+        soon as a refusal is seen, so the job's other languages stop reading too. Returns the wait in seconds."""
+        if job.refused_wait is None:
+            job.refused_wait = self.safety.refused()
+        return job.refused_wait
+
+    def _refusal_key(self, alias):
+        """The store's mark of a file whose read was refused (1 h / 6 h / 24 h): in public mode the person's own (a
+        refusal is most likely their account's limit, so it never backs the file off for anyone else), else the
+        file's (a self-hosted install, or a public worker without a person's key)."""
+        return self._row_key(alias) or alias
+
+    def _file_blocked(self, alias):
+        """The file backs off: after its read failures (anyone's: they are about the file) or a refusal of this
+        viewer's reads."""
+        return any(self.store.file_blocked(key) for key in dict.fromkeys((alias, self._refusal_key(alias))))
 
     def _wait_again(self, job):
         """An audio job that ended without its sync: the file waits for the viewer's pick again."""
@@ -1009,6 +1122,13 @@ class Worker(threading.Thread):
                      "opened" if job.opened else "picked", job.label)
             self._wait_again(job)
             return
+        if job.stopped:
+            # a job stopped by the back-off or the day's budget, due again while that pause lasts: stopped again before
+            # anything is listed, asked or counted (README: a retry is only a check of the pause)
+            if self.safety.backing_off():
+                raise Stopped(BACKING_OFF)
+            if time.time() < job.budget_until:
+                raise BudgetSpent(BUDGET_SPENT)
         hints = dict(job.hints)
         job.usenet = False
         row = self._kept_usenet_row(job) if job.audio else None
@@ -1025,16 +1145,16 @@ class Worker(threading.Thread):
                 self._wait_again(job)
             self._note_unlisted(job.alias)
             return
-        if job.usenet:      # two people playing the same Usenet release at once: it is read once
-            with self.turn.claim(f"usenet:{job.alias}"):
-                return self._process_row(job, hints, row, None)
-        bt = bt_alias(row)
+        # a Usenet file is claimed by its name only (_run): its row names no torrent file, and its address is each
+        # person's own
+        bt = None if job.usenet else bt_alias(row)
         if not bt:
             return self._process_row(job, hints, row, None)
         # the listed torrent: TheSubtitleDB finds subtitles made for its very video by its hash
         _, info_hash, file_idx = bt.split(":")
         hints.update(infoHash=info_hash, fileIdx=int(file_idx))
-        with self.turn.claim(bt):   # another person playing the same torrent file under another name waits, then reads nothing
+        # another person playing the same torrent file under another name waits, then reads nothing
+        with self._claim(job, bt):
             return self._process_row(job, hints, row, bt)
 
     def _kept_usenet_row(self, job):
@@ -1058,27 +1178,37 @@ class Worker(threading.Thread):
 
     def _usenet_row(self, job, hints):
         """The played file's row in one Usenet listing, when the gate allows one: the listing is
-        counted; an error row, an HTTP error or no answer stops Usenet for the day and nothing is read; a file not
-        listed isn't looked up there again for a day."""
+        counted once the config is checked; an error row, an HTTP error or no answer stops Usenet for the day and
+        nothing is read; a file not listed isn't looked up there again for a day."""
         with self.cv:
             kept = self.usenet_rows.get(job.alias)
         if kept and time.time() - kept[0] < USENET_ROW_KEPT_S:     # a retry, or the same file asked for again
             return kept[1]
         gate = self.usenet_gate
+        if not gate.may_take(job.alias):
+            return None
+        try:
+            # the config first: one that can't be checked lists nothing, so no listing of the day is spent on it
+            self.usenet.check_config()
+        except realdebrid.Blocked:
+            return None
         if not gate.take(job.alias):
             return None
         try:
             listed = self.usenet.streams(job.type, job.video_id)
+            error_row = any((s.get("streamData") or {}).get("type") == "error" for s in listed)
         except realdebrid.Blocked:       # the Usenet config couldn't be checked: nothing was listed
             return None
         except urllib.error.HTTPError as e:
             e.close()
             gate.stop(f"HTTP {e.code} from the Usenet listing")
             return None
-        except (OSError, ValueError) as e:
+        # no answer, a cut one (http.client.IncompleteRead is no OSError) or one that isn't a listing (not a JSON
+        # object of rows)
+        except (OSError, ValueError, http.client.HTTPException, AttributeError, TypeError) as e:
             gate.stop(f"the Usenet listing failed ({type(e).__name__})")
             return None
-        if any((s.get("streamData") or {}).get("type") == "error" for s in listed):
+        if error_row:
             gate.stop("an error in the Usenet listing")
             return None
         found = self.usenet.match(listed, hints, usenet=True)
@@ -1096,9 +1226,12 @@ class Worker(threading.Thread):
         self.start_lookup(job.video_id)
         known = self.store.resolve(bt or (job.alias if job.usenet else None)) if bt or job.usenet else None
         if known and self.store.judged_all(known, self.s.languages, origlang.current(self.rule_for(job.video_id)),
-                                           time.time() - JUDGED_FOR_S):
+                                           time.time() - JUDGED_FOR_S) \
+                and (not job.audio or self.store.audio_judged(known, self.s.languages)):
             # the same file of the same torrent, judged for every language here lately (read through someone else's
-            # listing, in public mode): nothing to read
+            # listing, in public mode): nothing to read. For an audio job, only once the audio route judged it: a first
+            # pass marks a file judged whose only track is too small for its subtitles, which only the audio route can
+            # judge, and that file's pick (or "open") is what queued this job
             self.store.alias(job.alias, known)
             log.info("known file %s: nothing to read", job.label)
             if not self.store.keep_texts:   # this person's copies are made from their own list's originals
@@ -1115,11 +1248,13 @@ class Worker(threading.Thread):
                 self._set_originals(job.alias, candidates, hints.get("filename"), hints.get("videoHash"))
             log.info("index larger than the cap %s (%.0f MB): originals kept", job.label, self._cap(job) / 2 ** 20)
             return
-        # an audio job is the same file as its first pass: it isn't counted again
-        if self.limits is not None and not job.audio and not self.limits.may_start_file():
+        # an audio job is the same file as its first pass: it isn't counted again; nor is a job queued again
+        # after a stop, counted already (README: new files are counted)
+        counts = self.limits is not None and not job.audio and not job.file_counted
+        if counts and not self.limits.may_start_file():
             raise OverLimit("files per day")
         url = row["url"]
-        if self.store.file_blocked(job.alias):
+        if self._file_blocked(job.alias):
             log.info("file backing off after read failures %s", job.label)
             if job.audio:   # nothing read: the file waits for another pick
                 self._wait_again(job)
@@ -1146,7 +1281,8 @@ class Worker(threading.Thread):
             # The audio job reads at the address its first pass resolved, so the Usenet service doesn't fetch
             # the NZB again; when it stops answering, the link is asked again as any reader does (at most twice)
             reader.resolved, reader.redirects = job.kept[1], True
-        if self.limits is not None and not job.audio:
+        if counts:
+            job.file_counted = True
             self.limits.file_started()
         if job.audio:
             self._audio_started(job)
@@ -1172,9 +1308,11 @@ class Worker(threading.Thread):
                     return
                 if tries_left and e.connection and not reader.bytes and not job.usenet:
                     # The first read got no answer (a passing fault, as on Breaking Bad): tried once
-                    # more, with the same reader, so it is one of the link's look-ups
+                    # more, with the same reader, so it is one of the link's look-ups; the job keeps its
+                    # claims, but its places are free for others meanwhile
                     log.info("read failed %s (%s), tried again in %d s", job.label, e, READ_RETRY_S)
-                    time.sleep(READ_RETRY_S)
+                    with self._given_back(job):
+                        time.sleep(READ_RETRY_S)
                     continue
                 if job.usenet:      # an NZB fetch that failed can't be told apart from other faults here
                     self.usenet_gate.stop("the first read of a Usenet file failed")
@@ -1380,7 +1518,8 @@ class Worker(threading.Thread):
     def _sync_all(self, job, per_lang, sync):
         """Judge every language (sync(lang, candidates) -> result key) and publish each as final. A language that waits
         for the audio route is published once the anchored guesses are set, also when another language raised (the
-        first error is raised after). The languages go in their order, a picked one too."""
+        first error is raised after, a refusal before any other). The languages go in their order, a picked one too
+."""
         deferred, errors = {}, []
         try:
             if self.s.parallel_languages and len(per_lang) > 1:
@@ -1389,6 +1528,9 @@ class Worker(threading.Thread):
                     for fut in as_completed(futures):
                         try:
                             self._finish(job, futures[fut], fut.result(), deferred)
+                        except Refused as e:   # every read waits from now: the other language's next read stops too
+                            self._refused(job)
+                            errors.append(e)
                         except Exception as e:   # the other language still finishes
                             errors.append(e)
             else:
@@ -1403,8 +1545,8 @@ class Worker(threading.Thread):
                 if not self._audio_queued(job.alias):   # picked already: a waiting pick waits for the audio route
                     for lang, key in deferred.items():
                         self._publish(job.alias, lang, key, final=True)
-        if errors:
-            raise errors[0]
+        if errors:   # a refusal first: the job ends as refused (_run), whatever else another language raised
+            raise next((e for e in errors if isinstance(e, Refused)), errors[0])
 
     def _finish(self, job, lang, key, deferred):
         """A language's judging ended: published as final, or kept in `deferred` while it waits for the audio route.
@@ -1470,7 +1612,8 @@ class Worker(threading.Thread):
         key = self._row_key(alias)
         if key is not None:
             self.store.originals_put(key, langs)
-        log.info("original %s: not %s text, %s served instead", lang, lang_name(lang), "another" if pick else "none")
+        why = f"not {lang_name(lang)} text" if current["id"] in refused else "its download failed"
+        log.info("original %s: %s, %s served instead", lang, why, "another" if pick else "none")
 
     def _keep_original(self, file_key, lang, candidates, texts, refused, filename, file_hash, rule=None):
         """Nothing of a language passed: the original its "<Language> (original)" entry serves, kept per file and
@@ -1509,8 +1652,13 @@ class Worker(threading.Thread):
             original = (self.originals.get(alias) or {}).get(lang)
         hints = dict(seen[2]) if seen else {}
         if listed is None and seen is not None:   # not listed lately: this person's list again, as original_text does
+            # on the request's own time, as the downloads: a list that comes later is kept (lists) for the player's
+            # next try
+            fetch = self.original_pool.submit(self._candidates, Job(*seen), dict(hints))
             try:
-                self._candidates(Job(*seen), dict(hints))
+                fetch.result(timeout=max(0.0, deadline - time.time()))
+            except FutureTimeout:
+                return None, "late", None
             except Exception as e:
                 log.info("subtitle list failed for an original: %s", type(e).__name__)
             with self.cv:
@@ -1949,11 +2097,21 @@ class Worker(threading.Thread):
         return out
 
     def _fetch_one(self, job, lang, rank, cand):
+        """A subtitle's download, (rank, cand, bytes), or None when it failed; kept LIST_TTL_S (fetched_subs). One of
+        the same address running already (a player's retry while its first try's download goes on, or the text pass's)
+        is waited for, not started again, so a site is asked, and its limit counted, once."""
         url, now = cand["url"], time.time()
         with self.cv:
             got = self.fetched_subs.get(url)
-        if got and now - got[0] < LIST_TTL_S:
-            return rank, cand, got[1]
+            if got and now - got[0] < LIST_TTL_S:
+                return rank, cand, got[1]
+            running = self.fetching.get(url)
+            if running is None:
+                mine = self.fetching[url] = Future()
+        if running is not None:
+            raw = running.result()
+            return None if raw is None else (rank, cand, raw)
+        raw = None
         try:
             source = cand.get("source")
             ledger = getattr(self.extra, "ledger", None) if self.extra is not None else None
@@ -1967,6 +2125,10 @@ class Worker(threading.Thread):
         except Exception as e:
             log.info("subtitle fetch failed %s %s rank %d: %s", job.label, lang, rank, type(e).__name__)
             return None
+        finally:   # the callers waiting for it get its bytes, or None when it failed
+            with self.cv:
+                del self.fetching[url]
+            mine.set_result(raw)
 
     def _keep_download(self, url, at, raw):
         """A download (begun `at`) kept in fetched_subs as the newest entry, served for LIST_TTL_S: the entries older
@@ -1995,11 +2157,11 @@ class Worker(threading.Thread):
             pool.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_all(self, job, lang, tries):
-        """The fast path's downloads: up to 4 at once, results in try order; failed ones are left out."""
+        """The fast path's downloads: up to FETCH_AT_ONCE at once, results in try order; failed ones are left out."""
         if len(tries) <= 1:
             got = [self._fetch_one(job, lang, rank, cand) for rank, cand in tries]
         else:
-            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="subsync-fetch") as pool:
+            with ThreadPoolExecutor(max_workers=FETCH_AT_ONCE, thread_name_prefix="subsync-fetch") as pool:
                 got = list(pool.map(lambda rc: self._fetch_one(job, lang, *rc), tries))
         return [g for g in got if g is not None]
 

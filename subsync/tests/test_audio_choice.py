@@ -683,6 +683,35 @@ class QueueTest(Base):
         w.submit(Job("movie", "tt1", self.hints))
         self.assertEqual(w.published(self.alias, "eng"), "k1")
 
+    def test_a_wait_lasts_its_timeout_when_the_wall_clock_steps_back(self):
+        """The waits time out on the monotonic clock, so a step of the wall clock (NTP) never holds a request
+        past what it may wait."""
+        w = self.worker(Limits())
+        w.submit(Job("movie", "tt1", self.hints))           # queued, not run here: every wait runs to its timeout
+        looks = []
+
+        def stepping_back():                                # each look at the wall clock is 3 s earlier than the last
+            looks.append(1)
+            return time.time() - 3 * len(looks)
+        waits = {"wait_for": lambda: w.wait_for(self.alias, "eng", 0.2),
+                 "wait_for_file": lambda: w.wait_for_file(self.alias, 0.2),
+                 "wait_for_originals": lambda: w.wait_for_originals(self.alias, 0.2)}
+        try:
+            with mock.patch.object(worker_mod, "time", mock.Mock(time=stepping_back)):
+                for name, wait in waits.items():
+                    with self.subTest(wait=name):
+                        t0 = time.monotonic()
+                        t = threading.Thread(target=wait, daemon=True)
+                        t.start()
+                        t.join(2.0)
+                        self.assertFalse(t.is_alive())
+                        self.assertLess(time.monotonic() - t0, 1.0)
+        finally:
+            with w.cv:                                      # a wait that outlived its check ends now
+                w.jobs.clear()
+                w.queue.clear()
+                w.cv.notify_all()
+
 
 class StopsWhileWaiting:
     """An audio place given only once the worker was stopped (Pool.stop while the pick waited for its turn)."""
@@ -734,7 +763,9 @@ class AudioEndingTest(Base):
                 self.one_audio_turn(w)
                 self.assertTrue(w.waits_for_pick(self.alias))
                 self.assertTrue(self.worker(Limits()).waits_for_pick(self.alias))   # its row too
-                self.assertEqual(self.store.file_blocked(self.alias), isinstance(error, Refused))   # 1 h, 6 h, 24 h
+                # 1 h, 6 h, 24 h, for this person: a refusal is most likely their account's limit
+                self.assertEqual(w._file_blocked(self.alias), isinstance(error, Refused))
+                self.assertFalse(self.store.file_blocked(self.alias))   # never for anyone else
 
     def test_a_pick_queued_when_the_worker_stops_waits_again(self):
         w = self.picked(self.worker(Limits()))
@@ -953,6 +984,58 @@ class UsenetTest(Base):
 
 
 # --------------------------------------------------------------------------------------------------- the start lines
+
+class SmallTrackTest(unittest.TestCase):
+    """A file whose only track is too small for its subtitles (a signs track not flagged forced) waits for a
+    pick after its first pass, which marks its languages judged though only the audio route can judge them: on a torrent
+    row (or a Usenet one) the pick's audio job finds those marks, and it still reads the file; once the audio route has
+    judged it, a later audio job reads nothing."""
+
+    def test_the_picks_audio_job_reads_the_file(self):
+        from helpers import FakeDownloads, dialogue_srt
+        srv = RangeServer(FIXTURES)
+        self.addCleanup(srv.close)
+        tmp = TempDir()
+        folder = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        url = "http://subs.test/big.srt"
+        downloads = FakeDownloads({url: dialogue_srt("eng", n=200)})   # 200 lines; the file's track has 30
+        patcher = downloads.patch()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        row = {"url": srv.url("tiny.mkv"), "streamData": {"torrent": {"infoHash": "a" * 40, "fileIdx": 0}}}
+        s = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng",
+                      "SUBSYNC_EXTRA_SOURCES": ""})
+        store = Store(folder)
+        w = Worker(s, store, Listing(row, [{"id": "big", "lang": "eng", "url": url, "release": "Movie"}]), Safety())
+        first = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": os.path.getsize(os.path.join(FIXTURES,
+                                                                                                         "tiny.mkv"))})
+        w.process(first)
+        file_key = store.resolve(first.alias)
+        self.assertTrue(store.file_detail(file_key)["reference"])   # it has a track, too small for the subtitle:
+        self.assertTrue(w.waits_for_pick(first.alias))               # it waits for a pick
+        self.assertTrue(store.judged_all(file_key, ["eng"], s.rule_id, 0))
+        self.assertTrue(w.pick(first.alias))
+        synced = []
+
+        def audio_job():
+            with w.cv:
+                w.queue.clear()
+                job = w.jobs.pop(first.alias)
+            self.assertTrue(job.audio)
+            w.process(job)
+            return job
+        w._sync_all = lambda job, *a: synced.append(job)
+        job = audio_job()
+        self.assertEqual(synced, [job])                             # the audio route judged it
+        store.put(file_key, "a" * 64, "eng", 0, "keep_original", "x", route="audio", body="1\n", fmt="srt",
+                  candidate_id="big", original="1\n")
+        with w.cv:
+            w._put_waiting(first.again())                           # picked again (another person's pick, say)
+        self.assertTrue(w.pick(first.alias))
+        audio_job()
+        self.assertEqual(len(synced), 1)                            # judged by the audio route: nothing to read
+
 
 class StartLineTest(unittest.TestCase):
     def public(self, **env):

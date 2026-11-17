@@ -406,8 +406,15 @@ class FakeUsenet(FakeDebrid):
         super().__init__(subs)
         self.base = "https://aios/stremio/u/e"
         self.listed, self.fail, self.listings = list(listed), fail, 0
+        self.blocked, self.config_checks = False, 0   # with blocked, the config can't be checked (sources.Aios)
+
+    def check_config(self):
+        self.config_checks += 1
+        if self.blocked:
+            raise realdebrid.Blocked("subsync's config can't be checked for Real-Debrid")
 
     def streams(self, *a):
+        self.check_config()                                  # as sources.Aios does before every request through it
         self.listings += 1
         if self.fail:
             raise self.fail
@@ -500,6 +507,39 @@ class WorkerTest(TempDirTest):
                              (TimeoutError(), [])]:
             with self.subTest(fail=fail, listed=len(listed)):
                 u = FakeUsenet(listed, fail=fail)
+                w = self.make(u)
+                w.process(Job("movie", "tt1", HINTS))
+                self.assertTrue(self.counts.stopped_)
+                self.assertEqual(self.rows, [])               # nothing read after an error
+                w.process(Job("movie", "tt2", dict(HINTS, filename="b.mkv")))
+                self.assertEqual(u.listings, 1)
+
+    def test_a_config_that_cant_be_checked_spends_no_listing(self):
+        # The config is checked before a listing is counted: one that can't be read lists nothing, and spends
+        # none of the day's listings
+        u = FakeUsenet([row()])
+        u.blocked = True
+        w = self.make(u)
+        for i in range(12):
+            w.process(Job("movie", f"tt{i}", dict(HINTS, filename=f"{i}.mkv")))
+        self.assertEqual((u.config_checks, u.listings, self.counts.n, self.counts.stopped_), (12, 0, 0, False))
+        u.blocked = False                                    # readable again: the next file is listed, and counted
+        w.process(Job("movie", "tt1", HINTS))
+        self.assertEqual((u.listings, self.counts.n), (1, 1))
+        self.assertEqual(self.rows, [(True, row())])
+
+    def test_a_cut_or_malformed_listing_stops_usenet_for_the_day(self):
+        # As an HTTP error or no answer does, an answer cut short or one that isn't a listing stops Usenet
+        import http.client
+
+        class NotRows(FakeUsenet):
+            def streams(self, *a):
+                self.listings += 1
+                return ["not a row"]
+        for u in (FakeUsenet([], fail=http.client.IncompleteRead(b"", 10)),           # no OSError
+                  FakeUsenet([], fail=AttributeError("'list' object has no attribute 'get'")),   # not a JSON object
+                  NotRows()):
+            with self.subTest(usenet=u):
                 w = self.make(u)
                 w.process(Job("movie", "tt1", HINTS))
                 self.assertTrue(self.counts.stopped_)

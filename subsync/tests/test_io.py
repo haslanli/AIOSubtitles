@@ -1346,6 +1346,36 @@ class CapReachedTest(unittest.TestCase):
         self.assertGreater(w.jobs[self.job.alias].not_before, time.time() + 500)
         self.assertIsNone(self.store.over_cap(self.job.alias))
 
+    def test_a_stopped_job_lists_and_counts_nothing_again_while_its_pause_lasts(self):
+        """A job stopped by the day's budget (until 00:00 UTC) or the refusal back-off, due again while that
+        pause lasts, is stopped again before anything is listed, asked or counted; once reads may go on it runs, and its
+        file is counted once in all (README: new files)."""
+        listings = []
+        find_row = self.aios.find_row
+        self.aios.find_row = lambda *a: listings.append(1) or find_row(*a)
+        for pause in ("budget", "back-off"):
+            with self.subTest(pause=pause):
+                listings.clear()
+                self.aios.lists = 0
+                w = self.worker(SUBSYNC_INDEX_CAP_MB="32", SUBSYNC_DAILY_BUDGET_GB="0.0001" if pause == "budget" else "100")
+                if pause == "back-off":
+                    w.safety.refused()                           # an earlier refusal: every read waits
+                run_once(w, Job("movie", "tt1", dict(self.job.hints)))
+                retry = w.jobs[self.job.alias]
+                self.assertEqual((len(listings), self.aios.lists, w.limits.started), (1, 1, 1))
+                for _ in range(3):                               # due again: the pause is still on
+                    retry.not_before = 0
+                    run_once(w, retry)
+                    self.assertIs(w.jobs.get(self.job.alias), retry)   # queued again
+                self.assertEqual((len(listings), self.aios.lists, w.limits.started), (1, 1, 1))
+                w.s.daily_budget, retry.budget_until, w.safety.refused_until = 10 ** 12, 0.0, 0.0   # 00:00 UTC came
+                retry.not_before = 0
+                run_once(w, retry)
+                self.assertFalse(w.busy_with(self.job.alias))
+                self.assertIsNotNone(self.store.resolve(self.job.alias))     # its index was read
+                self.assertEqual((len(listings), w.limits.started), (2, 1))  # counted once in all
+                self.store.db.execute("DELETE FROM aliases")
+
 
 # -- a first read that can't reach the file ------------------------------------------------------------
 import urllib.error  # noqa: E402
@@ -1472,6 +1502,18 @@ class FirstReadRetryTest(unittest.TestCase):
         self.assertEqual(self.srv.log[0], (0, self.size))          # the start, read on the second try
         self.assertIsNotNone(self.store.resolve(self.job.alias))   # its index was read
         self.assertFalse(self.store.file_blocked(self.job.alias))
+
+    def test_the_wait_before_the_second_try_holds_no_place(self):
+        """The job keeps its claims through the wait before its second try, but gives its place back, so another
+        person's file is worked on meanwhile; it takes the place again for the read."""
+        from subsync.worker import Turn
+        turn, inside = Turn(1), []
+        self.w.turn = turn
+        self.sleep.side_effect = lambda s: inside.append((turn._inside, set(turn._claims)))
+        self.run_with(Flaky(self.link, faults=1))
+        self.assertEqual(inside, [(0, {self.job.alias})])           # the place free, the file's claim kept
+        self.assertIsNotNone(self.store.resolve(self.job.alias))   # read on the second try
+        self.assertEqual((turn._inside, turn._claims), (0, set()))
 
     def test_two_dropped_connections_back_the_file_off_for_ten_minutes(self):
         flaky = Flaky(self.link, faults=2)

@@ -458,6 +458,61 @@ class WorkerHooksTest(unittest.TestCase):
         self.assertGreater(one[1], 0)
         self.assertEqual(run(["tiny.mkv", "tiny-renamed.mkv"]), one)
 
+    def test_a_wait_for_the_same_torrent_file_holds_no_place(self):
+        """A person whose file another person works on under another name (the same torrent file) waits for
+        it with their place given back, so a third person's file is worked on meanwhile (Turn's rule)."""
+        import threading
+        import time
+        from subsync.worker import Job, Safety, Turn, Worker
+        turn, spans, lock = Turn(2), {}, threading.Lock()
+        torrent = {"url": "http://127.0.0.1:9/never", "streamData": {"torrent": {"infoHash": HASH, "fileIdx": 2}}}
+
+        def process_row(job, hints, row, bt):
+            t0 = time.time()
+            time.sleep(0.6)
+            with lock:
+                spans[job.alias] = (t0, time.time())
+        for name, row in (("same.mkv", torrent), ("same-renamed.mkv", torrent),
+                          ("other.mkv", {"url": "http://127.0.0.1:9/other"})):
+            w = Worker(self.settings(), self.store, ListingAios(row), Safety(), turn=turn)
+            w._process_row = process_row
+            self.workers.append(w)
+            w.submit(Job("movie", "tt1", {"filename": name, "videoSize": 1}))
+            w.start()
+            time.sleep(0.1)                                  # each asks after the one before
+        self.assertTrue(wait_until(lambda: len(spans) == 3))
+        first, second, other = (spans[f"name:{name}|1"] for name in ("same.mkv", "same-renamed.mkv", "other.mkv"))
+        self.assertLessEqual(first[1], second[0])            # the same torrent file one after the other
+        self.assertLess(other[0], first[1])                  # the other file had a place while the second waited
+        self.assertEqual((turn._inside, turn._claims), (0, set()))
+
+    def test_one_persons_refused_read_backs_the_file_off_for_them_only(self):
+        """A refused read (HTTP 403/429) is most likely the person's own account's limit: the file backs off
+        for that person, never for another person who plays it."""
+        from subsync.reader import Refused
+        from subsync.worker import Job, Safety, Worker
+        row = {"url": "http://127.0.0.1:9/never"}
+
+        def person(who):
+            limits = StubLimits()
+            limits.who = who
+            w = Worker(self.settings(SUBSYNC_PUBLIC="on"), self.store, ListingAios(row), Safety(), limits=limits)
+            self.workers.append(w)
+            return w
+        a, b = person("a" * 16), person("b" * 16)
+        job = Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1})
+
+        def refused(j):
+            a.stop_flag = True                               # one turn of the loop
+            raise Refused("HTTP 429")
+        a.process = refused
+        a.submit(job)
+        a._loop("main")
+        self.assertTrue(a._file_blocked(job.alias))          # 1 h, then 6 h, 24 h, for this person
+        self.assertFalse(self.store.file_blocked(job.alias))
+        b.process(Job("movie", "tt1", dict(job.hints)))
+        self.assertEqual(b.aios.subtitle_requests, 1)        # not backing off: the other person's job goes on
+
     def test_a_full_queue_queues_nothing(self):
         from subsync.worker import Job, Safety, Worker
         w = Worker(self.settings(), self.store, ListingAios(), Safety(), limits=StubLimits(queue=1))
