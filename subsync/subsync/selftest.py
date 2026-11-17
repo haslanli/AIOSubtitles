@@ -26,7 +26,7 @@ class CapGuard:
         if self.used + length > self.cap:
             raise Stopped("cap reached")
 
-    def after_read(self, n):
+    def after_read(self, n, asked=None):
         self.used += n
 
 

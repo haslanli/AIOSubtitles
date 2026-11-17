@@ -7,13 +7,14 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import FIXTURES, RangeServer, TempDir  # noqa: E402
 from subsync import sources  # noqa: E402
 from subsync import worker as worker_mod  # noqa: E402
-from subsync.reader import ReadFailed  # noqa: E402
+from subsync.reader import ReadFailed, Refused  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
 from subsync.worker import Job, OverLimit, Safety, StoreAudioCounts, Worker, audio_places  # noqa: E402
@@ -595,6 +596,248 @@ class SelfHostedTest(Base):
         self.assertTrue(w.waits_for_pick(self.alias))
 
 
+# ------------------------------------------------------------------------------------- the queue, picks and endings
+
+class FillsMeanwhile(Limits):
+    """A person's limits whose queue is filled by another request of theirs between the answers in `answers` (each
+    may_queue call takes the next; then the queue's real answer)."""
+
+    def __init__(self, answers, **kw):
+        super().__init__(**kw)
+        self.answers = list(answers)
+
+    def may_queue(self, queued):
+        return self.answers.pop(0) if self.answers else super().may_queue(queued)
+
+
+class QueueTest(Base):
+    """A pick, a first pass that finds the file waiting and a request that asks for the list again queue a job and change
+    the file's state in one step: what they say happened is what happened."""
+    choice = "pick"
+
+    def waiting(self, limits):
+        w = self.first_pass(self.worker(limits))
+        self.assertTrue(w.waits_for_pick(self.alias))
+        return w
+
+    def test_a_pick_starts_only_an_audio_job_it_queued(self):
+        for answers in ([True, False], [False]):   # the queue fills while the pick runs; full already
+            with self.subTest(answers=answers):
+                self.store.db.execute("DELETE FROM pickable")
+                limits = FillsMeanwhile([], queue=3)
+                w = self.waiting(limits)
+                limits.answers = list(answers)
+                started = w.pick(self.alias)
+                self.assertEqual(started, self.alias in w.jobs)
+                if not started:   # it waits for another pick, in memory and in the store
+                    self.assertTrue(w.waits_for_pick(self.alias))
+                    self.assertTrue(self.worker(Limits()).waits_for_pick(self.alias))
+
+    def test_a_first_pass_that_finds_the_pick_queues_its_audio_job_or_leaves_the_file_waiting(self):
+        limits = FillsMeanwhile([True, False])
+        w = self.worker(limits)
+        w.picked_early[self.alias] = time.time()            # the entry was downloaded while the index was read
+        self.first_pass(w)
+        queued = self.queued_audio(w) == [(self.alias, True, False)]
+        self.assertTrue(queued or w.waits_for_pick(self.alias))
+
+    def test_asking_for_the_list_again_says_whether_a_job_is_queued(self):
+        w = self.worker(Limits(queue=0))
+        w.remember(Job("movie", "tt1", self.hints))
+        self.assertFalse(w.ask_list_again(self.alias))      # the person's queue is full: nothing queued
+        self.assertEqual(len(w.jobs), 0)
+        w = self.worker(Limits())
+        w.remember(Job("movie", "tt1", self.hints))
+        self.assertTrue(w.ask_list_again(self.alias))
+        self.assertEqual(list(w.jobs), [self.alias])
+
+    def test_a_file_the_listing_didnt_have_isnt_listed_again_for_a_pick(self):
+        class Counted(Listing):
+            calls = 0
+
+            def find_row(self, *a):
+                Counted.calls += 1
+                return None
+        w = Worker(self.settings(), self.store, Counted(None, self.subs()), Safety(), limits=Limits())
+        self.workers.append(w)
+        w.submit(Job("movie", "tt1", self.hints))
+        w.queue.clear()
+        w.process(w.jobs.pop(self.alias))                   # not in the listing (uncached): held for UNLISTED_S
+        self.assertTrue(w.recently_unlisted(self.alias))
+        for _ in range(3):                                  # a pick of its entry, again and again
+            self.assertFalse(w.ask_list_again(self.alias))
+        self.assertEqual((Counted.calls, len(w.jobs)), (1, 0))
+
+    def test_a_new_job_of_a_file_is_waited_for_not_an_earlier_jobs_placeholders(self):
+        w = self.worker(Limits())
+        with w.cv:
+            w.done[self.alias] = {"eng": None}              # an earlier job of the file published nothing
+        w.submit(Job("movie", "tt1", self.hints))           # asked again (another rule, say): queued, not run here
+        t0 = time.time()
+        self.assertEqual(w.wait_for(self.alias, "eng", 0.3), (None, None))
+        self.assertIsNone(w.wait_for_file(self.alias, 0.3))
+        self.assertGreaterEqual(time.time() - t0, 0.5)      # both waited for this job's first pass
+        w = self.worker(Limits())
+        with w.cv:
+            w.done[self.alias] = {"eng": "k1"}              # a pass an earlier job published is still served
+        w.submit(Job("movie", "tt1", self.hints))
+        self.assertEqual(w.published(self.alias, "eng"), "k1")
+
+
+class StopsWhileWaiting:
+    """An audio place given only once the worker was stopped (Pool.stop while the pick waited for its turn)."""
+
+    def __init__(self, w):
+        self.w = w
+
+    def __enter__(self):
+        self.w.stop()
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class AudioEndingTest(Base):
+    """A picked audio job that ends without its sync, however it ends, leaves its file waiting for another pick (README:
+    "if it stops half-way, the file waits for another pick"); a refused debrid file still backs off."""
+    choice = "pick"
+
+    def picked(self, w):
+        self.first_pass(w)
+        self.assertTrue(w.pick(self.alias))
+        self.assertFalse(w.waits_for_pick(self.alias))
+        return w
+
+    def one_audio_turn(self, w):
+        """The audio lane's loop, in this thread, for the one queued job."""
+        real = w.process
+
+        def once(job):
+            try:
+                real(job)
+            finally:
+                w.stop_flag = True
+        w.process = once
+        w._loop("audio")
+
+    def test_a_failure_during_the_sync_leaves_the_file_waiting(self):
+        for error in (ReadFailed("timed out"), Refused("HTTP 429"), RuntimeError("a bug")):
+            with self.subTest(error=type(error).__name__):
+                self.store.db.execute("DELETE FROM pickable")
+                self.store.db.execute("DELETE FROM files")
+                w = self.picked(self.worker(Limits()))
+
+                def failing(*a, error=error):
+                    raise error
+                w._sync_all = failing                       # the audio fit fails after the index was read
+                self.one_audio_turn(w)
+                self.assertTrue(w.waits_for_pick(self.alias))
+                self.assertTrue(self.worker(Limits()).waits_for_pick(self.alias))   # its row too
+                self.assertEqual(self.store.file_blocked(self.alias), isinstance(error, Refused))   # 1 h, 6 h, 24 h
+
+    def test_a_pick_queued_when_the_worker_stops_waits_again(self):
+        w = self.picked(self.worker(Limits()))
+        w.stop()                                            # Pool.stop: a settings change, an idle worker
+        self.assertTrue(w.waits_for_pick(self.alias))
+        self.assertTrue(self.worker(Limits()).waits_for_pick(self.alias))   # the person's next worker finds it
+
+    def test_a_pick_stopped_while_it_waits_for_its_turn_waits_again(self):
+        w = self.picked(self.worker(Limits()))
+        w.audio_turn = StopsWhileWaiting(w)
+        w._loop("audio")
+        self.assertTrue(w.waits_for_pick(self.alias))
+
+    def test_an_audio_job_whose_read_fails_backs_off_and_waits_and_a_pick_meanwhile_reads_nothing(self):
+        w = self.picked(self.worker(Limits()))
+        w.aios.row = {"url": self.srv.url("gone.mp4")}      # the debrid file is gone (HTTP 404)
+        w.queue.clear()
+        w.process(w.jobs.pop(self.alias))
+        self.assertTrue(self.store.file_blocked(self.alias))
+        self.assertTrue(w.waits_for_pick(self.alias))
+        self.assertTrue(w.pick(self.alias))
+        w.queue.clear()
+        log = len(self.srv.log)
+        w.process(w.jobs.pop(self.alias))                   # backing off: nothing read, it keeps waiting
+        self.assertEqual(len(self.srv.log), log)
+        self.assertTrue(w.waits_for_pick(self.alias))
+
+
+class MapsTest(Base):
+    """The worker's in-memory maps: a file asked about again is the newest entry, not the first to go; downloads
+    nothing serves any more are dropped; the maps both lanes write are written under the worker's lock
+; the person's limits are called, never probed."""
+    choice = "pick"
+
+    def test_a_file_asked_about_again_is_the_last_forgotten(self):
+        w = self.worker(Limits())
+        with mock.patch.object(worker_mod, "SEEN_ENTRIES", 3):
+            for name in ("a", "b", "c", "a", "d"):
+                w.remember(Job("movie", "tt1", {"filename": f"{name}.mkv", "videoSize": 1}))
+        self.assertEqual(list(w.seen), ["name:c.mkv|1", "name:a.mkv|1", "name:d.mkv|1"])
+
+    def downloads(self, w, *names, at=None):
+        with w.cv:
+            for name in names:
+                w.fetched_subs[f"http://subs.test/{name}"] = (time.time() if at is None else at, b"x" * 40)
+
+    def fetch(self, w, name):
+        with mock.patch.object(worker_mod, "fetch_subtitle", lambda url, headers=None: b"x" * 40):
+            self.assertIsNotNone(w._fetch_one(Job("movie", "tt1", self.hints), "eng", 0,
+                                              {"url": f"http://subs.test/{name}", "id": name, "lang": "eng"}))
+
+    def test_downloads_no_one_serves_are_dropped(self):
+        w = self.worker(Limits())
+        self.downloads(w, "stale", at=time.time() - worker_mod.LIST_TTL_S - 1)
+        self.downloads(w, "fresh")
+        self.fetch(w, "new")
+        self.assertEqual(sorted(w.fetched_subs), ["http://subs.test/fresh", "http://subs.test/new"])
+
+    def test_a_download_fetched_again_is_the_newest(self):
+        w = self.worker(Limits())
+        with mock.patch.object(worker_mod, "FETCHED_CAP", 100):
+            self.downloads(w, "again", at=time.time() - worker_mod.LIST_TTL_S - 1)
+            self.downloads(w, "fresh")
+            self.fetch(w, "again")                          # stale: downloaded again for the audio job
+            self.fetch(w, "new")                            # past the cap: the oldest goes
+        self.assertEqual(list(w.fetched_subs), ["http://subs.test/again", "http://subs.test/new"])
+
+    def written_under_the_lock(self, w, call):
+        """call() in a thread while this thread holds the worker's lock: True if it had to wait for it."""
+        with w.cv:
+            t = threading.Thread(target=call, daemon=True)
+            t.start()
+            t.join(0.3)
+            waited = t.is_alive()
+        t.join(5)
+        return waited
+
+    def test_a_file_the_listing_doesnt_have_is_noted_under_the_lock(self):
+        w = Worker(self.settings(), self.store, Listing(None, self.subs()), Safety(), limits=Limits())
+        self.workers.append(w)
+        self.assertTrue(self.written_under_the_lock(w, lambda: w.process(Job("movie", "tt1", self.hints))))
+        self.assertTrue(w.recently_unlisted(self.alias))
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_the_limits_are_called_not_probed(self):
+        from subsync.public import StoreOnly
+        w = self.worker(StoreOnly())                        # a person who gets no worker now
+        self.assertIsNone(w.who)
+        self.assertFalse(w._may_start_audio(False))
+        self.assertFalse(w._audio_room(self.alias))
+
+        class Partial:                                      # a limits object without the audio counts or the room
+            who = None
+
+            def may_queue(self, queued):
+                return True
+        w = self.worker(Partial())
+        with self.assertRaises(AttributeError):             # an error, never a limit silently off
+            w._may_start_audio(False)
+        with self.assertRaises(AttributeError):
+            w._audio_room(self.alias)
+
+
 # ---------------------------------------------------------------------------------------------- Usenet in the route
 
 class Redirect:
@@ -663,7 +906,7 @@ class UsenetTest(Base):
     def test_after_the_rows_hour_a_pick_lists_again_only_through_the_gate(self):
         job = self.picked()
         when, kept_row, address = self.w.usenet_rows[self.alias]
-        self.w.usenet_rows[self.alias] = (when - worker_mod.UNLISTED_S - 1, kept_row, address)
+        self.w.usenet_rows[self.alias] = (when - worker_mod.USENET_ROW_KEPT_S - 1, kept_row, address)
         self.counts.stopped_ = True                                     # Usenet stopped for the day: nothing listed
         self.w._sync_all = lambda *a: None
         self.w.process(job)
@@ -686,6 +929,17 @@ class UsenetTest(Base):
         self.assertTrue(wait_until(lambda: self.w.waits_for_pick(self.alias)))   # it waits for another pick
         self.assertFalse(self.counts.stopped_)
         self.assertFalse(self.store.file_blocked(self.alias))
+
+    def test_the_usenet_rows_are_read_and_written_under_the_lock(self):
+        # Both lanes find and keep Usenet rows; a request thread waits for the lock like for every other map
+        job = Job("movie", "tt1", self.hints)
+        with self.w.cv:
+            t = threading.Thread(target=self.w._usenet_row, args=(job, dict(self.hints)), daemon=True)
+            t.start()
+            t.join(0.3)
+            self.assertTrue(t.is_alive())
+        t.join(5)
+        self.assertIn(self.alias, self.w.usenet_rows)
 
     def test_an_index_read_that_fails_in_the_audio_job_doesnt_stop_usenet(self):
         job = self.picked()

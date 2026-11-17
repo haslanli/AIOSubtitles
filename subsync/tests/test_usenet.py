@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -213,6 +214,32 @@ class MemoryTest(TempDirTest):
         key = worker_mod.UsenetGate.key_of("who1", "name:Some.Film.2024.mkv|123")
         self.assertNotIn("Film", key)
         self.assertNotEqual(key, worker_mod.UsenetGate.key_of("who2", "name:Some.Film.2024.mkv|123"))
+
+
+class GateTest(TempDirTest):
+    """A listing is checked and counted in one step, so the day's last one is taken once, also when both lanes
+    of a worker (a first pass and an audio job) ask for it at the same moment."""
+
+    def test_the_days_last_listing_is_taken_once(self):
+        class Slow(worker_mod.StoreUsenetCounts):
+            def listings(self):
+                got = super().listings()
+                time.sleep(0.3)                             # the other lane asks meanwhile
+                return got
+        store = Store(self.dir)
+        counts = Slow(store)
+        for _ in range(9):
+            counts.add_listing()
+        gate = worker_mod.UsenetGate(store, 10, counts, who="w")
+        taken = []
+        lanes = [threading.Thread(target=lambda alias=alias: taken.append(gate.take(alias)), daemon=True)
+                 for alias in ("name:a.mkv|1", "name:b.mkv|2")]
+        for t in lanes:
+            t.start()
+        for t in lanes:
+            t.join(5)
+        self.assertEqual(sorted(taken), [False, True])
+        self.assertEqual(store.bytes_today("usenet"), 10)
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")

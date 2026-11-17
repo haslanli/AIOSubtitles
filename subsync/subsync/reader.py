@@ -11,7 +11,8 @@ at the download address had made 50 calls). The Real-Debrid guard checks every a
 (HTTP 403, most likely a debrid per-account download limit) raises Refused so the worker can back off; a
 reply whose total size differs from the file's raises ReadFailed. A read that got no answer (no connection, a reset, a
 timeout) raises ReadFailed with `connection` set, so the worker can try a file's first read once more.
-Before each read the guard (budget, pause) may stop the job.
+Before each read the guard (budget, pause) may stop the job; after each, one that failed too, it is told the bytes
+received and the length the read asked for (guard.after_read).
 """
 import logging
 import threading
@@ -189,9 +190,9 @@ class RangeReader:
         finally:
             if sent:
                 self._count(requests=1)
+            if self.guard:   # also when it failed: the length it asked for is no longer reserved (worker.JobGuard)
+                self.guard.after_read(len(data), length)
         self._count(got=len(data))
-        if self.guard:
-            self.guard.after_read(len(data))
         self._log(start, length, len(data), status, t0, None)
         if status in (403, 429):
             raise Refused(f"HTTP {status}")
@@ -224,9 +225,10 @@ class RangeReader:
             length = min(length, self.size - start)
         if self.guard:
             self.guard.before_read(length)
-        t0 = time.time()
+        t0, opened = time.time(), False
         try:
             r, t0 = self._open(start, length)
+            opened = True
         except urllib.error.HTTPError as e:
             self._count(requests=1)
             e.close()
@@ -238,6 +240,9 @@ class RangeReader:
             self._count(requests=1)
             self._log(start, length, 0, 0, t0, type(e).__name__)
             raise ReadFailed(type(e).__name__, connection=connection_fault(e)) from None
+        finally:
+            if not opened and self.guard:   # nothing read: the length it asked for is no longer reserved (JobGuard)
+                self.guard.after_read(0, length)
         self._count(requests=1)
         got, status = 0, getattr(r, "status", 200)
         try:
@@ -264,7 +269,7 @@ class RangeReader:
             r.close()
             self._count(got=got)
             if self.guard:
-                self.guard.after_read(got)
+                self.guard.after_read(got, length)
             self._log(start, length, got, status, t0, None)
 
     def _count(self, got=0, requests=0):

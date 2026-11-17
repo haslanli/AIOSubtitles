@@ -252,6 +252,8 @@ class SharedStoreTest(unittest.TestCase):
 
 
 class StubLimits:
+    who = None
+
     def __init__(self, queue=10, files=True, fail_read=False):
         self.queue, self.files, self.fail_read = queue, files, fail_read
         self.reads, self.received, self.started = [], [], 0
@@ -271,8 +273,17 @@ class StubLimits:
         if self.fail_read:
             raise OverLimit("bytes per day")
 
+    def has_room(self, n):
+        return True
+
     def after_read(self, n):
         self.received.append(n)
+
+    def may_start_audio(self, opened=False):
+        return True
+
+    def audio_started(self, opened=False):
+        pass
 
 
 def wait_until(check, timeout=3.0):

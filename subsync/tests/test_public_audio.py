@@ -72,6 +72,12 @@ class Limits:
         self.read += n
         self.left -= n
 
+    def may_start_audio(self, opened=False):   # today's audio syncs: not counted here
+        return True
+
+    def audio_started(self, opened=False):
+        pass
+
 
 class Base(unittest.TestCase):
     def setUp(self):

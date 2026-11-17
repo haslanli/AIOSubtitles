@@ -745,8 +745,9 @@ def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=
     if force_route != "audio" and own_track(index, len(dial), image_ref):
         return dict(base, outcome="keep_original", route=None,
                     reason="more than twice the lines of the file's own track: kept, never sent to the audio route")
-    if not audio:
-        return dict(base, outcome="keep_original", reason="no text track and the audio route is off", route=None)
+    if not audio:   # waits_audio: only the audio route could judge it (the worker's no-track case; never stored)
+        return dict(base, outcome="keep_original", reason="no text track and the audio route is off", route=None,
+                    waits_audio=True)
     if audio_lock is not None:   # one audio fit at a time: it reads the file through a shared reader
         with audio_lock:
             fit = fit_tracks(index, lines, vad=vad, lead=audio_lead, ffmpeg=ffmpeg, better=audio_better,

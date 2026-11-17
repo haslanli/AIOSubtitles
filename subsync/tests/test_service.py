@@ -1452,6 +1452,25 @@ class BestFitOffersTest(unittest.TestCase):
         self.assertEqual(ranked, [exact, snapped_worse, snapped, better])   # unchanged first; then share, then median
         self.assertEqual(sorted([speech, speech_best], key=Worker.fit_rank), [speech_best, speech])
 
+    def test_how_a_copy_passed_is_read_from_its_recorded_gates(self):
+        # The gates its judging recorded (detail["better"], detail["aligned"]) say how a copy passed; the
+        # reason's words only for a row stored without them, so rewording a reason changes no ranking
+        main = {"outcome": "synced", "reason": "re-timed to the release",
+                "detail": {"gate_synced": {"median_ms": 90.0, "within200": 0.7}}}
+        better = {"outcome": "synced", "reason": "re-timed to the release",
+                  "detail": {"gate_synced": {"median_ms": 50.0, "within200": 0.9}, "better": {"pass": True}}}
+        self.assertEqual(sorted([better, main], key=Worker.fit_rank), [main, better])   # the main rule first
+        shift = {"outcome": "synced", "reason": "moved by one shift",
+                 "detail": {"gate_synced": {"median_ms": 0.0, "within200": 0.95}, "shift_fit": {"offset_s": 1.0}}}
+        alass = {"outcome": "synced", "reason": "passes against the release track",
+                 "detail": {"gate_synced": {"median_ms": 0.0, "within200": 1.0}}}
+        self.assertEqual(sorted([alass, shift], key=Worker.fit_rank), [shift, alass])   # its author's own timing
+        aligned = dict(shift, detail=dict(shift["detail"], aligned={"pass": True}))
+        self.assertEqual(sorted([aligned, alass], key=Worker.fit_rank), [alass, aligned])   # not by the main rule
+        old = {"outcome": "synced", "reason": "clearly better than the original",   # stored before the gates were kept
+               "detail": {"gate_synced": {"median_ms": 50.0, "within200": 0.9}}}
+        self.assertEqual(sorted([old, main], key=Worker.fit_rank), [main, old])
+
     def test_a_subtitle_moved_by_one_shift_ranks_with_the_unchanged_ones(self):
         # Game of Thrones S01E01: an in-sync original (91.6 % within 200 ms) kept a BluRay rip, 1 s off and exact after one
         # shift, from being tried; a whole-subtitle shift keeps its author's timing, so it ranks by fit with the originals

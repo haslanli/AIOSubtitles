@@ -30,7 +30,7 @@ class Guard:
             raise Stopped("test stop")
         self.calls += 1
 
-    def after_read(self, n):
+    def after_read(self, n, asked=None):
         self.got += n
 
 
@@ -347,6 +347,7 @@ class PipelineTest(unittest.TestCase):
 # -- candidate order, image refs ----------------------------------------------------------------------------------
 import random  # noqa: E402
 import statistics  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
@@ -1090,6 +1091,88 @@ class GuardCapTest(unittest.TestCase):
             self.assertNotIsInstance(caught.exception, CapReached)
 
 
+class GuardReservationTest(unittest.TestCase):
+    """A job reads in parallel (audio windows, line reads), so each read's length is reserved until its
+    after_read: reads checked at once never pass a limit together, and one that got less than it asked leaves the
+    room it didn't use; the job stops where reading one at a time would have stopped."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = Store(self.tmp.name)
+
+    def meanwhile(self, call):
+        """call() in another thread: (the thread, what it gave: "read" or the exception)."""
+        out = []
+
+        def run():
+            try:
+                call()
+                out.append("read")
+            except Exception as e:
+                out.append(e)
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(0.3)
+        return t, out
+
+    def test_two_reads_checked_at_once_never_pass_the_cap_together(self):
+        from subsync.reader import CapReached
+        g = JobGuard(Safety(), self.store, 10 ** 9, 100)
+        g.before_read(80)                                   # a read running
+        t, out = self.meanwhile(lambda: g.before_read(80))
+        self.assertTrue(t.is_alive())                       # with the running read it could pass the cap: it waits
+        g.after_read(80, 80)                                # the running read got all it asked for
+        t.join(5)
+        self.assertIsInstance(out[0], CapReached)
+        self.assertEqual((g.bytes, g.reserved), (80, 0))
+
+    def test_a_read_that_got_less_than_it_asked_leaves_room(self):
+        g = JobGuard(Safety(), self.store, 10 ** 9, 100)
+        g.before_read(80)
+        t, out = self.meanwhile(lambda: g.before_read(80))
+        g.after_read(10, 80)                                # a window's stream stopped once the window was decoded
+        t.join(5)
+        self.assertEqual(out, ["read"])
+        self.assertEqual((g.bytes, g.reserved), (10, 80))
+        g.after_read(0, 80)                                 # a read that failed gives its reservation back too
+        self.assertEqual(g.reserved, 0)
+
+    def test_the_days_budget_and_the_persons_bytes_count_the_running_reads(self):
+        day = JobGuard(Safety(), self.store, 100, 10 ** 9)
+        day.before_read(80)
+        t, out = self.meanwhile(lambda: day.before_read(80))
+        self.assertTrue(t.is_alive())
+        day.after_read(80, 80)
+        t.join(5)
+        self.assertIsInstance(out[0], GuardStopped)         # the day's budget, as one read after the other
+        person = CountedLimits()
+        asked = []
+        person.before_read = asked.append
+        g = JobGuard(Safety(), self.store, 10 ** 9, limits=person)
+        g.before_read(30)
+        g.before_read(20)
+        self.assertEqual(asked, [30, 50])                   # the person's limit sees this job's running reads
+
+    def test_the_reader_gives_back_what_a_failed_or_stopped_read_reserved(self):
+        srv = RangeServer(FIXTURES)
+        self.addCleanup(srv.close)
+        g = JobGuard(Safety(), self.store, 10 ** 9, 10 ** 9)
+
+        def no_answer(request, timeout):
+            raise TimeoutError("timed out")
+        for stream in (False, True):
+            r = RangeReader(srv.url("tiny.mkv"), "t", g, opener=no_answer)
+            with self.assertRaises(ReadFailed):
+                b"".join(r.stream(0, 1000)) if stream else r.get(0, 1000)
+            self.assertEqual(g.reserved, 0)
+        r = RangeReader(srv.url("tiny.mkv"), "t", g)
+        chunks = r.stream(0, 4096, chunk=1024)
+        next(chunks)
+        chunks.close()                                      # the caller stopped early
+        self.assertEqual((g.reserved, g.bytes), (0, 1024))
+
+
 class CountedLimits:
     """A person's limits that allow everything and count the files started."""
     who = None
@@ -1109,7 +1192,16 @@ class CountedLimits:
     def before_read(self, length):
         pass
 
+    def has_room(self, n):
+        return True
+
     def after_read(self, n):
+        pass
+
+    def may_start_audio(self, opened=False):
+        return True
+
+    def audio_started(self, opened=False):
         pass
 
 

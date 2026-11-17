@@ -22,7 +22,7 @@ from . import audiofit, choose, langcheck, pipeline, realdebrid, srclimits
 from . import origlang
 from .langs import lang3
 from .langs import name as lang_name
-from .mkv import MkvIndex, NotMatroska  # noqa: F401
+from .mkv import NotMatroska
 from .mp4 import open_index
 from .reader import MAX_RE_RESOLVE, CapReached, RangeReader, ReadFailed, Refused, Stopped
 from .sources import bt_alias, expected_size, fetch_subtitle, plausible_size, same_hash
@@ -30,9 +30,23 @@ from .store import JUDGED_FOR_S, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, resul
 from .subs import decode, fingerprint, is_ass, parse
 
 log = logging.getLogger("subsync.worker")
-UNLISTED_S = 3600
+UNLISTED_S = 3600   # a file the listing didn't have (uncached, or another release) isn't looked for again this long
+USENET_ROW_KEPT_S = 3600   # a file found on Usenet: a retry or its audio job reuses its row and address this long
+PICKED_EARLY_S = 3600   # an entry downloaded while the file's first pass ran still counts as its pick this long
+LIST_TTL_S = 600    # a text pass's subtitle list and downloads, reused by the audio job that follows a pick
+EXPIRE_EVERY_S = 3600   # the store's old rows are removed this often (Store.expire)
+IDLE_POLL_S = 5.0   # an idle lane looks at the queue again this often (a job deferred by not_before comes due)
+BACKOFF_MAX_S = 6 * 3600   # the refusal back-off doubles up to this (Safety)
 READ_RETRY_S = 10   # a first read that got no answer is tried once more this much later
 FETCHED_CAP = 32 * 1024 * 1024   # downloads kept for the audio job that follows a pick (worker._fetch_one), in bytes
+# In-memory maps of a worker (in public mode, of a person): entries kept, the oldest dropped first (put_bounded)
+SEEN_ENTRIES = 2000         # files asked about (seen)
+PICKS_ENTRIES = 2000        # files waiting for a pick, and picks that came before their file was known to wait
+RESULTS_ENTRIES = 500       # files' results, kept in step: done, judged and originals
+GUESSES_ENTRIES = 500       # a waiting file's anchored guesses (provisional) and its originals' measures
+UNLISTED_ENTRIES = 5000     # files the listing didn't have
+USENET_ROWS_ENTRIES = 200   # files found on Usenet
+LISTS_ENTRIES = 200         # files' subtitle lists
 FETCH_AT_ONCE = 4   # a language's subtitle downloads at once: one round (a picked language's alass after it)
 CONSENSUS_TRIES = 12   # a file with no track: the main language's downloads beside its guess, for a consensus
 # Originals downloaded on a request's own time (Worker.original_for) at once, in one pool for the worker's life: more
@@ -46,6 +60,20 @@ USENET_MAX_RE_RESOLVE = 1         # its link is asked at most twice per job (a f
 # (each subtitle tried places its own windows), so a pick needs room for this many times them, at most the
 # per-file audio limit
 AUDIO_NEED_MARGIN = 2.5
+
+
+def put_bounded(d, key, value, limit):
+    """d[key] = value as the newest entry of a map kept to `limit` entries, the oldest dropped first: a key set again
+    moves to the end (a dict keeps a key set again in its first place, so the file just asked about would go first)."""
+    d.pop(key, None)
+    d[key] = value
+    trim_oldest(d, limit)
+
+
+def trim_oldest(d, limit):
+    """Drops a map's oldest entries (a dict keeps insertion order) past `limit`."""
+    while len(d) > limit:
+        d.pop(next(iter(d)))
 
 
 def usenet_size_ok(listed):
@@ -124,18 +152,22 @@ class UsenetGate:
 
     def __init__(self, store, per_day, counts, who=""):
         self.store, self.per_day, self.counts, self.who = store, per_day, counts, who or ""
+        self._lock = threading.Lock()   # both lanes of a worker list through its one gate
 
     @staticmethod
     def key_of(who, alias):
         return hashlib.sha256(f"usenet|{who}|{alias}".encode()).hexdigest()[:32]
 
-    def may_list(self, alias):
-        if self.per_day <= 0 or self.counts.stopped() or self.counts.listings() >= self.per_day:
-            return False
-        return not self.store.usenet_recently_missed(self.key_of(self.who, alias), USENET_UNLISTED_S)
-
-    def listed(self):
-        self.counts.add_listing()
+    def take(self, alias):
+        """A listing for this file, if one may be made now: checked and counted in one step, so two lanes can't both
+        take the day's last one."""
+        with self._lock:
+            if self.per_day <= 0 or self.counts.stopped() or self.counts.listings() >= self.per_day:
+                return False
+            if self.store.usenet_recently_missed(self.key_of(self.who, alias), USENET_UNLISTED_S):
+                return False
+            self.counts.add_listing()
+            return True
 
     def missed(self, alias):
         self.store.usenet_missed(self.key_of(self.who, alias))
@@ -148,7 +180,7 @@ class UsenetGate:
 class Safety:
     """The refusal back-off every read checks first."""
 
-    def __init__(self, backoff_s=900, backoff_max_s=6 * 3600, clock=time.time):
+    def __init__(self, backoff_s=900, backoff_max_s=BACKOFF_MAX_S, clock=time.time):
         self.backoff_s, self.backoff_max_s, self.clock = backoff_s, backoff_max_s, clock
         self.refused_until = 0.0
         self.refusals = 0
@@ -245,17 +277,35 @@ class NoTurn:
 
 class JobGuard:
     """Checked before every read of a job: the back-off, the day's budget, the job's own byte cap and (public mode) the
-    person's own limits."""
+    person's own limits. A job reads in parallel (audio windows, line reads), so each read's length stays reserved
+    from its before_read to its after_read: a read is checked against the bytes received plus the reads still running,
+    and when only those could take it past a limit, it waits for them to end (a read may get less than it asked: a
+    window's stream stops once the window is decoded). So the job stops where reading one at a time would have stopped,
+    and reads checked at once never pass a limit together."""
 
     def __init__(self, safety, store, daily_budget, file_cap=None, limits=None):
         self.safety, self.store = safety, store
         self.daily_budget, self.file_cap, self.limits = daily_budget, file_cap, limits
-        self.bytes = 0
-        self._lock = threading.Lock()   # audio windows are read in parallel
+        self.bytes = 0      # received by the job's reads that ended
+        self.reserved = 0   # asked by its reads still running
+        self._cv = threading.Condition()
 
     def before_read(self, length):
-        if self.safety.backing_off():
-            raise Stopped("backing off after a refusal")
+        with self._cv:
+            while True:
+                if self.safety.backing_off():
+                    raise Stopped("backing off after a refusal")
+                try:
+                    self._check(self.reserved + length)
+                    break
+                except (Stopped, OverLimit):   # CapReached is a Stopped
+                    if not self.reserved:
+                        raise
+                self._cv.wait()   # a running read ends: its after_read comes also when it failed (reader.py)
+            self.reserved += length
+
+    def _check(self, length):
+        """Raises when reading `length` more bytes would pass a limit (cv held)."""
         if self.store.bytes_today("read") + length > self.daily_budget:
             raise Stopped("daily budget spent")
         if self.file_cap and self.bytes + length > self.file_cap:
@@ -263,14 +313,18 @@ class JobGuard:
         if self.limits is not None:
             self.limits.before_read(length)
 
-    def after_read(self, n):
-        with self._lock:
-            self.bytes += n
-        self.store.add_bytes("read", n)
-        if self.limits is not None:
-            self.limits.after_read(n)
+    def after_read(self, n, asked=None):
+        """A read ended with `n` bytes received (0 when it failed); `asked`: the length its before_read reserved (by
+        default n, a read that got what it asked for)."""
         if n:
+            self.store.add_bytes("read", n)
+            if self.limits is not None:
+                self.limits.after_read(n)
             self.safety.read_ok()
+        with self._cv:
+            self.bytes += n
+            self.reserved = max(0, self.reserved - (n if asked is None else asked))
+            self._cv.notify_all()
 
 
 class Job:
@@ -290,6 +344,10 @@ class Job:
         # Languages whose entry was downloaded while this job was queued or running -> when (Worker.prioritize),
         # for alass sooner; they no longer hold the other languages' downloads back
         self.picked = {}
+
+    def again(self):
+        """A new job of the same file (its type, id and hints), with none of this one's state."""
+        return Job(self.type, self.video_id, self.hints)
 
     @property
     def alias(self):
@@ -326,23 +384,21 @@ class Worker(threading.Thread):
         # Usenet: the Usenet config's sources.Aios and its UsenetGate, both or neither
         self.usenet, self.usenet_gate = (usenet, usenet_gate) if usenet is not None and usenet_gate is not None \
             else (None, None)
-        # public mode: the turn every person's worker shares, and this person's limits (may_queue, may_start_file,
-        # file_started, before_read, after_read)
+        # public mode: the turn every person's worker shares, and this person's limits (public.UserLimits, or
+        # public.StoreOnly: who, may_queue, may_start_file, file_started, before_read, after_read, has_room,
+        # may_start_audio, audio_started); None on a self-hosted install
         self.turn = turn if turn is not None else NoTurn()
         # public mode: the audio syncs' own places, shared by everyone (audio_places), taken before a place of the turn
         self.audio_turn = audio_turn if audio_turn is not None else NoTurn()
         self.limits = limits
         # The audio syncs this viewer may start a day: public mode's person's own limits, a self-hosted
-        # install's in the store's day counters; limits without them count nothing
-        if limits is None:
-            self.audio_counts = StoreAudioCounts(store, settings)
-        else:
-            self.audio_counts = limits if hasattr(limits, "may_start_audio") else None
+        # install's in the store's day counters
+        self.audio_counts = StoreAudioCounts(store, settings) if limits is None else limits
         self.extra = extra          # extra.ExtraSources: sources subsync searches itself
         # origlang.Lookup: titles' original languages (one per process, shared in public mode); None: never looked up
         self.lookup = lookup
         # public mode: an opaque key of this person for the sources' fair shares (sourcestate.Ledger), never logged
-        self.who = getattr(limits, "who", None)
+        self.who = limits.who if limits is not None else None
         self.vad_factory = vad_factory
         self._vad = None
         self.queue, self.jobs = [], {}   # jobs in arrival order; alias -> queued job
@@ -376,27 +432,36 @@ class Worker(threading.Thread):
         """A file this person asked about: its subtitle list can be fetched again for them (original_text, a pick).
         Also when the answer came from stored copies alone and no job runs."""
         with self.cv:
-            self.seen[job.alias] = (job.type, job.video_id, dict(job.hints))
-            while len(self.seen) > 2000:
-                self.seen.pop(next(iter(self.seen)))
+            put_bounded(self.seen, job.alias, (job.type, job.video_id, dict(job.hints)), SEEN_ENTRIES)
 
     def submit(self, job):
-        self.remember(job)
+        """Queues a file's job: the job that gives its results (this one, or the file's job queued or running already),
+        or None when this person's queue is full or the worker has stopped."""
         with self.cv:
-            old = self.jobs.get(job.alias)
-            if old is not None:
-                old.audio = old.audio or job.audio
-                return old
-            running = self._running(job.alias)
-            if running is not None and (running.audio or not job.audio):
-                return running
-            if self.limits is not None and not self.limits.may_queue(len(self.jobs)):
-                return None   # this person's queue is full: the answer comes from the store only
-            self.jobs[job.alias] = job
-            self.queue.append(job)
-            self.judged.pop(job.alias, None)   # a pick waits for this job's results, not an earlier job's
-            self.cv.notify_all()
-            return job
+            return self._submit(job)
+
+    def _submit(self, job):
+        """submit (cv held), so a caller can queue a job and change its own state in the same step."""
+        self.remember(job)
+        old = self.jobs.get(job.alias)
+        if old is not None:
+            old.audio = old.audio or job.audio
+            return old
+        running = self._running(job.alias)
+        if running is not None and (running.audio or not job.audio):
+            return running
+        if self.stop_flag or not self._may_queue():
+            return None   # this person's queue is full (the answer comes from the store only), or the worker stopped
+        self.jobs[job.alias] = job
+        self.queue.append(job)
+        # a wait ends on this job's results, not an earlier job's: a pick waits for its final ones, and a pending wait
+        # for its first pass (an earlier job's placeholders are dropped; a key it published is served meanwhile)
+        self.judged.pop(job.alias, None)
+        passes = {lang: key for lang, key in self.done.pop(job.alias, {}).items() if key is not None}
+        if passes:
+            self.done[job.alias] = passes
+        self.cv.notify_all()
+        return job
 
     def audio_allowed(self, job):
         """May this job read the file's audio: an audio job (picked, or started as soon as the file was opened)
@@ -452,14 +517,13 @@ class Worker(threading.Thread):
 
     def ask_list_again(self, alias):
         """A pick for a file whose subtitle list is not known (it came back empty): queue its job again, which
-        fetches the list first. Returns True if a job is queued or running for it."""
+        fetches the list first; not for a file the listing didn't have within UNLISTED_S (it isn't looked for again,
+        as for a subtitle request). Returns True if a job is queued or running for it."""
         with self.cv:
             seen = self.seen.get(alias)
-        if seen is None:
+        if seen is None or self.recently_unlisted(alias):
             return self.busy_with(alias)
-        if not self.busy_with(alias):
-            self.submit(Job(*seen))
-        return True
+        return self.submit(Job(*seen)) is not None
 
     def known_originals(self, alias):
         """The original subtitle per language for a file subsync listed, or None if its list is not known."""
@@ -480,22 +544,21 @@ class Worker(threading.Thread):
             self._restore(alias)
             waiting = self.pickable.get(alias)
             if waiting is None:
-                self.picked_early[alias] = time.time()
-                while len(self.picked_early) > 2000:
-                    self.picked_early.pop(next(iter(self.picked_early)))
+                put_bounded(self.picked_early, alias, time.time(), PICKS_ENTRIES)
                 return False
-            if not (room and may and self._may_queue()):
+            job = waiting.again()
+            job.audio = True
+            # queued in the same step as the file stops waiting, so a pick never drops a file it didn't queue
+            if not (room and may) or self._submit(job) is None:
                 log.info("picked %s: %s, it waits for another pick", waiting.label,
-                         "today's audio syncs are used up" if not may else "no room for the audio route now")
+                         "today's audio syncs are used up" if not may else
+                         "no room for the audio route now" if not room else "no place in the queue")
                 return False
             self.pickable.pop(alias)
             key = self._row_key(alias)
             if key is not None:
                 self.store.pickable_drop(key)
-        job = Job(waiting.type, waiting.video_id, waiting.hints)
-        job.audio = True
         log.info("picked %s: the audio route starts", job.label)
-        self.submit(job)
         return True
 
     def _needs_pick(self, job):
@@ -509,21 +572,21 @@ class Worker(threading.Thread):
         while True:
             with self.cv:   # read and dropped in one step: pick() writes it, under the lock, from a request's thread
                 at = self.picked_early.pop(job.alias, None)
-            early = early or (at is not None and time.time() - at <= 3600)   # its entry was downloaded while this read ran
+            # its entry was downloaded while this read ran
+            early = early or (at is not None and time.time() - at <= PICKED_EARLY_S)
             opened = not early and self._may_open(job)
             start = (early or opened) and self._audio_room(job.alias) and self._may_start_audio(opened)
             with self.cv:
                 if not start and job.alias in self.picked_early:
                     continue   # a pick came while this was decided (the file wasn't waiting yet): as one that came before
                 self.picked_early.pop(job.alias, None)
-                if not (start and self._may_queue()):
+                again = job.again()
+                again.audio, again.opened = True, opened
+                if not start or self._submit(again) is None:   # queued, or waiting, in one step
                     self._put_waiting(job)
                     return False
             break
-        again = Job(job.type, job.video_id, job.hints)
-        again.audio, again.opened = True, opened
         log.info("%s %s: the audio route starts", "opened" if opened else "picked", job.label)
-        self.submit(again)
         return True
 
     def _may_open(self, job):
@@ -541,20 +604,17 @@ class Worker(threading.Thread):
 
     def _may_start_audio(self, opened):
         """Today's audio syncs of this viewer leave room for one more; with opened, an opened one too."""
-        return self.audio_counts is None or self.audio_counts.may_start_audio(opened)
+        return self.audio_counts.may_start_audio(opened)
 
     def _audio_started(self, job):
         """An audio job starts reading: counted once in today's audio syncs."""
         if not job.counted:
             job.counted = True
-            if self.audio_counts is not None:
-                self.audio_counts.audio_started(job.opened)
+            self.audio_counts.audio_started(job.opened)
 
     def _put_waiting(self, job):
         """The file waits for the person's pick, in memory and in the store (kept across a restart) (cv held)."""
-        self.pickable[job.alias] = job
-        while len(self.pickable) > 2000:
-            self.pickable.pop(next(iter(self.pickable)))
+        put_bounded(self.pickable, job.alias, job, PICKS_ENTRIES)
         key = self._row_key(job.alias)
         if key is not None:
             self.store.pickable_put(key, job.type, job.video_id, job.hints)
@@ -572,8 +632,7 @@ class Worker(threading.Thread):
         need = self._audio_need(alias)
         if self.store.bytes_today("read") + need > self.s.daily_budget:
             return False
-        has_room = getattr(self.limits, "has_room", None)
-        return has_room is None or has_room(need)
+        return self.limits is None or self.limits.has_room(need)
 
     def _audio_need(self, alias):
         """What an audio job of the file may read: its index again and its audio windows (audiofit.most_read) with
@@ -600,11 +659,12 @@ class Worker(threading.Thread):
         by construction)."""
         reason = row.get("reason") or ""
         d = row.get("detail") or {}
+        passed = Worker.passed_as(d, reason)
         if row.get("outcome") == "in_sync" or d.get("unchanged") or d.get("magnet") or "as it is" in reason:
             cls, g = 0, d.get("gate_original") or {}
-        elif d.get("shift_fit") and reason.startswith("passes"):   # moved as a whole: its author's own timing
+        elif d.get("shift_fit") and passed == "main":   # moved as a whole: its author's own timing
             cls, g = 0, d.get("gate_synced") or {}
-        elif "clearly better" in reason:
+        elif passed == "clearly better":
             cls, g = 2, d.get("gate_synced") or {}
         else:
             cls, g = 1, d.get("gate_synced") or d.get("gate_snapped") or {}
@@ -612,6 +672,20 @@ class Worker(threading.Thread):
         stacked = (d.get("stacked") or 0.0) >= pipeline.STACKED_SHARE
         within = (g.get("within200") or 0.0) - (pipeline.STACKED_PENALTY if stacked else 0.0)
         return (cls, -within, med if med is not None else 1e9)
+
+    @staticmethod
+    def passed_as(facts, reason):
+        """How a re-timed copy passed (pipeline.judge_copy): "clearly better" than the original, "aligned" to another
+        language's track, else "main" (the main rule against its own language). Told by the gates its judging recorded
+        (`facts`: a result, or a stored row's detail); by the reason's words only for a row stored without them."""
+        def gate(key, said):
+            got = facts.get(key)
+            return bool(got.get("pass")) if isinstance(got, dict) else said
+        if gate("better", "clearly better" in reason):
+            return "clearly better"
+        if gate("aligned", reason.startswith("aligned")):
+            return "aligned"
+        return "main"
 
     def start_lookup(self, video_id):
         """Starts the title's original-language lookup in the background (nothing if it is kept or running); with this
@@ -639,8 +713,14 @@ class Worker(threading.Thread):
 
     def recently_unlisted(self, alias, within=UNLISTED_S):
         """A file the listing didn't have (Usenet, uncached) is not looked for again for an hour."""
-        t = self.unlisted.get(alias)
+        with self.cv:
+            t = self.unlisted.get(alias)
         return t is not None and time.time() - t < within
+
+    def _note_unlisted(self, alias):
+        """The listing doesn't have this file now (recently_unlisted)."""
+        with self.cv:
+            put_bounded(self.unlisted, alias, time.time(), UNLISTED_ENTRIES)
 
     def busy_with(self, alias):
         with self.cv:
@@ -751,9 +831,8 @@ class Worker(threading.Thread):
                          fetched[got["index"]][0]["id"][:40], main, 100 * got["share"])
         with self.cv:   # a language the audio route has judged keeps its verdict, not a guess
             judged = self.judged.get(job.alias) or set()
-            self.provisional[job.alias] = {lang: body for lang, body in out.items() if lang not in judged}
-            while len(self.provisional) > 500:
-                self.provisional.pop(next(iter(self.provisional)))
+            put_bounded(self.provisional, job.alias, {lang: body for lang, body in out.items() if lang not in judged},
+                        GUESSES_ENTRIES)
 
     def _note_measure(self, alias, lang, cand_id, within):
         """A downloaded original measured as it is against the file's own track (check_original's share of
@@ -761,9 +840,9 @@ class Worker(threading.Thread):
         if within is None:
             return
         with self.cv:
-            self.measures.setdefault(alias, {}).setdefault(lang, {})[cand_id] = within
-            while len(self.measures) > 500:
-                self.measures.pop(next(iter(self.measures)))
+            notes = self.measures.get(alias) or {}
+            notes.setdefault(lang, {})[cand_id] = within
+            put_bounded(self.measures, alias, notes, GUESSES_ENTRIES)
 
     def measured_original(self, alias, lang):
         """The candidate id a pick serves when nothing passed by its deadline: the downloaded original that
@@ -799,7 +878,7 @@ class Worker(threading.Thread):
                         else:
                             self.current = job
                         return job
-                self.cv.wait(5.0)
+                self.cv.wait(IDLE_POLL_S)
         return None
 
     # -- the loop ----------------------------------------------------------------------------------------------
@@ -811,9 +890,13 @@ class Worker(threading.Thread):
         self.audio_worker.start()
 
     def stop(self):
-        """Ends the loop once the job it runs (if any) is done."""
+        """Ends the loop once the job it runs (if any) is done. The jobs still queued are not run; the file of an audio
+        job among them (a pick not started yet) waits for another pick, as when an audio job ends without its sync."""
         with self.cv:
             self.stop_flag = True
+            for job in self.queue:
+                if job.audio:
+                    self._put_waiting(job.again())
             self.cv.notify_all()
 
     def run(self):
@@ -824,16 +907,19 @@ class Worker(threading.Thread):
             job = self._next(lane)
             if job is None:
                 break
+            # an audio job that ends without its sync (stopped before it read, the day's data or its cap ran out, a read
+            # failed or was refused, anything else went wrong): its file waits for another pick, as the pick promised
+            unfinished = False
             try:
                 # an audio job takes its audio place before a place of the turn, so a held place never waits
                 with self.turn.claim(job.alias), (self.audio_turn if lane == "audio" else NoTurn()), self.turn:
-                    if not self.stop_flag:
+                    if self.stop_flag:   # stopped while it waited for its turn: nothing is read
+                        unfinished = True
+                    else:
                         self.process(job)
             except OverLimit as e:
                 log.info("over the limit %s: %s", job.label, e)
-                if job.audio:   # the person's day ran out during the audio sync: the file waits for another pick
-                    with self.cv:
-                        self._put_waiting(Job(job.type, job.video_id, job.hints))
+                unfinished = True   # the person's day ran out (in an audio sync, the file waits again)
             except CapReached as e:
                 # The file needs more than the job's own byte cap: not queued again, and not read again
                 # while the cap is not raised (capped). An audio job stopped at the audio route's cap says nothing
@@ -841,8 +927,7 @@ class Worker(threading.Thread):
                 if job.audio:
                     log.info("stopped %s at the audio cap (%.0f MB): it waits for another pick", job.label,
                              e.cap / 2 ** 20)
-                    with self.cv:
-                        self._put_waiting(Job(job.type, job.video_id, job.hints))
+                    unfinished = True
                 else:
                     for alias in {job.alias, job.bt} - {None}:   # its torrent file too, as _process_row records aliases
                         self.store.cap_reached(alias, e.cap)
@@ -852,25 +937,28 @@ class Worker(threading.Thread):
                 job.not_before = time.time() + self.s.retry_stopped_s
                 self._requeue(job)
             except Refused as e:
-                # most likely a per-account limit: every read waits; this file backs off 1 h / 6 h / 24 h
+                # most likely a per-account limit: every read waits; this file backs off 1 h / 6 h / 24 h, but a Usenet
+                # file in its audio sync doesn't (only a first read backs a Usenet file off)
                 wait = self.safety.refused()
-                if job.audio and job.usenet:   # only a first read backs a Usenet file off; it waits again
-                    self._wait_again(job)
-                else:
+                if not (job.audio and job.usenet):
                     self.store.file_failed(job.alias, REFUSED_BACKOFF_S)
+                unfinished = True
                 log.warning("refused %s (%s): no reads for %d s", job.label, e, wait)
             except ReadFailed as e:
-                if job.audio and job.usenet:
-                    # A read of a Usenet file that fails during its audio sync ends the job; Usenet goes on
-                    # (only a first read stops it for the day) and the file waits for another pick
+                if job.audio:
+                    # A read that fails during the audio sync ends the job (a Usenet file's doesn't stop Usenet:
+                    # only a first read does), and the file waits for another pick
                     log.info("read failed %s during the audio sync (%s): it waits for another pick", job.label, e)
-                    self._wait_again(job)
+                    unfinished = True
                 else:
                     log.warning("failed %s: %s", job.label, type(e).__name__)
             except Exception as e:  # never let one file stop the worker
                 log.warning("failed %s: %s", job.label, type(e).__name__)
+                unfinished = True
             finally:
                 with self.cv:
+                    if unfinished and job.audio:   # in the same step as its job ends: never neither busy nor waiting
+                        self._put_waiting(job.again())
                     if lane == "audio":
                         self.current_audio = None
                     else:
@@ -879,20 +967,18 @@ class Worker(threading.Thread):
                     for lang in self.s.languages:
                         self.done[job.alias].setdefault(lang, None)
                     self.cv.notify_all()
-                    while len(self.done) > 500:
-                        self.done.pop(next(iter(self.done)))
-                    while len(self.judged) > 500:
-                        self.judged.pop(next(iter(self.judged)))
-                    while len(self.originals) > 500:
-                        self.originals.pop(next(iter(self.originals)))
-            if time.time() - self.last_expire > 3600:
+                    for results in (self.done, self.judged, self.originals):
+                        if job.alias in results:   # this file's are the newest now
+                            results[job.alias] = results.pop(job.alias)
+                        trim_oldest(results, RESULTS_ENTRIES)
+            if time.time() - self.last_expire > EXPIRE_EVERY_S:
                 self.last_expire = time.time()
                 self.store.expire()
 
     def _wait_again(self, job):
         """An audio job that ended without its sync: the file waits for the viewer's pick again."""
         with self.cv:
-            self._put_waiting(Job(job.type, job.video_id, job.hints))
+            self._put_waiting(job.again())
 
     def _requeue(self, job):
         with self.cv:
@@ -937,9 +1023,7 @@ class Worker(threading.Thread):
             log.info("file not in the listing %s", job.label)
             if job.audio:      # e.g. a pick after its Usenet row's hour, with Usenet stopped: it keeps waiting
                 self._wait_again(job)
-            self.unlisted[job.alias] = time.time()
-            while len(self.unlisted) > 5000:
-                self.unlisted.pop(next(iter(self.unlisted)))
+            self._note_unlisted(job.alias)
             return
         if job.usenet:      # two people playing the same Usenet release at once: it is read once
             with self.turn.claim(f"usenet:{job.alias}"):
@@ -955,31 +1039,34 @@ class Worker(threading.Thread):
 
     def _kept_usenet_row(self, job):
         """An audio job's Usenet row and the address its first pass resolved, kept with the job for its life
-        (a job stopped and queued again keeps them), taken from the first pass's within UNLISTED_S; None otherwise."""
+        (a job stopped and queued again keeps them), taken from the first pass's within USENET_ROW_KEPT_S; None
+        otherwise."""
         if job.kept is None:
-            kept = self.usenet_rows.get(job.alias)
-            if self.usenet is None or not kept or time.time() - kept[0] >= UNLISTED_S:
+            with self.cv:
+                kept = self.usenet_rows.get(job.alias)
+            if self.usenet is None or not kept or time.time() - kept[0] >= USENET_ROW_KEPT_S:
                 return None
             job.kept = (kept[1], kept[2])
         return job.kept[0]
 
     def _keep_address(self, alias, row, address):
         """The address a Usenet file's link pointed to, kept with its row for the audio job that follows."""
-        kept = self.usenet_rows.get(alias)
-        if address and kept and kept[1] is row:
-            self.usenet_rows[alias] = (kept[0], row, address)
+        with self.cv:
+            kept = self.usenet_rows.get(alias)
+            if address and kept and kept[1] is row:
+                self.usenet_rows[alias] = (kept[0], row, address)   # the same entry: its time and place stay
 
     def _usenet_row(self, job, hints):
         """The played file's row in one Usenet listing, when the gate allows one: the listing is
         counted; an error row, an HTTP error or no answer stops Usenet for the day and nothing is read; a file not
         listed isn't looked up there again for a day."""
-        kept = self.usenet_rows.get(job.alias)
-        if kept and time.time() - kept[0] < UNLISTED_S:     # a retry, or the same file asked for again
+        with self.cv:
+            kept = self.usenet_rows.get(job.alias)
+        if kept and time.time() - kept[0] < USENET_ROW_KEPT_S:     # a retry, or the same file asked for again
             return kept[1]
         gate = self.usenet_gate
-        if not gate.may_list(job.alias):
+        if not gate.take(job.alias):
             return None
-        gate.listed()
         try:
             listed = self.usenet.streams(job.type, job.video_id)
         except realdebrid.Blocked:       # the Usenet config couldn't be checked: nothing was listed
@@ -998,9 +1085,8 @@ class Worker(threading.Thread):
         if found is None:
             gate.missed(job.alias)
         else:
-            self.usenet_rows[job.alias] = (time.time(), found, None)
-            while len(self.usenet_rows) > 200:
-                self.usenet_rows.pop(next(iter(self.usenet_rows)))
+            with self.cv:
+                put_bounded(self.usenet_rows, job.alias, (time.time(), found, None), USENET_ROWS_ENTRIES)
         return found
 
     def _process_row(self, job, hints, row, bt):
@@ -1035,6 +1121,8 @@ class Worker(threading.Thread):
         url = row["url"]
         if self.store.file_blocked(job.alias):
             log.info("file backing off after read failures %s", job.label)
+            if job.audio:   # nothing read: the file waits for another pick
+                self._wait_again(job)
             return
         # the subtitle list first (AIOStreams answers it from its cache), so a pending entry can fall back to the original
         candidates = self._candidates(job, hints)
@@ -1092,6 +1180,8 @@ class Worker(threading.Thread):
                     self.usenet_gate.stop("the first read of a Usenet file failed")
                 retry = self.store.file_failed(job.alias, REFUSED_BACKOFF_S if job.usenet else READ_FAILED_BACKOFF_S)
                 log.info("read failed %s (%s), retry %s", job.label, e, "never" if retry is None else time.strftime("%H:%M", time.gmtime(retry)))
+                if job.audio:   # a debrid file's audio job: it backs off as any read, and waits for another pick
+                    self._wait_again(job)
                 return
         if job.usenet:
             self._keep_address(job.alias, row, reader.resolved)
@@ -1099,7 +1189,7 @@ class Worker(threading.Thread):
             # 18a: the listed row is another file than the one played (same name, another release): nothing of it is
             # this file's, and the listing is not asked for it again for an hour
             log.info("the listed row is not the played file %s: not synced", job.label)
-            self.unlisted[job.alias] = time.time()
+            self._note_unlisted(job.alias)
             if job.usenet:
                 self.usenet_gate.missed(job.alias)
             return
@@ -1144,15 +1234,13 @@ class Worker(threading.Thread):
         # nothing is marked; everyone else who can pick it, or open it, still gets their own first pass
         log.info("done %s file=%s bytes=%d requests=%d", job.label, file_key, reader.bytes, reader.requests)
 
-    LIST_TTL_S = 600       # a text pass's subtitle list and downloads, reused by the audio job that follows a pick
-
     def _candidates(self, job, hints):
         """The file's subtitle list (AIOStreams and the extra sources). An audio job reuses the list its text pass got
         within LIST_TTL_S (asking again took 0.7 to 1.8 s of a pick's 14 s)."""
         now = time.time()
         with self.cv:
             got = self.lists.get(job.alias)
-        if job.audio and got and now - got[0] < self.LIST_TTL_S:
+        if job.audio and got and now - got[0] < LIST_TTL_S:
             return [dict(c) for c in got[1]]
         lister = self._lister()
         candidates = lister.subtitles(job.type, job.video_id, hints)
@@ -1171,14 +1259,9 @@ class Worker(threading.Thread):
                 log.info("extra sources failed %s: %s", job.label, type(e).__name__)
         with self.cv:
             for c in candidates:   # a stored recipe's original is found again by its id and language
-                self.by_id[(c["id"], c["lang"])] = dict(c)
-            while len(self.by_id) > srclimits.BY_ID_ENTRIES:
-                self.by_id.pop(next(iter(self.by_id)))
-        if candidates:
-            with self.cv:
-                self.lists[job.alias] = (now, [dict(c) for c in candidates])
-                while len(self.lists) > 200:
-                    self.lists.pop(next(iter(self.lists)))
+                put_bounded(self.by_id, (c["id"], c["lang"]), dict(c), srclimits.BY_ID_ENTRIES)
+            if candidates:
+                put_bounded(self.lists, job.alias, (now, [dict(c) for c in candidates]), LISTS_ENTRIES)
         return candidates
 
     def _audio_queued(self, alias):
@@ -1447,7 +1530,7 @@ class Worker(threading.Thread):
         def downloaded(c):
             with self.cv:
                 got = self.fetched_subs.get(c["url"])
-            return decode(got[1], lang) if got and time.time() - got[0] < self.LIST_TTL_S else None
+            return decode(got[1], lang) if got and time.time() - got[0] < LIST_TTL_S else None
 
         def download(c):
             # timed out here, not by fetch_subtitle's own timeout: that one bounds each socket wait only (not a site's
@@ -1519,7 +1602,7 @@ class Worker(threading.Thread):
                 return True
             url = (originals.get(lang) or {}).get("url")
             got = self.fetched_subs.get(url) if url else None
-        return bool(url) and not (got and time.time() - got[0] < self.LIST_TTL_S)
+        return bool(url) and not (got and time.time() - got[0] < LIST_TTL_S)
 
     def _sync_language(self, job, index, file_key, lang, candidates, oshash=None, filename=None):
         """The viewer's first subtitle, then subtitles made for this release, then the rest, until one
@@ -1688,7 +1771,7 @@ class Worker(threading.Thread):
                 return False
             record(e, dict(r, fast=True), t0)
             e["got"] = self.fresh(result_key(file_key, e["sha"]), job.rule)
-            return r["reason"].startswith("passes")
+            return self.passed_as(r, r["reason"]) == "main"
 
         fitted, shas = 0, set()   # best fit: alass runs so far, and the subtitles fitted (each once)
 
@@ -1779,8 +1862,7 @@ class Worker(threading.Thread):
                     shas.add(e["sha"])
                     fitted += 1
                 r, t0 = fit(e)
-                if not audio and r.get("route") is None and r["outcome"] == "keep_original" \
-                        and "audio route is off" in (r.get("reason") or ""):
+                if not audio and r.get("waits_audio"):   # no text or image track: only the audio route can judge it
                     if self.s.audio_choice != "off":   # a Usenet file too
                         if isinstance(entries, list) and self.s.anchored_guess:   # for an anchored guess (_set_provisional)
                             job.fetched[lang] = [(x["cand"], x.get("text") or decode(x["raw"], lang)) for x in entries]
@@ -1870,7 +1952,7 @@ class Worker(threading.Thread):
         url, now = cand["url"], time.time()
         with self.cv:
             got = self.fetched_subs.get(url)
-        if got and now - got[0] < self.LIST_TTL_S:
+        if got and now - got[0] < LIST_TTL_S:
             return rank, cand, got[1]
         try:
             source = cand.get("source")
@@ -1880,13 +1962,25 @@ class Worker(threading.Thread):
             headers = self.extra.headers_for(cand) if self.extra is not None else None
             raw = fetch_subtitle(url, headers=headers) if headers else fetch_subtitle(url)
             with self.cv:
-                self.fetched_subs[url] = (now, raw)
-                while len(self.fetched_subs) > 1 and sum(len(r) for _, r in self.fetched_subs.values()) > FETCHED_CAP:
-                    self.fetched_subs.pop(next(iter(self.fetched_subs)))
+                self._keep_download(url, now, raw)
             return rank, cand, raw
         except Exception as e:
             log.info("subtitle fetch failed %s %s rank %d: %s", job.label, lang, rank, type(e).__name__)
             return None
+
+    def _keep_download(self, url, at, raw):
+        """A download (begun `at`) kept in fetched_subs as the newest entry, served for LIST_TTL_S: the entries older
+        than that are dropped (nothing serves them again), then the oldest while the rest pass FETCHED_CAP, down to
+        one (cv held)."""
+        subs = self.fetched_subs
+        subs.pop(url, None)
+        subs[url] = (at, raw)
+        now = time.time()
+        for stale in [u for u, (t, _) in subs.items() if now - t >= LIST_TTL_S]:
+            del subs[stale]
+        kept = sum(len(r) for _, r in subs.values())
+        while len(subs) > 1 and kept > FETCHED_CAP:
+            kept -= len(subs.pop(next(iter(subs)))[1])
 
     def _fetch_stream(self, job, lang, tries):
         """Best fit's downloads: up to FETCH_AT_ONCE at once, each yielded as it ends; failed ones are left out. Every

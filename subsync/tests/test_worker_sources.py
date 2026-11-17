@@ -450,7 +450,8 @@ class PickedLanguageTest(unittest.TestCase):
             with self.lock:
                 self.events.append(("alass", c))
             if not track:
-                return {"outcome": "keep_original", "reason": "no text track and the audio route is off", "route": None}
+                return {"outcome": "keep_original", "reason": "no text track and the audio route is off", "route": None,
+                        "waits_audio": True}
             if c in passes:
                 return {"outcome": "synced", "reason": "passes the main rule", "route": "cues", "body": text,
                         "gate_synced": {"within200": 0.9, "median_ms": 30}}
@@ -609,6 +610,18 @@ class PickedLanguageTest(unittest.TestCase):
         w.prioritize(audio.alias, "eng")
         self.assertEqual(audio.picked, {})
 
+
+    def test_the_no_track_case_is_told_by_the_pipelines_flag_not_its_words(self):
+        # Only the audio route could judge it (waits_audio): one fit, then nothing more is fitted or stored,
+        # whatever the reason says
+        self.fakes(track=False)
+        fake = pipeline.sync_subtitle
+        with mock.patch.object(pipeline, "sync_subtitle",
+                               lambda *a, **kw: dict(fake(*a, **kw), reason="the file has no subtitle track of its own")):
+            w = self.worker(SUBSYNC_LANGUAGES="eng")
+            self.judge(w, self.picked(w, "eng"), ["eng"])
+        self.assertEqual([kind for kind, _ in self.events], ["check"] * 8 + ["alass"])
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
 
 if __name__ == "__main__":
     unittest.main()

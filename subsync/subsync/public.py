@@ -127,6 +127,7 @@ class UserUsenetCounts:
 
 class StoreOnly:
     """The limits of a person who gets no worker now (too many people active): nothing is queued or read."""
+    who = None   # no person's key: the sources' fair shares count no one for them (Worker.who)
 
     def may_queue(self, queued):
         return False
