@@ -4,22 +4,27 @@ Off (an install of your own): requests go where they are sent, as before; your A
 network next to subsync.
 
 Public mode: what people type and what their listings contain decides where the service connects, so it connects only
-to public internet addresses. A name is looked up first and refused when any of its addresses is private, loopback,
-link-local (the cloud's own metadata service among them), shared, multicast or reserved; after connecting, the address
-the connection really reached is checked again, so a name that changes its answer between the two is refused too.
-Redirects are opened through the same connections. Only http and https are opened, and proxies from the environment are
-not used.
+to public internet addresses. A name is looked up once and refused when any of its addresses is private, loopback,
+link-local (the cloud's own metadata service among them), shared, multicast or reserved; the connection goes to the
+addresses checked, and the address it really reached is checked again. An IPv6 address that stands for an IPv4 one
+(IPv4-mapped, or a translator's prefix such as NAT64's) is judged as that IPv4 address. Redirects are opened through the
+same connections. Only http and https are opened, and proxies from the environment are not used.
 
 Standard library only, so ./setup can import it.
 """
 import http.client
 import ipaddress
 import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 
 _public_only = False
 _resolver = socket.getaddrinfo
+# IPv6 prefixes whose last 32 bits are the IPv4 address a connection reaches: IPv4-mapped, IPv4-translated (SIIT), the
+# NAT64 well-known prefix (RFC 6052) and the old IPv4-compatible form; Python counts the last three as global whatever
+# IPv4 address they carry
+_CARRY_IPV4 = tuple(ipaddress.ip_network(p) for p in ("::ffff:0:0/96", "::ffff:0:0:0/96", "64:ff9b::/96", "::/96"))
 
 
 class Refused(OSError):
@@ -38,35 +43,36 @@ def public_only():
 
 
 def is_public_ip(ip):
-    """Whether an address is on the public internet."""
+    """Whether an address is on the public internet (an IPv6 address carrying an IPv4 one: whether that one is)."""
     try:
         address = ipaddress.ip_address(str(ip).split("%", 1)[0])
     except ValueError:
         return False
-    mapped = getattr(address, "ipv4_mapped", None)
-    if mapped is not None:
-        address = mapped
+    if address.version == 6 and any(address in prefix for prefix in _CARRY_IPV4):
+        address = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     return address.is_global and not address.is_multicast
 
 
-def check_host(host, port=None):
-    """In public mode, refuses a host any of whose addresses is not public. Lookup errors pass through as OSError."""
-    if not _public_only:
-        return
+def _public_addresses(host, port):
+    """The host's addresses, every one public, else Refused: an address written as such as it is, a name looked up
+    once. Lookup errors pass through as OSError."""
     if not host:
         raise Refused("a request without a host")
     try:
         ipaddress.ip_address(str(host).split("%", 1)[0])
-        literal = True
+        found = [host]   # an address written as such is checked as it is, without a lookup
     except ValueError:
-        literal = False
-    if literal:   # an address written as such is checked as it is, without a lookup
-        if not is_public_ip(host):
+        found = [sockaddr[0] for *_, sockaddr in _resolver(host, port, type=socket.SOCK_STREAM)]
+    for ip in found:
+        if not is_public_ip(ip):
             raise Refused(f"{host} is not a public internet address")
-        return
-    for *_, sockaddr in _resolver(host, port, type=socket.SOCK_STREAM):
-        if not is_public_ip(sockaddr[0]):
-            raise Refused(f"{host} is not a public internet address")
+    return found
+
+
+def check_host(host, port=None):
+    """In public mode, refuses a host any of whose addresses is not public. Lookup errors pass through as OSError."""
+    if _public_only:
+        _public_addresses(host, port)
 
 
 def check_scheme(url):
@@ -119,10 +125,19 @@ def credentials_follow(url, new_url):
 
 
 def _guarded_create_connection(address, *args, **kwargs):
+    """socket.create_connection through the check: in public mode the name is looked up once, and the connection goes
+    to the addresses checked, in the lookup's order, as create_connection's own would (the last error when none
+    answers); the address it really reached is checked again."""
+    if not _public_only:
+        return socket.create_connection(address, *args, **kwargs)
     host, port = address[0], address[1]
-    check_host(host, port)
-    sock = socket.create_connection(address, *args, **kwargs)
-    if _public_only:
+    error = OSError("getaddrinfo returns an empty list")
+    for ip in _public_addresses(host, port):
+        try:
+            sock = socket.create_connection((ip, port), *args, **kwargs)
+        except OSError as e:
+            error = e
+            continue
         try:
             peer = sock.getpeername()[0]
         except OSError:
@@ -131,7 +146,8 @@ def _guarded_create_connection(address, *args, **kwargs):
         if not is_public_ip(peer):
             sock.close()
             raise Refused(f"{host} reached an address that is not public")
-    return sock
+        return sock
+    raise error
 
 
 class _HTTPConnection(http.client.HTTPConnection):
@@ -166,6 +182,15 @@ class _OtherSchemes(urllib.request.BaseHandler):
         return None   # off: urllib's own handler opens it, as before
 
     file_open = ftp_open = data_open = _refuse
+
+
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """For a request that carries a key or a password: ahead of the gate's own redirect handler, a redirect comes back
+    as an HTTPError and is never followed (urllib would send every header on to wherever it points)."""
+    handler_order = 400
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
 
 
 class _NoEnvironmentProxies(urllib.request.ProxyHandler):

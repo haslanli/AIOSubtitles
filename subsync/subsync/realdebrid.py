@@ -85,13 +85,14 @@ class GuardedRedirects(urllib.request.HTTPRedirectHandler):
 _OPENER = net.build_opener()
 
 
-def urlopen(request, timeout):
+def urlopen(request, timeout, opener=None):
     """urllib.request.urlopen with the checks on the address and on every redirect (and, in public mode, net.py's
-    public-address check on every connection)."""
+    public-address check on every connection). `opener`: another of net.build_opener's (with a cookie jar, or
+    net.NoRedirects for a request that carries a key or a password)."""
     url = request.full_url if isinstance(request, urllib.request.Request) else request
     check(url)
     net.check_scheme(url)
-    return _OPENER.open(request, timeout=timeout)
+    return (opener or _OPENER).open(request, timeout=timeout)
 
 
 # ------------------------------------------------------------------------------------------- 2. each listed row

@@ -79,6 +79,17 @@ class RangesTest(unittest.TestCase):
             with self.subTest(ip=ip):
                 self.assertTrue(net.is_public_ip(ip))
 
+    def test_an_ipv6_address_carrying_an_ipv4_one_is_judged_by_it(self):
+        # A NAT64 gateway (64:ff9b::/96), a SIIT translator (::ffff:0:0:0/96) and the old IPv4-compatible form
+        # (::/96) reach the IPv4 address in the last 32 bits; Python counts these prefixes as global whatever it is
+        for ip in ("64:ff9b::a9fe:a9fe", "64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::e000:1", "::ffff:0:a9fe:a9fe",
+                   "::ffff:0:a00:1", "::a9fe:a9fe", "::a00:1"):
+            with self.subTest(ip=ip):
+                self.assertFalse(net.is_public_ip(ip))
+        for ip in ("64:ff9b::808:808", "::ffff:0:808:808", "::808:808"):
+            with self.subTest(ip=ip):
+                self.assertTrue(net.is_public_ip(ip))
+
 
 class OriginTest(unittest.TestCase):
     def test_where_credentials_may_follow_a_redirect(self):
@@ -111,6 +122,30 @@ class GateTest(unittest.TestCase):
         net.configure(public_only=True, resolver=resolver_answering("169.254.169.254"))
         with local_network_only():
             refused(self, lambda: realdebrid.urlopen("http://169.254.169.254/opc/v2/instance/", timeout=5))
+
+    def test_the_metadata_service_through_nat64_is_refused(self):
+        net.configure(public_only=True, resolver=resolver_answering("93.184.216.34"))
+        with local_network_only():
+            refused(self, lambda: realdebrid.urlopen("http://[64:ff9b::a9fe:a9fe]/latest/meta-data/", timeout=5))
+
+    def test_a_name_is_looked_up_once_and_its_checked_address_connected_to(self):
+        # The connection goes to the address the check passed, not to the name looked up a second time
+        server = Server()
+        try:
+            lookups = []
+
+            def resolve(host, port, *a, **k):
+                lookups.append(host)
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+            net.configure(public_only=True, resolver=resolve)
+            real = net.is_public_ip
+            with unittest.mock.patch.object(net, "is_public_ip", lambda ip: ip == "127.0.0.1" or real(ip)), \
+                    local_network_only():
+                with realdebrid.urlopen(f"http://files.test:{server.port}/x", timeout=5) as r:
+                    self.assertEqual(r.read(), b"ok")
+            self.assertEqual((lookups, server.requests), (["files.test"], ["/x"]))
+        finally:
+            server.close()
 
     def test_a_connection_that_lands_on_a_private_address_is_refused(self):
         server = Server()

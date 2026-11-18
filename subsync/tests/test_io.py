@@ -226,8 +226,9 @@ class Mp4Test(unittest.TestCase):
         import statistics
         for name in ("tiny.mp4", "tiny-nosub.mp4"):
             idx = self.index(name)
-            a, b = idx.byte_range(20.0, 10.0)
-            self.assertLess(b - a, idx.size // 3)
+            before = idx.r.bytes
+            idx.window_pcm(20.0, 10.0)
+            self.assertLess(idx.r.bytes - before, idx.size // 3)   # what the window's read takes, its margins included
             pcm = idx.window_pcm(20.0, 40.0)
             self.assertAlmostEqual(len(pcm) / 2 / 16000, 40.0, delta=0.1)
             x = array.array("h", pcm[:len(pcm) // 2 * 2])

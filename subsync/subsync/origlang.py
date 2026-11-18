@@ -10,7 +10,8 @@ person, a file or a link.
 
 Answers are kept per title in the store and shared by everyone: a found answer with no expiry, whatever its source,
 so a title is looked up once (longer than TMDB's terms allow, as SUBSYNC_TMDB_KEY's explanation says); not found 7 days and a
-failed service 10 minutes, so those are asked again. A lookup runs
+failed service 10 minutes, so those are asked again. An answer found without TMDB is asked at TMDB once a key comes, and
+only TMDB's answer replaces it (a TMDB that didn't answer is asked again 10 minutes later). A lookup runs
 in the background and never holds a job: a file read before the answer comes uses the rules for an unknown language,
 and is judged again once it is known (worker). An operator's list (SUBSYNC_ORIGINAL_LANGUAGES) overrides any lookup.
 """
@@ -58,21 +59,13 @@ class Failed(Exception):
         self.service, self.why, self.retry_after, self.code = service, why, retry_after, code
 
 
-class _Unfollowed(urllib.request.HTTPRedirectHandler):
-    """TMDB's calls carry a key: a redirect comes back as an error and is never followed (urllib would send the
-    Authorization header on to wherever it points)."""
-    handler_order = 400
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+_KEYED_OPENER = net.build_opener(net.NoRedirects())
 
 
 def _open_keyed(req, timeout):
-    """A request with a key in it: through the same checks as every request (Real-Debrid, the address rules), never
-    following a redirect."""
-    realdebrid.check(req.full_url)
-    net.check_scheme(req.full_url)
-    return net.build_opener(_Unfollowed()).open(req, timeout=timeout)
+    """A request with a key in it (TMDB's): through the same checks as every request (Real-Debrid, the address rules),
+    never following a redirect (urllib would send the key on to wherever it points)."""
+    return realdebrid.urlopen(req, timeout, opener=_KEYED_OPENER)
 
 
 def title_of(video_id):
@@ -101,6 +94,11 @@ def parse_overrides(text):
 def _plain(track):
     from .pipeline import is_secondary
     return not track.get("forced") and not is_secondary(track)
+
+
+def _found(answer):
+    """Whether an answer holds a found language (TMDB's "none", a language outside ISO 639-1, included)."""
+    return bool(answer and (answer.get("tmdb") or answer.get("wikidata") or answer.get("anime")))
 
 
 def choose(answer, tracks=()):
@@ -221,6 +219,7 @@ class Lookup:
         self.flying = {}                  # title -> its running lookup (a Future)
         self.paused = {}                  # service -> clock time it may be asked again
         self.bad_keys = {}                # a refused key's SHA-256 -> clock time it may be tried again
+        self.tmdb_later = {}              # title TMDB didn't answer for -> clock time it may be asked again
         self.max_pending = MAX_PENDING
         self.wikidata_lock = threading.Lock()
         self.anilist_lock = threading.Lock()
@@ -247,8 +246,9 @@ class Lookup:
 
     def start(self, video_id, key=""):
         """Starts the title's lookup in the background unless its answer is kept (an answer found without TMDB is
-        looked up again once with a key), an override names it, or it is running already (then that lookup). Returns
-        its Future, or None; never waits. Past MAX_PENDING lookups waiting, None: a later request asks again."""
+        looked up again with a key, once TMDB answers: FAILED_S after a try it didn't), an override names it, or it is
+        running already (then that lookup). Returns its Future, or None; never waits. Past MAX_PENDING lookups waiting,
+        None: a later request asks again."""
         title = title_of(video_id)
         if title is None or title in self.overrides:
             return None
@@ -256,12 +256,14 @@ class Lookup:
         with self.lock:
             if title in self.flying:
                 return self.flying[title]
-            kept = self.store.title_language(title, self.clock())
-            if kept is not None and not (key and title.startswith("tt") and not kept.get("tmdb_asked")):
+            now = self.clock()
+            kept = self.store.title_language(title, now)
+            if kept is not None and not (key and title.startswith("tt") and not kept.get("tmdb_asked")
+                                         and self.tmdb_later.get(title, 0) <= now):
                 return None
             if len(self.flying) >= self.max_pending:
                 return None
-            fut = self.pool.submit(self._lookup, title, key)
+            fut = self.pool.submit(self._lookup, title, key, kept if _found(kept) else None)
             self.flying[title] = fut
         fut.add_done_callback(lambda _f, t=title: self._landed(t))
         return fut
@@ -271,7 +273,10 @@ class Lookup:
             self.flying.pop(title, None)
 
     # -- one lookup --------------------------------------------------------------------------------------------
-    def _lookup(self, title, key):
+    def _lookup(self, title, key, kept=None):
+        """`kept`: the title's found answer, when it is looked up again for TMDB's (start). Only TMDB's answer replaces
+        it: while TMDB doesn't answer, it stays as it was, with no expiry, and when Wikidata doesn't, its Wikidata part
+        stays."""
         answer = {"tmdb": None, "tmdb_asked": False, "wikidata": None, "anime": None, "via": None, "failed": []}
         try:
             if title.startswith(("mal:", "kitsu:")):
@@ -297,8 +302,21 @@ class Lookup:
             answer["failed"].append("lookup")
             log.warning("original language %s: lookup failed (%s)", title, type(e).__name__)
         now = self.clock()
-        found = bool(answer["tmdb"] or answer["wikidata"] or answer["anime"])
-        if answer["failed"]:
+        if key and title.startswith("tt"):   # TMDB was asked: when it didn't answer, start asks it again FAILED_S later
+            if answer["tmdb_asked"]:
+                self.tmdb_later.pop(title, None)
+            else:
+                self.tmdb_later[title] = now + FAILED_S
+        if kept is not None:
+            if not answer["tmdb_asked"]:
+                log.info("original language %s: kept as found before (TMDB asked again later)", title)
+                return kept
+            if answer["wikidata"] is None:   # Wikidata didn't answer this time
+                answer["wikidata"] = kept.get("wikidata")
+                lang, how = choose(answer)
+                answer["via"] = how if lang else None
+        found = _found(answer)
+        if answer["failed"] and kept is None:
             until = now + FAILED_S
         elif not found:
             until = now + NOT_FOUND_S

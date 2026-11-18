@@ -464,14 +464,6 @@ class AiosError(Exception):
         self.message, self.fix, self.code, self.detail = message, fix, code, detail
 
 
-class _Unfollowed(urllib.request.HTTPRedirectHandler):
-    """Ahead of the request gate's own redirect handler: a redirect comes back as it is and is never followed."""
-    handler_order = 400
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
-
-
 ALIAS_REDIRECTS = (301, 302, 303, 307, 308)
 # AIOStreams' codes for a config ID and password that open no config: a wrong password, or a config that is gone
 WRONG_PASSWORD_CODES = ('USER_INVALID_DETAILS', 'USER_INVALID_PASSWORD', 'USER_NOT_FOUND')
@@ -539,7 +531,7 @@ class AiosApi:
         self.opener = net.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
         # for calls that carry a password: a redirect is never followed (urllib would send the password on to wherever
         # it points, plain http included)
-        self.keyed_opener = net.build_opener(urllib.request.HTTPCookieProcessor(self.jar), _Unfollowed())
+        self.keyed_opener = net.build_opener(urllib.request.HTTPCookieProcessor(self.jar), net.NoRedirects())
         self.signed_in = False
 
     def call(self, method, path, body=None, auth=None, timeout=None, raw=False):
@@ -570,10 +562,8 @@ class AiosApi:
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         wait_at_most = self._wait_at_most(timeout)
         try:
-            realdebrid.check(url)
-            net.check_scheme(url)
             try:
-                answer = (self.keyed_opener if auth else self.opener).open(req, timeout=wait_at_most)
+                answer = realdebrid.urlopen(req, wait_at_most, opener=self.keyed_opener if auth else self.opener)
             except urllib.error.HTTPError as e:
                 answer = e          # a refusal is an answer too: read, and closed, the same way
             try:
@@ -678,9 +668,7 @@ class AiosApi:
         wait_at_most = min(self._wait_at_most(), QUICK_TIMEOUT)
         location, body = None, b''
         try:
-            realdebrid.check(url)
-            net.check_scheme(url)
-            with net.build_opener(_Unfollowed()).open(req, timeout=wait_at_most) as r:
+            with realdebrid.urlopen(req, wait_at_most, opener=net.build_opener(net.NoRedirects())) as r:
                 status = r.status
         except urllib.error.HTTPError as e:
             status, location = e.code, (e.headers.get('Location') if e.headers else None)

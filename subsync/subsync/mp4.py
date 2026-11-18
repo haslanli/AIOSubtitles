@@ -4,20 +4,28 @@ audio windows. The same questions MkvIndex answers, for .mp4/.m4v/.mov files.
 Everything about timing lives in the `moov` box (at the start of a "fast start" file, else right after the media
 data): a text track's lines are its samples, and each sample's start, duration and size are in the sample tables, so
 the whole timing comes from `moov` without reading any media data. An empty sample (tx3g: 2 bytes, WebVTT: one empty
-`vtte` box) is the gap between two lines. An audio window is the byte range of the audio samples that cover it; AAC
-frames get an ADTS header each and AC-3/E-AC-3 frames are passed as they are, decoded from a pipe.
+`vtte` box) is the gap between two lines. An audio window is the byte range of the audio samples that cover it, streamed:
+each sample is cut out as its bytes pass, AAC frames with an ADTS header each and AC-3/E-AC-3 frames as they are, and
+fed to the decoder through a pipe.
 Fragmented files (`moof`) are not supported.
 """
 import struct
-import subprocess
 
 from .mkv import (HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, WORD_READ, LineReads, NotMatroska, add_audio_bytes,
-                  add_words_bytes, decoder_cmd, index_hash, read_lines, sane_duration, starts_at)
+                  add_words_bytes, decoder_cmd, index_hash, pipe_until, read_lines, sane_duration, starts_at)
 
 MAX_MOOV = 64 * 1024 * 1024
+# the samples of a track walked one by one (_lines, _sample_offsets) cost a Python object or more each, while a few bytes
+# of the movie box can claim billions: a file with more than these is not read (NotMp4)
+MAX_TEXT_SAMPLES = 1_000_000     # of all its text tracks together (a film's track: a few thousand lines and gaps)
+MAX_AUDIO_SAMPLES = 5_000_000    # of the audio track its windows are cut from (3 hours of 48 kHz AAC: about 0.5 M)
+WINDOW_MARGIN_S = 0.1            # audio read on each side of a window, so its first and last frames are whole
+# how many times its share of the file an audio window's bytes may span: a real file's busiest scene holds a few times
+# its share, a made-up chunk table can place a window's last sample gigabytes away (NotMp4)
+MAX_WINDOW_SPAN = 8
 TEXT_SAMPLE_ENTRIES = {b"tx3g": 2, b"text": 2, b"wvtt": 8}   # codec -> largest size of an empty sample
 AUDIO_RAW = {b"ac-3": "ac3", b"ec-3": "eac3"}
-CONTAINERS = (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"udta")
+TRAK_CONTAINERS = (b"mdia", b"minf", b"stbl", b"edts", b"udta")   # the boxes in a trak that hold the boxes read
 ADTS_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350)
 
 
@@ -45,6 +53,16 @@ def boxes(buf, pos, end):
             return
         yield kind, pos + head, pos + size
         pos += size
+
+
+def _table(b, q, f, fmt, count_at=4):
+    """The entries of a sample table box whose payload is b[q:f]: its 32-bit entry count at q + count_at, the entries,
+    each `fmt`, right after it. NotMp4 when the count claims more entries than the box holds."""
+    n = struct.unpack_from(">I", b, q + count_at)[0]
+    at, size = q + count_at + 4, struct.calcsize(fmt)
+    if n * size > f - at:
+        raise NotMp4("table larger than its box")
+    return list(struct.iter_unpack(fmt, b[at:at + n * size]))
 
 
 def looks_like_mp4(head):
@@ -97,7 +115,9 @@ class Mp4Index:
 
     def read_cues(self):
         """The movie box: what the head read holds of it, and the rest read once; a movie box that ends the file is read
-        with the file's last 64 KiB, which the hash needs too (kept as `last64`)."""
+        with the file's last 64 KiB, which the hash needs too (kept as `last64`). A file whose tracks claim more samples
+        than MAX_TEXT_SAMPLES or MAX_AUDIO_SAMPLES is not read; without a usable movie length (the header's all ones
+        say "unknown") the runtime is where the audio track ends."""
         if self.moov_size > MAX_MOOV:
             raise NotMp4("moov too large")
         end = min(self.moov_at + self.moov_size, self.size)
@@ -117,6 +137,12 @@ class Mp4Index:
                 self._moov(moov, p, e)
         if not self.tracks:
             raise NotMp4("no tracks")
+        audio = self._audio()
+        if sum(t["count"] for t in self.tracks if t["codec"] in TEXT_SAMPLE_ENTRIES) > MAX_TEXT_SAMPLES \
+                or (audio is not None and audio["count"] > MAX_AUDIO_SAMPLES):
+            raise NotMp4("too many samples")
+        if sane_duration(self.duration_s) is None and audio is not None:   # no usable length: the audio track's own
+            self.duration_s = self._end(audio)
         return self
 
     def read_hash(self):
@@ -131,7 +157,8 @@ class Mp4Index:
                     self.movie_scale, dur = struct.unpack_from(">IQ", b, q + 20)
                 else:
                     self.movie_scale, dur = struct.unpack_from(">II", b, q + 12)
-                self.duration_s = dur / self.movie_scale if self.movie_scale else None
+                unknown = dur == (1 << (64 if v == 1 else 32)) - 1     # all ones: "can't be determined" (ISO 14496-12)
+                self.duration_s = dur / self.movie_scale if self.movie_scale and not unknown else None
             elif kind == b"trak":
                 t = self._trak(b, q, f)
                 if t:
@@ -143,7 +170,7 @@ class Mp4Index:
 
         def walk(p, e):
             for kind, q, f in boxes(b, p, e):
-                if kind in (b"mdia", b"minf", b"stbl", b"edts", b"udta"):
+                if kind in TRAK_CONTAINERS:
                     walk(q, f)
                 elif kind == b"tkhd":
                     v, flags = b[q], int.from_bytes(b[q + 1:q + 4], "big")
@@ -165,16 +192,8 @@ class Mp4Index:
                     t["name"] = t["name"] or b[q + 24:f].split(b"\0")[0].decode("utf-8", "replace")
                 elif kind == b"name":
                     t["name"] = b[q:f].decode("utf-8", "replace").strip("\0 ")
-                elif kind == b"elst":
-                    v, n = b[q], struct.unpack_from(">I", b, q + 4)[0]
-                    at = q + 8
-                    for _ in range(n):
-                        if v == 1:
-                            dur, mt = struct.unpack_from(">Qq", b, at)
-                            at += 20
-                        else:
-                            dur, mt = struct.unpack_from(">Ii", b, at)
-                            at += 12
+                elif kind == b"elst":   # each edit: its duration, media time and rate
+                    for dur, mt, _ in _table(b, q, f, ">QqI" if b[q] == 1 else ">IiI"):
                         if mt == -1:
                             t["empty"] += dur          # an empty edit: the track starts later (movie timescale)
                         else:
@@ -186,27 +205,27 @@ class Mp4Index:
                         if t["codec"] == b"mp4a":
                             t["asc"] = _audio_specific_config(b[q + 8:min(f, q + 8 + esize)])
                 elif kind == b"stts":
-                    n = struct.unpack_from(">I", b, q + 4)[0]
-                    t["stts"] = list(struct.iter_unpack(">II", b[q + 8:q + 8 + 8 * n]))
+                    t["stts"] = _table(b, q, f, ">II")
                 elif kind == b"stsz":
                     t["const"], t["count"] = struct.unpack_from(">II", b, q + 4)
                     if not t["const"]:
-                        t["sizes"] = [x for (x,) in struct.iter_unpack(">I", b[q + 12:q + 12 + 4 * t["count"]])]
+                        t["sizes"] = [x for (x,) in _table(b, q, f, ">I", count_at=8)]
                 elif kind == b"stsc":
-                    n = struct.unpack_from(">I", b, q + 4)[0]
-                    t["stsc"] = list(struct.iter_unpack(">III", b[q + 8:q + 8 + 12 * n]))
+                    t["stsc"] = _table(b, q, f, ">III")
                 elif kind == b"stco":
-                    n = struct.unpack_from(">I", b, q + 4)[0]
-                    t["chunks"] = [x for (x,) in struct.iter_unpack(">I", b[q + 8:q + 8 + 4 * n])]
+                    t["chunks"] = [x for (x,) in _table(b, q, f, ">I")]
                 elif kind == b"co64":
-                    n = struct.unpack_from(">I", b, q + 4)[0]
-                    t["chunks"] = [x for (x,) in struct.iter_unpack(">Q", b[q + 8:q + 8 + 8 * n])]
+                    t["chunks"] = [x for (x,) in _table(b, q, f, ">Q")]
         walk(p, e)
         return t if t["id"] is not None and t["scale"] else None   # a timescale of 0 can't time anything: left out
 
     def _shift(self, t):
         """Seconds to add to a media time to get the presented time (edit list)."""
         return (t["empty"] / self.movie_scale if self.movie_scale else 0.0) - t["media_time"] / t["scale"]
+
+    def _end(self, t):
+        """The presented time at which the track's last sample ends."""
+        return sum(count * delta for count, delta in t["stts"]) / t["scale"] + self._shift(t)
 
     def _size(self, t, i):
         return t["const"] or t["sizes"][i]
@@ -274,10 +293,6 @@ class Mp4Index:
                 return t
         return usable[0] if usable else None
 
-    def audio_track_index(self):
-        t = self._audio()
-        return None if t is None else [x for x in self.tracks if x["handler"] == b"soun"].index(t)
-
     def duration(self):
         return sane_duration(self.duration_s)
 
@@ -317,45 +332,58 @@ class Mp4Index:
             i += count
         return first, last, first_time
 
-    def byte_range(self, start, length):
+    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024):
+        """16 kHz mono s16le PCM of [start, start+length) from the first usable audio track. The byte range of the
+        samples that cover it (WINDOW_MARGIN_S more on each side) is one bounded read, streamed as MkvIndex's is: each
+        sample is cut out as its bytes pass and fed to the decoder, and the read stops once the window is decoded, so an
+        interleaved file's video is never held. A range wider than MAX_WINDOW_SPAN times the window's share of the file
+        is not read (NotMp4). Bytes read are added to `audio_bytes`."""
         t = self._audio()
         if t is None:
             raise NotMp4("no audio this module can decode")
-        first, last, _ = self._samples_in(t, start, start + length)
+        first, last, first_time = self._samples_in(t, start - WINDOW_MARGIN_S, start + length + WINDOW_MARGIN_S)
         offs = self._sample_offsets(t)
         if first is None or last >= len(offs):
             raise NoAudioThere("no audio samples there")
-        return offs[first], offs[last] + self._size(t, last)
-
-    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg"):
-        """16 kHz mono s16le PCM of [start, start+length) from the first usable audio track, one bounded read."""
-        t = self._audio()
-        if t is None:
-            raise NotMp4("no audio this module can decode")
-        first, last, first_time = self._samples_in(t, start - 0.1, start + length + 0.1)
-        offs = self._sample_offsets(t)
-        if first is None or last >= len(offs):
-            raise NoAudioThere("no audio samples there")
-        a, b = offs[first], offs[last] + self._size(t, last)
-        data = self.r.get(a, b - a)
-        add_audio_bytes(self, len(data))
-        if t["codec"] == b"mp4a":
-            fmt, parts = "aac", []
-            for i in range(first, last + 1):
-                frame = data[offs[i] - a: offs[i] - a + self._size(t, i)]
-                parts.append(_adts(t["asc"], len(frame)) + frame)
-            stream = b"".join(parts)
-        else:
-            fmt = AUDIO_RAW[t["codec"]]
-            stream = b"".join(data[offs[i] - a: offs[i] - a + self._size(t, i)] for i in range(first, last + 1))
+        order = sorted(range(first, last + 1), key=offs.__getitem__)   # the samples in file order (as muxers store them)
+        a, b = offs[order[0]], max(offs[i] + self._size(t, i) for i in order)
+        d = self.duration()
+        if d and b - a > MAX_WINDOW_SPAN * (length + 2 * WINDOW_MARGIN_S) * self.size / d:
+            raise NotMp4("audio samples spread far past their window")
+        fmt = "aac" if t["codec"] == b"mp4a" else AUDIO_RAW[t["codec"]]
         skip = max(0.0, start - first_time)
+        cmd = decoder_cmd(ffmpeg, fmt, ["-ss", f"{skip:.3f}", "-t", f"{length:.3f}", "-ac", "1", "-ar", str(sr),
+                                        "-f", "s16le", "-"])
+        got = [0]
+
+        def samples(chunks):
+            """The window's samples in decoding order, each cut out of the read once all its bytes are in (those a
+            piece of the read completes, joined); only the bytes a sample still needs are kept."""
+            buf, at, k, cut, nxt = bytearray(), a, 0, {}, first   # buf: the file's bytes from `at` on
+            try:
+                for c in chunks:
+                    got[0] += len(c)
+                    buf += c
+                    while k < len(order) and offs[order[k]] + self._size(t, order[k]) <= at + len(buf):
+                        i = order[k]
+                        cut[i] = bytes(buf[offs[i] - at:offs[i] - at + self._size(t, i)])
+                        k += 1
+                    done = min(offs[order[k]] - at, len(buf)) if k < len(order) else len(buf)
+                    del buf[:done]
+                    at += done
+                    out = []
+                    while nxt in cut:
+                        frame = cut.pop(nxt)
+                        out.append(_adts(t["asc"], len(frame)) + frame if fmt == "aac" else frame)
+                        nxt += 1
+                    if out:
+                        yield b"".join(out)
+            finally:
+                chunks.close()   # the decoder stopped early: the connection closes now
         try:
-            out = subprocess.run(decoder_cmd(ffmpeg, fmt, ["-ss", f"{skip:.3f}", "-t", f"{length:.3f}", "-ac", "1",
-                                                           "-ar", str(sr), "-f", "s16le", "-"]),
-                                 input=stream, capture_output=True, timeout=300)
-        except subprocess.TimeoutExpired as e:   # as mkv.pipe_until: what was decoded (AudioFit refuses a short window)
-            return e.stdout or b""
-        return out.stdout
+            return pipe_until(cmd, b"", samples(self.r.stream(a, b - a, chunk)), int(length * sr) * 2)
+        finally:
+            add_audio_bytes(self, got[0])
 
 
 def sample_text(codec, data):
@@ -400,9 +428,13 @@ def _audio_specific_config(entry):
         if tag != 0x03:
             return b""
         flags = entry[p + 2]
-        p += 3 + (2 if flags & 0x80 else 0) + (2 if flags & 0x20 else 0)
+        p += 3                       # ES_ID, flags; then, in this order (ISO 14496-1), the fields the flags announce:
+        if flags & 0x80:
+            p += 2                   # dependsOn_ES_ID
         if flags & 0x40:
-            p += 1 + entry[p]
+            p += 1 + entry[p]        # URL length and URL
+        if flags & 0x20:
+            p += 2                   # OCR_ES_Id
         tag, p, _ = descriptor(p)
         if tag != 0x04:
             return b""

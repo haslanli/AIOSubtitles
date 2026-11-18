@@ -4,7 +4,6 @@ a subtitle signal no longer than the windows can read."""
 import collections
 import os
 import random
-import subprocess
 import sys
 import threading
 import unittest
@@ -104,11 +103,15 @@ class UnreadableWindowTest(unittest.TestCase):
         self.assertEqual(out["windows"], 0)
 
     def test_an_mp4_decoder_that_times_out_gives_what_it_decoded(self):
+        from subsync.mkv import pipe_until
         srv = RangeServer(FIXTURES)
         try:
             idx = open_index(RangeReader(srv.url("tiny.mp4"), "test"))
-            timeout = subprocess.TimeoutExpired(["ffmpeg"], 300, output=b"\x01\x00" * 1000)
-            with mock.patch("subsync.mp4.subprocess.run", side_effect=timeout):
+            # a decoder that gives 1,000 samples and then runs past its time (300 s, here 1 s)
+            hangs = [sys.executable, "-c", "import sys, time; sys.stdout.buffer.write(b'\\x01\\x00' * 1000); "
+                                           "sys.stdout.buffer.flush(); sys.stdin.buffer.read(); time.sleep(30)"]
+            with mock.patch("subsync.mp4.decoder_cmd", lambda *a, **k: hangs), \
+                    mock.patch("subsync.mp4.pipe_until", lambda *a, **k: pipe_until(*a, **k, timeout=1.0)):
                 self.assertEqual(idx.window_pcm(20.0, 10.0), b"\x01\x00" * 1000)
                 fit = AudioFit(idx, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=LoudVad())
                 with self.assertRaises(ReadFailed):                       # and a fit takes it as a short window

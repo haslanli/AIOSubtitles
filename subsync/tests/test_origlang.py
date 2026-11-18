@@ -383,6 +383,50 @@ class TmdbLaterTest(Base):
         self.assertIsNone(self.lookup.start("tt1375666", key=""))
         self.assertEqual(len(self.srv.of("tmdb")), 1)
 
+    def until(self, title):
+        return self.store.db.execute("SELECT until FROM title_language WHERE title=?", (title,)).fetchone()[0]
+
+    def again(self, title):
+        fut = self.lookup.start(title, key=KEY)
+        self.assertIsNotNone(fut)
+        fut.result(timeout=10)
+        return self.lookup.peek(title)
+
+    def test_a_found_answer_stays_while_tmdb_doesnt_answer(self):
+        # Only TMDB's answer replaces a found one; while it doesn't come the answer stays, with no expiry, and
+        # TMDB is asked again ten minutes later, not on every request
+        self.srv.wikidata["tt1"] = [binding("Q1860", iso1="en")]
+        self.ask("tt1", key="")
+        self.srv.status["tmdb"] = (500, ())
+        self.srv.status["sparql"] = (500, ())
+        got = self.again("tt1")
+        self.assertEqual((origlang.choose(got), got["tmdb_asked"]), (("eng", "wikidata"), False))
+        self.assertIsNone(self.until("tt1"))
+        self.assertIsNone(self.lookup.start("tt1", key=KEY))
+        self.assertEqual(len(self.srv.of("tmdb")), 1)
+        self.clock.t += 601
+        self.srv.status.clear()
+        self.srv.find["tt1"] = {"movie_results": [{"id": 1, "original_language": "fr"}]}
+        got = self.again("tt1")
+        self.assertEqual((origlang.choose(got), got["tmdb_asked"]), (("fre", "tmdb"), True))
+        self.assertEqual(len(self.srv.of("tmdb")), 2)
+
+    def test_a_found_answer_keeps_its_wikidata_part_when_only_wikidata_fails(self):
+        self.srv.wikidata["tt1"] = [binding("Q150", iso1="fr"), binding("Q1860", iso1="en")]
+        self.ask("tt1", key="")
+        self.srv.status["sparql"] = (500, ())
+        self.srv.find["tt1"] = {"movie_results": [{"id": 1, "original_language": "en"}]}
+        got = self.again("tt1")
+        self.assertEqual((got["wikidata"], origlang.choose(got)), (["fre", "eng"], ("eng", "tmdb")))
+        self.assertIsNone(self.until("tt1"))
+
+    def test_a_tmdb_that_failed_is_not_asked_again_at_once(self):
+        self.srv.status["tmdb"] = (500, ())
+        self.srv.wikidata["tt1"] = [binding("Q1860", iso1="en")]
+        self.ask("tt1")
+        self.assertIsNone(self.lookup.start("tt1", key=KEY))           # the failed row's ten minutes hold
+        self.assertEqual(len(self.srv.of("tmdb")), 1)
+
 
 class WikidataTest(Base):
     key = ""
