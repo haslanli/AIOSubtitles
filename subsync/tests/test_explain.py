@@ -405,6 +405,174 @@ class Group2Test(unittest.TestCase):
                              "(at most 5 a day)", "(none on this install: such files wait for a pick)"))
 
 
+class Group3Test(unittest.TestCase):
+    """The texts of cycle 1's vis3-explain-3, word for word."""
+
+    @staticmethod
+    def public(**env):
+        return Settings(dict({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://subs.test"}, **env))
+
+    @staticmethod
+    def privacy(s, sources=None):
+        from subsync.extra import asked_sources
+        return dict(explain.privacy_parts(s, asked_sources(s, "series") if sources is None else sources))
+
+    def test_counts_of_one_read_in_the_singular(self):
+        # "1 sign-up attempts", "at most 1 extra searches", "(0 of 1 searches used today)"
+        self.assertEqual(explain.tries_text(1), "Each try counts: 1 sign-up attempt per address in an hour.")
+        self.assertEqual(explain.tries_text(5), "Each try counts: 5 sign-up attempts per address in an hour.")
+        self.assertIn(" The cost: at most 1 extra search a day through your indexers ", explain.usenet_help(1))
+        self.assertNotIn("extra searches", explain.usenet_help(1))
+        self.assertEqual(explain.usenet_help(10), explain.QUESTIONS["USENET"][1])
+        self.assertEqual(explain.setup_help("USENET", Settings({"SUBSYNC_USENET_LISTINGS_PER_DAY": "1"})),
+                         explain.usenet_help(1))
+        self.assertEqual(explain.usenet_status(True, "NzbDAV", 0, 1),
+                         "Usenet: on, through NzbDAV (0 of 1 search used today)")
+        self.assertEqual(explain.usenet_status(True, "NzbDAV", 2, 10),
+                         "Usenet: on, through NzbDAV (2 of 10 searches used today)")
+        self.assertEqual(explain.usenet_status(False, "NzbDAV", 2, 10), "Usenet: off")
+        self.assertEqual([explain.plural(n, "day") for n in (0, 1, 2)], ["days", "day", "days"])
+
+    def test_the_audio_texts_at_their_zero_values(self):
+        # SUBSYNC_AUDIO_BUDGET_GB 0 read "at most no set limit"; SUBSYNC_USER_AUDIO_PER_DAY 0 still asked the question
+        # and said "at most 0 a day"
+        self.assertIn(" 0 stops new audio syncs, takes the audio question off the pages and keeps the copies already "
+                      "made. ", explain.SETTINGS["SUBSYNC_USER_AUDIO_PER_DAY"][1])
+        limited, unlimited = self.public(SUBSYNC_AUDIO_ROUTE="on"), \
+            self.public(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")
+        self.assertIn("about 60–350 MB a file and at most 1 GB, and works one to three minutes",
+                      explain.audio_help(limited))
+        self.assertIn("about 60–350 MB a file, and works one to three minutes", explain.audio_help(unlimited))
+        self.assertIn("short parts of its sound (about 60–350 MB, at most 1 GB) through",
+                      self.privacy(limited)["What is read"])
+        self.assertIn("short parts of its sound (about 60–350 MB) through", self.privacy(unlimited)["What is read"])
+        for text in (explain.audio_help(unlimited), self.privacy(unlimited)["What is read"]):
+            self.assertNotIn("no set limit", text)
+        self.assertIsNone(explain.audio_limit_words(unlimited))
+        for gb, words in (("1", "1 GB"), ("0.5", "0.5 GB"), ("2.5", "2.5 GB"), ("1000000", "1000000 GB")):
+            self.assertEqual(explain.audio_limit_words(Settings({"SUBSYNC_AUDIO_BUDGET_GB": gb})), words)
+        none_a_day = self.public(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_USER_AUDIO_PER_DAY="0")
+        self.assertTrue(explain.audio_offered(limited))
+        self.assertFalse(explain.audio_offered(none_a_day))
+        self.assertEqual(explain.intro_parts(none_a_day), explain.intro_parts(self.public()))
+        self.assertEqual(explain.next_text(none_a_day), explain.PUBLIC_TEXTS["next"])
+        self.assertEqual(self.privacy(none_a_day), self.privacy(self.public()))
+
+    def test_the_kept_password_texts_state_how_often_the_check_runs(self):
+        # "about once a day" whatever SUBSYNC_RECHECK_HOURS said; with 0 nothing uses a kept password
+        for hours, every in (("24", "about once a day"), ("6", "about every 6 hours"), ("48", "about every 2 days"),
+                             ("36", "about every 36 hours"), ("1", "about every 1 hour")):
+            with self.subTest(hours=hours):
+                s = self.public(SUBSYNC_RECHECK_HOURS=hours)
+                self.assertEqual(explain.recheck_every(s), every)
+                self.assertIn(f"encrypted so that it opens only with your personal link, and {every} while you use it "
+                              "rebuilds its own config from yours, ", explain.field_help("keep_password", s))
+                self.assertTrue(explain.PUBLIC_TEXTS["copied_auto"].format(when="today", every=every).endswith(
+                    f" AIOSubtitles keeps your password and follows changes to your config by itself, {every} while "
+                    "you use it."))
+                self.assertTrue(s.keeps_passwords)
+        self.assertFalse(self.public(SUBSYNC_RECHECK_HOURS="0").keeps_passwords)
+        self.assertTrue(explain.SETTINGS["SUBSYNC_RECHECK_HOURS"][1].endswith(
+            "; people who don't use the service aren't checked. With 0, the pages don't offer to keep the password, "
+            "since nothing would use it."))
+
+    def test_the_privacy_page_names_the_audio_answer_where_it_is_asked(self):
+        # The answer for files with no subtitles of their own is kept in the record
+        stored = "your config's id, your languages, {}and when your AIOStreams was last checked"
+        answer = "your answer for files with no subtitles of their own, "
+        self.assertIn(stored.format(answer), self.privacy(self.public(SUBSYNC_AUDIO_ROUTE="on"))["What is stored"])
+        self.assertIn(stored.format(""), self.privacy(self.public())["What is stored"])
+        self.assertIn(stored.format(answer + "your TMDB key if you added one, "),
+                      self.privacy(self.public(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_TMDB_PERSONAL="on"))["What is stored"])
+
+    def test_the_hosts_own_setup_is_the_instances_settings(self):
+        # Cloudflare, 30-day backups and the project's issues were stated on every instance
+        self.assertEqual(explain.SETTINGS["SUBSYNC_CONTACT"], (
+            "", "Where people using this public instance can ask questions, like https://github.com/you/project/issues "
+                "or mailto:you@example.com: the pages' Questions link. Empty: the pages show no Questions link."))
+        self.assertEqual(explain.SETTINGS["SUBSYNC_FRONT_PROXY"], (
+            "", "The name of the service in front of this instance that sees every request, like Cloudflare, for the "
+                "privacy page. Empty: the privacy page says the web server in front of it is run by whoever hosts "
+                "it."))
+        self.assertEqual(explain.SETTINGS["SUBSYNC_BACKUP_DAYS"], (
+            "", "How many days your backups keep people's encrypted records, like 30, for the privacy and settings "
+                "pages. Empty: they say the host's backups may keep a deleted record longer."))
+        s = Settings({"SUBSYNC_CONTACT": " mailto:a@b.test ", "SUBSYNC_FRONT_PROXY": "Cloudflare",
+                      "SUBSYNC_BACKUP_DAYS": "30"})
+        self.assertEqual((s.contact, s.front_proxy, s.backup_days), ("mailto:a@b.test", "Cloudflare", 30))
+        self.assertEqual((Settings({}).contact, Settings({}).front_proxy, Settings({}).backup_days), ("", "", 0))
+        owner, other = self.public(SUBSYNC_FRONT_PROXY="Cloudflare", SUBSYNC_BACKUP_DAYS="30"), self.public()
+        self.assertEqual(self.privacy(owner)["Who else sees your requests"],
+                         "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet "
+                         "address and the links you open, your personal link included. AIOSubtitles itself keeps no "
+                         "log of requests. Backups of the stored data are kept for up to 30 days.")
+        self.assertEqual(self.privacy(other)["Who else sees your requests"],
+                         "The web server in front of AIOSubtitles passes every request on and so sees your internet "
+                         "address and the links you open, your personal link included; whoever hosts this instance "
+                         "runs it. AIOSubtitles itself keeps no log of requests. Whoever hosts this instance decides "
+                         "whether backups of the stored data are made and how long they are kept.")
+        for s, field, keep, stored in (
+                (owner, "(the encrypted backups keep it up to 30 days more)",
+                 "; the encrypted backups keep it up to 30 days more.", "(and up to 30 days more in the encrypted backups)"),
+                (other, "(the host's encrypted backups may keep it longer)",
+                 "; the host's encrypted backups may keep it longer.",
+                 "(and possibly longer in the host's encrypted backups)"),
+                (self.public(SUBSYNC_BACKUP_DAYS="1"), "(the encrypted backups keep it up to 1 day more)",
+                 "; the encrypted backups keep it up to 1 day more.", "(and up to 1 day more in the encrypted backups)")):
+            with self.subTest(days=s.backup_days):
+                self.assertTrue(explain.field_help("tmdb_key", s).endswith(" Remove key deletes it at once " + field
+                                                                           + "."))
+                self.assertTrue(explain.field_help("keep_password", s).endswith(
+                    " Untick and refresh, or press \"Stop keeping my password\", to delete it at once" + keep))
+                self.assertTrue(explain.field_help("forget_password", s).startswith(
+                    "Deletes the AIOStreams password AIOSubtitles kept, at once " + field + "; nothing else changes."))
+                self.assertIn("in the same encrypted record, until you untick it " + stored + ". ",
+                              self.privacy(s)["What is stored"])
+        for text in [explain.field_help(n, other) for n in ("tmdb_key", "keep_password", "forget_password")] \
+                + list(self.privacy(other).values()):
+            self.assertNotIn("Cloudflare", text)
+            self.assertNotIn("30 days", text)
+
+    def test_the_privacy_page_states_the_instances_record_keeping(self):
+        # it said 180 days whatever SUBSYNC_USER_KEEP_DAYS was
+        for days, words in (("180", "180 days"), ("30", "30 days"), ("1", "1 day")):
+            with self.subTest(days=days):
+                self.assertTrue(self.privacy(self.public(SUBSYNC_USER_KEEP_DAYS=days))["How long it is kept"].startswith(
+                    f"until you delete your data on your settings page, or {words} after your last request; then "))
+
+    def test_the_privacy_page_names_only_the_sites_the_instance_asks(self):
+        # it named every site, and Cinemeta in each lookup sentence, even with the lookup off
+        tail = (": they get the title's IMDb id, season and episode, the languages, and the file's name, size and "
+                "hashes, from AIOSubtitles' server, never your internet address.")
+        cinemeta = " For series, it first asks Cinemeta for TheTVDB's number by the title's id alone."
+        owner = self.public(SUBSYNC_SUBDL_KEY="k", SUBSYNC_SUBSOURCE_KEY="k")
+        self.assertIn(" AIOSubtitles also searches subtitle sites itself (OpenSubtitles, TheSubtitleDB, SubDL, "
+                      "SubSource, Gestdown)" + tail + cinemeta + " To time subtitles to the original speech, ",
+                      self.privacy(owner)["What is read"])
+        self.assertIn("itself (OpenSubtitles, TheSubtitleDB, Gestdown)" + tail + cinemeta,
+                      self.privacy(self.public())["What is read"])
+        without_gestdown = self.privacy(self.public(SUBSYNC_EXTRA_SOURCES="osv3,tsdb"))["What is read"]
+        self.assertIn("itself (OpenSubtitles, TheSubtitleDB)" + tail + " To time subtitles", without_gestdown)
+        self.assertNotIn("Cinemeta", without_gestdown)
+        usenet_on = " or from your Usenet service when you turn Usenet on."
+        self.assertTrue(self.privacy(self.public(SUBSYNC_EXTRA_SOURCES="osv3,tsdb", SUBSYNC_ORIGINAL_LANGUAGE="off"))
+                        ["What is read"].endswith(usenet_on + " AIOSubtitles also searches subtitle sites itself "
+                                                  "(OpenSubtitles, TheSubtitleDB)" + tail))
+        self.assertTrue(self.privacy(self.public(SUBSYNC_EXTRA_SOURCES="", SUBSYNC_ORIGINAL_LANGUAGE="off"))
+                        ["What is read"].endswith(usenet_on))
+        self.assertEqual(explain.PRIVACY_LOOKUP["off"], "")                  # no lookup: no sentence
+        for kind, where in (("tmdb", "TMDB, Wikidata, and for anime AniList and Kitsu"),
+                            ("personal", "TMDB with your own key if you added one, Wikidata, and for anime AniList "
+                                         "and Kitsu"),
+                            ("wikidata", "Wikidata, and for anime AniList and Kitsu")):
+            with self.subTest(kind=kind):
+                self.assertIn(f" from its own server: at {where}. The answers are kept with no time limit",
+                              explain.PRIVACY_LOOKUP[kind])
+                self.assertNotIn("Cinemeta", explain.PRIVACY_LOOKUP[kind])
+        self.assertIn(" Without it, your titles are looked up on Wikidata only (for anime, AniList and Kitsu). ",
+                      explain.PUBLIC_FIELDS["tmdb_key"])
+
+
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
 
 

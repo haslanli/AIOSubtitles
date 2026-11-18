@@ -10,7 +10,7 @@ and UI_WORDS below; nothing else is shown.
 """
 from . import explain, ui
 from .aiosconfig import LANGUAGES, usenet_names
-from .extra import cleanable_presets
+from .extra import asked_sources, cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .settings import MB
 from .ui import e
@@ -37,7 +37,7 @@ UI_WORDS = (
     "Signed up · AIOSubtitles", "Settings · AIOSubtitles", "Delete · AIOSubtitles", "Deleted · AIOSubtitles",
     "Privacy · AIOSubtitles", "Not found · AIOSubtitles",
     # Usenet
-    "Sync Usenet files too", "Usenet", "searches used today",
+    "Sync Usenet files too", "Usenet", "searches used today", "search used today",
     # files with no subtitles of their own: the question, its answers, the settings row's button
     "Files with no subtitles of their own", "Off", "On, when I pick the file (recommended)",
     "On, as soon as a file is opened (not recommended)", "Save answer",
@@ -59,9 +59,9 @@ def language_names(codes):
 
 def audio_answers(settings):
     """The answers for files with no subtitles of their own this instance offers, as (value, answer): none
-    while its audio route is off; without "as soon as a file is opened" while it allows no opened syncs
-    (SUBSYNC_USER_OPENED_PER_DAY 0)."""
-    if not getattr(settings, "audio_route", False):
+    while its audio route is off or allows no audio syncs (explain.audio_offered); without "as soon as a file is
+    opened" while it allows no opened syncs (SUBSYNC_USER_OPENED_PER_DAY 0)."""
+    if not explain.audio_offered(settings):
         return ()
     return tuple((value, answer + tag) for value, answer, tag in AUDIO_ANSWERS
                  if value != "open" or settings.user_opened_per_day > 0)
@@ -81,6 +81,25 @@ def _audio_group(settings, chosen, labelled=True, error_id=None):
     if labelled:
         return ui.radio_group(AUDIO_LABEL, rows, help_text=explain.audio_help(settings), id="audio", error_id=error_id)
     return ui.radio_group(None, rows, id="audio", labelled_by="audio-h", described_by="audio-help", error_id=error_id)
+
+
+def _top(settings, start="/"):
+    """The page's header, its Questions link the instance's own (SUBSYNC_CONTACT; none without one)."""
+    return ui.top(settings.contact if settings is not None else "", start)
+
+
+def _keep_password(settings, kept=False):
+    """The box that lets AIOSubtitles keep the person's password, as a tuple of the rows to show: none where the
+    instance keeps no password (Settings.keeps_passwords)."""
+    if not settings.keeps_passwords:
+        return ()
+    return (ui.choice("keep_password", "Keep my password, so AIOSubtitles follows my config by itself",
+                      explain.field_help("keep_password", settings), checked=kept),)
+
+
+def _choices(*rows):
+    """Choice rows together, or nothing when there is none."""
+    return ui.choices(*rows) if rows else ""
 
 
 def _problem(error, field, title, fields=(), extra=""):
@@ -141,7 +160,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
     screens.append(_screen("password", steps, 100, ui.field(
         "password", "Your AIOStreams password", explain.PUBLIC_FIELDS["password"], kind="password", mono=True,
         question=True, reveal=True, error_ref=err("password"), attrs="required autocomplete=\"off\"")
-        + f"<div class=\"choices\">{ui.choice('keep_password', 'Keep my password, so AIOSubtitles follows my config by itself', explain.PUBLIC_FIELDS['keep_password'])}</div>"))
+        + _choices(*_keep_password(settings))))
     screens.append(_screen("languages", steps, 100,
                            "<h2 class=\"q\" id=\"languages-q\">Languages</h2>"
                            + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>"
@@ -173,9 +192,9 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
              f"<div class=\"screens\">" + (f"<div class=\"notes\">{problem}</div>" if problem else "")
              + "".join(screens) + "</div></form></div>")
     before = ui.dots(explain.PUBLIC_BEFORE)
-    tries = explain.PUBLIC_TEXTS["tries"].format(n=settings.signups_per_hour)
+    tries = explain.tries_text(settings.signups_per_hour)
     opener = ui.link_button("Sign up", "#signup", "primary", attrs="data-open", arrow=True)
-    body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT)}<main class=\"grid\">"
+    body = (f"<div class=\"wrap\">{_top(settings)}<main class=\"grid\">"
             f"<h1>{_headline()}</h1><section class=\"what\">{_intro(settings)}</section>"
             f"<section class=\"need\" aria-labelledby=\"need-h\"><h2 id=\"need-h\">Before you start</h2>{before}"
             f"<p class=\"small\">{e(tries)}</p><div class=\"go\">{opener}</div></section>"
@@ -226,7 +245,7 @@ def result_page(result, settings=None):
                 [f"<p>{e(explain.PUBLIC_MANUAL_LEAD)}</p>", ui.dots(explain.PUBLIC_MANUAL_STEPS)]
         left = ui.note("warn", None, "One step left", extra="".join(lines))
     # the personal link first; what to know about this setup heads the column beside it
-    body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT)}<main class=\"grid\"><h1>You're signed up</h1>"
+    body = (f"<div class=\"wrap\">{_top(settings)}<main class=\"grid\"><h1>You're signed up</h1>"
             + f"<section class=\"key\" aria-labelledby=\"personal-l\">"
             + ui.link_block(result.manifest_url, texts["signed_up"])
             + "</section><div class=\"then\">"
@@ -368,7 +387,7 @@ def _tmdb_row(settings, record, error=None):
                                       reveal=True, error=error, attrs="autocomplete=\"off\" spellcheck=\"false\" required")
                  + f"<div class=\"actions\">{ui.button('Save key', 'primary', type='submit')}</div>", cls="") if asks else ""
     return _row("tmdb-h", "Original languages",
-                f"<p class=\"help\" id=\"tmdb_key-help\">{e(explain.PUBLIC_FIELDS['tmdb_key'])}</p>",
+                f"<p class=\"help\" id=\"tmdb_key-help\">{e(explain.field_help('tmdb_key', settings))}</p>",
                 "<div class=\"controls\">" + save + remove + "</div>")
 
 
@@ -409,7 +428,8 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                    usage["files"] >= files_limit)
         + ui.gauge(f"{_megabytes(usage['bytes'])} MB of {bytes_limit / MB:.0f} MB", "read",
                    _share(usage["bytes"], bytes_limit), usage["bytes"] >= bytes_limit)
-        + (ui.gauge(f"{usenet_usage['listings']} of {settings.usenet_listings_per_day}", "searches used today",
+        + (ui.gauge(f"{usenet_usage['listings']} of {settings.usenet_listings_per_day}",
+                    f"{explain.plural(settings.usenet_listings_per_day, 'search', 'searches')} used today",
                     _share(usenet_usage["listings"], settings.usenet_listings_per_day),
                     usenet_usage["listings"] >= settings.usenet_listings_per_day)
            if usenet_on else "")
@@ -425,11 +445,14 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                                                           "languages-help", "languages-error" if lang_error else None)
                            + f"<div class=\"actions\">{ui.button('Save languages', 'primary', type='submit')}</div>"))
     kept = bool(record.get("auto_password"))
-    copied = "" if stored else (f"<p class=\"help\">"
-                                f"{e(texts['copied_auto' if kept else 'copied'].format(when=days_ago(record.get('synced_at'), now)))}</p>")
+    when = days_ago(record.get("synced_at"), now)
+    # a password kept while the check is off follows nothing: the plain text, and Refresh deletes it
+    copied = texts["copied_auto"].format(when=when, every=explain.recheck_every(settings)) \
+        if kept and settings.keeps_passwords else texts["copied"].format(when=when)
+    copied = "" if stored else f"<p class=\"help\">{e(copied)}</p>"
     forget = _form("forget-password", "<div class=\"actions\">" + ui.button(
         "Stop keeping my password", "secondary", type="submit", attrs="aria-describedby=\"forget_password-help\"")
-        + f"</div><p class=\"after\" id=\"forget_password-help\">{e(explain.PUBLIC_FIELDS['forget_password'])}</p>",
+        + f"</div><p class=\"after\" id=\"forget_password-help\">{e(explain.field_help('forget_password', settings))}</p>",
         cls="forget") if kept else ""
     refresh = _row("refresh-h", "Refresh after changing your AIOStreams config", copied, "<div class=\"controls\">"
                    + _form("refresh", ui.field("refresh", "Your AIOStreams password", explain.PUBLIC_FIELDS["refresh"], name="password",
@@ -439,18 +462,17 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                               name="link", kind="url", mono=True, error=error if field == "new_link" else None,
                               attrs=f"autocomplete=\"off\" spellcheck=\"false\" inputmode=\"url\" "
                                     f"placeholder=\"{e(LINK_PLACEHOLDER)}\"")
-                   + ui.choices(ui.choice("keep_password", "Keep my password, so AIOSubtitles follows my config by itself",
-                                          explain.PUBLIC_FIELDS["keep_password"], checked=kept),
-                                *((ui.choice("usenet", "Sync Usenet files too",
-                                             explain.usenet_help(settings.usenet_listings_per_day),
-                                             checked=bool(record.get("usenet"))),) if usenet_allowed(settings) else ()))
+                   + _choices(*_keep_password(settings, kept),
+                              *((ui.choice("usenet", "Sync Usenet files too",
+                                           explain.usenet_help(settings.usenet_listings_per_day),
+                                           checked=bool(record.get("usenet"))),) if usenet_allowed(settings) else ()))
                    + f"<div class=\"actions\">{ui.button('Refresh', 'primary', type='submit')}</div>", cls="")
                    + forget + "</div>")
     delete = _row("delete-h", "Delete my data",
                   f"<p class=\"help\" id=\"delete-help\">{e(explain.PUBLIC_FIELDS['delete'])}</p>",
                   _form("delete-confirm", "<div class=\"actions\">" + ui.button(
                       "Delete my data…", "danger", type="submit", attrs="aria-describedby=\"delete-help\"") + "</div>"))
-    body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT)}<main><h1>Your AIOSubtitles</h1>"
+    body = (f"<div class=\"wrap\">{_top(settings)}<main><h1>Your AIOSubtitles</h1>"
             + (f"<div class=\"notes\" aria-live=\"polite\">{notes}</div>" if notes else "")
             + f"<div class=\"grid12 band\">{link}{today}</div>"
             f"<div class=\"rows\">{languages}{_audio_row(settings, record, error if field == 'audio' else None)}"
@@ -467,13 +489,15 @@ def _foot(settings):
     return ui.footer(explain.TMDB_NOTICE) if settings is not None and explain.tmdb_used(settings) else ""
 
 
-def _letter(title, heading, content, personal=False, start="/", settings=None):
-    body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT, start)}<main class=\"letter\"><h1>{e(heading)}</h1>{content}</main>"
-            f"{_foot(settings)}</div>")
+def _letter(title, heading, content, personal=False, start="/", settings=None, credit=False):
+    """A page of text: the header with the instance's Questions link, and TMDB's credit under it only where `credit`
+    (the privacy page, which names TMDB)."""
+    body = (f"<div class=\"wrap\">{_top(settings, start)}<main class=\"letter\"><h1>{e(heading)}</h1>{content}</main>"
+            f"{_foot(settings) if credit else ''}</div>")
     return ui.page(title, body, "letter", personal=personal)
 
 
-def delete_confirm_page(error=None, field=None, stored=False):
+def delete_confirm_page(error=None, field=None, stored=False, settings=None):
     """The delete step. `stored`: a person with stored copies only has no config of AIOSubtitles' own to remove."""
     gone = [line for key, line in explain.PUBLIC_DELETE_LIST.items() if not (stored and key == "config")]
     content = (_problem(error, field, "Nothing was deleted", ("delete",))
@@ -484,10 +508,10 @@ def delete_confirm_page(error=None, field=None, stored=False):
                           attrs="autocomplete=\"off\"")
                + "<div class=\"actions\">" + ui.button("Delete my data", "danger", type="submit")
                + ui.link_button("Keep my data", "configure", "secondary") + "</div>", cls=""))
-    return _letter("Delete · AIOSubtitles", "Delete your data?", content, personal=True)
+    return _letter("Delete · AIOSubtitles", "Delete your data?", content, personal=True, settings=settings)
 
 
-def deleted_page(outcome):
+def deleted_page(outcome, settings=None):
     left = []
     if not outcome.get("sync_removed"):
         left.append(explain.PUBLIC_TEXTS["sync_left"])
@@ -498,25 +522,31 @@ def deleted_page(outcome):
         notes += ui.note("warn", None, "One step left", extra="".join(f"<p>{e(t)}</p>" for t in left))
     content = (f"<div class=\"notes\">{notes}</div><div class=\"body\"><p><a href=\"/\">Sign up again</a> "
                "to use AIOSubtitles again.</p></div>")
-    return _letter("Deleted · AIOSubtitles", "Your data is deleted", content, personal=True)
+    return _letter("Deleted · AIOSubtitles", "Your data is deleted", content, personal=True, settings=settings)
 
 
 def privacy_page(settings):
+    """The privacy page: what this instance reads and keeps (explain.privacy_parts, with the subtitle sites it asks
+    itself), then where to ask questions, where it has a contact (SUBSYNC_CONTACT)."""
+    parts = explain.privacy_parts(settings, asked_sources(settings, "series"))     # series: every site, Gestdown too
     sections = "".join(
         f"<section aria-labelledby=\"privacy-{i}\"><h2 id=\"privacy-{i}\">{e(head)}</h2>"
-        f"<p>{e(text[:1].upper() + text[1:])}</p></section>" for i, (head, text) in enumerate(explain.privacy_parts(settings)))
-    content = (f"<div class=\"body\">{sections}<section aria-labelledby=\"privacy-q\"><h2 id=\"privacy-q\">Questions</h2>"
-               f"<p><a class=\"mono\" href=\"{e(explain.CONTACT)}\">{e(explain.CONTACT)}</a></p></section></div>")
-    return _letter("Privacy · AIOSubtitles", "What AIOSubtitles reads and keeps", content, settings=settings)
+        f"<p>{e(text[:1].upper() + text[1:])}</p></section>" for i, (head, text) in enumerate(parts))
+    questions = (f"<section aria-labelledby=\"privacy-q\"><h2 id=\"privacy-q\">Questions</h2>"
+                 f"<p><a class=\"mono\" href=\"{e(settings.contact)}\">{e(settings.contact)}</a></p></section>"
+                 if settings.contact else "")
+    content = f"<div class=\"body\">{sections}{questions}</div>"
+    return _letter("Privacy · AIOSubtitles", "What AIOSubtitles reads and keeps", content, settings=settings,
+                   credit=True)
 
 
-def not_found_page():
+def not_found_page(settings=None):
     content = (f"<div class=\"body\"><p>{e(explain.PUBLIC_TEXTS['not_found'])}</p>"
                "<p><a href=\"/\">Sign up</a> to start over.</p></div>")
-    return _letter("Not found · AIOSubtitles", "This page doesn't exist", content)
+    return _letter("Not found · AIOSubtitles", "This page doesn't exist", content, settings=settings)
 
 
-def error_page(message):
+def error_page(message, settings=None):
     content = (f"<div class=\"notes\">{ui.note('problem', message, role='alert')}</div>"
                "<div class=\"body\"><p><a href=\"/\">Back to the start page</a></p></div>")
-    return _letter("AIOSubtitles", "Something went wrong", content)
+    return _letter("AIOSubtitles", "Something went wrong", content, settings=settings)

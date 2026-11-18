@@ -72,6 +72,16 @@ def result(**kw):
 
 
 RECORD = {"languages": ["eng", "spa"], "synced_at": 0}
+CONTACT = "mailto:host@example.com"
+# a host's own setup on its pages: its Questions link, the service in front, how long its backups keep records
+HOST = {"SUBSYNC_CONTACT": CONTACT, "SUBSYNC_FRONT_PROXY": "Cloudflare", "SUBSYNC_BACKUP_DAYS": "30"}
+
+
+def privacy_parts(s):
+    """The privacy page's parts as the page fills them in: with the subtitle sites the instance asks itself."""
+    from subsync import explain
+    from subsync.extra import asked_sources
+    return explain.privacy_parts(s, asked_sources(s, "series"))
 USAGE = {"files": 3, "bytes": 351 * 1024}
 HOSTILE = "<b onclick=\"x\">&'\""
 
@@ -141,6 +151,25 @@ def every_page():
                                                     message=pages.done_message("audio", dict(RECORD, audio="off"))[0]),
         "settings-audio-error": pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on"), RECORD, USAGE, LINK, now=0,
                                                     error="Wrong.", field="audio"),
+        # No audio limit, and no audio syncs a day (the pages then treat the audio route as off)
+        "privacy-audio-no-limit": pages.privacy_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")),
+        "signup-audio-no-limit": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")),
+        "signup-no-audio-syncs": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_USER_AUDIO_PER_DAY="0")),
+        # The check off (no password kept), or every 6 hours
+        "signup-no-check": pages.signup_page(settings(SUBSYNC_RECHECK_HOURS="0")),
+        "settings-kept-no-check": pages.settings_page(settings(SUBSYNC_RECHECK_HOURS="0"),
+                                                      dict(RECORD, auto_password="x"), USAGE, LINK, now=0),
+        "settings-kept-6-hours": pages.settings_page(settings(SUBSYNC_RECHECK_HOURS="6"),
+                                                     dict(RECORD, auto_password="x"), USAGE, LINK, now=0),
+        # A host's own setup on every page
+        "signup-host": pages.signup_page(settings(**HOST)),
+        "result-host": pages.result_page(result(), settings(**HOST)),
+        "settings-host": pages.settings_page(settings(SUBSYNC_TMDB_PERSONAL="on", **HOST),
+                                             dict(RECORD, auto_password="x", tmdb_key="x" * 32), USAGE, LINK, now=0),
+        "privacy-host": pages.privacy_page(settings(**HOST)),
+        "delete-host": pages.delete_confirm_page(settings=settings(**HOST)),
+        "deleted-host": pages.deleted_page({}, settings(**HOST)),
+        "not-found-host": pages.not_found_page(settings(**HOST)),
         "not-found": pages.not_found_page(),
         "error": pages.error_page("Wrong."),
     }
@@ -161,7 +190,7 @@ def approved_texts():
     texts = list(explain.PUBLIC_FIELDS.values()) + list(explain.PUBLIC_BEFORE) + list(explain.PUBLIC_MANUAL_STEPS)
     texts += list(explain.PUBLIC_DELETE_LIST.values()) + list(explain.PUBLIC_STORE_ONLY) + list(explain.PUBLIC_HEADLINE)
     texts += list(explain.PUBLIC_REAL_DEBRID_WARNING)       # its title and text apart (the result page); joined below
-    texts += [explain.PUBLIC_REAL_DEBRID_NOTICE, explain.CONTACT]
+    texts += [explain.PUBLIC_REAL_DEBRID_NOTICE, explain.CONTACT, CONTACT]
     texts += [explain.languages_help(settings(SUBSYNC_MAX_LANGUAGES=str(n))) for n in (1, 2, 3, 4)]
     texts.append(explain.PUBLIC_MANUAL_LEAD)
     # the clean-up box's words with the addons each instance takes out: the OpenSubtitles ones, and all four
@@ -172,17 +201,26 @@ def approved_texts():
     texts += [(t[:1].upper() + t[1:]) for _, t in explain.PRIVACY_PARTS]
     audio = settings(SUBSYNC_AUDIO_ROUTE="on")            # the audio route's words, as an instance with it on shows them
     texts += list(explain.intro_parts(audio)) + [explain.next_text(audio)]
-    texts += [(t[:1].upper() + t[1:]) for _, t in explain.privacy_parts(audio)]
+    texts += [(t[:1].upper() + t[1:]) for _, t in privacy_parts(audio)]
+    # without an audio limit, and with a host's own setup
+    for s in (settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0"), settings(**HOST)):
+        texts += [(t[:1].upper() + t[1:]) for _, t in privacy_parts(s)]
+    texts.append(explain.audio_help(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")))
+    # the fields that state how often the check runs and how long backups keep what is deleted
+    for s in (settings(), settings(SUBSYNC_RECHECK_HOURS="6"), settings(**HOST)):
+        texts += [explain.field_help(name, s) for name in ("tmdb_key", "keep_password", "forget_password")]
     # the original-language lookups' words, by what the instance uses (TMDB with its key, each person's, Wikidata
     # only, none), and TMDB's notice and its logo's name
     for env in ({"SUBSYNC_TMDB_KEY": "k"}, {"SUBSYNC_TMDB_PERSONAL": "on"}, {}, {"SUBSYNC_ORIGINAL_LANGUAGE": "off"},
                 {"SUBSYNC_TMDB_KEY": "k", "SUBSYNC_AUDIO_ROUTE": "on"}):
-        texts += [(t[:1].upper() + t[1:]) for _, t in explain.privacy_parts(settings(**env))]
+        texts += [(t[:1].upper() + t[1:]) for _, t in privacy_parts(settings(**env))]
     texts.append(explain.TMDB_NOTICE)
     for title, text, _ in explain.PUBLIC_STATES.values():
         texts += [title, text.replace("{detail}", "Detail.")]
     for key, text in explain.PUBLIC_TEXTS.items():
-        texts.append(text.format(n=5, when="at sign-up", names="English, Spanish", answer="Off") if "{" in text else text)
+        texts.append(text.format(when="at sign-up", names="English, Spanish", answer="Off",
+                                 attempts="5 sign-up attempts", every="about once a day") if "{" in text else text)
+    texts.append(explain.PUBLIC_TEXTS["copied_auto"].format(when="at sign-up", every="about every 6 hours"))
     # the answer for files with no subtitles of their own, as an instance with three or two answers shows it
     for env in ({}, {"SUBSYNC_USER_OPENED_PER_DAY": "0"}):
         offers = settings(SUBSYNC_AUDIO_ROUTE="on", **env)
@@ -827,8 +865,16 @@ class OtherPagesTest(unittest.TestCase):
     def test_privacy_in_four_parts_with_the_same_words(self):
         from subsync import explain, pages
         tree = Tree(pages.privacy_page(settings()))
-        self.assertEqual(len(tree.all("h2")), len(explain.PRIVACY_PARTS) + 1)
-        default = {"audio": "", "tmdb": "", "lookup": explain.PRIVACY_LOOKUP["wikidata"]}   # what settings() fills in
+        # no Questions part without the instance's contact; one with it, linking to it
+        self.assertEqual(len(tree.all("h2")), len(explain.PRIVACY_PARTS))
+        hosted = Tree(pages.privacy_page(settings(SUBSYNC_CONTACT=CONTACT)))
+        self.assertEqual(len(hosted.all("h2")), len(explain.PRIVACY_PARTS) + 1)
+        self.assertIn("Questions " + CONTACT, hosted.text())
+        sites = explain.PRIVACY_SITES.format(sites="OpenSubtitles, TheSubtitleDB, Gestdown")
+        default = {"audio": "", "audio_answer": "", "tmdb": "",           # what settings() fills in
+                   "asked": f" {sites} {explain.PRIVACY_CINEMETA} {explain.PRIVACY_LOOKUP['wikidata']}",
+                   "backups": explain.BACKUP_WORDS["stored"][1], "front": explain.PRIVACY_FRONT[1],
+                   "backups_kept": explain.BACKUP_WORDS["kept"][1], "keep": "180 days"}
         for head, text in explain.PRIVACY_PARTS:
             text = text.format(**default)
             self.assertIn(head, tree.text())
@@ -839,6 +885,122 @@ class OtherPagesTest(unittest.TestCase):
         text = Tree(pages.not_found_page()).text()
         self.assertIn("This page doesn't exist", text)
         self.assertIn(explain.PUBLIC_TEXTS["not_found"], text)
+
+
+class InstanceWordsTest(unittest.TestCase):
+    """Cycle 1's vis3-explain-3 on the pages: what they say follows the instance's settings."""
+
+    @staticmethod
+    def every_kind(s):
+        """Each public page, made as public.py makes it, with the instance's settings."""
+        from subsync import pages
+        kept = dict(RECORD, auto_password="x")
+        return {"start": pages.signup_page(s), "signed up": pages.result_page(result(), s),
+                "settings": pages.settings_page(s, kept, USAGE, LINK, now=0), "privacy": pages.privacy_page(s),
+                "delete": pages.delete_confirm_page(settings=s), "deleted": pages.deleted_page({}, s),
+                "not found": pages.not_found_page(s)}
+
+    def test_no_audio_syncs_a_day_takes_the_audio_question_off_the_pages(self):
+        # SUBSYNC_USER_AUDIO_PER_DAY 0 still asked the question; the audio limit 0 read "at most no set limit"
+        from subsync import explain, pages
+        s = settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_USER_AUDIO_PER_DAY="0")
+        for name, page in self.every_kind(s).items():
+            with self.subTest(page=name):
+                self.assertNotIn('name="audio"', page)
+                self.assertNotIn('id="audio-h"', page)
+                self.assertNotIn("Files with no subtitles of their own", page)
+                for words in explain.PUBLIC_AUDIO.values():
+                    self.assertNotIn(ui_text(words[:60]), page)
+                self.assertNotIn("your answer for files with no subtitles of their own", page)
+        self.assertIn('name="audio"', pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on")))
+        unlimited = settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")
+        for page in (pages.signup_page(unlimited), pages.privacy_page(unlimited)):
+            self.assertNotIn("no set limit", page)
+        self.assertIn("about 60–350 MB a file, and works one to three minutes", Tree(pages.signup_page(unlimited)).text())
+        self.assertIn("short parts of its sound (about 60–350 MB) through", Tree(pages.privacy_page(unlimited)).text())
+
+    def test_the_kept_password_box_only_while_the_check_runs(self):
+        # With SUBSYNC_RECHECK_HOURS 0 nothing uses a kept password; otherwise the pages say how often
+        from subsync import pages
+        off = settings(SUBSYNC_RECHECK_HOURS="0")
+        kept = dict(RECORD, auto_password="x")
+        self.assertNotIn('name="keep_password"', pages.signup_page(off))
+        page = pages.settings_page(off, kept, USAGE, LINK, now=0)
+        tree = Tree(page)
+        self.assertNotIn('name="keep_password"', page)
+        self.assertTrue(tree.all("input", name="action", value="forget-password"))     # it can still be deleted
+        self.assertIn("was copied from yours at sign-up. After you add or remove a service or addon in AIOStreams, "
+                      "press Refresh.", tree.text())
+        self.assertNotIn("follows changes to your config by itself", tree.text())
+        six = settings(SUBSYNC_RECHECK_HOURS="6")
+        self.assertIn("encrypted so that it opens only with your personal link, and about every 6 hours while you use "
+                      "it rebuilds its own config from yours,", Tree(pages.signup_page(six)).text())
+        tree = Tree(pages.settings_page(six, kept, USAGE, LINK, now=0))
+        self.assertIn("AIOSubtitles keeps your password and follows changes to your config by itself, about every 6 "
+                      "hours while you use it.", tree.text())
+        self.assertTrue(tree.all("input", name="keep_password"))
+        self.assertIn("about once a day while you use it rebuilds", Tree(pages.signup_page(settings())).text())
+
+    def test_the_hosts_own_contact_proxy_and_backups(self):
+        # Every instance named the project's issues, Cloudflare and 30-day backups
+        from subsync import explain
+        questions = f'<a href="{CONTACT}">Questions</a>'
+        for name, page in self.every_kind(settings()).items():
+            with self.subTest(page=name, host=False):
+                self.assertNotIn(">Questions<", page)
+                self.assertNotIn(explain.CONTACT, page)
+                self.assertNotIn("Cloudflare", page)
+                self.assertNotIn("30 days", page)
+        for name, page in self.every_kind(settings(**HOST)).items():
+            with self.subTest(page=name, host=True):
+                self.assertIn(questions, page)
+                self.assertNotIn(explain.CONTACT, page)
+        texts = {name: Tree(page).text() for name, page in self.every_kind(settings(**HOST)).items()}
+        self.assertIn("AIOSubtitles runs behind Cloudflare, which passes every request on", texts["privacy"])
+        self.assertIn("Backups of the stored data are kept for up to 30 days. How long it is kept", texts["privacy"])
+        self.assertIn("Questions " + CONTACT, texts["privacy"])
+        self.assertIn("to delete it at once; the encrypted backups keep it up to 30 days more.", texts["settings"])
+        plain = Tree(self.every_kind(settings())["settings"]).text()
+        self.assertIn("to delete it at once; the host's encrypted backups may keep it longer.", plain)
+        # TMDB's credit stays where it was: the letters get the instance's settings for their header only
+        for name, page in self.every_kind(settings(SUBSYNC_TMDB_KEY="k", **HOST)).items():
+            with self.subTest(page=name, tmdb=True):
+                self.assertEqual(explain.TMDB_NOTICE in page, name in ("start", "signed up", "settings", "privacy"))
+
+    def test_counts_of_one(self):
+        # "1 sign-up attempts", "at most 1 extra searches", "(0 of 1 searches used today)"
+        from subsync import pages
+        one = settings(SUBSYNC_SIGNUPS_PER_HOUR="1", SUBSYNC_USENET="on", SUBSYNC_USENET_LISTINGS_PER_DAY="1")
+        start = Tree(pages.signup_page(one)).text()
+        self.assertIn("Each try counts: 1 sign-up attempt per address in an hour.", start)
+        self.assertIn("The cost: at most 1 extra search a day through your indexers", start)
+        record = dict(RECORD, sync_uuid="s", usenet=True, usenet_uuid="u", usenet_services=["nzbdav"])
+        page = pages.settings_page(one, record, USAGE, LINK, now=0, usenet_usage={"listings": 0, "stopped": False})
+        self.assertIn("Usenet: on, through NzbDAV (0 of 1 search used today)", Tree(page).text())
+        self.assertIn("<p><b>0 of 1</b><span>search used today</span></p>", page)          # the gauge
+        self.assertNotIn("searches used today", page)
+        self.assertIn("<span>searches used today</span>", pages.settings_page(
+            settings(SUBSYNC_USENET="on"), record, USAGE, LINK, now=0, usenet_usage={"listings": 0, "stopped": False}))
+
+    def test_the_privacy_page_says_what_this_instance_asks_and_keeps(self):
+        # The sites it asks, Cinemeta with Gestdown only;: its record days;: the audio answer
+        from subsync import pages
+        owner = Tree(pages.privacy_page(settings(SUBSYNC_SUBDL_KEY="k", SUBSYNC_SUBSOURCE_KEY="k"))).text()
+        self.assertIn("AIOSubtitles also searches subtitle sites itself (OpenSubtitles, TheSubtitleDB, SubDL, SubSource, "
+                      "Gestdown): they get", owner)
+        self.assertIn("never your internet address. For series, it first asks Cinemeta for TheTVDB's number by the "
+                      "title's id alone. To time subtitles", owner)
+        self.assertNotIn("Cinemeta", Tree(pages.privacy_page(settings(SUBSYNC_EXTRA_SOURCES="osv3,tsdb"))).text())
+        self.assertIn("or 30 days after your last request;",
+                      Tree(pages.privacy_page(settings(SUBSYNC_USER_KEEP_DAYS="30"))).text())
+        self.assertIn("your languages, your answer for files with no subtitles of their own, and when your AIOStreams "
+                      "was last checked", Tree(pages.privacy_page(settings(SUBSYNC_AUDIO_ROUTE="on"))).text())
+
+
+def ui_text(text):
+    """A text as the pages write it (escaped)."""
+    from subsync.ui import e
+    return e(text)
 
 
 class ScriptTest(unittest.TestCase):

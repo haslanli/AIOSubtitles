@@ -229,6 +229,27 @@ class PublicHttpTest(Base):
         self.assertEqual(http(f"{self.base}/u/{token}/manifest.json")[0], 404)
         self.assertEqual(http(f"{self.base}/u/{token}/configure")[0], 404)
 
+    def test_every_page_links_to_the_hosts_own_contact(self):
+        # SUBSYNC_CONTACT is the pages' Questions link, the pages the router makes without a person included;
+        # without it they show none
+        def questions(text):
+            return f'<a href="{contact}">Questions</a>' in text
+        contact = "mailto:host@example.com"
+        self.assertFalse(questions(http(self.base + "/privacy")[1].decode()))
+        self.assertNotIn(">Questions<", http(self.base + "/")[1].decode())
+        self.tearDown()
+        self.start(SUBSYNC_CONTACT=contact)
+        uuid, code, text, headers, token = self.sign_up()
+        self.assertTrue(questions(text))                                       # the signed-up page
+        for page in (http(self.base + "/")[1], http(self.base + "/privacy")[1],
+                     http(self.base + "/nothing", headers={"Accept": "text/html"})[1],
+                     http(f"{self.base}/u/{token}/configure")[1],
+                     http(f"{self.base}/u/{token}/configure", form(action="delete-confirm"))[1],
+                     http(f"{self.base}/u/{token}/configure", form(action="delete", password=PASSWORD))[1]):
+            with self.subTest(page=page[:200]):
+                self.assertTrue(questions(page.decode()))
+        self.assertIn(f'<p><a class="mono" href="{contact}">{contact}</a></p>', http(self.base + "/privacy")[1].decode())
+
     def test_no_secret_in_logs(self):
         uuid, _, _, _, token = self.sign_up()
         http(f"{self.base}/u/{token}/subtitles/movie/tt1/filename=a.mkv&videoSize=1000.json")
@@ -495,6 +516,9 @@ class PublicCheckTest(Base):
         self.assertIn('name="link"', page)                  # Refresh takes the new link
 
     def test_the_kept_password_box_and_forgetting_it(self):
+        # the box is offered only while the check runs; a fresh record's check is a day away, so none runs
+        self.tearDown()
+        self.start(SUBSYNC_RECHECK_HOURS="24")
         uuid, code, text, headers, token = self.sign_up()
         self.assertNotIn("auto_password", self.users.open(token))
         signup_page = http(self.base + "/")[1].decode()
@@ -509,6 +533,22 @@ class PublicCheckTest(Base):
         self.assertNotIn("auto_password", self.users.open(token))
         page = http(f"{self.base}/u/{token}/configure?done=forgot")[1].decode()
         self.assertNotIn('value="forget-password"', page)
+
+    def test_with_the_check_off_no_password_is_offered_or_kept(self):
+        # This harness runs with SUBSYNC_RECHECK_HOURS 0; a kept password would never be used
+        self.assertNotIn('name="keep_password"', http(self.base + "/")[1].decode())
+        uuid, code, text, headers, token = self.sign_up(keep_password="on")       # sent anyway: not kept
+        self.assertEqual(code, 200)
+        self.assertNotIn("auto_password", self.users.open(token))
+        self.set_record(token, auto_password=PASSWORD)                         # kept before the check was turned off
+        page = http(f"{self.base}/u/{token}/configure")[1].decode()
+        self.assertIn('value="forget-password"', page)                         # it can still be deleted at once
+        self.assertNotIn('name="keep_password"', page)
+        self.assertNotIn("follows changes to your config by itself", page)
+        code, _, _ = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD,
+                                                                     keep_password="on"))
+        self.assertEqual(code, 303)
+        self.assertNotIn("auto_password", self.users.open(token))              # the next Refresh deletes it
 
     def test_refresh_with_a_new_link_over_http(self):
         uuid, code, text, headers, token = self.sign_up()

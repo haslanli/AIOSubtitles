@@ -16,6 +16,13 @@ from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .realdebrid import REASON
 
+
+def plural(n, one, many=None):
+    """The word for n of a thing, as a text says it after the number: `one` for 1, else `many` (by default `one` +
+    "s"): "1 day", "30 days", "1 search", "10 searches"."""
+    return one if n == 1 else many or one + "s"
+
+
 # ------------------------------------------------------------------------------------------- fixed rules
 
 RULES = [
@@ -190,19 +197,26 @@ RULES = [
 ]
 
 # ------------------------------------------------------------------------------------------- ./setup's questions
-# Usenet's explanation, with "{per_day}" for its searches a day: the ./setup question gives the default of
+# Usenet's explanation, with "{searches}" for its searches a day: the ./setup question gives the default of
 # SUBSYNC_USENET_LISTINGS_PER_DAY, ./setup's screens and the public pages' Usenet box the install's own number
-# (setup_help, usenet_help)
+# (usenet_help, setup_help)
 USENET_TEXT = (
     "Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a "
     "second config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it "
     "needs (more for audio syncs). Recommended if you play from Usenet and your indexer's daily limit isn't "
-    "tight. The cost: at most {per_day} "
-    "extra searches a day through your indexers (usually none, because your AIOStreams reuses the search you just "
-    "made), fetching a release's NZB when your Usenet service doesn't have it yet, and some Usenet data per file "
-    "(more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and "
-    "everyone who plays the same release, because one sync serves all of them. Off: nothing on Usenet is searched "
-    "or read.")
+    "tight. The cost: at most {searches} a day through your indexers (usually none, because your AIOStreams reuses "
+    "the search you just made), fetching a release's NZB when your Usenet service doesn't have it yet, and some "
+    "Usenet data per file (more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps "
+    "you first, and everyone who plays the same release, because one sync serves all of them. Off: nothing on Usenet "
+    "is searched or read.")
+
+
+def usenet_help(per_day):
+    """Usenet's explanation with an install's searches a day (SUBSYNC_USENET_LISTINGS_PER_DAY): "at most 10 extra
+    searches a day", "at most 1 extra search a day"."""
+    return USENET_TEXT.format(searches=f"{per_day} {plural(per_day, 'extra search', 'extra searches')}")
+
+
 # The audio question's explanation, with "{opened}" for the files that may start as soon as they are opened, a day
 # (SUBSYNC_USER_OPENED_PER_DAY, AUDIO_OPENED); the audio limit's, with "{wait}" for the seconds an app waits for a pick
 # (SUBSYNC_PICK_WAIT_MS). The questions below give the defaults, ./setup's screens this install's values (setup_help).
@@ -260,7 +274,7 @@ QUESTIONS = {
         "and checks them against the file. Each extra language adds those downloads and a few seconds of work per "
         "file; the video file is still read only once."),
     "AUDIO": ("no", AUDIO_TEXT.format(opened=AUDIO_OPENED[0].format(n=5))),
-    "USENET": ("no", USENET_TEXT.format(per_day=10)),
+    "USENET": ("no", usenet_help(10)),
     "AUDIO_BUDGET": ("1", AUDIO_BUDGET_TEXT.format(wait=14)),
     "SUBDL_KEY": (
         "",
@@ -480,8 +494,8 @@ GROUPS = [
             "Audio syncs one person may start a day (UTC), picked or opened. Each reads about 60–350 MB of a file's "
             "sound and keeps a processor busy for one to three minutes, and its copy then serves everyone who plays "
             "that file. 20 by default; recommended: keep it, so the processors are shared fairly while the daily data "
-            "limit bounds the reads. 0 stops new audio syncs and keeps the copies already made. Past it, that person's "
-            "files wait for a pick the next day."),
+            "limit bounds the reads. 0 stops new audio syncs, takes the audio question off the pages and keeps the "
+            "copies already made. Past it, that person's files wait for a pick the next day."),
         "SUBSYNC_USER_OPENED_PER_DAY": (
             "5",
             "Of those, how many may start as soon as a file is opened, for people who chose that (UTC day). 5 by "
@@ -907,6 +921,19 @@ GROUPS = [
             "from their AIOStreams then, because opening the record needs their personal link; the privacy page says "
             "so. Shorter keeps less data about people who left; longer spares people who come back after a long break "
             "from signing up again."),
+        # what the pages say about the host's own setup: empty, they say it in words true of any host
+        "SUBSYNC_CONTACT": (
+            "",
+            "Where people using this public instance can ask questions, like https://github.com/you/project/issues or "
+            "mailto:you@example.com: the pages' Questions link. Empty: the pages show no Questions link."),
+        "SUBSYNC_FRONT_PROXY": (
+            "",
+            "The name of the service in front of this instance that sees every request, like Cloudflare, for the "
+            "privacy page. Empty: the privacy page says the web server in front of it is run by whoever hosts it."),
+        "SUBSYNC_BACKUP_DAYS": (
+            "",
+            "How many days your backups keep people's encrypted records, like 30, for the privacy and settings pages. "
+            "Empty: they say the host's backups may keep a deleted record longer."),
         "SUBSYNC_TRUSTED_PROXY": (
             "127.0.0.1",
             "The addresses of the web server in front of subsync, comma-separated. Only requests from these may say, "
@@ -928,7 +955,8 @@ GROUPS = [
             "AIOSubtitles' own config there still open), repairs a changed link, and tells the person on their "
             "settings page and in their subtitle lists what only they can fix; for people who let AIOSubtitles keep "
             "their password it also rebuilds AIOSubtitles' config from theirs. Shorter notices changes sooner, at more "
-            "calls to every AIOStreams; people who don't use the service aren't checked."),
+            "calls to every AIOStreams; people who don't use the service aren't checked. With 0, the pages don't offer "
+            "to keep the password, since nothing would use it."),
         "SUBSYNC_SYNCS_AT_ONCE": (
             "auto",
             "How many files the service works on at once for everyone, or auto for one per processor it may use. "
@@ -1001,9 +1029,11 @@ PUBLIC_PASSWORD_TEXT = (
     "second one for Usenet only), so opening a file opens only that file. It is not stored unless you tick \"Keep my "
     "password\" below. You'll be asked again only if you refresh.")
 
+# The project's own Questions link, on ./setup's pages (a public instance's pages show SUBSYNC_CONTACT's)
 CONTACT = "https://github.com/haslanli/AIOSubtitles/issues"
 
-# one explanation for each field and button of the public pages
+# one explanation for each field and button of the public pages; "{every}" (how often the check runs) and "{backups}"
+# (how long the host's backups keep what is deleted) take the instance's words (field_help)
 PUBLIC_FIELDS = {
     "link": (
         "The link of your AIOStreams config, the one your apps use: on AIOStreams' configure page, copy the install "
@@ -1029,22 +1059,21 @@ PUBLIC_FIELDS = {
         "them and nothing is removed. It works only together with adding AIOSubtitles; to undo it, add the addons "
         "again on AIOStreams' configure page."),
     "usenet": USENET_TEXT,      # the installer question's text, with the instance's number (usenet_help)
-    # The answer for files with no subtitles of their own, with the instance's audio limit and daily count
-    # (audio_help); each answer's own words are in PUBLIC_AUDIO_ANSWERS
+    # The answer for files with no subtitles of their own, with the instance's audio limit ("{at_most}", none
+    # without one) and daily count (audio_help); each answer's own words are in PUBLIC_AUDIO_ANSWERS
     "audio": (
         "Some files carry no subtitle track, so a subtitle can only be timed to them by listening to their speech: "
         "AIOSubtitles reads short parts of the file's sound through your own debrid service (or Usenet, if you turned "
-        "it on), about 60–350 MB a file and at most {limit}, and works one to three minutes; the synced copy then "
-        "serves everyone who plays the same file, you included next time. These syncs count in your daily data, at "
-        "most {per_day} a day."),
+        "it on), about 60–350 MB a file{at_most}, and works one to three minutes; the synced copy then serves everyone "
+        "who plays the same file, you included next time. These syncs count in your daily data, at most {per_day} a "
+        "day."),
     "invite": "The code you were given. AIOSubtitles is open only to invited people for now.",
     "tmdb_key": (
         "Optional: your own free TMDB API key (on themoviedb.org: your account's settings, API). AIOSubtitles uses it to "
         "look up the original language of the films and series you play, so their subtitles are timed to the file's "
         "track in that language; it sends only the title's IMDb id, and the answers are shared with everyone. Without "
-        "it, your titles are looked up on Wikidata only. It is stored encrypted in your record, opens only with your "
-        "personal link, and is never shown; Remove key deletes it at once (the encrypted backups keep it up to 30 days "
-        "more)."),
+        "it, your titles are looked up on Wikidata only (for anime, AniList and Kitsu). It is stored encrypted in your "
+        "record, opens only with your personal link, and is never shown; Remove key deletes it at once ({backups})."),
     "refresh": (
         "Your AIOStreams password, used now to read your config again and rebuild AIOSubtitles' own config from it, for "
         "example after you added or removed a service, to make that config again if it is gone, and to put "
@@ -1056,16 +1085,14 @@ PUBLIC_FIELDS = {
         "with."),
     "keep_password": (
         "Off by default. Ticked: AIOSubtitles keeps your AIOStreams password, encrypted so that it opens only with your "
-        "personal link, and about once a day while you use it rebuilds its own config from yours, so services and "
-        "addons you add or remove are followed without Refresh; Real-Debrid stays out, and Usenet unless you turn it "
+        "personal link, and {every} while you use it rebuilds its own config from yours, so services and addons you "
+        "add or remove are followed without Refresh; Real-Debrid stays out, and Usenet unless you turn it "
         "on, and your own config is never changed. The cost: that password can change your whole AIOStreams config, all your keys included, "
         "so if AIOSubtitles' server were broken into while you use it, it could be read. Unticked: it is used once and "
-        "forgotten. Untick and refresh, or press \"Stop keeping my password\", to delete it at once; the encrypted "
-        "backups keep it up to 30 days more."),
+        "forgotten. Untick and refresh, or press \"Stop keeping my password\", to delete it at once; {backups}."),
     "forget_password": (
-        "Deletes the AIOStreams password AIOSubtitles kept, at once (the encrypted backups keep it up to 30 days more); "
-        "nothing else changes. AIOSubtitles then stops following changes to your config by itself, and you press "
-        "Refresh after you change it."),
+        "Deletes the AIOStreams password AIOSubtitles kept, at once ({backups}); nothing else changes. AIOSubtitles "
+        "then stops following changes to your config by itself, and you press Refresh after you change it."),
     "delete": (
         "Deletes everything AIOSubtitles keeps about you and removes its own config from your AIOStreams; your "
         "personal link stops working at once. Optional: with your AIOStreams password it also takes itself out of "
@@ -1103,10 +1130,19 @@ PUBLIC_AUDIO_ANSWERS = {
 }
 
 
+def audio_offered(settings):
+    """Whether the public pages ask the question for files with no subtitles of their own and describe the audio
+    route: with it on and audio syncs allowed (SUBSYNC_USER_AUDIO_PER_DAY above 0). With 0 they treat it as off; the
+    answers people saved stay in their records for when it is raised again."""
+    return settings is not None and settings.audio_route and settings.user_audio_per_day > 0
+
+
 def audio_help(settings):
-    """The explanation of the answer for files with no subtitles of their own, with the instance's audio limit and
-    the audio syncs a person may start a day."""
-    return PUBLIC_FIELDS["audio"].format(limit=audio_limit_words(settings), per_day=settings.user_audio_per_day)
+    """The explanation of the answer for files with no subtitles of their own, with the instance's audio limit (no
+    "at most" without one) and the audio syncs a person may start a day."""
+    limit = audio_limit_words(settings)
+    return PUBLIC_FIELDS["audio"].format(at_most=f" and at most {limit}" if limit else "",
+                                         per_day=settings.user_audio_per_day)
 
 
 def audio_answer_help(answer, settings):
@@ -1126,14 +1162,50 @@ def clean_up_help(presets):
     return PUBLIC_FIELDS["clean_up"].format(names=f"{', '.join(first)} and {last}" if first else last)
 
 
-def usenet_help(per_day):
-    """The Usenet box's explanation with the instance's searches a day (SUBSYNC_USENET_LISTINGS_PER_DAY)."""
-    return PUBLIC_FIELDS["usenet"].format(per_day=per_day)
-
-
 def usenet_status(on, names, used, per_day):
-    """The settings row: "Usenet: on, through NzbDAV (2 of 10 searches used today)" / "Usenet: off"."""
-    return f"Usenet: on, through {names} ({used} of {per_day} searches used today)" if on else "Usenet: off"
+    """The settings row: "Usenet: on, through NzbDAV (2 of 10 searches used today)", "(0 of 1 search used today)" /
+    "Usenet: off"."""
+    if not on:
+        return "Usenet: off"
+    return f"Usenet: on, through {names} ({used} of {per_day} {plural(per_day, 'search', 'searches')} used today)"
+
+
+def recheck_every(settings):
+    """How often the check runs while a person uses the service (SUBSYNC_RECHECK_HOURS), as the pages say it: "about
+    once a day" at 24 hours, "about every 6 hours", "about every 2 days"."""
+    hours = settings.recheck_hours
+    if hours == 24:
+        return "about once a day"
+    if hours % 24 == 0:
+        days = int(hours // 24)
+        return f"about every {days} {plural(days, 'day')}"
+    return f"about every {hours:g} {plural(hours, 'hour')}"
+
+
+# How long the host's backups keep what a person deletes (SUBSYNC_BACKUP_DAYS), in the words of each text that says
+# it, (with the instance's days, without them): a field's explanation, "What is stored" and "Who else sees your
+# requests" on the privacy page
+BACKUP_WORDS = {
+    "field": ("the encrypted backups keep it up to {days} more", "the host's encrypted backups may keep it longer"),
+    "stored": ("and up to {days} more in the encrypted backups", "and possibly longer in the host's encrypted backups"),
+    "kept": ("Backups of the stored data are kept for up to {days}.",
+             "Whoever hosts this instance decides whether backups of the stored data are made and how long they are "
+             "kept."),
+}
+
+
+def backup_words(settings, text):
+    """How long the instance's backups keep a record, in `text`'s words (BACKUP_WORDS): with SUBSYNC_BACKUP_DAYS its
+    days, "up to 30 days more"; without, that the host's backups may keep it longer."""
+    days = settings.backup_days
+    with_days, without = BACKUP_WORDS[text]
+    return with_days.format(days=f"{days} {plural(days, 'day')}") if days else without
+
+
+def field_help(name, settings):
+    """A field's explanation (PUBLIC_FIELDS) with the instance's words: how often the check runs ("{every}") and how
+    long its backups keep what is deleted ("{backups}")."""
+    return PUBLIC_FIELDS[name].format(every=recheck_every(settings), backups=backup_words(settings, "field"))
 
 
 NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four"}
@@ -1196,13 +1268,13 @@ PUBLIC_TEXTS = {
     "addon_left": (
         "Remove the AIOSubtitles addon from your AIOStreams config yourself (Addons, then delete it and save); its "
         "link no longer works."),
-    "tries": "Each try counts: {n} sign-up attempts per address in an hour.",
+    "tries": "Each try counts: {attempts} per address in an hour.",     # tries_text
     "kept_note": "For your safety, the link, password and invite code aren't kept after an error: enter them again.",
     "password_once": "Your password is used for this sign-up only and is not stored, unless you tick \"Keep my password\".",
     "copied": ("AIOSubtitles' config on your AIOStreams was copied from yours {when}. After you add or remove a service or "
                "addon in AIOStreams, press Refresh."),
     "copied_auto": ("AIOSubtitles' config on your AIOStreams was copied from yours {when}. AIOSubtitles keeps your "
-                    "password and follows changes to your config by itself, about once a day while you use it."),
+                    "password and follows changes to your config by itself, {every} while you use it."),
     "forgot": ("Your kept password is deleted. AIOSubtitles no longer follows your config by itself: press Refresh after "
                "you change it."),
     "notice_where": ("Open your AIOSubtitles settings page: your personal link, ending in configure instead of "
@@ -1237,38 +1309,52 @@ PUBLIC_TEXTS = {
 }
 
 
-# The privacy page in four parts, (heading, text), filled in by privacy_parts: "{audio}" takes the audio route's words
-# on what is read, "{lookup}" the original-language lookups' sentence, "{tmdb}" a person's own TMDB key among what is
-# stored.
+def tries_text(per_hour):
+    """The start page's note on the sign-up attempts an address may make in an hour (SUBSYNC_SIGNUPS_PER_HOUR)."""
+    return PUBLIC_TEXTS["tries"].format(attempts=f"{per_hour} {plural(per_hour, 'sign-up attempt')}")
+
+
+# The privacy page in four parts, (heading, text), filled in by privacy_parts with the instance's words: "{audio}" the
+# audio route's on what is read, "{asked}" the sites it searches and the lookups it makes (PRIVACY_SITES,
+# PRIVACY_CINEMETA, PRIVACY_LOOKUP), "{audio_answer}" and "{tmdb}" a person's answer for files with no subtitles of
+# their own and their own TMDB key among what is stored, "{backups}" and "{backups_kept}" how long the host's backups
+# keep a record (BACKUP_WORDS), "{front}" who sees every request (PRIVACY_FRONT), "{keep}" SUBSYNC_USER_KEEP_DAYS.
 PRIVACY_PARTS = (
     ("What is read",
      "your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, its subtitle track "
      "(about 1 MB; a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its own server and "
      "doesn't keep){audio} and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your "
-     "AIOStreams, or from your Usenet service when you turn Usenet on. "
-     "AIOSubtitles also searches subtitle sites itself (OpenSubtitles, TheSubtitleDB, Gestdown, SubDL, SubSource): they "
-     "get the title's IMDb id, season and episode, the languages, and the file's name, size and hashes, from "
-     "AIOSubtitles' server, never your internet address. {lookup}"),
+     "AIOStreams, or from your Usenet service when you turn Usenet on.{asked}"),
     ("What is stored",
      "one record, encrypted so that it opens only with your personal link (your AIOStreams address, AIOSubtitles' own "
      "config there and its password (and its Usenet config's, with Usenet on), your config's id, your languages, "
-     "{tmdb}and when "
+     "{audio_answer}{tmdb}and when "
      "your AIOStreams was last checked), and how much was read for you each day. AIOSubtitles' own config holds your "
      "debrid keys, as your own config does (its Usenet config your Usenet and indexer keys), and the service can open "
      "them while your requests come in. Your AIOStreams password is stored only if you tick \"Keep "
-     "my password\", in the same encrypted record, until you untick it (and up to 30 days more in the encrypted "
-     "backups). For each synced subtitle only its new timing "
-     "(never its text), with the names and sizes of the files it fits, is shared and kept 180 days after last use, "
-     "without who played them. Logs name the titles "
-     "synced, never who asked."),
+     "my password\", in the same encrypted record, until you untick it ({backups}). For each synced subtitle only "
+     "its new timing (never its text), with the names and sizes of the files it fits, is shared and kept 180 days "
+     "after last use, without who played them. Logs name the titles synced, never who asked."),
     ("Who else sees your requests",
-     "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address and the "
-     "links you open, your personal link included. AIOSubtitles itself keeps no log of requests. Backups of the stored "
-     "data are kept for up to 30 days."),
+     "{front} AIOSubtitles itself keeps no log of requests. {backups_kept}"),
     ("How long it is kept",
-     "until you delete your data on your settings page, or 180 days after your last request; then AIOSubtitles' own "
+     "until you delete your data on your settings page, or {keep} after your last request; then AIOSubtitles' own "
      "config can't be removed from your AIOStreams, because opening your record needs your link."),
 )
+# The sites AIOSubtitles searches itself, by source (extra.asked_sources): "{sites}" names those the instance asks, in
+# the order of the rule "Which subtitles are tried first"; Cinemeta is asked only to find a series on Gestdown
+PRIVACY_SITES = ("AIOSubtitles also searches subtitle sites itself ({sites}): they get the title's IMDb id, season and "
+                 "episode, the languages, and the file's name, size and hashes, from AIOSubtitles' server, never your "
+                 "internet address.")
+SITE_NAMES = {"osv3": "OpenSubtitles", "osv3plus": "OpenSubtitles", "tsdb": "TheSubtitleDB", "subdl": "SubDL",
+              "subsource": "SubSource", "gestdown": "Gestdown", "wyzie": "Wyzie"}
+PRIVACY_CINEMETA = "For series, it first asks Cinemeta for TheTVDB's number by the title's id alone."
+# Who sees every request, with the service in front of the instance (SUBSYNC_FRONT_PROXY), without it
+PRIVACY_FRONT = ("AIOSubtitles runs behind {proxy}, which passes every request on and so sees your internet address "
+                 "and the links you open, your personal link included.",
+                 "The web server in front of AIOSubtitles passes every request on and so sees your internet address "
+                 "and the links you open, your personal link included; whoever hosts this instance runs it.")
+PRIVACY_AUDIO_STORED = "your answer for files with no subtitles of their own, "   # in "What is stored", where asked
 
 
 class State(NamedTuple):
@@ -1314,17 +1400,18 @@ def state_text(state, detail=None):
     return PUBLIC_STATES[state].text.format(detail=detail or "")
 
 
-# The audio route on the public pages, shown only when the instance has it on: the intro's sentence,
-# the privacy page's words on what is read ("{limit}": the instance's audio limit), the signed-up page's note; and
-# the note under the answer "as soon as a file is opened", shown while it is the one picked. Each person
-# chooses when (PUBLIC_FIELDS["audio"]), so these name the default and leave the answers to the settings page.
+# The audio route on the public pages, shown only where the pages offer it (audio_offered): the intro's
+# sentence, the privacy page's words on what is read ("{at_most}": the instance's audio limit, none without one), the
+# signed-up page's note; and the note under the answer "as soon as a file is opened", shown while it is the one
+# picked. Each person chooses when (PUBLIC_FIELDS["audio"]), so these name the default and leave the answers to the
+# settings page.
 PUBLIC_AUDIO = {
     "intro": ("A file with no subtitle track of its own can be synced from its sound, when you choose: by default only "
               "after you pick its \"(AIOSubtitles)\" entry. That reads about 60–350 MB of it through your debrid "
               "service or Usenet, and the copy is there the next time you open the file."),
     "privacy": ("; for a file with no subtitle track of its own, as you choose on your settings page (by default only "
-                "after you pick its \"(AIOSubtitles)\" entry), short parts of its sound (about 60–350 MB, at most "
-                "{limit}) through your own debrid service or Usenet, used only to time the subtitles and not kept;"),
+                "after you pick its \"(AIOSubtitles)\" entry), short parts of its sound (about 60–350 MB{at_most}) "
+                "through your own debrid service or Usenet, used only to time the subtitles and not kept;"),
     "next": ("A file with no subtitle track of its own takes one to three minutes once its sync from the sound starts "
              "(by default after you pick its \"(AIOSubtitles)\" entry; you choose on your settings page); its copy is "
              "there the next time you open it."),
@@ -1334,34 +1421,36 @@ PUBLIC_AUDIO = {
 
 
 def audio_limit_words(settings):
-    """The instance's per-file audio limit as the pages say it: "1 GB", "0.5 GB"."""
-    return f"{settings.audio_budget / 1e9:g} GB" if settings.audio_budget else "no set limit"
+    """The instance's per-file audio limit as the pages say it, in plain digits: "1 GB", "0.5 GB", "1000000 GB" (never
+    "1e+06 GB"); None without a limit (SUBSYNC_AUDIO_BUDGET_GB 0)."""
+    if not settings.audio_budget:
+        return None
+    return f"{settings.audio_budget / 1e9:f}".rstrip("0").rstrip(".") + " GB"
 
 
 def intro_parts(settings):
-    """The landing intro's two paragraphs, the audio route's sentence ending the first when the instance has it on."""
+    """The landing intro's two paragraphs, the audio route's sentence ending the first where the pages offer it."""
     first = PUBLIC_TEXTS["intro"]
-    if getattr(settings, "audio_route", False):
+    if audio_offered(settings):
         first += " " + PUBLIC_AUDIO["intro"]
     return first, PUBLIC_TEXTS["intro_shared"]
 
 
 # TMDB's notice (its terms ask for it, with its logo, wherever TMDB's data is used: ui.tmdb_credit), and the privacy
 # page's sentence on the original-language lookups, by what the instance uses: TMDB with its own key, TMDB with each
-# person's own key, Wikidata only, or no lookup at all (Cinemeta, asked for a series' TheTVDB number, in every one)
+# person's own key, Wikidata only, or no lookup at all (no sentence)
 TMDB_NOTICE = "AIOSubtitles uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB."
 # ("{kept}": how long TMDB's answers are kept, where the instance asks TMDB: origlang.TMDB_KEEP_S)
 _LOOKUP = ("To time subtitles to the original speech, AIOSubtitles also looks up each title's original language by its "
-           "id alone (IMDb, or for anime MyAnimeList or Kitsu), from its own server: at {where}; for series it asks "
-           "Cinemeta for TheTVDB's number the same way. The answers are kept with no time limit{kept} and shared by "
-           "everyone.")
+           "id alone (IMDb, or for anime MyAnimeList or Kitsu), from its own server: at {where}. The answers are kept "
+           "with no time limit{kept} and shared by everyone.")
 _TMDB_KEPT = " (TMDB's up to 6 months)"
 PRIVACY_LOOKUP = {
     "tmdb": _LOOKUP.format(where="TMDB, Wikidata, and for anime AniList and Kitsu", kept=_TMDB_KEPT),
     "personal": _LOOKUP.format(
         where="TMDB with your own key if you added one, Wikidata, and for anime AniList and Kitsu", kept=_TMDB_KEPT),
     "wikidata": _LOOKUP.format(where="Wikidata, and for anime AniList and Kitsu", kept=""),
-    "off": "For series, AIOSubtitles asks Cinemeta for TheTVDB's number by the title's id alone, from its own server.",
+    "off": "",
 }
 PRIVACY_TMDB_STORED = "your TMDB key if you added one, "      # in "What is stored", when each person may add one
 
@@ -1382,21 +1471,37 @@ def tmdb_used(settings):
     return lookup_kind(settings) in ("tmdb", "personal")
 
 
-def privacy_parts(settings):
-    """The privacy page's parts, (heading, text): the audio route's words on what is read when the instance has it on,
-    the lookups' sentence after the subtitle sites', and a person's own TMDB key among what is stored when they may
-    add one."""
+def privacy_parts(settings, sources):
+    """The privacy page's parts, (heading, text), with what this instance does: the audio route's words on what is read
+    and a person's answer for it among what is stored where the pages offer it; the subtitle sites it asks (`sources`:
+    extra.asked_sources), Cinemeta only with Gestdown, and the lookups' sentence; a person's own TMDB key among what is
+    stored when they may add one; who sees every request and how long backups and records are kept, by its
+    settings."""
     kind = lookup_kind(settings)
-    fill = {"audio": PUBLIC_AUDIO["privacy"].format(limit=audio_limit_words(settings))
-            if getattr(settings, "audio_route", False) else "",
-            "lookup": PRIVACY_LOOKUP[kind], "tmdb": PRIVACY_TMDB_STORED if kind == "personal" else ""}
+    audio, limit = audio_offered(settings), audio_limit_words(settings)
+    sites = list(dict.fromkeys(SITE_NAMES[source] for source in sources))      # both OpenSubtitles ones named once
+    asked = [PRIVACY_SITES.format(sites=", ".join(sites))] if sites else []
+    if "gestdown" in sources:
+        asked.append(PRIVACY_CINEMETA)
+    if PRIVACY_LOOKUP[kind]:
+        asked.append(PRIVACY_LOOKUP[kind])
+    with_proxy, without = PRIVACY_FRONT
+    keep = settings.user_keep_days
+    fill = {"audio": PUBLIC_AUDIO["privacy"].format(at_most=f", at most {limit}" if limit else "") if audio else "",
+            "asked": "".join(" " + sentence for sentence in asked),
+            "audio_answer": PRIVACY_AUDIO_STORED if audio else "",
+            "tmdb": PRIVACY_TMDB_STORED if kind == "personal" else "",
+            "backups": backup_words(settings, "stored"),
+            "front": with_proxy.format(proxy=settings.front_proxy) if settings.front_proxy else without,
+            "backups_kept": backup_words(settings, "kept"),
+            "keep": f"{keep} {plural(keep, 'day')}"}
     return tuple((head, text.format(**fill)) for head, text in PRIVACY_PARTS)
 
 
 def next_text(settings):
-    """The signed-up page's "what happens next", with the audio route's note when the instance has it on."""
+    """The signed-up page's "what happens next", with the audio route's note where the pages offer it."""
     text = PUBLIC_TEXTS["next"]
-    return text + " " + PUBLIC_AUDIO["next"] if getattr(settings, "audio_route", False) else text
+    return text + " " + PUBLIC_AUDIO["next"] if audio_offered(settings) else text
 
 
 # The sign-up page's heading in three parts, for its deliberate line breaks on desktop and phones (pages._headline).

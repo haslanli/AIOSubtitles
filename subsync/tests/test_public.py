@@ -1151,21 +1151,32 @@ class PublicTextsTest(unittest.TestCase):
                 self.assertRegex(text, r"(?<![\d.])" + re.escape(shown.strip()))   # the number whole, not a tail
 
     def test_the_privacy_text_names_cloudflare_and_the_backups_before_how_long(self):
+        # An instance with the owner's settings (SUBSYNC_FRONT_PROXY, SUBSYNC_BACKUP_DAYS) reads as before;
+        # one without them, in words true of any host
         from subsync import explain
-        parts = explain.privacy_parts(Settings({}))
-        text = " ".join(f"{head}: {text}" for head, text in parts)       # the parts in order, under their headings
-        added = ("AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address "
+        from subsync.extra import asked_sources
+        for env, added in (
+                ({"SUBSYNC_FRONT_PROXY": "Cloudflare", "SUBSYNC_BACKUP_DAYS": "30"},
+                 "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address "
                  "and the links you open, your personal link included. AIOSubtitles itself keeps no log of requests. "
-                 "Backups of the stored data are kept for up to 30 days.")
-        self.assertIn("Logs name the titles synced, never who asked. Who else sees your requests: " + added
-                      + " How long it is kept:", text)
+                 "Backups of the stored data are kept for up to 30 days."),
+                ({}, "The web server in front of AIOSubtitles passes every request on and so sees your internet address "
+                     "and the links you open, your personal link included; whoever hosts this instance runs it. "
+                     "AIOSubtitles itself keeps no log of requests. Whoever hosts this instance decides whether "
+                     "backups of the stored data are made and how long they are kept.")):
+            with self.subTest(env=env):
+                s = Settings(env)
+                parts = explain.privacy_parts(s, asked_sources(s, "series"))
+                text = " ".join(f"{head}: {text}" for head, text in parts)   # the parts in order, under their headings
+                self.assertIn("Logs name the titles synced, never who asked. Who else sees your requests: " + added
+                              + " How long it is kept:", text)
 
     def test_the_privacy_text_says_what_reading_a_track_of_pictures_means(self):
         # Image subtitle tracks' words are read on the server, and such a track can take a few MB
         from subsync import explain
         self.assertIn("for each file you play, its subtitle track (about 1 MB; a few MB when the track's lines are "
                       "pictures, whose words AIOSubtitles reads on its own server and doesn't keep) and the subtitles "
-                      "your AIOStreams lists", dict(explain.privacy_parts(Settings({})))["What is read"])
+                      "your AIOStreams lists", dict(explain.privacy_parts(Settings({}), ()))["What is read"])
 
     def test_the_other_read_sizes_say_the_same_with_the_same_words(self):
         # The landing intro and the README's texts that give "about 1 MB" per file take the privacy sentence's

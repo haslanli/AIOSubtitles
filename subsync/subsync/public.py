@@ -483,7 +483,7 @@ class PublicHandler(Handler):
         """404: a short page for a browser, nothing for an app. The same for any unknown address, a personal link
         nobody signed up with included, so the answer tells nothing about which links exist."""
         if "text/html" in (self.headers.get("Accept") or ""):
-            return self._html(404, pages.not_found_page())
+            return self._html(404, pages.not_found_page(self.service.s))
         return self._send(404, b"")
 
     def _see(self, done):
@@ -645,7 +645,8 @@ class PublicHandler(Handler):
                 svc.pool.stop(token)
                 return self._see("tmdb-key-removed")
             if action == "delete-confirm":
-                return self._html(200, pages.delete_confirm_page(stored=store_only(record)), personal=True)
+                return self._html(200, pages.delete_confirm_page(stored=store_only(record), settings=svc.s),
+                                  personal=True)
             if action == "delete":
                 svc.pool.stop(token, forget=True)
                 svc.checker.forget(token)
@@ -655,12 +656,12 @@ class PublicHandler(Handler):
                 except SignupError as e:      # back to the delete step, not the settings page
                     return self._html(e.code, pages.delete_confirm_page(
                         error=e.message, field="delete" if e.field == "password" else e.field,
-                        stored=store_only(record)), personal=True)
+                        stored=store_only(record), settings=svc.s), personal=True)
                 # a request while it took (its AIOStreams calls) may have opened the record and made an App again: it
                 # stops now that the record is gone (Pool.app opens a record again after a stop, and finds none)
                 svc.pool.stop(token, forget=True)
                 svc.checker.forget(token)
-                return self._html(200, pages.deleted_page(outcome), personal=True)
+                return self._html(200, pages.deleted_page(outcome, svc.s), personal=True)
         except SignupError as e:
             return page(e.code, error=e.message, field=e.field)
         return page(400, error="Choose one of the buttons on this page.")

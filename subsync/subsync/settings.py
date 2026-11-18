@@ -271,6 +271,11 @@ class Settings:
         self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS"))
         self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN")) * 60
         self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS"))
+        # what the pages say about the host's own setup: the Questions link, the service in front that sees
+        # every request, how many days backups keep records; empty, words true of any host instead (0 days: empty)
+        self.contact = g("SUBSYNC_CONTACT").strip()
+        self.front_proxy = g("SUBSYNC_FRONT_PROXY").strip()
+        self.backup_days = max(0, int(g("SUBSYNC_BACKUP_DAYS").strip() or 0))
         # each person's AIOStreams checked again, at most this often, while they use the service (recheck.py); 0: never
         self.recheck_hours = float(g("SUBSYNC_RECHECK_HOURS"))
         # the web server's addresses; "gateway" is this container's default gateway, found at start (the address a
@@ -317,6 +322,12 @@ class Settings:
         if not self.audio_route:
             return "off"
         return self.audio_when if self.audio_when in AUDIO_CHOICES else "pick"
+
+    @property
+    def keeps_passwords(self):
+        """Public mode: whether a person may let AIOSubtitles keep their AIOStreams password. Only the check
+        (recheck.py) uses a kept password, so not while SUBSYNC_RECHECK_HOURS turns it off."""
+        return self.recheck_hours > 0
 
     @property
     def rule_id(self):

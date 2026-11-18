@@ -31,8 +31,8 @@ AUDIO_PER_DAY_TEXT = (
     "Audio syncs one person may start a day (UTC), picked or opened. Each reads about 60–350 MB of a file's sound and "
     "keeps a processor busy for one to three minutes, and its copy then serves everyone who plays that file. 20 by "
     "default; recommended: keep it, so the processors are shared fairly while the daily data limit bounds the "
-    "reads. 0 stops new audio syncs and keeps the copies already made. Past it, that person's files wait for a "
-    "pick the next day.")
+    "reads. 0 stops new audio syncs, takes the audio question off the pages and keeps the copies already made. Past "
+    "it, that person's files wait for a pick the next day.")     # the pages treat 0 as the route off
 OPENED_PER_DAY_TEXT = (
     "Of those, how many may start as soon as a file is opened, for people who chose that (UTC day). 5 by default; "
     "recommended: keep it low, since apps also ask for files people only browse or that they prepare next. 0 "

@@ -137,10 +137,10 @@ def page(title, body, kind, personal=False, body_attrs="", opened=False, refresh
 
 
 def top(contact, start="/", privacy=True):
-    """The page's header: the name, Privacy (the site only) and Questions."""
+    """The page's header: the name, Privacy (the site only) and Questions (where there is a `contact`)."""
     return (f"<header class=\"top\"><a class=\"wordmark\" href=\"{e(start)}\">AIOSubtitles</a>"
             f"<nav class=\"links\" aria-label=\"AIOSubtitles\">" + ("<a href=\"/privacy\">Privacy</a>" if privacy else "")
-            + f"<a href=\"{e(contact)}\">Questions</a></nav></header>")
+            + (f"<a href=\"{e(contact)}\">Questions</a>" if contact else "") + "</nav></header>")
 
 
 # ------------------------------------------------------------------------------------------- buttons

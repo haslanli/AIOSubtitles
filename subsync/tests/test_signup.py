@@ -676,6 +676,38 @@ class SignupTest(PublicParts, unittest.TestCase):
         self.assertEqual(self.logs.lines.count("a person's TMDB key was deleted"), 1)
 
 
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+class KeptPasswordTest(PublicParts, unittest.TestCase):
+    """Only the check uses a kept password, so with it off (SUBSYNC_RECHECK_HOURS 0) none is kept, even from a
+    form that sends the box ticked, and one kept before goes at the next refresh."""
+
+    def setUp(self):
+        from subsync import signup
+        self.signup = signup
+        self.start_public(SUBSYNC_RECHECK_HOURS="0")
+
+    def tearDown(self):
+        self.stop_public()
+
+    def refresh(self, settings, token):
+        self.signup.refresh(settings, self.users, token, {"password": PASSWORD, "keep_password": "on"},
+                            api_factory=self.api, timeout=10)
+        return self.users.open(token).get("auto_password")
+
+    def test_no_password_is_kept_while_the_check_is_off(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        form = {"link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "password": PASSWORD,
+                "languages": "English", "add_addon": "on", "keep_password": "on"}
+        token = self.signup.signup(self.s, self.users, form, api_factory=self.api, timeout=10).token
+        self.assertNotIn("auto_password", self.users.open(token))
+        record = self.users.open(token)
+        record["auto_password"] = PASSWORD                  # kept before the check was turned off
+        self.users.update(token, record)
+        self.assertIsNone(self.refresh(self.s, token))
+        on = Settings(dict(self.env, SUBSYNC_RECHECK_HOURS="24"))
+        self.assertEqual(self.refresh(on, token), PASSWORD)  # with the check on, the same box keeps it
+
+
 class UsenetServicesInAddonsTest(unittest.TestCase):
     """An addon's own Services choice can name a Usenet service that the sync config leaves out, and AIOStreams
     refuses a config whose addon names a service it doesn't have. No sign-up store needed, so these run

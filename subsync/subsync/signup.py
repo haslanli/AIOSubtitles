@@ -574,6 +574,13 @@ def _audio_answer(choice, settings):
     return choice
 
 
+def keeps_password(settings, form):
+    """Whether a sign-up or refresh keeps the person's password: they ticked the box, on an instance whose check, the
+    only use of a kept password, is on (Settings.keeps_passwords; with it off, a password kept before goes at the next
+    refresh)."""
+    return form.get("keep_password") == "on" and settings.keeps_passwords
+
+
 def form_audio(settings, form):
     """The sign-up's answer for files with no subtitles of their own: None when this instance doesn't ask it
     (its audio route is off) or the form leaves it out (the person then reads "pick", as everyone signed up before);
@@ -631,7 +638,7 @@ def _signup(settings, users, form, api_factory, timeout):
             _usenet_synced(record, usenet, fields, not has_sync)
         _usenet_state(record, want, services, why)
         # the person chose it (unticked by default): AIOSubtitles refreshes by itself
-        if form.get("keep_password") == "on":
+        if keeps_password(settings, form):
             record["auto_password"] = password
         users.create(token, record)   # the record first: the person's own config gets the link only once the link works
     changes, added, manual = [], False, False
@@ -726,7 +733,7 @@ def _refresh(settings, users, token, form, api_factory, timeout):
             else:
                 _take_config(record, "usenet")
             _usenet_state(record, want, services, why)
-            if form.get("keep_password") == "on":
+            if keeps_password(settings, form):
                 record["auto_password"] = password
             else:
                 record.pop("auto_password", None)
