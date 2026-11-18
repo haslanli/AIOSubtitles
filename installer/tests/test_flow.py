@@ -8,6 +8,7 @@ import socket
 import stat
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -78,6 +79,10 @@ class FakeAios:
         self.aliases = {}           # alias links (stock: /stremio/u/<alias>/… redirects to the full link)
         self.alias_answer = None    # 'ok_200': the alias route answers a page instead
         self.setting = {'*': 300}
+        self.admin = True           # what the sign-in says of the account; the settings need an admin's sign-in
+        self.setting_source = 'database'   # 'environment': fixed by SUBTITLE_CACHE_TTL, not changed through the API
+        self.has_cache_setting = True      # False: an AIOStreams version without the subtitle cache setting
+        self.keeps_setting = True          # False: a change of the setting is answered but not kept
         self.log = []
         outer = self
 
@@ -107,6 +112,13 @@ class FakeAios:
                 n = int(self.headers.get('Content-Length') or 0)
                 return json.loads(self.rfile.read(n) or b'{}')
 
+            def _refused_unless_admin(self):
+                """The dashboard's settings need an admin's sign-in: True when refused (the answer is sent)."""
+                if self.headers.get('Cookie') and outer.admin:
+                    return False
+                self._json(403, {'success': False, 'error': {'code': 'FORBIDDEN', 'message': 'not allowed'}})
+                return True
+
             def do_HEAD(self):
                 u = urllib.parse.urlsplit(self.path)
                 outer.log.append(('HEAD', u.path, None))
@@ -132,8 +144,12 @@ class FakeAios:
                     return self._json(200, {'success': True, 'data': {'userData': outer.users[uuid]['config'],
                                                                       'encryptedPassword': 'ENC-' + uuid[:4]}})
                 if path == '/api/v1/dashboard/settings':
-                    return self._json(200, {'success': True, 'data': {'settings': [
-                        {'key': 'resources.cache.subtitle.ttl', 'value': outer.setting, 'source': 'database', 'env': 'SUBTITLE_CACHE_TTL'}]}})
+                    if self._refused_unless_admin():
+                        return
+                    rows = [{'key': 'resources.cache.subtitle.ttl', 'value': outer.setting,
+                             'source': outer.setting_source, 'env': 'SUBTITLE_CACHE_TTL'}] if outer.has_cache_setting else []
+                    return self._json(200, {'success': True, 'data': {'settings': rows + [
+                        {'key': 'resources.cache.stream.ttl', 'value': 600, 'source': 'database', 'env': 'STREAM_CACHE_TTL'}]}})
                 parts = path.split('/')
                 if len(parts) > 4 and parts[1] == 'stremio' and parts[2] == 'u':
                     found = outer.aliases.get(urllib.parse.unquote(parts[3]))
@@ -196,7 +212,7 @@ class FakeAios:
                 outer.log.append(('POST', path, None))
                 if path == '/api/v1/auth/login':
                     ok = body == {'username': 'admin', 'password': 'adminpw'}
-                    return self._json(200 if ok else 401, {'success': ok, 'data': {'isAdmin': True}, '_cookie': ok})
+                    return self._json(200 if ok else 401, {'success': ok, 'data': {'isAdmin': outer.admin}, '_cookie': ok})
                 if outer.gated and not self.headers.get('Cookie'):
                     return self._json(403, {'success': False, 'error': {'code': 'FORBIDDEN', 'message': 'not allowed'}})
                 refused = refusal(body['config'])
@@ -210,12 +226,18 @@ class FakeAios:
 
             def do_DELETE(self):
                 uuid = self._auth()
-                outer.users.pop(uuid, None)
+                outer.log.append(('DELETE', uuid, None))
+                if not uuid:            # no such config, or the wrong password: nothing is deleted
+                    return self._json(401, {'success': False, 'error': {'code': 'USER_INVALID_DETAILS'}})
+                outer.users.pop(uuid)
                 return self._json(200, {'success': True})
 
             def do_PATCH(self):
                 body = self._body()
-                outer.setting = body['resources.cache.subtitle.ttl']
+                if self._refused_unless_admin():
+                    return
+                if outer.keeps_setting:
+                    outer.setting = body['resources.cache.subtitle.ttl']
                 return self._json(200, {'success': True})
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), H)

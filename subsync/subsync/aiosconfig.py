@@ -475,6 +475,25 @@ ALIAS_REDIRECTS = (301, 302, 303, 307, 308)
 WRONG_PASSWORD_CODES = ('USER_INVALID_DETAILS', 'USER_INVALID_PASSWORD', 'USER_NOT_FOUND')
 
 
+# AIOStreams' codes for a config ID and password that open no config: a wrong password, or a config that is gone
+WRONG_PASSWORD_CODES = ('USER_INVALID_DETAILS', 'USER_INVALID_PASSWORD', 'USER_NOT_FOUND')
+
+
+def _asks_sign_in(code, message):
+    """AIOStreams refusing until an account signs in: its code says so, or its own words do (a wrong password or a
+    refused config is that, whatever the words)."""
+    code = str(code or '')
+    if code in WRONG_PASSWORD_CODES or code == 'USER_INVALID_CONFIG':
+        return False
+    return code in ('FORBIDDEN', 'UNAUTHORIZED') or 'not allowed' in (message or '').lower()
+
+
+def needs_sign_in(e):
+    """Whether an AiosError is AIOStreams asking for a signed-in account, as its message then says: told by AIOStreams'
+    code and own words, never by the message's wording."""
+    return _asks_sign_in(e.code, e.detail)
+
+
 def _plain(code, message):
     """AIOStreams error codes, in plain words."""
     code = str(code or '')
@@ -482,7 +501,7 @@ def _plain(code, message):
         return 'That config ID and password don\'t match a config on this AIOStreams.'
     if code == 'USER_INVALID_CONFIG':
         return f'AIOStreams refused the config: {message}'
-    if code in ('FORBIDDEN', 'UNAUTHORIZED') or 'not allowed' in (message or '').lower():
+    if _asks_sign_in(code, message):
         return 'This AIOStreams asks you to sign in before configs can be saved.'
     if code == 'RATE_LIMIT_EXCEEDED' or 'too many' in (message or '').lower():
         return 'AIOStreams is limiting requests from this machine (it allows 10 new configs an hour); try again later.'

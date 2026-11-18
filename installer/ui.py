@@ -15,8 +15,15 @@ def paint(code, text):
     return f'\033[{code}m{text}\033[0m' if COLOR else text
 
 
+# What a terminal acts on instead of showing: every C0 control but the line break, DEL and the C1 controls. Text from
+# AIOStreams (a version, an error message, a name in a config) is printed in setup's lines, so these are taken out of
+# every line: nothing printed can move the cursor, clear lines or set the window title or the clipboard. paint's colour
+# codes (ESC [ … m) stay while colour is on; with it off, setup prints none, so any there are taken out whole.
+UNSHOWN = re.compile(r'(\033\[[0-9;]*m)|[\x00-\x09\x0b-\x1f\x7f-\x9f]')
+
+
 def say(text=''):
-    print(text, flush=True)
+    print(UNSHOWN.sub(lambda m: m.group(1) if COLOR and m.group(1) else '', str(text)), flush=True)
 
 
 def wrap(text, indent='  '):
@@ -53,12 +60,9 @@ def stop(message, fix=None):
     raise Stop(message, fix)
 
 
-STEPS = 8
-
-
-def step(number, title, total=None):
+def step(number, title, total):
     say()
-    say(paint('1', f'Step {number} of {total or STEPS} · {title}'))
+    say(paint('1', f'Step {number} of {total} · {title}'))
     say(paint('2', '─' * 60))
 
 
@@ -77,7 +81,8 @@ def box(title, paragraphs, colour='1;32', width=76):
 
 
 def strip_ansi(text):
-    return re.sub(r'\033\[[0-9;]*m', '', text)
+    """The text as it takes room on the terminal: without colour codes and what say() takes out."""
+    return UNSHOWN.sub('', text)
 
 
 def masked(value):

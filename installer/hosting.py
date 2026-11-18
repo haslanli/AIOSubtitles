@@ -43,8 +43,8 @@ def check_address(value):
     start at the address's root), written the same way every time."""
     text = (value or '').strip()
     parts = urllib.parse.urlsplit(text)
-    if parts.scheme != 'https' or not parts.hostname or parts.path not in ('', '/') or parts.query or parts.fragment \
-            or parts.username or parts.password:
+    if parts.scheme != 'https' or not parts.hostname or not plan.has_usable_port(parts) or parts.path not in ('', '/') \
+            or parts.query or parts.fragment or parts.username or parts.password:
         return False, ADDRESS_WORDS, text
     return True, '', f'https://{parts.netloc.lower()}'
 

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from installer import dockerenv, engine, plan, web, where  # noqa: E402
 from installer.aios import Aios, AiosError  # noqa: E402
 from installer.ui import Asker, Stop, bad, note, ok, paint, say, stop, warn, wrap  # noqa: E402
-from installer.engine import backup, load_settings, read_kv, short, subsync_status  # noqa: E402,F401
+from installer.engine import backup, load_settings, short, subsync_status  # noqa: E402,F401
 
 CONTAINER = engine.CONTAINER
 
@@ -49,7 +49,7 @@ def cmd_restore(args, path):
     data = json.loads(Path(path).read_text())
     s = load_settings()
     aios = Aios(s.get('aios_url') or 'http://127.0.0.1:3000')
-    ask = Asker(read_kv(Path(args.answers)) if args.answers else {}, args.yes)
+    ask = Asker(plan.parse_env(Path(args.answers).read_text()) if args.answers else {}, args.yes)
     uuid = data['uuid']
     password = ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)
     if not ask.yesno('CONFIRM', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):

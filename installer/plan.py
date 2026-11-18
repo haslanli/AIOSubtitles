@@ -56,11 +56,20 @@ def public_default(aios_public, lan_ip, port=SUBSYNC_PORT):
     return 'port', f'http://{host}:{port}'
 
 
+def has_usable_port(parts):
+    """Whether a split address has no port or one from 1 to 65535 (`.port` raises ValueError for letters or a number
+    out of range, which urlsplit itself lets through)."""
+    try:
+        return parts.port != 0
+    except ValueError:
+        return False
+
+
 def check_public(url):
     """(good, message, normalized) for an address typed in by the user."""
     url = (url or '').strip().rstrip('/')
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme not in ('http', 'https') or not parts.hostname:
+    if parts.scheme not in ('http', 'https') or not parts.hostname or not has_usable_port(parts):
         return False, 'Type a full address that starts with http:// or https://', url
     if parts.query or parts.fragment:
         return False, 'Leave out anything after ? or #.', url

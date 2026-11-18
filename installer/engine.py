@@ -23,8 +23,9 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from installer import docs, dockerenv, hosting, limits, plan, ui, update, where
+from installer import docs, dockerenv, hosting, limits, plan, screens, ui, update, where
 from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the client through here)
+from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
 from subsync import explain, realdebrid
 
@@ -57,15 +58,9 @@ ALIAS_NO_CONFIG = ("Setup couldn't get the config from that alias link. Paste th
 # ------------------------------------------------------------------------------------------- state files
 
 def read_kv(path):
-    out = {}
-    if path.exists():
-        for line in path.read_text().splitlines():
-            if '=' in line and not line.lstrip().startswith('#'):
-                k, v = line.split('=', 1)
-                v = re.sub(r'\s+#.*$', '', v).strip()
-                if v:
-                    out[k.strip()] = v
-    return out
+    """The non-empty values of a KEY=value file setup wrote (state/secrets.env), read as plan.parse_env reads every
+    env and answers file."""
+    return {k: v for k, v in plan.parse_env(path.read_text() if path.exists() else '').items() if v}
 
 
 def own(path):
@@ -98,8 +93,23 @@ def write_private(path, text):
     tmp.replace(path)
 
 
+# What ends a line where a value is written: every line break str.splitlines() knows (plan.parse_env reads the files
+# back with it; Docker Compose ends a line at \n), and NUL. A value holding one, from AIOStreams' answers say, would add
+# lines, and so settings, of its own.
+LINE_BREAK = re.compile(r'[\x00\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]')
+
+
+def one_line_each(path, values):
+    """Stops before `path` is written when a value would break its line."""
+    for k, v in values.items():
+        if LINE_BREAK.search(str(v)):
+            raise Stop(f'Setup stopped before writing {shown(path)}: the value for {k} has a line break in it.')
+
+
 def write_kv(path, values, header):
-    body = [f'# {line}' for line in header.splitlines()] + [f'{k}={v}' for k, v in values.items() if v not in (None, '')]
+    values = {k: v for k, v in values.items() if v not in (None, '')}
+    one_line_each(path, values)
+    body = [f'# {line}' for line in header.splitlines()] + [f'{k}={v}' for k, v in values.items()]
     write_private(path, '\n'.join(body) + '\n')
 
 
@@ -111,6 +121,7 @@ NOT_A_SETTING = 'Not a subsync setting: kept as you wrote it.'
 def write_env(path, values):
     """state/subsync.env: each line with its setting's explanation (explain.py) above it. Empty values are written: an
     empty value is a setting too."""
+    one_line_each(path, values)
     body = [f'# {line}' for line in ENV_HEADER.splitlines()]
     for k, v in values.items():
         body += [''] + docs.comment(explain.SETTINGS[k][1] if k in explain.SETTINGS else NOT_A_SETTING) + [f'{k}={v}']
@@ -142,10 +153,6 @@ def backup(config, uuid, label='viewer'):
 def setup_version():
     """This setup's own version (its image's VERSION file)."""
     return update.running(REPO)
-
-
-def current_version():
-    return setup_version()
 
 
 def compose_for(s):
@@ -329,7 +336,7 @@ class Rows:
 
     wrap = say
 
-    def step(self, number, title, total=None):
+    def step(self, number, title, total):
         pass
 
     def box(self, *a, **k):
@@ -379,9 +386,16 @@ class Engine:
         filled[limits.DAILY.setting] = limits.current(limits.DAILY, env)
         return filled
 
+    def show_step(self, step_id, route='yourself'):
+        """A step's heading in a terminal, "Step n of N · title": its route's steps as the page's rail lists them."""
+        titles, ids = (screens.HOSTING, screens.HOSTING_IDS) if route == 'host' else \
+            (screens.PERSONAL, screens.PERSONAL_IDS)
+        i = ids.index(step_id)
+        self.out.step(i + 1, titles[i], len(ids))
+
     # 1 -------------------------------------------------------------------------------------------------------
     def check_machine(self):
-        self.out.step(1, 'This machine', self.HOST_STEPS if getattr(self, 'route', None) == 'host' else None)
+        self.show_step('machine', getattr(self, 'route', None))
         problem = dockerenv.docker_problem()
         if problem:
             stop(*problem)
@@ -395,7 +409,7 @@ class Engine:
 
     # 2 -------------------------------------------------------------------------------------------------------
     def find_aios(self):
-        self.out.step(2, 'Your AIOStreams')
+        self.show_step('aios')
         found = self.found = dockerenv.aios_containers()
         container = None
         if len(found) > 1:
@@ -406,7 +420,9 @@ class Engine:
         elif found:
             container = found[0]
         url = None
-        if container and 'AIOS_URL' not in self.answers:
+        # the container's own addresses first, even with an address given (a re-run's page fills in the last one): on
+        # the bridge network trying them joins AIOStreams' network, which that address may need
+        if container:
             for candidate in self.aios_urls(container):
                 try:
                     status = Aios(candidate, timeout=8).status()
@@ -425,7 +441,7 @@ class Engine:
         self.aios = Aios(url)
         settings = self.status['settings']
         public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
-        self.s.update(aios_url=url, aios_public=public, version=current_version(), aios_version=self.status.get('version'))
+        self.s.update(aios_url=url, aios_public=public, version=setup_version(), aios_version=self.status.get('version'))
         if container and container['host_network']:
             self.s.update(mode='host', container=container['name'], networks=[],
                           aios_internal=f"http://127.0.0.1:{container['port']}")
@@ -475,7 +491,7 @@ class Engine:
 
     # 3 -------------------------------------------------------------------------------------------------------
     def read_viewer(self):
-        self.out.step(3, 'The config your apps use')
+        self.show_step('config')
 
         def check_id(value):
             alias = plan.alias_from(value)       # an alias link (…/stremio/u/<name>/…) is looked up here
@@ -529,7 +545,7 @@ class Engine:
 
     # 4 -------------------------------------------------------------------------------------------------------
     def choices(self):
-        self.out.step(4, 'Your choices')
+        self.show_step('choices')
         prev_langs = ', '.join(n for n, _, _ in [plan._BY[c] for c in self.prev.get('languages', []) if c in plan._BY]) or None
 
         def check_langs(value):
@@ -614,9 +630,13 @@ class Engine:
         return value or self.keys.get('TMDB_KEY', '')
 
     def public_address(self):
-        lan = lan_address()
-        kind, default = plan.public_default(self.s['aios_public'], lan)
         prev = self.prev.get('public_base')
+        # The default is used or shown only without a last answer to keep and, on the page, without one sent; it holds
+        # this machine's LAN address only when AIOStreams' own address is local. That address is looked up only then:
+        # on the bridge network the lookup starts a helper container.
+        answered = self.page and str(self.ask.answers.get('PUBLIC_ADDRESS') or '').strip()
+        lan = lan_address() if not (prev or answered) and plan.is_local_host(plan.host_of(self.s['aios_public'])) else ''
+        _, default = plan.public_default(self.s['aios_public'], lan)
         url = self.ask.text('PUBLIC_ADDRESS', 'subsync\'s address for your apps', current=prev, default=default,
                             check=plan.check_public)
         kind = 'path' if plan.base_path_of(url) else 'port'
@@ -638,7 +658,7 @@ class Engine:
     def limits(self):
         """The limits a personal install asks: the daily total and, with the audio route on, the audio limit (no language
         limit: on your own install you choose your languages yourself)."""
-        self.out.step(5, 'Limits')
+        self.show_step('limits')
         lim = limits.DAILY
 
         def check(value):
@@ -695,7 +715,7 @@ class Engine:
         return sections
 
     def review_and_save(self):
-        self.out.step(6, 'Your AIOStreams configs')
+        self.show_step('review')
         self.cache = None
         self.out.changes(self.plan_changes())
         self.cache = self.offer_cache_setting()
@@ -721,7 +741,7 @@ class Engine:
             self.with_sign_in(lambda: self.aios.delete_config(self.keys[f'{kind}_UUID'], self.keys[f'{kind}_PASSWORD']))
             self.out.ok(done)
         except AiosError as e:
-            if 'match' not in e.message:     # already gone: nothing to delete
+            if str(e.code) not in WRONG_PASSWORD_CODES:     # else already gone: nothing to delete
                 raise
         self.keys.pop(f'{kind}_UUID', None)
         self.keys.pop(f'{kind}_PASSWORD', None)
@@ -762,7 +782,7 @@ class Engine:
                 self.out.ok(f"Updated {name} ({short(self.keys[uuid_key])})")
                 return
             except AiosError as e:
-                if 'match' not in e.message:
+                if str(e.code) not in WRONG_PASSWORD_CODES:     # else gone: a new one is made
                     raise
                 self.out.warn(f'{name[0].upper()}{name[1:]} is gone from AIOStreams; making a new one.'
                               if kind == 'USENET' else 'subsync\'s old config is gone from AIOStreams; making a new one.')
@@ -778,7 +798,7 @@ class Engine:
         try:
             return action()
         except AiosError as e:
-            if 'sign in' not in e.message or self.aios.signed_in:
+            if not needs_sign_in(e) or self.aios.signed_in:
                 raise
             self.out.warn(e.message)
             self.sign_in('to save configs')
@@ -827,7 +847,7 @@ class Engine:
 
     # 7 -------------------------------------------------------------------------------------------------------
     def install(self):
-        self.out.step(7, 'Installing subsync')
+        self.show_step('install')
         if self.s['public_kind'] == 'path':
             self.proxy_rule()
         def link(kind):
@@ -874,11 +894,11 @@ class Engine:
     def own_image(self):
         """This install's id (kept from the last setup) and the image the service runs: setup's own, pinned."""
         self.s['install_id'] = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
-        self.s['version'] = current_version()
+        self.s['version'] = setup_version()
         if PLACE:
             self.s.update(image=PLACE.image, local=PLACE.local)
         else:
-            self.s.setdefault('image', self.prev.get('image') or f'aiosubtitles:local-{current_version()}')
+            self.s.setdefault('image', self.prev.get('image') or f'aiosubtitles:local-{setup_version()}')
             self.s.setdefault('local', True)
 
     def write_setup_script(self):
@@ -938,7 +958,7 @@ class Engine:
     def self_test_checks(self):
         """The checks that read nothing: the address apps use, AIOStreams asking subsync, subsync's config finding
         files (a search only). Returns the ready rows a test read could take."""
-        self.out.step(8, 'Checking that it works')
+        self.show_step('check')
         self.good = True
         # a) the address apps use
         if self.public_health():
@@ -1110,7 +1130,6 @@ class Engine:
 
     # ------------------------------------------------------------------------------------- the hosting route
     ROUTES = [('yourself', 'Install it for yourself'), ('host', 'Host a public instance')]
-    HOST_STEPS = 7
 
     def choose_route(self):
         """Install it for yourself, or host a public instance: the last setup's route on a re-run."""
@@ -1119,7 +1138,7 @@ class Engine:
         return self.route
 
     def host_address(self):
-        self.out.step(2, 'Its web address', self.HOST_STEPS)
+        self.show_step('address', 'host')
         env = env_values()
         kept = self.prev.get('public_base') if self.prev.get('route') == 'host' else None
         self.address = self.ask.text('HOST_ADDRESS', 'Web address', current=kept, check=hosting.check_address)
@@ -1129,11 +1148,11 @@ class Engine:
         if port != self.prev.get('port') and port_taken(port, '127.0.0.1') \
                 and not dockerenv.container_state(CONTAINER):
             stop(f'Port {port} on this machine is already in use.')
-        self.s.update(route='host', public_base=self.address, port=port, version=current_version())
+        self.s.update(route='host', public_base=self.address, port=port, version=setup_version())
 
     def host_signups(self):
         """The invite code (suggested on a first setup; emptied, anyone may sign up) and the secret, made once."""
-        self.out.step(3, 'Sign-ups', self.HOST_STEPS)
+        self.show_step('signups', 'host')
         env = env_values()
         if 'SUBSYNC_PUBLIC_INVITE' in self.answers:
             self.invite = (self.answers['SUBSYNC_PUBLIC_INVITE'] or '').strip()
@@ -1148,7 +1167,7 @@ class Engine:
             self.secret = hosting.new_secret()
 
     def host_choices(self):
-        self.out.step(4, 'Your choices', self.HOST_STEPS)
+        self.show_step('hostchoices', 'host')
         for key, label in (('SUBDL_KEY', 'SubDL API key'), ('SUBSYNC_SUBSOURCE_KEY', 'SubSource API key')):
             value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key))
             if value:
@@ -1167,7 +1186,7 @@ class Engine:
 
     def host_limits(self):
         """Every limit, in its three groups, the current value or subsync's default filled in."""
-        self.out.step(5, 'Limits', self.HOST_STEPS)
+        self.show_step('hostlimits', 'host')
         env = env_values()
         self.limit_values = {}
         for lim in limits.hosting(getattr(self, 'host_usenet', True), getattr(self, 'host_audio', False)):
@@ -1186,7 +1205,7 @@ class Engine:
         return int(value) if value and value.isdigit() else None
 
     def host_install(self):
-        self.out.step(6, 'Installing AIOSubtitles', self.HOST_STEPS)
+        self.show_step('hostinstall', 'host')
         if self.secret_new:
             self.out.ok('Made the secret key and kept it in state/subsync.env, readable only by your user.')
         answers = {'HOST_ADDRESS': self.address, 'SUBSYNC_TRUSTED_PROXY': self.trusted_proxy,
@@ -1231,7 +1250,7 @@ class Engine:
         return status == 200 and body.strip() == b'ok'
 
     def host_check(self):
-        self.out.step(7, 'Checking that it works', self.HOST_STEPS)
+        self.show_step('hostcheck', 'host')
         self.good = hosting.check(self.address, self.out)
         return self.good
 

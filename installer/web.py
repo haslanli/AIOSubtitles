@@ -439,7 +439,7 @@ class App:
             rollback = (prev['previous'].get('version'), copy)
         offer = bool(prev.get('added_opensubtitles'))
         return self.page(screens.after_setup(prev.get('route') or 'yourself', rows, details,
-                                             prev.get('version') or engine.current_version(), ready, problem,
+                                             prev.get('version') or engine.setup_version(), ready, problem,
                                              offer_opensubtitles=offer,
                                              config=engine.short(e.keys.get('VIEWER_UUID', '')), rollback=rollback))
 
