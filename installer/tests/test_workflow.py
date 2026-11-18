@@ -4,7 +4,10 @@ Every outside action is pinned to a full commit SHA with its version beside it; 
 the jobs that publish, and those run only for a push to main or a release tag, after every test has passed; nothing
 but the run's own GITHUB_TOKEN is used; event values reach scripts only through env.
 """
+import os
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -205,6 +208,60 @@ class WorkflowRules(unittest.TestCase):
         self.assertIn('out="$(docker run --rm "$IMAGE" setup --status 2>&1 || true)"', check)
         self.assertIn('grep -qF "Setup needs Docker\'s socket" <<< "$out"', check)
         self.assertIn("docker exec aiosubtitles-check grep -E '^Uid:\\s+10001\\s' /proc/1/status", check)
+
+
+class StartCheckGreps(unittest.TestCase):
+    """The start check's header and leak greps, run in bash with stand-ins for curl and docker that write more after
+    the line grep looks for. Piped into `grep -q` under pipefail, a command still writing when grep stops at its match
+    dies of SIGPIPE and fails the pipeline: the header check then fails and the leak check passes."""
+
+    SECRET = '-Ab' + 'c' * 40           # token_urlsafe can start with '-': grep must not read it as an option
+    MORE = "head -c 2000000 /dev/zero | tr '\\0' x; echo"       # far more than a pipe holds
+
+    def setUp(self):
+        if not shutil.which('bash'):
+            self.skipTest('needs bash')
+        check = read('image-build.yml').split('- name: Start it once and check that it answers', 1)[1]
+        self.lines = [line.strip() for line in check.split('\n      - name:', 1)[0].splitlines()]
+
+    def command(self, first, last):
+        """The check's lines from the one that contains `first` (or, with none, the last one alone) to the one that
+        contains `last`."""
+        end = next(i for i, line in enumerate(self.lines) if last in line)
+        start = next((i for i, line in enumerate(self.lines[:end + 1]) if first in line), end)
+        return '\n'.join(self.lines[start:end + 1])
+
+    def run_check(self, stand_in, command, **env):
+        script = '\n'.join(['set -euo pipefail', 'fail() { echo "FAIL: $1"; exit 3; }', 'secret="$SECRET"', stand_in,
+                            command, 'echo PASSED'])
+        done = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL, env=dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'),
+                                                                 SECRET=self.SECRET, **env))
+        return done.stdout.strip().splitlines()[-1:]
+
+    def test_a_secret_in_the_log_is_always_found(self):
+        leak = self.command('logs="$(docker logs', 'The secret is in the log')
+        docker = f'docker() {{ printf "%s\\n" "$FIRST"; {self.MORE}; }}'
+        self.assertEqual(self.run_check(docker, leak, FIRST=f'started, key={self.SECRET}'),
+                         ['FAIL: The secret is in the log'])
+        self.assertEqual(self.run_check(docker, leak, FIRST='started'), ['PASSED'])
+        self.assertEqual(self.run_check('docker() { return 1; }', leak), ['PASSED'])      # no log: nothing in it
+
+    def test_the_security_header_is_found_however_much_follows_it(self):
+        header = self.command('curl -fsS -D -', 'security header')
+        curl = f'curl() {{ printf "%s\\r\\n" "HTTP/1.1 200 OK" "$CSP"; {self.MORE}; }}'
+        self.assertEqual(self.run_check(curl, header, CSP="content-security-policy: default-src 'none'"), ['PASSED'])
+        self.assertEqual(self.run_check(curl, header, CSP='x-other: 1'),
+                         ['FAIL: The sign-up page has no security header'])
+        self.assertEqual(self.run_check('curl() { return 22; }', header),
+                         ['FAIL: The sign-up page has no security header'])
+
+    def test_no_check_pipes_into_a_quiet_grep(self):
+        for name in ('image.yml', 'image-build.yml'):
+            for script in run_scripts(read(name)):
+                for line in script.splitlines():
+                    if not line.lstrip().startswith('#'):
+                        self.assertNotRegex(line, r'\|\s*grep\s+(-\w+\s+)*-\w*q', name)
 
 
 if __name__ == '__main__':

@@ -101,9 +101,9 @@ class Hosting(unittest.TestCase):
         self.assertEqual(limits.personal(audio=False, usenet=True), [limits.DAILY, limits.USENET])
 
     def test_public_env_writes_the_switch(self):
-        answers = {'HOST_ADDRESS': 'https://subs.example.com', 'SUBSYNC_USENET': 'yes'}
-        self.assertEqual(hosting.public_env(answers, 's' * 43, {})['SUBSYNC_USENET'], 'on')
-        self.assertEqual(hosting.public_env(dict(answers, SUBSYNC_USENET='no'), 's' * 43, {})['SUBSYNC_USENET'], 'off')
+        answers = {'HOST_ADDRESS': 'https://subs.example.com'}
+        self.assertEqual(hosting.public_env(answers, 's' * 43, {}, usenet=True)['SUBSYNC_USENET'], 'on')
+        self.assertEqual(hosting.public_env(answers, 's' * 43, {}, usenet=False)['SUBSYNC_USENET'], 'off')
         self.assertIn('SUBSYNC_USENET', hosting.OWNED)
 
 

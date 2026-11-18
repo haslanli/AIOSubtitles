@@ -20,7 +20,11 @@ from contextlib import closing
 from .settings import Settings
 from .store import day_of
 
+# The databases ./setup copies before an update and puts back on a rollback (installer/dockerenv.py's DATABASES is kept
+# equal by a test): the people's records, then the shared store. sources.sqlite3 (only the subtitle sites' daily
+# counters) is left out on purpose: a rollback leaves it as it is.
 DATABASES = ("users.sqlite3", "subsync.sqlite3")
+USERS_DB, STORE_DB = DATABASES
 USAGE = "usage: python -m subsync.hostcmd status | copy-databases DEST"
 
 
@@ -33,11 +37,11 @@ def _read_only(path):
 def numbers(settings):
     out = {"public": settings.public, "people": 0, "max_people": settings.max_users, "read_today": 0,
            "daily_budget": settings.daily_budget}
-    users = os.path.join(settings.data, "users.sqlite3")
+    users = os.path.join(settings.data, USERS_DB)
     if os.path.exists(users):
         with _read_only(users) as db:
             out["people"] = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    store = os.path.join(settings.data, "subsync.sqlite3")
+    store = os.path.join(settings.data, STORE_DB)
     if os.path.exists(store):
         with _read_only(store) as db:
             row = db.execute("SELECT bytes FROM budget WHERE day=? AND kind='read'", (day_of(),)).fetchone()

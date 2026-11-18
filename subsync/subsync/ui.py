@@ -362,14 +362,20 @@ def config_changes(sections):
     return "<div class=\"changes\">" + "".join(out) + "</div>"
 
 
+def row(hid, heading, about_html, controls_html):
+    """A settings row (the settings page, the setup page): its heading and explanation on the left, its controls on the
+    right (stacked on phones). `about_html` and `controls_html`: HTML the caller built from escaped parts."""
+    return (f"<section class=\"grid12 row\" aria-labelledby=\"{e(hid)}\"><div class=\"about\"><h2 id=\"{e(hid)}\">"
+            f"{e(heading)}</h2>{about_html}</div>{controls_html}</section>")
+
+
 def update_panel(heading, about, running_html, ready, action):
     """The update panel: what updating does, the version running (HTML the caller built from escaped parts),
     the one ready (None: up to date), and the action. The heading's id is up-h, for the section's aria-labelledby."""
-    hid = "up-h"
     lines = f"<p>{running_html}</p>" + (f"<p class=\"new\">{e(ready)}</p>" if ready else "")
-    return (f"<section class=\"grid12 row\" aria-labelledby=\"{e(hid)}\"><div class=\"about\"><h2 id=\"{e(hid)}\">"
-            f"{e(heading)}</h2><p class=\"help\">{e(about)}</p></div><div class=\"controls\"><div class=\"version\">{lines}"
-            "</div>" + (f"<div class=\"actions\">{button(action, type='submit')}</div>" if ready else "") + "</div></section>")
+    actions = f"<div class=\"actions\">{button(action, type='submit')}</div>" if ready else ""
+    return row("up-h", heading, f"<p class=\"help\">{e(about)}</p>",
+               f"<div class=\"controls\"><div class=\"version\">{lines}</div>{actions}</div>")
 
 
 def code_lines(lines):

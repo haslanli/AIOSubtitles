@@ -40,6 +40,14 @@ class SharedRules(unittest.TestCase):
         self.assertIs(aios.Aios, aiosconfig.AiosApi)
         self.assertIs(aios.AiosError, aiosconfig.AiosError)
 
+    def test_no_private_rule_is_reached_through_plan(self):
+        from subsync import aiosconfig
+        borrowed = [name for name, value in vars(plan).items() if name.startswith('_') and not name.startswith('__')
+                    and getattr(aiosconfig, name, None) is value]
+        self.assertEqual(borrowed, [])
+        # the names of a saved install's language codes, as the page fills them in again (a code it doesn't know: none)
+        self.assertEqual(plan.names_of_codes(['eng', 'xx', 'rus', 'deu']), ['English', 'Russian', 'German'])
+
 
 class Languages(unittest.TestCase):
     def test_names_and_codes(self):
@@ -320,6 +328,17 @@ class Files(unittest.TestCase):
                 self.assertIsNone(plan.audio_budget(typed))
         self.assertEqual(plan.audio_budget('3', allowed_too='3'), '3')   # a value set by hand before is kept
 
+    def test_env_files_are_read_as_docker_compose_reads_them(self):
+        text = ('A="pa ss #1"\nB=pa#ss #c\nC=x  # note\nD=\'q\' # c\nE="open"\nF="not closed\nG="a"b\nexport H=1\n'
+                'I = Spanish\nJ=\nK=""\n# L=a comment\nnot a line\n')
+        self.assertEqual(plan.parse_env(text), {'A': 'pa ss #1', 'B': 'pa#ss', 'C': 'x', 'D': 'q', 'E': 'open',
+                                                'F': '"not closed', 'G': '"a"b', 'H': '1', 'I': 'Spanish', 'J': '',
+                                                'K': ''})
+        # the lines setup keeps are written back as they were
+        self.assertEqual(plan.parse_env(text, as_written=True),
+                         dict(plan.parse_env(text), A='"pa ss #1"', D="'q' # c", E='"open"', K='""'))
+        self.assertEqual(plan.audio_when_of(plan.parse_env('SUBSYNC_AUDIO_WHEN="open"\n')), 'open')
+
     def test_hand_added_lines_are_kept(self):
         written = plan.subsync_env(self.S)
         current = plan.parse_env('# a note\nSUBSYNC_MAX_TRIES=9   # mine\nSUBSYNC_EXTRA_SOURCES=\nTZ=Europe/Berlin\n'
@@ -366,8 +385,11 @@ class Files(unittest.TestCase):
         self.assertIn('\n  aios0: {external: true, name: "aio_default"}\n', text)   # never AIOStreams' network
 
     def test_compose_runs_the_service_as_its_own_user(self):
+        # as the image's entry script asks (user: "10001:10001"), and the user setup's helper containers run as
+        from installer import dockerenv
         for s in ({'bind': '127.0.0.1'}, {'host_network': True}, {'networks': ['aio_default'], 'bind': '0.0.0.0'}):
-            self.assertIn('    user: "10001"\n', self.compose(**s))
+            self.assertIn('    user: "10001:10001"\n', self.compose(**s))
+        self.assertEqual(dockerenv.SERVICE_USER, '10001:10001')
 
     def test_compose_never_gives_the_service_dockers_socket(self):
         for s in ({'bind': '127.0.0.1'}, {'host_network': True}, {'networks': ['aio_default'], 'bind': '0.0.0.0'},

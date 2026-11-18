@@ -63,12 +63,12 @@ def answers_example():
 def write():
     readme = REPO / 'README.md'
     text = readme.read_text()
-    if START in text:
-        before, rest = text.split(START, 1)
-        text = before + readme_section() + rest.split(END, 1)[1]
-    else:
+    if START not in text:
         raise SystemExit(f'README.md has no line "{START}": put it where the settings section goes.')
-    readme.write_text(text)
+    before, rest = text.split(START, 1)
+    if END not in rest:
+        raise SystemExit(f'README.md has no line "{END}" after "{START}": put it where the settings section ends.')
+    readme.write_text(before + readme_section() + rest.split(END, 1)[1])
     (REPO / 'docs' / 'answers.example').write_text(answers_example())
 
 

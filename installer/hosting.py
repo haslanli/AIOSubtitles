@@ -53,9 +53,10 @@ def check_address(value):
     return True, '', f'https://{parts.netloc.lower()}'
 
 
-def public_env(answers, secret, limit_values):
-    """Public mode's lines: the address, the secret, the invite code, the trusted proxy, the source keys and every
-    limit that differs from subsync's default. Empty values are left out (subsync's default is empty)."""
+def public_env(answers, secret, limit_values, usenet=False, audio=False, tmdb_personal=False):
+    """Public mode's lines: the address, the secret, the invite code, the trusted proxy, the source keys, the host's
+    three choices (`usenet`, `audio`, `tmdb_personal`: True or False) and every limit that differs from subsync's
+    default. Empty values are left out (subsync's default is empty)."""
     env = {
         'SUBSYNC_PUBLIC': 'on',
         'SUBSYNC_PUBLIC_BASE': answers['HOST_ADDRESS'],
@@ -66,16 +67,13 @@ def public_env(answers, secret, limit_values):
         'SUBSYNC_SUBSOURCE_KEY': answers.get('SUBSYNC_SUBSOURCE_KEY', ''),
         # the original-language lookup's TMDB key for everyone; without one, whether each person may add their own
         'SUBSYNC_TMDB_KEY': answers.get('TMDB_KEY', ''),
-        'SUBSYNC_TMDB_PERSONAL': 'on' if not answers.get('TMDB_KEY')
-        and str(answers.get('SUBSYNC_TMDB_PERSONAL', '')).lower() in ('yes', 'on', 'true') else 'off',
+        'SUBSYNC_TMDB_PERSONAL': 'on' if tmdb_personal and not answers.get('TMDB_KEY') else 'off',
         # whether people may turn Usenet on for themselves (with their own services, through their AIOStreams)
-        'SUBSYNC_USENET': 'on' if str(answers.get('SUBSYNC_USENET', '')).lower() in ('yes', 'on', 'true') else 'off',
+        'SUBSYNC_USENET': 'on' if usenet else 'off',
         # whether files with no subtitle track of their own may be synced from their sound, as each person chooses
-        'SUBSYNC_AUDIO_ROUTE': 'on' if str(answers.get('SUBSYNC_AUDIO_ROUTE', '')).lower() in ('yes', 'on', 'true')
-        else 'off',
+        'SUBSYNC_AUDIO_ROUTE': 'on' if audio else 'off',
     }
-    usenet, audio = env['SUBSYNC_USENET'] == 'on', env['SUBSYNC_AUDIO_ROUTE'] == 'on'
-    env.update(limits.env_lines(limits.hosting(usenet, audio), limit_values))
+    env.update(limits.env_lines(limits.hosting(bool(usenet), bool(audio)), limit_values))
     return {k: v for k, v in env.items() if v not in (None, '')}
 
 
@@ -104,7 +102,8 @@ def fetch(url, timeout=10):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, dict(response.headers.items()), response.read(4096)
     except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers.items()), b''
+        with e:             # its response, closed now rather than when it is collected
+            return e.code, dict(e.headers.items()), b''
 
 
 def check(address, out):

@@ -1,13 +1,16 @@
 """Setup's Docker work from inside its container: the helper on the machine's network, joining AIOStreams'
 network, the ownership check, the new version's start check, and putting a database copy back."""
+import ast
 import base64
 import io
 import json
+import socket
 import tarfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv
+from installer import dockerenv, plan
 
 IMAGE = 'ghcr.io/haslanli/aiosubtitles:1.4.0@sha256:' + 'a' * 64
 
@@ -24,6 +27,141 @@ class FakeDocker:
             if cmd[:len(prefix)] == prefix:
                 return answer(cmd) if callable(answer) else answer
         return 0, '', ''
+
+
+def container(cid, name, image, env=(), host_network=False, networks=None, ports=None):
+    """A container as `docker inspect` describes it (the fields setup reads)."""
+    return {'Id': cid, 'Name': f'/{name}', 'Config': {'Image': image, 'Env': ['PATH=/usr/bin', *env]},
+            'HostConfig': {'NetworkMode': 'host' if host_network else 'bridge'},
+            'NetworkSettings': {'Networks': networks or {}, 'Ports': ports or {}}}
+
+
+class Discovery(unittest.TestCase):
+    """Which running containers are AIOStreams, and where this machine reaches each, from Docker's own answers."""
+
+    PS = ('aaa111\tghcr.io/viren070/aiostreams:latest\taiostreams\n'
+          'bbb222\tregistry.example/aio:2\tmy-aiostreams\n'
+          'ccc333\taiosubtitles:local-1.4.0\taiostreams-subsync\n'
+          'ddd444\tnginx:1\tweb\n')
+    CONTAINERS = {
+        'aaa111': container('aaa111', 'aiostreams', 'ghcr.io/viren070/aiostreams:latest', ['PORT=3000'],
+                            host_network=True, networks={'host': {'IPAddress': ''}}),
+        'bbb222': container('bbb222', 'my-aiostreams', 'registry.example/aio:2',
+                            ['PORT=', 'BASE_URL=https://aio.example.com'],
+                            networks={'bridge': {'IPAddress': '172.17.0.3'},
+                                      'aio_default': {'IPAddress': '172.18.0.2'}},
+                            ports={'3000/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '3001'},
+                                                {'HostIp': '::', 'HostPort': '3001'},
+                                                {'HostIp': '::1', 'HostPort': '3002'}],
+                                   '8080/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '8080'}], '9000/tcp': None}),
+        'ccc333': container('ccc333', 'aiostreams-subsync', 'aiosubtitles:local-1.4.0',
+                            networks={'aio_default': {'IPAddress': '172.18.0.3'}}),
+    }
+
+    def docker(self, gone=(), env=None):
+        """`docker ps` and `docker inspect` as Docker answers them; `gone`: ids removed since `docker ps`."""
+        def inspect(cmd):
+            found = [self.CONTAINERS[i] for i in cmd[2:] if i not in gone]
+            if env:
+                found = [dict(c, Config=dict(c['Config'], Env=env)) for c in found]
+            return (1 if gone else 0), json.dumps(found), ''.join(f'Error: No such object: {i}\n' for i in gone)
+        return FakeDocker([(['docker', 'ps'], (0, self.PS, '')), (['docker', 'inspect'], inspect)])
+
+    def test_aiostreams_containers_and_what_setup_needs_of_each(self):
+        docker = self.docker()
+        with mock.patch.object(dockerenv, 'run', docker):
+            found = dockerenv.aios_containers()
+        self.assertEqual(found, [
+            {'name': 'aiostreams', 'image': 'ghcr.io/viren070/aiostreams:latest', 'port': 3000, 'base_url': '',
+             'host_network': True, 'networks': [], 'ips': [], 'published': []},
+            {'name': 'my-aiostreams', 'image': 'registry.example/aio:2', 'port': 3000,
+             'base_url': 'https://aio.example.com', 'host_network': False, 'networks': ['aio_default'],
+             'ips': ['172.17.0.3', '172.18.0.2'], 'published': [('0.0.0.0', 3001), ('::', 3001), ('::1', 3002)]},
+        ])                                    # by image or name; never a subsync, nor a port other than AIOStreams'
+        inspected = [c for c, _ in docker.calls if c[:2] == ['docker', 'inspect']]
+        self.assertEqual(inspected, [['docker', 'inspect', 'aaa111', 'bbb222', 'ccc333']])     # never web
+
+    def test_a_port_that_isnt_a_number_is_aiostreams_default(self):
+        with mock.patch.object(dockerenv, 'run', self.docker(env=['PORT=${PORT}'])):
+            self.assertEqual([c['port'] for c in dockerenv.aios_containers()], [3000, 3000])
+        with mock.patch.object(dockerenv, 'run', self.docker(env=['PORT=3005'])):
+            self.assertEqual([c['port'] for c in dockerenv.aios_containers()], [3005, 3005])
+
+    def test_a_container_gone_since_docker_ps_leaves_the_others(self):
+        with mock.patch.object(dockerenv, 'run', self.docker(gone=('aaa111',))):
+            self.assertEqual([c['name'] for c in dockerenv.aios_containers()], ['my-aiostreams'])
+
+    def test_docker_not_answering_finds_none(self):
+        with mock.patch.object(dockerenv, 'run', FakeDocker([(['docker', 'ps'], (1, '', 'Cannot connect'))])):
+            self.assertEqual(dockerenv.aios_containers(), [])
+        with mock.patch.object(dockerenv, 'run', FakeDocker([(['docker', 'ps'], (0, self.PS, '')),
+                                                             (['docker', 'inspect'], (1, '', 'Cannot connect'))])):
+            self.assertEqual(dockerenv.aios_containers(), [])
+
+    def test_the_addresses_this_machine_reaches_it_at_best_first(self):
+        with mock.patch.object(dockerenv, 'run', self.docker()):
+            host, bridged = dockerenv.aios_containers()
+        self.assertEqual(dockerenv.host_urls(host), ['http://127.0.0.1:3000'])
+        self.assertEqual(dockerenv.host_urls(bridged), ['http://127.0.0.1:3001', 'http://[::1]:3002',
+                                                        'http://172.17.0.3:3000', 'http://172.18.0.2:3000',
+                                                        'https://aio.example.com'])
+        both = dict(bridged, host_network=True, port=3001, ips=[], base_url='http://127.0.0.1:3001')
+        self.assertEqual(dockerenv.host_urls(both), ['http://127.0.0.1:3001', 'http://[::1]:3002'])   # once each
+
+
+class DockerProblem(unittest.TestCase):
+    def problem(self, which='/usr/bin/docker', info=(0, '29.0.0', ''), compose=(0, '5.7.1', '')):
+        docker = FakeDocker([(['docker', 'info'], info), (['docker', 'compose'], compose)])
+        with mock.patch.object(dockerenv.shutil, 'which', lambda name: which), \
+                mock.patch.object(dockerenv, 'run', docker):
+            return dockerenv.docker_problem()
+
+    def test_docker_and_compose_working_is_no_problem(self):
+        self.assertIsNone(self.problem())
+
+    def test_each_problem_says_its_fix(self):
+        self.assertEqual(self.problem(which=None), ('Docker is not installed.', 'Install Docker '
+                                                   '(docs.docker.com/engine/install), then run ./setup again.'))
+        denied = (1, '', 'permission denied while trying to connect to the Docker daemon socket')
+        self.assertEqual(self.problem(info=denied)[0], 'Docker is installed, but this user may not use it.')
+        self.assertIn('sudo usermod -aG docker $USER', self.problem(info=denied)[1])
+        self.assertEqual(self.problem(info=(1, '', 'Cannot connect to the Docker daemon'))[0],
+                         'Docker is installed but not running.')
+        self.assertEqual(self.problem(compose=(1, '', "docker: 'compose' is not a docker command."))[0],
+                         'Docker Compose v2 is missing.')
+
+
+class PortInUse(unittest.TestCase):
+    def test_a_port_something_listens_on_is_in_use(self):
+        busy = socket.socket()
+        busy.bind(('127.0.0.1', 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        try:
+            self.assertTrue(dockerenv.port_in_use(port, '127.0.0.1'))
+        finally:
+            busy.close()
+        free = socket.socket()
+        free.bind(('127.0.0.1', 0))
+        port = free.getsockname()[1]
+        free.close()
+        self.assertFalse(dockerenv.port_in_use(port, '127.0.0.1'))
+
+
+class OneDefinition(unittest.TestCase):
+    """Each name setup's Docker work shares with the compose file it writes, and with subsync, is defined once."""
+
+    def test_the_install_names_are_plans(self):
+        for name in ('INSTALL_LABEL', 'SERVICE_USER', 'VOLUME', 'DATA'):
+            with self.subTest(name=name):
+                self.assertIs(getattr(dockerenv, name), getattr(plan, name))
+
+    def test_the_databases_are_subsyncs_own_list(self):
+        source = Path(__file__).resolve().parents[2] / 'subsync' / 'subsync' / 'hostcmd.py'
+        tree = ast.parse(source.read_text())       # read, not imported: subsync's settings need numpy
+        value = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                     and any(getattr(t, 'id', None) == 'DATABASES' for t in node.targets))
+        self.assertEqual(ast.literal_eval(value), dockerenv.DATABASES)
 
 
 class Probe(unittest.TestCase):
@@ -197,6 +335,9 @@ class Restore(unittest.TestCase):
         cmd, stdin = docker.calls[0]
         self.assertEqual(cmd[:8], ['docker', 'run', '--rm', '-i', '--user', '10001:10001', '--entrypoint', 'python'])
         self.assertIn('aiosubtitles_subsync-data:/data', cmd)
+        self.assertEqual(cmd[-2:], ['/data', '["users.sqlite3", "subsync.sqlite3"]'])    # where, and which databases
+        for name in dockerenv.DATABASES:
+            self.assertNotIn(name, dockerenv.RESTORE)                       # given, never a copy of the list
         with tarfile.open(fileobj=io.BytesIO(base64.b64decode(stdin))) as t:
             self.assertEqual(sorted(t.getnames()), ['subsync.sqlite3', 'users.sqlite3'])
 
@@ -208,9 +349,9 @@ class Restore(unittest.TestCase):
             for name in ('users.sqlite3', 'users.sqlite3-wal', 'subsync.sqlite3', 'subsync.sqlite3-shm'):
                 (data / name).write_text('new')
             payload = dockerenv.databases_tar({'subsync.sqlite3': b'old'})
-            with mock.patch('sys.stdin', io.StringIO(payload)), mock.patch('sys.stdout', io.StringIO()):
-                exec(compile(dockerenv.RESTORE.replace('"/data"', repr(tmp)), 'restore', 'exec'),
-                     {'__name__': '__main__'})
+            with mock.patch('sys.stdin', io.StringIO(payload)), mock.patch('sys.stdout', io.StringIO()), \
+                    mock.patch('sys.argv', ['-c', tmp, json.dumps(dockerenv.DATABASES)]):
+                exec(compile(dockerenv.RESTORE, 'restore', 'exec'), {'__name__': '__main__'})
             self.assertEqual(sorted(p.name for p in data.iterdir()), ['subsync.sqlite3'])   # not in the copy: gone
             self.assertEqual((data / 'subsync.sqlite3').read_text(), 'old')
             self.assertEqual(oct((data / 'subsync.sqlite3').stat().st_mode & 0o777), '0o600')

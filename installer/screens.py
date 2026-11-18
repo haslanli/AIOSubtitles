@@ -416,13 +416,12 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
                                             update.RESTORE_HELP, name='RESTORE_DATABASES', value='yes'))
         controls += (f'<div class="actions">{ui.button(update.ROLLBACK.format(version=version), "secondary", type="submit")}'
                      '</div>')
-        panel += (f'<section class="grid12 row" aria-labelledby="rb-h"><div class="about"><h2 id="rb-h">'
-                  f'{e(update.ROLLBACK_HEADING)}</h2><p class="help">{e(update.ROLLBACK_ABOUT)}</p></div>'
-                  f'<form class="controls" method="post" action="rollback">{controls}</form></section>')
-    answers = (f'<section class="grid12 row" aria-labelledby="ans-h"><div class="about"><h2 id="ans-h">Your answers</h2>'
-               f'<p class="help">{e("Already set up here: your answers are kept unless you change them.")}</p></div>'
-               f'<form class="controls" method="post" action="answers"><div class="actions">'
-               f'{ui.button("Change your answers", "secondary", type="submit")}</div></form></section>')
+        panel += ui.row('rb-h', update.ROLLBACK_HEADING, f'<p class="help">{e(update.ROLLBACK_ABOUT)}</p>',
+                        f'<form class="controls" method="post" action="rollback">{controls}</form>')
+    answers = ui.row('ans-h', 'Your answers',
+                     f'<p class="help">{e("Already set up here: your answers are kept unless you change them.")}</p>',
+                     f'<form class="controls" method="post" action="answers"><div class="actions">'
+                     f'{ui.button("Change your answers", "secondary", type="submit")}</div></form>')
     if route == 'host':
         controls = (ui.choices(ui.choice('confirm', DELETE_RECORDS, REMOVE_HOST_TEXT, name='CONFIRM', value='yes'))
                     + (f'<p class="field-error">{e(problem[1])}</p>' if problem and problem[1] else '')
@@ -436,9 +435,8 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
         controls += ('<input type="hidden" name="CONFIRM" value="yes">'
                      f'<div class="actions">{ui.button("Remove subsync", "danger", type="submit")}</div>')
         about = REMOVE_TEXT
-    remove = (f'<section class="grid12 row" aria-labelledby="rm-h"><div class="about"><h2 id="rm-h">Removing subsync</h2>'
-              f'<p class="help">{e(about)}</p></div><form class="controls" method="post" action="remove">{controls}</form>'
-              '</section>')
+    remove = ui.row('rm-h', 'Removing subsync', f'<p class="help">{e(about)}</p>',
+                    f'<form class="controls" method="post" action="remove">{controls}</form>')
     return ui.page(TITLE, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}<main>{status}'
                           f'<div class="rows">{panel}{answers}{remove}</div></main></div>', 'settings')
 

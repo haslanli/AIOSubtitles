@@ -116,6 +116,11 @@ def language_names(langs):
     return ', '.join(name for name, _, _ in langs)
 
 
+def names_of_codes(codes):
+    """The names of the languages these codes stand for, in their order; a code it doesn't know is left out."""
+    return [_BY[code][0] for code in codes if code in _BY]
+
+
 def config_id_from(text):
     """A config ID typed as is, or found in a pasted Stremio/Jellyfin link (…/stremio/<id>/…)."""
     m = UUID_RE.search(text or '')

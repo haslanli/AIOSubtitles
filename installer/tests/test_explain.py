@@ -1,8 +1,10 @@
 """Every ./setup question has its one explanation, and the README's settings section and docs/answers.example are the
 texts of subsync/subsync/explain.py, written by installer/docs.py."""
 import ast
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from installer import docs, ui
 from subsync import explain
@@ -97,6 +99,26 @@ class Documents(unittest.TestCase):
             self.assertIn(f'`{name}`', section)
         for title, _ in explain.RULES:
             self.assertIn(title, section)
+
+    def test_writing_needs_both_markers_and_rewrites_only_between_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / 'docs').mkdir()
+            readme = folder / 'README.md'
+            with mock.patch.object(docs, 'REPO', folder):
+                for text, missing in (('# Title\n', docs.START), (f'# Title\n{docs.START}\nold\n', docs.END),
+                                      (f'# Title\n{docs.END}\n{docs.START}\nold\n', docs.END)):
+                    with self.subTest(text=text):
+                        readme.write_text(text)
+                        with self.assertRaises(SystemExit) as caught:
+                            docs.write()
+                        self.assertIn(f'README.md has no line "{missing}"', str(caught.exception))
+                        self.assertEqual(readme.read_text(), text)                  # nothing written
+                        self.assertFalse((folder / 'docs' / 'answers.example').exists())
+                readme.write_text(f'# Title\n{docs.START}\nold\n{docs.END}\n## After\n')
+                docs.write()
+            self.assertEqual(readme.read_text(), f'# Title\n{docs.readme_section()}\n## After\n')
+            self.assertEqual((folder / 'docs' / 'answers.example').read_text(), docs.answers_example())
 
     def test_comments_keep_the_whole_text(self):
         text = explain.SETTINGS['SUBSYNC_DAILY_BUDGET_GB'][1]

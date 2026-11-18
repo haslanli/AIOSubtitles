@@ -54,7 +54,7 @@ class StateFiles(TmpState):
         path = Path(self.tmp.name) / 'file.env'
         path.write_text(text)
         self.assertEqual(engine.read_kv(path), {k: v for k, v in plan.parse_env(text).items() if v})
-        self.assertEqual(engine.read_kv(path), {'PLAIN': 'ab', 'QUOTED': '"x #y"', 'KEY': 'second'})
+        self.assertEqual(engine.read_kv(path), {'PLAIN': 'ab', 'QUOTED': 'x #y', 'SPACED': 'v', 'KEY': 'second'})
         self.assertEqual(engine.read_kv(Path(self.tmp.name) / 'none.env'), {})
 
     def test_a_value_with_a_line_break_is_never_written(self):

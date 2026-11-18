@@ -87,22 +87,29 @@ class Dockerfile(unittest.TestCase):
 class Entry(unittest.TestCase):
     """The entry script with stand-ins for id, setpriv and python on its PATH."""
 
-    def run_entry(self, *args, uid=0, setpriv_works=True):
+    def run_entry(self, *args, uid=0, setpriv_works=True, folder=None):
+        """`folder`: the entry script with the person's folder there instead of /folder; the python stand-in then
+        writes down the folder it runs in."""
         with tempfile.TemporaryDirectory() as tmp:
             bin_ = Path(tmp)
             log = bin_ / 'log'
+            entry = ENTRY
             stubs = {'id': f'echo {uid}',
                      'setpriv': ('echo "setpriv $*" >> "$LOG"; while [ "$1" != -- ]; do shift; done; shift; '
                                  '[ "$1" = true ] && exit 0; echo "ran $* as 10001" >> "$LOG"') if setpriv_works
                      else 'echo "setpriv: setresuid failed: Operation not permitted" >&2; exit 1',
                      'python': 'echo "python $* state=$AIOSUBTITLES_STATE image=$AIOSUBTITLES_IN_IMAGE" >> "$LOG"'}
+            if folder is not None:
+                entry = bin_ / 'entry'
+                entry.write_text(ENTRY.read_text().replace('/folder', str(folder)))
+                stubs['python'] = 'echo "in $(pwd -P)" >> "$LOG"'
             for name, body in stubs.items():
                 path = bin_ / name
                 path.write_text(f'#!/bin/sh\n{body}\n')
                 path.chmod(0o755)
             env = {'PATH': f'{bin_}:/usr/bin:/bin', 'LOG': str(log)}
-            done = subprocess.run(['sh', str(ENTRY), *args], capture_output=True, text=True, timeout=30, env=env,
-                                  stdin=subprocess.DEVNULL)
+            done = subprocess.run(['sh', str(entry), *args], capture_output=True, text=True, timeout=30, env=env,
+                                  stdin=subprocess.DEVNULL, cwd=bin_)
             return done.returncode, log.read_text() if log.exists() else '', done.stderr
 
     def test_setup_runs_setup_with_the_folders_state(self):
@@ -111,6 +118,19 @@ class Entry(unittest.TestCase):
         # -u: without a terminal (docker run -d, a pipe) Python would hold the page's address back
         self.assertEqual(log, 'python -I -u /opt/aiosubtitles/installer/wizard.py --version state=/folder/state '
                               'image=1\n')
+
+    def test_setup_runs_in_the_persons_folder(self):
+        # the README's ./setup --restore state/backups/FILE and --answers FILE: paths in the person's folder, which
+        # is /folder in setup's container (the image's own folder, WORKDIR, would be the wrong place)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp).resolve() / 'folder'
+            (folder / 'state').mkdir(parents=True)
+            code, log, _ = self.run_entry('setup', '--restore', 'state/backups/viewer-1a2b3c4d.json', folder=folder)
+            self.assertEqual((code, log), (0, f'in {folder}\n'))
+            # no folder mounted (docker run ... setup --version): setup still runs, where it was started
+            code, log, _ = self.run_entry('setup', '--version', folder=Path(tmp).resolve() / 'none')
+            self.assertEqual(code, 0)
+            self.assertTrue(log.startswith('in ') and not log.startswith(f'in {Path(tmp).resolve()}/none'), log)
 
     def test_the_service_started_as_root_drops_to_its_own_user(self):
         code, log, _ = self.run_entry('python', '-u', '-m', 'subsync')

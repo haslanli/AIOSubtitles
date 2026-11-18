@@ -659,6 +659,17 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.aios.throttle, 0)
 
+    def test_quoted_lines_are_read_as_compose_reads_them_and_kept_as_written(self):
+        self.run_setup(self.ANSWERS)
+        with open(self.state / 'subsync.env', 'a') as f:
+            f.write('SUBSYNC_EXTRA_SOURCES="a #b"\nSUBSYNC_MAX_TRIES=\'9\' # mine\nSUBSYNC_DAILY_BUDGET_GB="50"\n')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': '"' + PASSWORD + '"', 'TEST_READ': 'no'})   # quoted too
+        self.assertEqual(code, 0, out)
+        text = (self.state / 'subsync.env').read_text()
+        self.assertIn('\nSUBSYNC_EXTRA_SOURCES="a #b"\n', text)                  # kept as written: Compose reads a #b
+        self.assertIn("\nSUBSYNC_MAX_TRIES='9' # mine\n", text)
+        self.assertIn('\nSUBSYNC_DAILY_BUDGET_GB=50\n', text)                    # read as 50: the answer it keeps
+
     def test_a_rerun_keeps_settings_added_by_hand(self):
         self.run_setup(self.ANSWERS)
         with open(self.state / 'subsync.env', 'a') as f:

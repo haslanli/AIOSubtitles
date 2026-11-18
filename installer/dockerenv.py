@@ -11,6 +11,8 @@ import subprocess
 import tarfile
 import time
 
+from installer.plan import DATA, INSTALL_LABEL, SERVICE_USER, VOLUME
+
 
 def run(cmd, timeout=60, stdin=None):
     try:
@@ -44,10 +46,24 @@ def free_gb(path='/'):
 
 
 def _inspect(ids):
+    """`docker inspect` of these containers. Docker exits 1 when one of them is gone (removed since `docker ps`), but
+    still prints the others."""
     if not ids:
         return []
-    code, out, _ = run(['docker', 'inspect', *ids])
-    return json.loads(out) if code == 0 and out.strip() else []
+    _, out, _ = run(['docker', 'inspect', *ids])
+    try:
+        found = json.loads(out) if out.strip() else []
+    except ValueError:
+        return []
+    return found if isinstance(found, list) else []
+
+
+def _port(value):
+    """AIOStreams' PORT as its container has it: 3000 when it is unset, empty or not a number."""
+    try:
+        return int(value or 3000)
+    except ValueError:
+        return 3000
 
 
 def aios_containers():
@@ -62,7 +78,7 @@ def aios_containers():
         env = dict(e.split('=', 1) for e in (c.get('Config') or {}).get('Env') or [] if '=' in e)
         if 'subsync' in c['Name'].lower():
             continue
-        port = int(env.get('PORT', '3000') or 3000)
+        port = _port(env.get('PORT'))
         ns = c.get('NetworkSettings') or {}
         nets = ns.get('Networks') or {}
         published = []
@@ -89,7 +105,9 @@ def host_urls(c):
     if c['host_network']:
         urls.append(f"http://127.0.0.1:{c['port']}")
     for ip, port in c['published']:
-        urls.append(f"http://{'127.0.0.1' if ip in ('0.0.0.0', '::', '') else ip}:{port}")
+        if ip in ('0.0.0.0', '::', ''):
+            ip = '127.0.0.1'        # published on every address: this machine's own reaches it
+        urls.append(f"http://{f'[{ip}]' if ':' in ip else ip}:{port}")
     urls += [f"http://{ip}:{c['port']}" for ip in c['ips']]   # works on Linux, not on Docker Desktop
     if c['base_url']:
         urls.append(c['base_url'])
@@ -132,8 +150,7 @@ def exec_in(name, cmd, stdin=None, timeout=120):
 
 # ------------------------------------------------------------------------------------------- from inside setup's container
 SOCKET = '/var/run/docker.sock'
-INSTALL_LABEL = 'org.aiosubtitles.install'
-SERVICE_USER = '10001:10001'
+# The databases a copy holds: subsync's own list (subsync/subsync/hostcmd.py DATABASES; a test keeps them equal)
 DATABASES = ('users.sqlite3', 'subsync.sqlite3')
 
 # The helper's script: this machine's network address, and which of the host:port pairs given are taken. A port it
@@ -192,7 +209,7 @@ def foreign(project, container, install_id):
     that doesn't carry this install's id: [(kind, name)], empty when everything there is its own. RuntimeError when
     Docker doesn't answer."""
     label = f'{{{{.Label "{INSTALL_LABEL}"}}}}'
-    named = {'container': container, 'volume': f'{project}_subsync-data', 'network': f'{project}_default'}
+    named = {'container': container, 'volume': f'{project}_{VOLUME}', 'network': f'{project}_default'}
     kinds = (('container', ['docker', 'ps', '-a'], '{{.Names}}'), ('volume', ['docker', 'volume', 'ls'], '{{.Name}}'),
              ('network', ['docker', 'network', 'ls'], '{{.Name}}'))
     found = []
@@ -221,7 +238,7 @@ def check_image(image, project, install_id, seconds=90):
     try:
         run(['docker', 'volume', 'create', '--label', tag, name])
         code, out, err = run(['docker', 'run', '-d', '--name', name, '--label', tag, '--user', SERVICE_USER,
-                              '-v', f'{name}:/data', '-e', 'SUBSYNC_PUBLIC=on',
+                              '-v', f'{name}:{DATA}', '-e', 'SUBSYNC_PUBLIC=on',
                               '-e', 'SUBSYNC_PUBLIC_BASE=http://127.0.0.1:8790',
                               '-e', f'SUBSYNC_SECRET_KEY={secrets.token_urlsafe(32)}',
                               '-e', f'SUBSYNC_PUBLIC_INVITE={secrets.token_urlsafe(9)}',
@@ -253,11 +270,11 @@ def databases_tar(files):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-# Run by the old image, as the service's user, with its data volume at /data: removes the databases and their
-# leftover -wal/-shm files, then writes the copy's (a database not in the copy stays removed: as before the update).
-RESTORE = """import base64, io, os, sys, tarfile
-data = "/data"
-names = ("users.sqlite3", "subsync.sqlite3")
+# Run by the old image, as the service's user, with its data volume at the folder its first argument names: removes
+# the databases its second names (JSON) and their leftover -wal/-shm files, then writes the copy's (a database not in
+# the copy stays removed: as before the update).
+RESTORE = """import base64, io, json, os, sys, tarfile
+data, names = sys.argv[1], json.loads(sys.argv[2])
 copy = tarfile.open(fileobj=io.BytesIO(base64.b64decode(sys.stdin.read())))
 inside = set(copy.getnames())
 for name in names:
@@ -281,7 +298,8 @@ def restore_databases(image, volume, files):
     run on it (an older one has no command of its own for this). The service must be stopped. (True, '') or
     (False, reason)."""
     code, out, err = run(['docker', 'run', '--rm', '-i', '--user', SERVICE_USER, '--entrypoint', 'python',
-                          '-v', f'{volume}:/data', image, '-I', '-c', RESTORE], stdin=databases_tar(files), timeout=600)
+                          '-v', f'{volume}:{DATA}', image, '-I', '-c', RESTORE, DATA, json.dumps(DATABASES)],
+                         stdin=databases_tar(files), timeout=600)
     if code == 0 and out.strip().endswith('restored'):
         return True, ''
     return False, ((err or out).strip().splitlines() or ['no answer'])[-1]

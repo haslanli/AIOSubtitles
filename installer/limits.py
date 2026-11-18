@@ -12,6 +12,7 @@ applies to everyone who kept it.
 import math
 from collections import namedtuple
 
+from installer import plan
 from subsync import explain
 
 Limit = namedtuple('Limit', 'setting label unit kind options')
@@ -19,7 +20,7 @@ Limit.__new__.__defaults__ = ((),)
 Limit.default = property(lambda self: explain.SETTINGS[self.setting][0])
 
 DAILY = Limit('SUBSYNC_DAILY_BUDGET_GB', 'Data a day in total', 'GB', 'decimal')
-AUDIO = Limit('SUBSYNC_AUDIO_BUDGET_GB', 'Audio per file', 'GB', 'segmented', ('0.5', '1', '2', '4'))
+AUDIO = Limit('SUBSYNC_AUDIO_BUDGET_GB', 'Audio per file', 'GB', 'segmented', plan.AUDIO_BUDGETS)
 # The Usenet searches a day (one setting, per person on a public instance)
 USENET = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches a day', None, 'number')
 USENET_HOSTED = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches per person a day', None, 'number')
@@ -53,7 +54,7 @@ COUNT = 'A whole number from 0, like {default}.'
 WHOLE_OR_AUTO = 'A whole number from 1, or auto.'
 NOT_ABOVE_PLACES = 'A whole number from 1 to {places} (the files synced at a time), or auto.'
 ABOVE_ZERO = 'A number above 0, like {default}.'
-NOT_AN_AUDIO_LIMIT = 'Type 0.5, 1, 2 or 4 (GB per file).'
+NOT_AN_AUDIO_LIMIT = f'Type {plan.AUDIO_BUDGET_WORDS} (GB per file).'
 NOT_A_LANGUAGE_LIMIT = 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'
 
 
@@ -128,7 +129,6 @@ def check(lim, text, current=None, places=None):
         value = _above_zero(text)
         return (value, None) if value else (None, ABOVE_ZERO.format(default=shown(lim, lim.default)))
     if lim is AUDIO or lim.setting == AUDIO.setting:
-        from installer import plan
         value = plan.audio_budget(text, allowed_too=current)
         return (value, None) if value else (None, NOT_AN_AUDIO_LIMIT)
     value = text.strip()

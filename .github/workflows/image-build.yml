@@ -86,13 +86,17 @@ jobs:
           fail() { echo "::error::$1"; docker logs aiosubtitles-check 2>&1 | tail -n 30; exit 1; }
           [ "$state" = healthy ] || fail "It didn't become healthy ($state)"
           [ "$(curl -fsS http://127.0.0.1:18790/health)" = ok ] || fail "/health didn't say ok"
-          curl -fsS -D - -o /dev/null http://127.0.0.1:18790/ | grep -qi "^content-security-policy:.*default-src 'none'" \
+          # each grep -q below reads a captured text: in `cmd | grep -q` under pipefail, grep stopping at its match
+          # can make cmd die of SIGPIPE, which fails the pipeline (a header check failing, a leak check passing)
+          headers="$(curl -fsS -D - -o /dev/null http://127.0.0.1:18790/ || true)"
+          grep -qi "^content-security-policy:.*default-src 'none'" <<< "$headers" \
             || fail "The sign-up page has no security header"
           for font in AtkinsonHyperlegibleNext-wght.ttf AtkinsonHyperlegibleMono-wght.ttf; do
             [ "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:18790/static/fonts/$font")" = 200 ] \
               || fail "The font $font doesn't load"
           done
-          if docker logs aiosubtitles-check 2>&1 | grep -qF "$secret"; then fail "The secret is in the log"; fi
+          logs="$(docker logs aiosubtitles-check 2>&1 || true)"
+          if grep -qF -e "$secret" <<< "$logs"; then fail "The secret is in the log"; fi
           # setup inside the image: its version, its plain message without Docker's socket, and the service's user
           [ "$(docker run --rm "$IMAGE" setup --version)" = "$(tr -d '[:space:]' < VERSION)" ] \
             || fail "setup --version isn't VERSION"

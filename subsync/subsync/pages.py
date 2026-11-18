@@ -329,10 +329,7 @@ def _form(action, content, cls="controls"):
             f"value=\"{e(action)}\">{content}</form>")
 
 
-def _row(hid, heading, about, controls_html):
-    """A settings row: its heading and explanation on the left, its controls on the right (stacked on phones)."""
-    return (f"<section class=\"grid12 row\" aria-labelledby=\"{hid}\"><div class=\"about\"><h2 id=\"{hid}\">{e(heading)}</h2>"
-            f"{about}</div>{controls_html}</section>")
+_row = ui.row     # a settings row: its heading and explanation on the left, its controls on the right
 
 
 def _usenet_row(settings, record, usenet_usage):

@@ -1,6 +1,11 @@
 """The limits each install asks, their defaults from
 subsync's explanations, the check of a typed value, and how they reach state/subsync.env."""
+import contextlib
+import io
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from installer import limits, plan
 from subsync import explain
@@ -117,6 +122,23 @@ class Checks(unittest.TestCase):
         self.assertEqual(limits.check(audio, '3', current='3'), ('3', None))   # set by hand before: kept
         self.assertEqual(limits.check(langs, '3'), ('3', None))
         self.assertEqual(limits.check(langs, '5'), (None, 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'))
+
+    def test_the_audio_limits_choices_are_written_once(self):
+        # plan.AUDIO_BUDGETS: the page's choices, the check's message and the terminal's question and message
+        self.assertIs(limits.AUDIO.options, plan.AUDIO_BUDGETS)
+        self.assertEqual(plan.AUDIO_BUDGET_WORDS, '0.5, 1, 2 or 4')
+        self.assertEqual(limits.NOT_AN_AUDIO_LIMIT, 'Type 0.5, 1, 2 or 4 (GB per file).')
+        from installer import engine, ui
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(engine, 'STATE', Path(tmp) / 'state'), \
+                mock.patch.object(limits, 'NOT_AN_AUDIO_LIMIT', 'The one message.'), \
+                contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(ui.Stop) as caught:
+            engine.Engine({'AUDIO_BUDGET': '3'}).ask_audio_budget()
+        self.assertEqual(caught.exception.message, 'AUDIO_BUDGET: The one message.')
+        self.assertIn('How much of each file may the audio route read, in GB: 0.5, 1, 2 or 4?', out.getvalue())
+        # and the explanations name the same choices
+        self.assertIn(f'{plan.AUDIO_BUDGET_WORDS} GB.', explain.QUESTIONS['AUDIO_BUDGET'][1])
+        self.assertIn(f'({plan.AUDIO_BUDGET_WORDS})', explain.SETTINGS['SUBSYNC_AUDIO_BUDGET_GB'][1])
+        self.assertIn(f'at most {plan.AUDIO_BUDGETS[-1]} GB from ./setup', explain.SETTINGS['SUBSYNC_FILE_CAP_GB'][1])
 
     def test_the_daily_audio_counts_take_0(self):
         # 0 stops new audio syncs (SUBSYNC_USER_AUDIO_PER_DAY) or removes the opened answer (the other)

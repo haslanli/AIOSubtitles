@@ -133,9 +133,11 @@ def write_env(path, values):
     write_private(path, '\n'.join(body) + '\n')
 
 
-def env_values():
+def env_values(as_written=False):
+    """state/subsync.env's values, read as Compose reads them (plan.parse_env); `as_written`: quoted ones as the file
+    has them, for the lines setup keeps."""
     path = STATE / 'subsync.env'
-    return plan.parse_env(path.read_text() if path.exists() else '')
+    return plan.parse_env(path.read_text() if path.exists() else '', as_written=as_written)
 
 
 def load_settings():
@@ -420,7 +422,7 @@ class Engine:
             filled['AIOS_URL'] = p['aios_url']
         if self.keys.get('VIEWER_UUID'):
             filled['AIOS_CONFIG_ID'] = self.keys['VIEWER_UUID']
-        names = [plan._BY[c][0] for c in p.get('languages', []) if c in plan._BY]
+        names = plan.names_of_codes(p.get('languages', []))
         if names:
             filled['LANGUAGES'] = ', '.join(names)
         filled['AUDIO'] = self.known_audio()
@@ -594,7 +596,7 @@ class Engine:
     # 4 -------------------------------------------------------------------------------------------------------
     def choices(self):
         self.show_step('choices')
-        prev_langs = ', '.join(n for n, _, _ in [plan._BY[c] for c in self.prev.get('languages', []) if c in plan._BY]) or None
+        prev_langs = ', '.join(plan.names_of_codes(self.prev.get('languages', []))) or None
 
         def check_langs(value):
             langs, error = plan.parse_languages(value)
@@ -655,9 +657,9 @@ class Engine:
 
         def check(value):
             chosen = plan.audio_budget(value, allowed_too=current)
-            return (True, '', chosen) if chosen else (False, 'Type 0.5, 1, 2 or 4 (GB per file).', value)
-        return self.ask.text('AUDIO_BUDGET', 'How much of each file may the audio route read, in GB: 0.5, 1, 2 or 4?',
-                             current=current, default='1', check=check)
+            return (True, '', chosen) if chosen else (False, limits.NOT_AN_AUDIO_LIMIT, value)
+        return self.ask.text('AUDIO_BUDGET', f'How much of each file may the audio route read, in GB: '
+                                             f'{plan.AUDIO_BUDGET_WORDS}?', current=current, default='1', check=check)
 
     def source_keys(self):
         """Optional free keys for subtitle sources subsync searches itself (TheSubtitleDB, OpenSubtitles V3+ and
@@ -917,8 +919,8 @@ class Engine:
         asked = limits.personal(audio=False, usenet=self.usenet)
         env.update(limits.env_lines(asked, self.limit_values))
         # the setting SUBSYNC_AUDIO_WHEN replaced goes: the audio answer carries it (known_audio)
-        env, kept = plan.merge_env(env, env_values(), owned=limits.names([limits.DAILY, limits.USENET])
-                                   + ('SUBSYNC_AUDIO_ON_PICK',))
+        env, kept = plan.merge_env(env, env_values(as_written=True),
+                                   owned=limits.names([limits.DAILY, limits.USENET]) + ('SUBSYNC_AUDIO_ON_PICK',))
         write_env(STATE / 'subsync.env', env)
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
@@ -1231,12 +1233,12 @@ class Engine:
         if self.tmdb_key_question(screens.TMDB_FOR_EVERYONE):
             self.ask.answers.pop('SUBSYNC_TMDB_PERSONAL', None)     # a key for everyone: never each person's too
         else:
-            kept = env_values().get('SUBSYNC_TMDB_PERSONAL', 'off').strip().lower() in ('on', 'yes', 'true', '1')
+            kept = plan.is_on(env_values().get('SUBSYNC_TMDB_PERSONAL', 'off'))
             self.host_tmdb_personal = self.ask.yesno('SUBSYNC_TMDB_PERSONAL', screens.LABELS['SUBSYNC_TMDB_PERSONAL'],
                                                      kept)
-        kept = env_values().get('SUBSYNC_USENET', 'off').strip().lower() in ('on', 'yes', 'true', '1')
+        kept = plan.is_on(env_values().get('SUBSYNC_USENET', 'off'))
         self.host_usenet = self.ask.yesno('SUBSYNC_USENET', screens.LABELS['SUBSYNC_USENET'], kept)
-        kept = env_values().get('SUBSYNC_AUDIO_ROUTE', 'off').strip().lower() in ('on', 'yes', 'true', '1')
+        kept = plan.is_on(env_values().get('SUBSYNC_AUDIO_ROUTE', 'off'))
         self.host_audio = self.ask.yesno('SUBSYNC_AUDIO_ROUTE', screens.LABELS['SUBSYNC_AUDIO_ROUTE'], kept)
 
     def host_limits(self):
@@ -1266,12 +1268,11 @@ class Engine:
         answers = {'HOST_ADDRESS': self.address, 'SUBSYNC_TRUSTED_PROXY': self.trusted_proxy,
                    'SUBSYNC_PUBLIC_INVITE': self.invite, 'SUBDL_KEY': self.keys.get('SUBDL_KEY', ''),
                    'SUBSYNC_SUBSOURCE_KEY': self.keys.get('SUBSYNC_SUBSOURCE_KEY', ''),
-                   'TMDB_KEY': self.keys.get('TMDB_KEY', ''),
-                   'SUBSYNC_TMDB_PERSONAL': 'yes' if getattr(self, 'host_tmdb_personal', False) else 'no',
-                   'SUBSYNC_USENET': 'yes' if getattr(self, 'host_usenet', False) else 'no',
-                   'SUBSYNC_AUDIO_ROUTE': 'yes' if getattr(self, 'host_audio', False) else 'no'}
-        env, kept = plan.merge_env(hosting.public_env(answers, self.secret, self.limit_values), env_values(),
-                                   owned=hosting.OWNED)
+                   'TMDB_KEY': self.keys.get('TMDB_KEY', '')}
+        env = hosting.public_env(answers, self.secret, self.limit_values, usenet=getattr(self, 'host_usenet', False),
+                                 audio=getattr(self, 'host_audio', False),
+                                 tmdb_personal=getattr(self, 'host_tmdb_personal', False))
+        env, kept = plan.merge_env(env, env_values(as_written=True), owned=hosting.OWNED)
         write_env(STATE / 'subsync.env', env)
         self.secret_new = False
         if kept:
@@ -1544,7 +1545,7 @@ class Engine:
         folder = Path(folder)
         files = {name: (folder / name).read_bytes() for name in sorted(plain_databases(folder))}
         dockerenv.compose(STATE, 'stop', timeout=120)
-        good, _ = dockerenv.restore_databases(image, f'{plan.project()}_subsync-data', files)
+        good, _ = dockerenv.restore_databases(image, f'{plan.project()}_{plan.VOLUME}', files)
         dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
         return good and self.wait_healthy() and self.databases_ok()
 

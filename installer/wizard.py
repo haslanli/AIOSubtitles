@@ -78,10 +78,10 @@ def open_page(args):
             say()
             bad(where.NO_PAGE_PORT)
             return 1
-        app = web.App(port=where.PAGE_PORT, bind='0.0.0.0', public_port=place.page_port, no_browser=True)
+        app = web.App(port=where.PAGE_PORT, bind='0.0.0.0', public_port=place.page_port)
     else:
-        app = web.App(port=0, no_browser=True)
-    return web.serve(app, say=print, opener=None)
+        app = web.App(port=0)
+    return web.serve(app, say=print)
 
 
 def in_image():

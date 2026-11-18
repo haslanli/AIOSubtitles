@@ -11,11 +11,9 @@ import urllib.parse
 
 from subsync import explain
 from subsync.aiosconfig import (  # noqa: F401  (the rules live in subsync, shared with the public sign-up)
-    SUBSYNC_PRESET_NAME, SUBTITLE_PRESETS, USENET_PRESETS, USENET_SERVICES, SYNC_SETTINGS, LANGUAGES, UUID_RE,
-    parse_languages, language_names, config_id_from, alias_from, new_key, debrid_names, is_subtitle_preset, is_subsync_preset,
-    subtitle_sources, stream_sources, free_instance_id, with_defaults, subsync_preset, opensubtitles_preset,
-    _before_other_subtitles, viewer_change, without_subsync, sync_config, sync_config_problems, usenet_route,
-    usenet_sync_config, _BY)
+    USENET_SERVICES, SYNC_SETTINGS, LANGUAGES, parse_languages, language_names, names_of_codes, config_id_from,
+    alias_from, new_key, debrid_names, is_subtitle_preset, is_subsync_preset, subtitle_sources, subsync_preset,
+    viewer_change, without_subsync, sync_config, sync_config_problems, usenet_route, usenet_sync_config)
 
 SUBSYNC_PORT = 8790
 SUBSYNC_HOST = 'aiosubtitles-subsync'   # its name on AIOStreams' Docker network(s)
@@ -135,6 +133,7 @@ def subsync_env(s):
 
 
 AUDIO_BUDGETS = ('0.5', '1', '2', '4')   # GB per file the audio route may read: ./setup's choices (explain.py)
+AUDIO_BUDGET_WORDS = ', '.join(AUDIO_BUDGETS[:-1]) + ' or ' + AUDIO_BUDGETS[-1]     # as questions and messages say them
 
 # The personal route's audio question, one of three answers (its explanation: explain.QUESTIONS['AUDIO'])
 AUDIO_QUESTION = 'Sync files that have no subtitles of their own, from their audio?'
@@ -156,14 +155,23 @@ def audio_answer(text):
     return 'pick' if value in _YES else 'no' if value in _NO else None
 
 
+# A switch in state/subsync.env is on with one of these words, as subsync reads it (subsync/subsync/settings.py _on;
+# a test keeps them equal). Typed answers take y too (ui.Asker.yesno); AUDIO's yes takes no number (_YES above).
+ON = ('1', 'on', 'true', 'yes')
+
+
+def is_on(value):
+    """A switch of state/subsync.env, read as subsync reads it."""
+    return str(value).strip().lower() in ON
+
+
 def audio_when_of(env):
     """When the audio route starts as state/subsync.env has it, read as subsync reads it: SUBSYNC_AUDIO_WHEN, else
     the setting it replaced (SUBSYNC_AUDIO_ON_PICK: anything but on means open); pick otherwise."""
     when = str(env.get('SUBSYNC_AUDIO_WHEN') or '').strip().lower()
     if when in ('pick', 'open'):
         return when
-    return 'pick' if str(env.get('SUBSYNC_AUDIO_ON_PICK', 'on')).strip().lower() in ('1', 'on', 'true', 'yes') \
-        else 'open'
+    return 'pick' if is_on(env.get('SUBSYNC_AUDIO_ON_PICK', 'on')) else 'open'
 
 
 def _gigabytes(text):
@@ -189,18 +197,38 @@ def audio_budget(text, allowed_too=None):
     return None
 
 
-ENV_LINE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+ENV_LINE = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$')
 
 
-def parse_env(text):
-    """The KEY=value lines of an env file, empty values included (an empty value is a setting too). Comment and other
-    lines are skipped; in an unquoted value, a " #" starts a comment, as Docker Compose reads it."""
+def _between_quotes(value):
+    """A quoted value's text, found as Docker Compose finds it: the value starts with ' or ", the next one of the same
+    closes it, and nothing but a comment follows. None when it isn't quoted that way."""
+    quote = value[:1]
+    end = value.find(quote, 1) if quote in ('"', "'") else -1
+    if end < 0:
+        return None
+    rest = value[end + 1:].strip()
+    return value[1:end] if not rest or rest.startswith('#') else None
+
+
+def parse_env(text, as_written=False):
+    """The KEY=value lines of an env file (an answers file, state/subsync.env, state/secrets.env) as Docker Compose
+    reads them: an `export ` before the name and spaces round the = are allowed, a quoted value is the text between
+    its quotes as it is, and in an unquoted value a " #" starts a comment. Empty values are included (an empty value
+    is a setting too); comment and other lines are skipped; a $ is never substituted. A value that starts with a quote
+    it doesn't close is kept as written. `as_written`: every quoted value as the line has it (its quotes, and a comment
+    after them), for the lines setup writes back as they were."""
     out = {}
     for line in (text or '').splitlines():
         m = ENV_LINE.match(line)
-        if m:
-            value = m.group(2)
-            out[m.group(1)] = value if value.startswith(('"', "'")) else re.sub(r'\s+#.*$', '', value).strip()
+        if not m:
+            continue
+        value = m.group(2)
+        if value.startswith(('"', "'")):
+            inside = _between_quotes(value)
+            out[m.group(1)] = value if as_written or inside is None else inside
+        else:
+            out[m.group(1)] = re.sub(r'\s+#.*$', '', value).strip()
     return out
 
 
@@ -223,6 +251,9 @@ def container_name():
 
 
 INSTALL_LABEL = 'org.aiosubtitles.install'    # on everything setup makes: what its ownership check looks for
+SERVICE_USER = '10001:10001'    # the service's user and group: the image's own, which owns DATA (subsync/Dockerfile)
+VOLUME = 'subsync-data'         # the service's volume; Docker names it <project>_subsync-data
+DATA = '/data'                  # where it is in the service's container (subsync's SUBSYNC_DATA in the image)
 
 
 def compose_yaml(s):
@@ -239,11 +270,11 @@ def compose_yaml(s):
         f"    image: {s['image']}",
         f"    pull_policy: {'never' if s.get('local') else 'missing'}",
         f'    container_name: {container_name()}',
-        '    user: "10001"',
+        f'    user: "{SERVICE_USER}"',
         f'    labels: {label}',
         '    restart: unless-stopped',
         '    env_file: [subsync.env]',
-        '    volumes: ["subsync-data:/data"]',
+        f'    volumes: ["{VOLUME}:{DATA}"]',
         '    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}',
     ]
     if s.get('host_network'):
@@ -259,7 +290,7 @@ def compose_yaml(s):
         lines.append(f'  default: {{labels: {label}}}')
         for i, name in enumerate(s.get('networks') or []):
             lines.append(f'  aios{i}: {{external: true, name: "{name}"}}')
-    lines += ['volumes:', f'  subsync-data: {{labels: {label}}}', '']
+    lines += ['volumes:', f'  {VOLUME}: {{labels: {label}}}', '']
     return '\n'.join(lines)
 
 

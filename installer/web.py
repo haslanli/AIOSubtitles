@@ -11,7 +11,6 @@ seconds until it is done. The page stops when setup is done, after 60 minutes wi
 import os
 import re
 import secrets
-import sys
 import threading
 import time
 import urllib.parse
@@ -118,10 +117,9 @@ class Session:
 
 
 class App:
-    def __init__(self, port=0, idle_s=IDLE_S, fonts_dir=None, no_browser=False, bind='127.0.0.1', public_port=None):
+    def __init__(self, port=0, idle_s=IDLE_S, bind='127.0.0.1', public_port=None):
         self.key = secrets.token_urlsafe(24)
-        self.no_browser = no_browser
-        self.port, self.idle_s, self.fonts_dir = port, idle_s, fonts_dir
+        self.port, self.idle_s = port, idle_s
         self.bind, self.public_port = bind, public_port      # the machine's port for the page, when it differs
         self.last = time.monotonic()
         self.finished = threading.Event()
@@ -164,11 +162,11 @@ class App:
         if path == '/static/app.js':
             return 200, dict(STATIC_HEADERS, **{'Content-Type': 'text/javascript; charset=utf-8'}), ui.APP_JS.encode()
         m = FONT.match(path)
-        for folder in (self.fonts_dir, os.path.join(ui.STATIC, 'fonts')):
-            if m and folder and os.path.isfile(os.path.join(folder, m.group(1))):
-                with open(os.path.join(folder, m.group(1)), 'rb') as f:
-                    kind = 'font/ttf' if m.group(1).endswith('.ttf') else 'text/plain; charset=utf-8'
-                    return 200, dict(STATIC_HEADERS, **{'Content-Type': kind}), f.read()
+        file = os.path.join(ui.STATIC, 'fonts', m.group(1)) if m else None    # the typefaces and their licence (image)
+        if file and os.path.isfile(file):
+            with open(file, 'rb') as f:
+                kind = 'font/ttf' if file.endswith('.ttf') else 'text/plain; charset=utf-8'
+                return 200, dict(STATIC_HEADERS, **{'Content-Type': kind}), f.read()
         return 404, dict(STATIC_HEADERS, **{'Content-Type': 'text/plain'}), b''
 
     # ------------------------------------------------------------------------------------- the routes
@@ -390,7 +388,7 @@ class App:
         chosen = {}
         for key in ('SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_PERSONAL'):
             chosen[key] = e.answers.get(key, '') == 'yes' if key in e.answers else \
-                engine.env_values().get(key, 'off').strip().lower() in ('on', 'yes', 'true', '1')
+                plan.is_on(engine.env_values().get(key, 'off'))
         return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=chosen['SUBSYNC_USENET'],
                                               audio=chosen['SUBSYNC_AUDIO_ROUTE'],
                                               tmdb_personal=chosen['SUBSYNC_TMDB_PERSONAL']))
@@ -540,18 +538,14 @@ def start(app):
     return server
 
 
-def serve(app, say=print, opener=None):
-    """./setup's page: prints where it is, opens the browser on a desktop, and waits until it stops."""
+def serve(app, say=print):
+    """./setup's page: prints where it is (setup runs in a container: no browser to open there), and waits until it
+    stops."""
     server = start(app)
     port = app.public_port or app.port
     url = f'http://127.0.0.1:{port}/{app.key}/'
     for line in terminal_lines(port, url):
         say(line)
-    if opener and (sys.platform == 'darwin' or os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
-        try:
-            opener(url)
-        except Exception:      # no browser here: the address above still works
-            pass
     try:
         app.finished.wait()
     except KeyboardInterrupt:

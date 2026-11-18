@@ -1,16 +1,21 @@
 """The hosting route: a public instance set up by ./setup."""
+import ast
 import base64
 import contextlib
+import gc
+import http.server
 import io
 import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, hosting, limits, wizard
+from installer import dockerenv, engine, hosting, limits, plan, wizard
 
 ADDRESS = 'https://subs.example.com'
 SECRET_WORDS = 'kept it in state/subsync.env'
@@ -60,10 +65,10 @@ class Pieces(unittest.TestCase):
     def test_tmdb_for_everyone_or_each_persons_own(self):
         # the original-language lookup's key on a public instance: the hoster's own for everyone, or each person's
         base = {'HOST_ADDRESS': ADDRESS}
-        env = hosting.public_env(dict(base, TMDB_KEY='tk', SUBSYNC_TMDB_PERSONAL='yes'), hosting.new_secret(), {})
+        env = hosting.public_env(dict(base, TMDB_KEY='tk'), hosting.new_secret(), {}, tmdb_personal=True)
         self.assertEqual(env['SUBSYNC_TMDB_KEY'], 'tk')
         self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'off')          # a key for everyone: never both
-        env = hosting.public_env(dict(base, SUBSYNC_TMDB_PERSONAL='yes'), hosting.new_secret(), {})
+        env = hosting.public_env(base, hosting.new_secret(), {}, tmdb_personal=True)
         self.assertNotIn('SUBSYNC_TMDB_KEY', env)
         self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'on')
         env = hosting.public_env(base, hosting.new_secret(), {})
@@ -74,19 +79,19 @@ class Pieces(unittest.TestCase):
         except ImportError as e:
             self.skipTest(f'subsync.settings needs {e.name}')
         with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
-            for answers in (dict(base, TMDB_KEY='tk', SUBSYNC_TMDB_PERSONAL='yes'), dict(base, SUBSYNC_TMDB_PERSONAL='yes')):
-                self.assertEqual(Settings(hosting.public_env(answers, hosting.new_secret(), {})).conflicts(), [])
+            for answers in (dict(base, TMDB_KEY='tk'), base):
+                self.assertEqual(Settings(hosting.public_env(answers, hosting.new_secret(), {}, tmdb_personal=True))
+                                 .conflicts(), [])
 
     def test_the_audio_route_and_its_limit_when_the_host_chooses_them(self):
         # A public instance may sync files without a subtitle track from their sound, after a pick
-        answers = {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes'}
-        env = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_AUDIO_BUDGET_GB': '2'})
+        answers = {'HOST_ADDRESS': ADDRESS}
+        env = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_AUDIO_BUDGET_GB': '2'}, audio=True)
         self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_AUDIO_BUDGET_GB']), ('on', '2'))
         self.assertNotIn('SUBSYNC_AUDIO_ON_PICK', env)                 # never written: it stays on
-        default = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_AUDIO_BUDGET_GB': '1'})
+        default = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_AUDIO_BUDGET_GB': '1'}, audio=True)
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', default)            # the default: no line
-        off = hosting.public_env(dict(answers, SUBSYNC_AUDIO_ROUTE='no'), hosting.new_secret(),
-                                 {'SUBSYNC_AUDIO_BUDGET_GB': '2'})
+        off = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_AUDIO_BUDGET_GB': '2'}, audio=False)
         self.assertEqual(off['SUBSYNC_AUDIO_ROUTE'], 'off')
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', off)                # no limit asked or written with it off
         self.assertTrue({'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_AUDIO_BUDGET_GB'} <= set(hosting.OWNED))
@@ -124,15 +129,15 @@ class Pieces(unittest.TestCase):
 
     def test_the_audio_routes_limits_are_written_only_with_it_on_and_when_not_the_default(self):
         # The two daily counts and the audio syncs at a time
-        answers = {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes'}
+        answers = {'HOST_ADDRESS': ADDRESS}
         changed = {'SUBSYNC_USER_AUDIO_PER_DAY': '10', 'SUBSYNC_USER_OPENED_PER_DAY': '0', 'SUBSYNC_AUDIO_AT_ONCE': '1'}
-        env = hosting.public_env(answers, hosting.new_secret(), changed)
+        env = hosting.public_env(answers, hosting.new_secret(), changed, audio=True)
         self.assertEqual({k: env[k] for k in changed}, changed)
         default = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_USER_AUDIO_PER_DAY': '20',
                                                                      'SUBSYNC_USER_OPENED_PER_DAY': '5',
-                                                                     'SUBSYNC_AUDIO_AT_ONCE': 'auto'})
+                                                                     'SUBSYNC_AUDIO_AT_ONCE': 'auto'}, audio=True)
         self.assertFalse(set(changed) & set(default))
-        off = hosting.public_env(dict(answers, SUBSYNC_AUDIO_ROUTE='no'), hosting.new_secret(), changed)
+        off = hosting.public_env(answers, hosting.new_secret(), changed, audio=False)
         self.assertFalse(set(changed) & set(off))
         self.assertLessEqual(set(changed), set(hosting.OWNED))       # a line set by hand gives way to the answer
         try:
@@ -161,6 +166,64 @@ class Pieces(unittest.TestCase):
 
     def test_the_hosting_limits_are_the_three_groups(self):
         self.assertEqual(hosting.LIMITS, limits.hosting(usenet=True, audio=True))   # every limit the route may write
+
+
+class Switches(unittest.TestCase):
+    """The host's three choices reach public_env as True or False, never as words it reads again; a switch already in
+    state/subsync.env is read as subsync reads it."""
+
+    def test_the_host_choices_are_written_as_chosen(self):
+        answers = {'HOST_ADDRESS': ADDRESS}
+        for chosen in (False, True):
+            with self.subTest(chosen=chosen):
+                env = hosting.public_env(answers, 's' * 43, {}, usenet=chosen, audio=chosen, tmdb_personal=chosen)
+                switches = ('SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_PERSONAL')
+                self.assertEqual({k: env[k] for k in switches}, dict.fromkeys(switches, 'on' if chosen else 'off'))
+        env = hosting.public_env(answers, 's' * 43, {})
+        self.assertEqual((env['SUBSYNC_USENET'], env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_TMDB_PERSONAL']),
+                         ('off', 'off', 'off'))                                      # nothing chosen: all off
+
+    def test_a_switch_is_read_with_subsyncs_own_words(self):
+        tree = ast.parse((Path(__file__).resolve().parents[2] / 'subsync' / 'subsync' / 'settings.py').read_text())
+        on = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_on')
+        self.assertEqual(sorted(plan.ON), sorted(ast.literal_eval(on.body[0].value.comparators[0])))
+        for value, expected in (('1', True), (' ON ', True), ('Yes', True), ('true', True), ('y', False),
+                                ('off', False), ('0', False), ('', False), (None, False)):
+            with self.subTest(value=value):
+                self.assertIs(plan.is_on(value), expected)
+        self.assertEqual(plan.audio_when_of({'SUBSYNC_AUDIO_ON_PICK': '1'}), 'pick')
+        self.assertEqual(plan.audio_when_of({'SUBSYNC_AUDIO_ON_PICK': 'off'}), 'open')
+
+
+class Fetch(unittest.TestCase):
+    """One GET from this machine (127.0.0.1 here), as hosting.check makes them."""
+
+    def setUp(self):
+        class Answer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status = 200 if self.path == '/health' else 502
+                self.send_response(status)
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'ok' if status == 200 else b'no')
+
+            def log_message(self, *args):
+                pass
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Answer)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f'http://127.0.0.1:{self.server.server_address[1]}'
+
+    def test_an_error_answer_is_closed_at_once(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            for _ in range(3):
+                status, _, body = hosting.fetch(self.base + '/')
+            gc.collect()
+        self.assertEqual((status, body), (502, b''))
+        self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
+        self.assertEqual(hosting.fetch(self.base + '/health')[::2], (200, b'ok'))
 
 
 class RouteFixture(unittest.TestCase):

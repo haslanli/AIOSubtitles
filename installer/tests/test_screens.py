@@ -154,6 +154,20 @@ class Structure(unittest.TestCase):
         self.assertIn(htmllib.escape(explain.QUESTIONS['AIOS_CONFIG_ID'][1]), html)
         self.assertIn('aria-describedby="aios_config_password-help"', html)
 
+    def test_the_page_after_setups_rows_are_the_settings_pages_rows(self):
+        # one frame (subsync's ui.row) for the update panel, the rollback, your answers and removing, as on the
+        # settings page: each section is labelled by its own heading
+        html = screens.after_setup('yourself', [('ok', 'running', None)], [('logs', 'docker logs x')], '1.4.0', None,
+                                   config='1a2b3c4d…', rollback=('1.3.0', 'databases-20261114'))
+        sections = re.findall(r'<section class="grid12 row" aria-labelledby="([^"]+)"><div class="about">'
+                              r'<h2 id="([^"]+)">', html)
+        self.assertEqual([hid for hid, _ in sections], ['up-h', 'rb-h', 'ans-h', 'rm-h'])
+        self.assertTrue(all(hid == heading for hid, heading in sections))
+        self.assertIs(pages._row, ui.row)
+        self.assertEqual(ui.row('a-h', 'A <b>', '<p class="help">x</p>', '<div class="controls">y</div>'),
+                         '<section class="grid12 row" aria-labelledby="a-h"><div class="about"><h2 id="a-h">A &lt;b&gt;'
+                         '</h2><p class="help">x</p></div><div class="controls">y</div></section>')
+
     def test_a_wrong_password_keeps_the_id_and_never_shows_a_password(self):
         # test_flow's "an empty password goes back to the ID", as the page does it
         html, _ = samples.every_state()['config-wrong-password']

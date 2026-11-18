@@ -6,6 +6,9 @@ set -e
 if [ "$1" = setup ]; then
   shift
   export AIOSUBTITLES_STATE=/folder/state AIOSUBTITLES_IN_IMAGE=1
+  # run in the person's folder (on the source route, the parent of its state/), where the paths given to it are:
+  # ./setup --restore state/backups/FILE; with no folder mounted (setup --version), where it starts
+  if [ -d /folder ]; then cd /folder; fi
   exec python -I -u /opt/aiosubtitles/installer/wizard.py "$@"   # -u: lines show at once, terminal or not
 fi
 if [ "$(id -u)" = 0 ]; then

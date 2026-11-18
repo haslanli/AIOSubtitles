@@ -4,6 +4,7 @@ through the real engine (a stand-in AIOStreams, Docker faked)."""
 import ast
 import html
 import re
+import tempfile
 import threading
 import time
 import unittest
@@ -98,6 +99,25 @@ class Security(unittest.TestCase):
         self.assertEqual(self.b.request('GET', '/static/app.js')[0], 200)
         self.assertEqual(self.b.request('GET', '/static/fonts/nope.ttf')[0], 404)
         self.assertEqual(self.b.request('GET', '/static/../web.py')[0], 404)
+
+    def test_the_images_typefaces_and_their_licence_are_served(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fonts = Path(tmp) / 'fonts'
+            fonts.mkdir()
+            (fonts / 'Face-wght.ttf').write_bytes(b'\x00\x01face')
+            (fonts / 'OFL.txt').write_bytes(b'licence')
+            (Path(tmp) / 'secret.txt').write_bytes(b'not a font')
+            with mock.patch.object(web.ui, 'STATIC', tmp):
+                status, headers, _ = self.b.request('GET', '/static/fonts/Face-wght.ttf')
+                self.assertEqual((status, headers['Content-Type']), (200, 'font/ttf'))
+                self.assertEqual(self.app.handle('GET', '/static/fonts/Face-wght.ttf',
+                                                 {'Host': f'127.0.0.1:{self.app.port}'}, b'')[2], b'\x00\x01face')
+                status, headers, text = self.b.request('GET', '/static/fonts/OFL.txt')
+                self.assertEqual((status, headers['Content-Type'], text), (200, 'text/plain; charset=utf-8', 'licence'))
+                self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+                for path in ('/static/fonts/../secret.txt', '/static/fonts/secret.txt', '/static/fonts/Face-wght.otf'):
+                    with self.subTest(path=path):
+                        self.assertEqual(self.b.request('GET', path)[0], 404)
 
     def test_a_body_over_16_kb_is_refused(self):
         status, _, _ = self.b.request('POST', f'/{self.app.key}/', form={'ROUTE': 'x' * 17000})
