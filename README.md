@@ -56,7 +56,7 @@ AIOStreams. Each step says what it does and what it changes. Nothing in your AIO
 a copy of your config is saved first. Every question, with its explanation, is also under [Settings](#settings). The
 first run downloads the image (about 1 GB).
 
-To set it up without the page, give the answers in a file: `./setup --answers FILE --yes` (see
+To set it up without the page, give the answers in a file in `state/`: `./setup --answers state/FILE --yes` (see
 `docs/answers.example`).
 
 ### Why setup needs Docker's socket

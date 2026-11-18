@@ -45,6 +45,15 @@ ROLLBACK_ABOUT = ('Goes back to the version before the last update, with the sam
 RESTORE_QUESTION = 'Also put back the databases from before version {version} was installed ({name})?'
 RESTORE_HELP = ('Everything since that update is lost: sign-ups, records and stored copies made after it. '
                 'Without this, the earlier version runs on the databases as they are now.')
+# An install setup 1.3.0 or before made (no install id): only setup's steps take it over (installer/engine.py), so its
+# update goes through them once, on the page and in a terminal
+EARLY_INSTALL_PAGE = ('This install was made by setup 1.3.0 or before: press Change your answers and go through the '
+                      'steps once; your answers and stored copies are kept.')
+EARLY_INSTALL = ('This install was made by setup 1.3.0 or before: run ./setup and go through its steps once; your '
+                 'answers and stored copies are kept.')
+# setup 1.3.0's own ./setup --update fetches the new files with git, then runs their wizard.py on this machine's Python
+# with --update-finish: the update ends there, and the folder's new ./setup finishes it
+UPDATE_FINISH = 'The files are updated. Run ./setup to finish the update: it keeps your answers.'
 # the source route's ./setup --update (git, in the folder's own script; a test keeps the script's words equal)
 LOOK_FAILED = "Couldn't look for a new version: {reason}."
 NOT_GIT = ("This folder wasn't downloaded with git, so it can't fetch a new version: download the new version, copy "

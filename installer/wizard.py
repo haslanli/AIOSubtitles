@@ -20,15 +20,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from installer import dockerenv, engine, plan, screens, web, where  # noqa: E402
+from installer import dockerenv, engine, plan, screens, update, web, where  # noqa: E402
 from installer.aios import AiosError  # noqa: E402
 from installer.ui import Stop, answers_advice, bad, note, ok, paint, say, stop, warn  # noqa: E402
 from installer.engine import backup, short  # noqa: E402
 
 
 def answers_from(args):
-    """The answers file's lines (KEY= is an answer too), or None when no answers file was given."""
-    return plan.parse_env(Path(args.answers).read_text()) if args.answers else None
+    """The answers file's lines (KEY= is an answer too), or None when no answers file was given. When it can't be read,
+    a Stop that says to put it in state/: setup sees that folder on both routes (the source route mounts no other)."""
+    if not args.answers:
+        return None
+    try:
+        return plan.parse_env(Path(args.answers).read_text())
+    except (OSError, ValueError):       # missing, a folder, unreadable, or not text
+        raise Stop(CANT_OPEN.format(file=args.answers), GIVE_ANSWERS) from None
 
 
 # ------------------------------------------------------------------------------------------- other commands
@@ -49,11 +55,13 @@ def cmd_status():
     return 0
 
 
-# --restore FILE when FILE can't be read, or isn't a saved copy of a config (engine.backup's {"uuid", "config"})
+# --restore FILE when FILE can't be read, or isn't a saved copy of a config (engine.backup's {"uuid", "config"});
+# --answers FILE when FILE can't be read
 CANT_OPEN = "Setup can't open {file}."
 NOT_A_COPY = "{file} isn't a saved copy of a config."
 GIVE_A_COPY = ('Give a saved copy from state/backups/, like '
                './setup --restore state/backups/viewer-1a2b3c4d-20261117-120000.json.')
+GIVE_ANSWERS = 'Give an answers file in state/, like ./setup --answers state/answers.txt --yes.'
 
 
 def saved_copy(path):
@@ -76,7 +84,10 @@ def saved_copy(path):
 def cmd_restore(args, path):
     uuid, config = saved_copy(path)         # before anything is asked or changed
     e = engine.Engine(answers_from(args), yes=args.yes)
-    e.aios = engine.saved_aios(e.prev)
+    if e.prev.get('aios_url'):
+        e.aios = engine.saved_aios(e.prev)
+    else:           # no settings (./setup --uninstall deletes them): AIOStreams found as installing finds it
+        e.reach_aios()
     password = e.ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)
     if not e.ask.yesno('CONFIRM', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):
         stop('Nothing was changed.')
@@ -140,10 +151,17 @@ def main(argv=None):
                         help='with --rollback: also put back the databases from before that update')
     parser.add_argument('--version', action='store_true', help="this setup's version")
     parser.add_argument('--no-browser', action='store_true', help=argparse.SUPPRESS)   # kept: no browser opens now
+    # setup 1.3.0's own ./setup --update, once it has these files, runs them with this on the machine's Python
+    parser.add_argument('--update-finish', metavar='COMMIT', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.version:
         print(engine.setup_version())
         return 0
+    if args.update_finish:      # the folder's new ./setup finishes it, in the image: nothing to do here
+        say()
+        warn(update.UPDATE_FINISH)
+        say()
+        return 1
     if os.environ.get('AIOSUBTITLES_IN_IMAGE') and in_image():
         return 1
     try:

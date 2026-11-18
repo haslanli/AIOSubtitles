@@ -311,7 +311,7 @@ class FlowFixture(AnswersRun, unittest.TestCase):
             mock.patch.object(engine, 'STATE', self.state),
             mock.patch.object(engine, 'REPO', Path(self.tmp.name)),
             mock.patch.object(engine, 'PLACE', self.place),
-            mock.patch.object(dockerenv, 'foreign', lambda project, container, install_id: []),
+            mock.patch.object(dockerenv, 'foreign', lambda project, container, install_id, unlabelled=(): []),
             mock.patch.object(dockerenv, 'docker_problem', lambda: None),
             mock.patch.object(dockerenv, 'free_gb', lambda p='/': 100.0),
             mock.patch.object(dockerenv, 'aios_containers', lambda: [container]),
@@ -1013,8 +1013,8 @@ class Bridge(FlowFixture):
         self.assertTrue(all(image == IMAGE for image, _ in self.probed))
 
     def test_the_guard_stops_an_install_before_anything_is_written(self):
-        with mock.patch.object(dockerenv, 'foreign',
-                               lambda project, container, install_id: [('container', 'aiosubtitles-subsync')]), \
+        with mock.patch.object(dockerenv, 'foreign', lambda project, container, install_id, unlabelled=():
+                               [('container', 'aiosubtitles-subsync')]), \
                 mock.patch.object(engine.Engine, 'aios_urls', lambda e, c: [self.aios.url]):
             code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 1)
@@ -1023,8 +1023,8 @@ class Bridge(FlowFixture):
         self.assertFalse(self.aios.subsync_up)
 
     def test_the_guard_stops_at_the_first_step_before_anything_changes(self):
-        with mock.patch.object(dockerenv, 'foreign',
-                               lambda project, container, install_id: [('volume', 'aiosubtitles_subsync-data')]), \
+        with mock.patch.object(dockerenv, 'foreign', lambda project, container, install_id, unlabelled=():
+                               [('volume', 'aiosubtitles_subsync-data')]), \
                 mock.patch.object(engine.Engine, 'aios_urls', lambda e, c: [self.aios.url]):
             code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 1)

@@ -52,6 +52,8 @@ def check_address(value):
     if parts.scheme != 'https' or not parts.hostname or not plan.has_usable_port(parts) or parts.path not in ('', '/') \
             or parts.query or parts.fragment or parts.username or parts.password:
         return False, ADDRESS_REFUSED, text
+    if plan.has_space(text):
+        return False, plan.NO_SPACES, text
     return True, '', f'https://{parts.netloc.lower()}'
 
 
@@ -79,10 +81,10 @@ def public_env(answers, secret, limit_values, usenet=False, audio=False, tmdb_pe
     return {k: v for k, v in env.items() if v not in (None, '')}
 
 
-def compose_yaml(image, install_id, port, local=False):
-    """subsync alone, listening on 127.0.0.1 only, on no AIOStreams network."""
+def compose_yaml(image, install_id, port, local=False, external_volume=None):
+    """subsync alone, listening on 127.0.0.1 only, on no AIOStreams network (`external_volume`: plan.compose_yaml)."""
     return plan.compose_yaml({'image': image, 'local': local, 'install_id': install_id, 'host_network': False,
-                              'networks': [], 'bind': '127.0.0.1', 'port': port})
+                              'networks': [], 'bind': '127.0.0.1', 'port': port, 'external_volume': external_volume})
 
 
 def web_server_rule(address, target):

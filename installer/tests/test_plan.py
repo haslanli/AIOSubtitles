@@ -388,6 +388,19 @@ class Files(unittest.TestCase):
         self.assertIn('  default: {labels: {org.aiosubtitles.install: "id-1234"}}\n', text)  # its own network
         self.assertIn('\n  aios0: {external: true, name: "aio_default"}\n', text)   # never AIOStreams' network
 
+    def test_compose_keeps_the_volume_of_an_install_setup_1_3_0_made_as_it_is(self):
+        # Docker can't label a volume it has, and Compose 2.27 and later asks "Recreate (data will be lost)?" for one
+        # whose labels differ from the file's: declared external by its name, it is never made, checked or made again
+        text = self.compose(networks=['aio_default'], bind='127.0.0.1', external_volume='aiosubtitles_subsync-data')
+        self.assertTrue(text.endswith('\nvolumes:\n  subsync-data: {external: true, name: "aiosubtitles_subsync-data"}\n'),
+                        text)
+        self.assertIn('    volumes: ["subsync-data:/data"]\n', text)
+        self.assertIn('    labels: {org.aiosubtitles.install: "id-1234"}\n', text)           # the container
+        self.assertIn('  default: {labels: {org.aiosubtitles.install: "id-1234"}}\n', text)  # its own network
+        self.assertEqual(text.count('org.aiosubtitles.install'), 2)
+        host = self.compose(host_network=True, external_volume='aiosubtitles_subsync-data')
+        self.assertTrue(host.endswith('\nvolumes:\n  subsync-data: {external: true, name: "aiosubtitles_subsync-data"}\n'))
+
     def test_compose_runs_the_service_as_its_own_user(self):
         # as the image's entry script asks (user: "10001:10001"), and the user setup's helper containers run as
         from installer import dockerenv

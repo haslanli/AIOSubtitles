@@ -272,6 +272,23 @@ class Guard(unittest.TestCase):
         self.assertEqual(found, [('container', 'aiosubtitles-subsync'), ('container', 'aiosubtitles-caddy-1'),
                                  ('volume', 'aiosubtitles_subsync-data'), ('network', 'aiosubtitles_default')])
 
+    def test_what_it_has_without_its_label_is_its_own_only_while_unlabelled(self):
+        # an install setup 1.3.0 or before made: nothing labelled; then, taken over, the volume it kept
+        docker = self.docker('aiosubtitles-subsync\t\n', 'aiosubtitles_subsync-data\t\n', 'aiosubtitles_default\t\n')
+        unlabelled = {('container', 'aiosubtitles-subsync'), ('volume', 'aiosubtitles_subsync-data'),
+                      ('network', 'aiosubtitles_default')}
+        with mock.patch.object(dockerenv, 'run', docker):
+            self.assertEqual(dockerenv.foreign('aiosubtitles', 'aiosubtitles-subsync', 'id-1', unlabelled=unlabelled), [])
+            self.assertEqual(dockerenv.foreign('aiosubtitles', 'aiosubtitles-subsync', 'id-1',
+                                               unlabelled={('volume', 'aiosubtitles_subsync-data')}),
+                             [('container', 'aiosubtitles-subsync'), ('network', 'aiosubtitles_default')])
+        # another install's label, or a name not given, stays foreign
+        docker = self.docker('aiosubtitles-subsync\tid-other\naiosubtitles-caddy-1\t\n', 'aiosubtitles_subsync-data\t\n',
+                             'aiosubtitles_default\tid-1\n')
+        with mock.patch.object(dockerenv, 'run', docker):
+            self.assertEqual(dockerenv.foreign('aiosubtitles', 'aiosubtitles-subsync', 'id-1', unlabelled=unlabelled),
+                             [('container', 'aiosubtitles-subsync'), ('container', 'aiosubtitles-caddy-1')])
+
     def test_it_looks_by_project_and_by_name(self):
         docker = self.docker()
         with mock.patch.object(dockerenv, 'run', docker):

@@ -93,6 +93,15 @@ class Documents(unittest.TestCase):
         self.assertEqual((REPO / 'docs' / 'answers.example').read_text(), docs.answers_example(),
                          'run: python3 -I installer/docs.py')
 
+    def test_the_answers_examples_header_says_where_the_file_goes(self):
+        # in state/: both routes mount it (the source route only it); and a " #" inside quotes is kept (plan.parse_env)
+        header = docs.answers_example().split('\n\n', 1)[0]
+        self.assertEqual(' '.join(line.removeprefix('# ') for line in header.splitlines()),
+                         'Answers for ./setup --answers state/FILE (add --yes to ask nothing). Leave a line out to be '
+                         "asked, or to keep the current value on a re-run; an optional key's empty line (TMDB_KEY=) "
+                         'removes the saved key. A " #" starts a comment, except inside quotes. Keep this file private '
+                         'if it holds a password.')
+
     def test_every_setting_and_rule_is_in_the_readme(self):
         section = docs.readme_section()
         for name in list(explain.QUESTIONS) + list(explain.SETTINGS):

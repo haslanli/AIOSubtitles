@@ -101,7 +101,8 @@ class EngineUpdate(unittest.TestCase):
                   mock.patch.object(dockerenv, 'container_state', state_of),
                   mock.patch.object(dockerenv, 'check_image', check_image),
                   mock.patch.object(dockerenv, 'restore_databases', restore),
-                  mock.patch.object(dockerenv, 'foreign', lambda project, container, install_id: self.foreign),
+                  mock.patch.object(dockerenv, 'foreign',
+                                    lambda project, container, install_id, unlabelled=(): self.foreign),
                   mock.patch.object(engine.Engine, 'wait_healthy',
                                     lambda e, seconds=90: dockerenv.container_state(engine.CONTAINER).split()[-1:]
                                     == ['healthy']),
@@ -110,11 +111,11 @@ class EngineUpdate(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def install(self, route='yourself', image=OLD, version='1.3.0', previous=None):
+    def install(self, route='yourself', image=OLD, version='1.3.0', previous=None, **more):
         self.state.mkdir()
         settings = {'route': route, 'version': version, 'image': image, 'install_id': 'id-1', 'mode': 'remote',
                     'networks': [], 'bind': '127.0.0.1', 'port': 8790, 'public_base': 'https://aio.example.com/subsync',
-                    'installed': '2026-11-13'}
+                    'installed': '2026-11-13', **more}
         if previous:
             settings['previous'] = previous
         engine.save_settings(settings)
@@ -327,6 +328,42 @@ class EngineUpdate(unittest.TestCase):
         self.assertTrue(engine.Engine({}, page=True).rollback())
         self.assertNotIn('restore', self.kinds())
 
+    def test_an_install_taken_over_from_setup_1_3_0_keeps_its_volume_through_an_update(self):
+        # its volume carries no label and is declared external, so Compose never makes, checks or makes it again
+        volume = 'aiosubtitles_subsync-data'
+        self.install(external_volume=volume)
+        asked = []
+
+        def foreign(project, container, install_id, unlabelled=()):
+            asked.append((install_id, set(unlabelled)))
+            return []
+        with mock.patch.object(dockerenv, 'foreign', foreign):
+            self.assertTrue(engine.Engine({}, page=True).update())
+        self.assertEqual(asked, [('id-1', {('volume', volume)})])
+        compose = (self.state / 'compose.yaml').read_text()
+        self.assertIn(f'    image: {NEW}\n', compose)
+        self.assertIn(f'\nvolumes:\n  subsync-data: {{external: true, name: "{volume}"}}\n', compose)
+        s = engine.load_settings()
+        self.assertEqual((s['version'], s['external_volume'], s['previous']['version']), ('1.4.0', volume, '1.3.0'))
+
+    def test_and_through_a_rollback_whose_copy_goes_back_into_it(self):
+        volume = 'aiosubtitles_subsync-data'
+        self.rollback_with_its_copy(external_volume=volume)
+        asked = []
+
+        def foreign(project, container, install_id, unlabelled=()):
+            asked.append((install_id, set(unlabelled)))
+            return []
+        with mock.patch.object(dockerenv, 'foreign', foreign):
+            self.assertTrue(engine.Engine({}, page=True).rollback(restore=True))
+        self.assertEqual(asked, [('id-1', {('volume', volume)})])
+        restore = next(ev for ev in self.events if ev[0] == 'restore')
+        self.assertEqual(restore[1:3], (OLD, volume))
+        self.assertEqual(self.restored, {'users.sqlite3': b'copy A'})
+        self.assertIn(f'\nvolumes:\n  subsync-data: {{external: true, name: "{volume}"}}\n',
+                      (self.state / 'compose.yaml').read_text())
+        self.assertEqual(engine.load_settings()['external_volume'], volume)
+
     def test_no_earlier_version_no_rollback(self):
         self.install()
         with self.assertRaises(Stop) as caught:
@@ -335,10 +372,11 @@ class EngineUpdate(unittest.TestCase):
 
     # ------------------------------------------------------------------ what goes wrong, and the copies' files
 
-    def rollback_with_its_copy(self, route='yourself'):
+    def rollback_with_its_copy(self, route='yourself', **more):
         """1.4.0 runs, after an update from 1.3.0 whose copy (copy A) is in state/backups."""
         self.install(route=route, image=NEW, version='1.4.0',
-                     previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-20261113-000000'})
+                     previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-20261113-000000'},
+                     **more)
         before = self.state / 'backups' / 'databases-20261113-000000'
         before.mkdir(parents=True)
         (before / 'users.sqlite3').write_bytes(b'copy A')
@@ -467,7 +505,8 @@ class EngineUpdate(unittest.TestCase):
             return 0, '', ''
         with self.copying(cp), self.assertRaises(Stop) as caught:
             engine.Engine({}, page=True).update()
-        self.assertEqual(caught.exception.message, update.FAILED.format(reason=update.COPY_NOT_A_FOLDER, version='1.3.0'))
+        self.assertEqual(caught.exception.message, "The update didn't go through: the copy of the databases is not a "
+                                                   'folder. Version 1.3.0 keeps running.')         # as approved
         self.assertNotIn('check', self.kinds())
         self.assertEqual(list((self.state / 'backups').iterdir()), [])          # the link is gone, its target stays
         self.assertEqual(stat.S_IMODE(elsewhere.stat().st_mode), 0o755)

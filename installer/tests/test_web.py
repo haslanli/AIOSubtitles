@@ -713,6 +713,24 @@ class Personal(BackgroundWork, FlowFixture):
         _, _, text = self.b.get('choices')                                       # Back from Limits
         self.assertIn(explain.USENET_WHY['proxy'], text)
 
+    def test_an_address_with_a_space_is_asked_again_at_its_field(self):
+        # it was taken, and the address's first check then ended in http.client's InvalidURL: the page's "unexpected
+        # error" stop
+        b = self.b
+        b.post('', {'ROUTE': 'yourself'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('aios', {'go': 'next'})
+        b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        b.follow('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
+        form = {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': 'http://192.168.1.5:8790/sub sync', 'go': 'next'}
+        status, _, text = b.post('choices', form)
+        self.assertEqual(status, 200)
+        self.assertIn('<p class="field-error" id="public_address-error">Leave out the spaces.</p>', text)
+        self.assertNotIn(screens.UNEXPECTED[0], text)
+        status, headers, _ = b.post('choices', dict(form, PUBLIC_ADDRESS=f'{PUBLIC}/subsync'))
+        self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/limits'))
+
     def test_the_container_choice_shows_each_name_once_with_its_image(self):
         two = [{'name': name, 'image': image, 'port': 3000, 'base_url': PUBLIC, 'host_network': False,
                 'networks': ['aio_default'], 'ips': [], 'published': []}
@@ -909,6 +927,15 @@ class Hosting(BackgroundWork, RouteFixture):
                 mock.patch.object(engine.dockerenv, 'container_state', lambda n: ''):
             _, _, text = b.post('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
         self.assertIn('Port 8790 on this machine is already in use.', text)
+
+    def test_a_web_address_with_a_space_is_asked_again_at_its_field(self):
+        b = Browser(web.App(port=8811))
+        b.post('', {'ROUTE': 'host'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        _, _, text = b.post('address', {'HOST_ADDRESS': 'https://subs.exa mple.com', 'SUBSYNC_TRUSTED_PROXY': 'gateway',
+                                        'go': 'next'})
+        self.assertIn('<p class="field-error" id="host_address-error">Leave out the spaces.</p>', text)
 
     def test_a_public_instance_through_the_page(self):
         app = web.App(port=8805)
@@ -1211,6 +1238,30 @@ class Rollback(BackgroundWork, FlowFixture):
         _, _, text = b.get('')
         self.assertIn('action="rollback"', text)
         self.assertNotIn('name="RESTORE_DATABASES"', text)
+
+
+class EarlyInstall(BackgroundWork, FlowFixture):
+    """An install setup 1.3.0 or before made: the page after setup offers the update, as for any older version, and
+    its Update sends it through the steps once, where it is taken over."""
+
+    def test_its_update_says_go_through_the_steps_once(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        s = engine.load_settings()
+        early = dict({k: v for k, v in s.items() if k not in ('install_id', 'image', 'local')}, version='0.9.0')
+        engine.save_settings(early)
+        compose = (self.state / 'compose.yaml').read_text()
+        started = self.started_count
+        b = Browser(web.App(port=8812))
+        _, _, text = b.get('')
+        self.assertIn(update.READY.format(version=engine.setup_version()), text)
+        b.post('update', {})
+        _, _, text = b.settle('updating')
+        self.assertIn('This install was made by setup 1.3.0 or before: press Change your answers and go through the '
+                      'steps once; your answers and stored copies are kept.', ' '.join(text.split()))
+        self.assertEqual(engine.load_settings(), early)
+        self.assertEqual((self.state / 'compose.yaml').read_text(), compose)
+        self.assertEqual(self.started_count, started)
 
 
 class Fixtures(unittest.TestCase):

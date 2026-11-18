@@ -207,10 +207,11 @@ def _listing(cmd):
     return [line.split('\t') + [''] for line in out.splitlines() if line.strip()]
 
 
-def foreign(project, container, install_id):
+def foreign(project, container, install_id, unlabelled=()):
     """What Docker has under this setup's names (the compose project, the service's container, its volume and network)
-    that doesn't carry this install's id: [(kind, name)], empty when everything there is its own. RuntimeError when
-    Docker doesn't answer."""
+    that doesn't carry this install's id: [(kind, name)], empty when everything there is its own. `unlabelled`: the
+    (kind, name) this install has without its id (setup labels what it makes since 1.4.0), its own while they carry no
+    install label at all. RuntimeError when Docker doesn't answer."""
     label = f'{{{{.Label "{INSTALL_LABEL}"}}}}'
     named = {'container': container, 'volume': f'{project}_{VOLUME}', 'network': f'{project}_default'}
     kinds = (('container', ['docker', 'ps', '-a'], '{{.Names}}'), ('volume', ['docker', 'volume', 'ls'], '{{.Name}}'),
@@ -223,7 +224,8 @@ def foreign(project, container, install_id):
                 if filt.startswith('name=') and row[0] != named[kind]:
                     continue        # Docker's name filter matches parts of names too
                 seen.setdefault(row[0], row[1])
-        found += [(kind, n) for n, owner in seen.items() if owner != install_id]
+        found += [(kind, n) for n, owner in seen.items()
+                  if owner != install_id and not (owner == '' and (kind, n) in unlabelled)]
     return found
 
 

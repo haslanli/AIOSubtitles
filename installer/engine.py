@@ -38,6 +38,12 @@ CONTAINER = plan.container_name()
 PLACE = None       # where.Place: where this setup runs, read at start-up (installer/wizard.py)
 GUARD_STOP = ("Setup stopped without changing anything: Docker has a {kind} named {name} that this setup didn't make. "
               "If it belongs to another AIOSubtitles, run that one's setup; if not, rename or remove it yourself.")
+# a volume's own: removing it may delete an AIOSubtitles' stored copies, or a public instance's records
+GUARD_STOP_VOLUME = ("Setup stopped without changing anything: Docker has a volume named {name} that this setup "
+                     "didn't make. It may hold an AIOSubtitles' stored copies (on a public instance, everyone's "
+                     "records): if it belongs to another AIOSubtitles, run that one's setup; remove it only once you "
+                     "are sure nothing in it is needed.")
+TAKEN_OVER = 'Took over the install an earlier setup (1.3.0 or before) made here; its stored copies are kept.'
 CANT_REACH = ("Setup runs in a container, so it can't reach an AIOStreams that only listens on this machine's "
               '127.0.0.1. Give its address on your network, or use the source route (README).')
 STARTING = 'Starting {name}'
@@ -217,10 +223,11 @@ def setup_version():
 def compose_for(s):
     """state/compose.yaml for the setup saved in `s` (state/settings.json): its image, pinned, and its install id."""
     if s.get('route') == 'host':
-        return hosting.compose_yaml(s['image'], s['install_id'], s['port'], local=s.get('local'))
+        return hosting.compose_yaml(s['image'], s['install_id'], s['port'], local=s.get('local'),
+                                    external_volume=s.get('external_volume'))
     return plan.compose_yaml({'image': s['image'], 'local': s.get('local'), 'install_id': s['install_id'],
                               'host_network': s.get('mode') == 'host', 'networks': s.get('networks'),
-                              'bind': s.get('bind'), 'port': s['port']})
+                              'bind': s.get('bind'), 'port': s['port'], 'external_volume': s.get('external_volume')})
 
 
 def write_compose(s):
@@ -262,15 +269,37 @@ def saved_aios(s):
     return Aios(s.get('aios_url') or plan.AIOS_DEFAULT_URL)
 
 
-def guard(install_id):
-    """Stops before any change when Docker has something under setup's names that this install didn't make."""
+def made_before_labels(s):
+    """Whether the setup saved in `s` (state/settings.json) is an install setup 1.3.0 or before made: installed, with
+    no install id. Setup labels what it makes since 1.4.0, so that install's container, volume and network carry no
+    label; setup's steps take it over once (Engine.own_image)."""
+    return bool(s.get('installed')) and not s.get('install_id')
+
+
+def data_volume(s):
+    """The service's volume as Docker names it: the one an install setup 1.3.0 or before made, kept as it is, or the
+    one its compose file makes."""
+    return s.get('external_volume') or f'{plan.project()}_{plan.VOLUME}'
+
+
+def unlabelled_own(s):
+    """What the install saved in `s` has under setup's names without its label: all three while setup 1.3.0 or before
+    made it, then the volume kept from it."""
+    if made_before_labels(s):
+        return {('container', CONTAINER), ('volume', data_volume(s)), ('network', f'{plan.project()}_default')}
+    return {('volume', s['external_volume'])} if s.get('external_volume') else set()
+
+
+def guard(install_id, unlabelled=()):
+    """Stops before any change when Docker has something under setup's names that this install didn't make
+    (`unlabelled`: what it has without its label, unlabelled_own)."""
     try:
-        found = dockerenv.foreign(plan.project(), CONTAINER, install_id)
+        found = dockerenv.foreign(plan.project(), CONTAINER, install_id, unlabelled=unlabelled)
     except RuntimeError as e:
         raise Stop(str(e)) from None
     if found:
         kind, name = found[0]
-        raise Stop(GUARD_STOP.format(kind=kind, name=name))
+        raise Stop(GUARD_STOP_VOLUME.format(name=name) if kind == 'volume' else GUARD_STOP.format(kind=kind, name=name))
 
 
 def new_install_id():
@@ -498,7 +527,7 @@ class Engine:
             stop(*problem)
         # before any question: nothing under setup's names that this install didn't make
         self.install_id = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
-        guard(self.install_id)
+        guard(self.install_id, unlabelled_own(self.prev))
         self.out.ok('Docker and Docker Compose work')
         free = dockerenv.free_gb(str(STATE.parent))
         if free is not None:
@@ -507,6 +536,28 @@ class Engine:
     # 2 -------------------------------------------------------------------------------------------------------
     def find_aios(self):
         self.show_step('aios')
+        container, url = self.reach_aios()
+        settings = self.status['settings']
+        public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
+        self.s.update(aios_url=url, aios_public=public, version=setup_version(), aios_version=self.status.get('version'))
+        if container and container['host_network']:
+            self.s.update(mode='host', container=container['name'], networks=[],
+                          aios_internal=f"http://127.0.0.1:{container['port']}")
+        elif container and container['networks']:
+            self.s.update(mode='network', container=container['name'], networks=container['networks'],
+                          aios_internal=f"http://{container['name']}:{container['port']}")
+        else:
+            self.s.update(mode='remote', container=(container or {}).get('name'), networks=[], aios_internal=public)
+        self.out.ok(f'Viewers reach it at {public}')
+        if self.s['mode'] == 'network':
+            self.out.note(f"subsync will join its Docker network{'s' if len(container['networks']) > 1 else ''}: {', '.join(container['networks'])}")
+        elif self.s['mode'] == 'remote':
+            self.out.note('It doesn\'t run in Docker on this machine, so subsync talks to it over the network.')
+
+    def reach_aios(self):
+        """AIOStreams as this machine reaches it: its container (which one, when there are several), else the address
+        asked. Sets self.aios and self.status; returns (the container or None, the address). ./setup --restore finds
+        it this way too when no address is saved."""
         found = self.found = dockerenv.aios_containers()
         container = None
         if len(found) > 1:
@@ -538,22 +589,7 @@ class Engine:
         if urllib.parse.urlsplit(url).scheme == 'http' and not plan.is_private_host(plan.host_of(url)):
             self.out.warn(PLAIN_HTTP.format(address=url))      # before the config's password is asked
         self.aios = Aios(url)
-        settings = self.status['settings']
-        public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
-        self.s.update(aios_url=url, aios_public=public, version=setup_version(), aios_version=self.status.get('version'))
-        if container and container['host_network']:
-            self.s.update(mode='host', container=container['name'], networks=[],
-                          aios_internal=f"http://127.0.0.1:{container['port']}")
-        elif container and container['networks']:
-            self.s.update(mode='network', container=container['name'], networks=container['networks'],
-                          aios_internal=f"http://{container['name']}:{container['port']}")
-        else:
-            self.s.update(mode='remote', container=(container or {}).get('name'), networks=[], aios_internal=public)
-        self.out.ok(f'Viewers reach it at {public}')
-        if self.s['mode'] == 'network':
-            self.out.note(f"subsync will join its Docker network{'s' if len(container['networks']) > 1 else ''}: {', '.join(container['networks'])}")
-        elif self.s['mode'] == 'remote':
-            self.out.note('It doesn\'t run in Docker on this machine, so subsync talks to it over the network.')
+        return container, url
 
     def aios_urls(self, c):
         """Addresses setup can reach a container's AIOStreams at, best first. On the bridge network setup joins
@@ -1010,7 +1046,7 @@ class Engine:
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         self.own_image()
-        guard(self.s['install_id'])
+        guard(self.s['install_id'], unlabelled_own(self.prev))
         write_compose(self.s)
         if self.audio:
             self.s['audio_when'] = self.audio_when
@@ -1022,12 +1058,19 @@ class Engine:
         save_settings(self.s)
         self.write_keys()
         self.start('subsync', 'subsync is running (it restarts by itself after a reboot)')
+        if made_before_labels(self.prev):
+            self.out.ok(TAKEN_OVER)
         self.write_setup_script()
         self.save_viewer()
 
     def own_image(self):
-        """This install's id (kept from the last setup) and the image the service runs: setup's own, pinned."""
+        """This install's id (kept from the last setup) and the image the service runs: setup's own, pinned. An install
+        setup 1.3.0 or before made is taken over here: it gets an id, and its volume, which Docker can't label, is kept
+        as it is (recorded in state/settings.json, declared external in its compose file); its container and network
+        are made again with the label when it starts."""
         self.s['install_id'] = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
+        if made_before_labels(self.prev) or self.prev.get('external_volume'):
+            self.s['external_volume'] = data_volume(self.prev)
         self.s['version'] = setup_version()
         if PLACE:
             self.s.update(image=PLACE.image, local=PLACE.local)
@@ -1375,12 +1418,14 @@ class Engine:
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         self.own_image()
-        guard(self.s['install_id'])
+        guard(self.s['install_id'], unlabelled_own(self.prev))
         write_compose(self.s)
         self.s.update(installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
         save_settings(self.s)
         self.write_keys()
         self.start('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
+        if made_before_labels(self.prev):
+            self.out.ok(TAKEN_OVER)
         self.write_setup_script()
         self.web_server_rule = None
         if not self.public_health_at(self.address):
@@ -1500,7 +1545,7 @@ class Engine:
         if not self.ask.yesno('CONFIRM', 'Remove subsync?', False):
             stop('Nothing was changed.')
         if (STATE / 'compose.yaml').exists():
-            guard(s.get('install_id'))
+            guard(s.get('install_id'), unlabelled_own(s))
         if removed:
             path = backup(self.viewer, uuid)
             self.with_sign_in(lambda: self.aios.save_config(uuid, password, new))
@@ -1538,7 +1583,7 @@ class Engine:
                 raise Problem('CONFIRM', screens.TICK_TO_REMOVE)
             stop('Nothing was changed.')
         if (STATE / 'compose.yaml').exists():
-            guard(s.get('install_id'))
+            guard(s.get('install_id'), unlabelled_own(s))
             self.take_down()
         for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
             (STATE / name).unlink(missing_ok=True)
@@ -1553,9 +1598,14 @@ class Engine:
         self.say_what_stays()
 
     def take_down(self):
-        """The service's container removed with its stored copies. When Docker fails, setup stops before any of its
-        files is deleted, so removing it again finishes the job."""
+        """The service's container removed with its stored copies; the volume kept from an install setup 1.3.0 or
+        before is removed by its name after it, since Compose never removes a volume its file declares external. When
+        Docker fails, setup stops before any of its files is deleted, so removing it again finishes the job."""
         code, out, err = dockerenv.compose(STATE, 'down', '-v', timeout=300)
+        if code == 0 and self.prev.get('external_volume'):
+            code, out, err = dockerenv.run(['docker', 'volume', 'rm', self.prev['external_volume']], timeout=120)
+            if 'no such volume' in err.lower():       # gone already: a removal stopped after removing it
+                code = 0
         if code != 0:
             stop(REMOVE_FAILED, last_lines(out, err))
         self.out.ok('Removed the subsync container and its stored copies')
@@ -1571,6 +1621,8 @@ class Engine:
         """The page's Update, or ./setup --update: the service moves to this setup's own version."""
         if not self.prev.get('installed'):
             stop('subsync is not set up here yet.', 'Run ./setup')
+        if made_before_labels(self.prev):       # its image was built from code since replaced: no switch, no way back
+            raise Stop(update.EARLY_INSTALL_PAGE if self.page else update.EARLY_INSTALL)
         ready = update.compare(self.prev, PLACE.image if PLACE else None, setup_version())
         if ready.how == 'newest':
             raise Stop(update.NEWEST)
@@ -1606,7 +1658,7 @@ class Engine:
         version back (with the copy when it needs it) if the new one doesn't answer."""
         s = self.s = dict(self.prev)
         old = {'image': s.get('image'), 'local': bool(s.get('local')), 'version': s.get('version')}
-        guard(s.get('install_id'))
+        guard(s.get('install_id'), unlabelled_own(s))
         held = self.route_check()            # what held before: a check that failed already can't fail the update
         needed = {(s.get('previous') or {}).get('databases'), restore} - {None}     # never pruned: a rollback needs them
         copy = self.copy_databases(old['version'], keep=needed)
@@ -1661,7 +1713,7 @@ class Engine:
         folder = Path(folder)
         files = {name: (folder / name).read_bytes() for name in sorted(plain_databases(folder))}
         dockerenv.compose(STATE, 'stop', timeout=120)
-        good, _ = dockerenv.restore_databases(image, f'{plan.project()}_{plan.VOLUME}', files)
+        good, _ = dockerenv.restore_databases(image, data_volume(self.s), files)
         dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
         return good and self.wait_healthy() and self.databases_ok()
 

@@ -64,6 +64,14 @@ def has_usable_port(parts):
         return False
 
 
+# an address with a space (or another blank) inside: urlsplit lets it through, and Python's http.client then refuses it
+NO_SPACES = 'Leave out the spaces.'
+
+
+def has_space(text):
+    return any(c.isspace() for c in text)
+
+
 def check_public(url):
     """(good, message, normalized) for an address typed in by the user."""
     url = (url or '').strip().rstrip('/')
@@ -72,6 +80,8 @@ def check_public(url):
         return False, 'Type a full address that starts with http:// or https://', url
     if parts.query or parts.fragment:
         return False, 'Leave out anything after ? or #.', url
+    if has_space(url):
+        return False, NO_SPACES, url
     return True, '', url
 
 
@@ -261,7 +271,9 @@ def compose_yaml(s):
     """state/compose.yaml: subsync only, on AIOStreams' Docker network(s) when it runs on this machine. It runs the
     image setup itself runs from (`s['image']`, pinned by digest; `local`: built on this machine, never pulled), as its
     own user, never with Docker's socket, and labels the container, its volume and its own network with the install's
-    id (`s['install_id']`)."""
+    id (`s['install_id']`). The volume an install setup 1.3.0 or before made keeps (`s['external_volume']`, its name;
+    Docker can't label a volume it has) is declared external instead, so Compose never creates, checks or recreates
+    it."""
     label = f'{{{INSTALL_LABEL}: "{s["install_id"]}"}}'
     lines = [
         '# Written by ./setup (AIOSubtitles). Run ./setup again to change it; edits here are replaced.',
@@ -291,7 +303,9 @@ def compose_yaml(s):
         lines.append(f'  default: {{labels: {label}}}')
         for i, name in enumerate(s.get('networks') or []):
             lines.append(f'  aios{i}: {{external: true, name: "{name}"}}')
-    lines += ['volumes:', f'  {VOLUME}: {{labels: {label}}}', '']
+    kept = s.get('external_volume')
+    volume = f'{{external: true, name: "{kept}"}}' if kept else f'{{labels: {label}}}'
+    lines += ['volumes:', f'  {VOLUME}: {volume}', '']
     return '\n'.join(lines)
 
 

@@ -10,6 +10,8 @@ import json
 import os
 import re
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,6 +139,22 @@ class Addresses(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertEqual(hosting.check_address(bad), (False, hosting.ADDRESS_REFUSED, bad))
         self.assertEqual(hosting.check_address('https://Subs.Example.com:8443/'), (True, '', 'https://subs.example.com:8443'))
+
+    def test_an_address_with_a_space_in_it_is_asked_again(self):
+        # urlsplit lets a space through (and drops a tab); the address's first check then ended in http.client's
+        # InvalidURL: a traceback in a terminal, the page's "unexpected error" stop
+        for bad in ('http://exa mple.com', 'http://x/sub sync', 'https://a.example.com/sub\tsync',
+                    'http://192.168.1.5:8790/sub sync'):
+            with self.subTest(bad=bad):
+                self.assertEqual(plan.check_public(bad), (False, 'Leave out the spaces.', bad))
+        self.assertEqual(plan.check_public('  http://x/sub%20sync/ '), (True, '', 'http://x/sub%20sync'))   # % stays
+        for bad in ('https://exa mple.com', 'https://subs.exa mple.com/', 'https://subs.example\t.com'):
+            with self.subTest(bad=bad):
+                self.assertEqual(hosting.check_address(bad), (False, 'Leave out the spaces.', bad))
+        self.assertEqual(hosting.check_address(' https://subs.example.com '), (True, '', 'https://subs.example.com'))
+        # the neighbours, unchanged
+        self.assertEqual(plan.check_public('exa mple.com')[1], 'Type a full address that starts with http:// or https://')
+        self.assertEqual(plan.check_public('http://x/a b?c')[1], 'Leave out anything after ? or #.')
 
 
 class ErrorCodes(TmpState):
@@ -664,6 +682,29 @@ class SavedAiostreams(Offline):
         self.assertEqual(code, 0, out.getvalue())
         self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
         self.assertEqual(self.ours(), [])                                         # the copy from before subsync
+
+    def test_restore_after_an_uninstall_finds_aiostreams_as_installing_does(self):
+        # --uninstall deletes settings.json, and its closing list points to --restore: that asked
+        # http://127.0.0.1:3000, setup's own container here
+        copy = (self.state / 'backups').glob('viewer-*').__next__()       # the install's: before subsync was added
+        copy = copy.rename(copy.with_name(f'viewer-{UUID[:8]}-20261117-120000.json'))    # one the removal can't reuse
+        code, out = self.again('--uninstall', CONFIRM='yes')
+        self.assertEqual(code, 0, out)
+        self.assertFalse((self.state / 'settings.json').exists())
+        self.aios.users[UUID]['config']['presets'].append({'type': 'custom', 'options': {'manifestUrl': 'x'}})
+        self.joined.clear()                                 # the next ./setup: a new container
+        answers = self.answers_file({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(['--restore', str(copy), '--answers', answers, '--yes'])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
+        self.assertIn('Found AIOStreams 2.37.0 in the container "aiostreams"', out.getvalue())
+        self.assertNotIn('Viewers reach it at', out.getvalue())          # the AIOStreams step's install rows: none
+        self.assertNotIn('Step 2', out.getvalue())
+        self.assertIn('Restored.', out.getvalue())
+        self.assertEqual(self.aios.users[UUID]['config'], json.loads(copy.read_text())['config'])
+        self.assertEqual(self.ours(), [])                                   # the change since is gone
 
     def test_aiostreams_own_address_when_the_saved_one_cant_be_reached(self):
         self.joins = False                                   # its network is gone (renamed by its compose project)
@@ -1202,6 +1243,55 @@ class Restore(Offline):
                 self.assertIn(f'✗ {message.format(path)} {self.GIVE}', flat(out))
                 self.assertEqual(self.unchanged(), before)
 
+    def test_after_an_uninstall_aiostreams_is_found_or_asked_as_installing_does(self):
+        copy = self.copy.rename(self.copy.with_name(f'viewer-{UUID[:8]}-20261117-120000.json'))   # the removal's own
+        code, out = self.again('--uninstall', CONFIRM='yes')                                     # copy can't reuse it
+        self.assertEqual(code, 0, out)
+        self.assertFalse((self.state / 'settings.json').exists())
+        saved = json.loads(copy.read_text())['config']
+        # no AIOStreams container on this machine: its address is asked, as the AIOStreams step asks it
+        with mock.patch.object(dockerenv, 'aios_containers', lambda: []):
+            code, out = self.restore(copy, AIOS_URL=self.aios.url)
+        self.assertEqual(code, 0, out)
+        self.assertIn('What address do you open AIOStreams at?', out)
+        self.assertIn('✓ AIOStreams 2.37.0 answers there', flat(out))
+        self.assertIn('Restored.', out)
+        self.assertEqual(self.aios.users[UUID]['config'], saved)
+        # two: which one is asked, as there
+        two = [{'name': name, 'image': 'ghcr.io/viren070/aiostreams:latest', 'port': 3000, 'base_url': PUBLIC,
+                'host_network': False, 'networks': [], 'ips': [], 'published': []} for name in ('aio-a', 'aio-b')]
+        with mock.patch.object(dockerenv, 'aios_containers', lambda: two):
+            code, out = self.restore(copy, AIOS_CONTAINER='aio-b')
+        self.assertEqual(code, 0, out)
+        self.assertIn('More than one AIOStreams runs here. Which one do your apps use?', out)
+        self.assertIn('Found AIOStreams 2.37.0 in the container "aio-b"', out)
+        self.assertIn('Restored.', out)
+
+    def test_an_answers_file_setup_cant_open_is_a_plain_message(self):
+        # it ended in a Python traceback (FileNotFoundError); the source route mounts only state/, so a file elsewhere
+        # in the folder is never found there
+        folder = Path(self.tmp.name)
+        (folder / 'binary.txt').write_bytes(b'\xff\xfe\x00\x01')
+        unreadable = folder / 'unreadable.txt'
+        unreadable.write_text('AIOS_CONFIG_PASSWORD=x\n')
+        unreadable.chmod(0o000)
+        self.addCleanup(unreadable.chmod, 0o600)
+        give = 'Give an answers file in state/, like ./setup --answers state/answers.txt --yes.'
+        before = self.unchanged(), engine.load_settings()
+        paths = [folder / 'missing.txt', 'my-answers.txt', folder, folder / 'binary.txt']
+        paths += [unreadable] if os.geteuid() != 0 else []          # root reads it anyway
+        for path in paths:
+            for argv in (['--answers', str(path), '--yes'], ['--answers', str(path)],
+                         ['--uninstall', '--answers', str(path), '--yes'],
+                         ['--restore', str(self.copy), '--answers', str(path), '--yes']):
+                with self.subTest(path=str(path), argv=argv[0]):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        code = wizard.main(argv)
+                    self.assertEqual(code, 1, out.getvalue())
+                    self.assertIn(f"✗ Setup can't open {path}. {give}", flat(out.getvalue()))
+                    self.assertEqual((self.unchanged(), engine.load_settings()), before)
+
 
 class Advice(Offline):
     """The way out the terminal gives after an answer refused or not given: by the answers file, and none to give for a
@@ -1284,6 +1374,236 @@ class RouteKept(Offline):
         code, out = self.run_setup({'ROUTE': 'yourself', 'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
         self.assertEqual(code, 0, out)                                   # its own route goes on
         self.assertNotIn('How do you want to use it?', self.again()[1])  # and isn't asked again
+
+
+FOREIGN = dockerenv.foreign         # the real ownership check, taken before any test puts a stand-in in its place
+KEPT_VOLUME = 'aiosubtitles_subsync-data'
+# state/compose.yaml as setup 1.3.0 wrote it for this install (installer/plan.py at aiosubtitles-public f4313df)
+COMPOSE_1_3_0 = '''# Written by ./setup (AIOSubtitles). Run ./setup again to change it; edits here are replaced.
+name: aiosubtitles
+services:
+  subsync:
+    build: ../subsync
+    image: aiosubtitles/subsync:1.3.0
+    container_name: aiosubtitles-subsync
+    restart: unless-stopped
+    env_file: [subsync.env]
+    volumes: ["subsync-data:/data"]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    ports: ["127.0.0.1:8790:8790"]
+    networks:
+      default: {}
+      aios0: {aliases: [aiosubtitles-subsync]}
+networks:
+  aios0: {external: true, name: "aio_default"}
+volumes:
+  subsync-data: {}
+'''
+
+
+class TakeOver(Offline):
+    """An install setup 1.3.0 or before made: the same names, no install id, nothing labelled. Setup's steps take
+    it over once, and its volume, which Docker can't label, is kept as it is: declared external, recorded in
+    settings.json, accepted by the guard, removed by its name. Docker is a stand-in that lists what it has with each
+    one's label; its compose up makes the container and network again with the compose file's label, and refuses a
+    volume declared otherwise than it was made (Compose 2.27 and later asks "Recreate (data will be lost)?", which
+    nobody would see). Nothing here is checked on a real Docker: see the ledger for that test."""
+
+    def setUp(self):
+        super().setUp()
+        self.docker, self.volume_calls = {}, []
+        self.install()                      # the folder's answers, keys and config copies, as an install leaves them
+        s = engine.load_settings()
+        self.settings_1_3_0 = dict({k: v for k, v in s.items() if k not in ('install_id', 'image', 'local')},
+                                   version='1.3.0')
+        engine.save_settings(self.settings_1_3_0)
+        (self.state / 'compose.yaml').write_text(COMPOSE_1_3_0)
+        self.docker = {('container', 'aiosubtitles-subsync'): '', ('volume', KEPT_VOLUME): '',
+                       ('network', 'aiosubtitles_default'): ''}
+        for p in (mock.patch.object(dockerenv, 'foreign', FOREIGN), mock.patch.object(dockerenv, 'run', self.run_docker)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_docker(self, cmd, timeout=60, stdin=None):
+        """Docker's listings with each item's install label, and its volume commands."""
+        kind = {('docker', 'ps'): 'container', ('docker', 'volume'): 'volume', ('docker', 'network'): 'network'}.get(
+            tuple(cmd[:2]))
+        if kind and cmd[2] in ('-a', 'ls'):
+            return 0, ''.join(f'{name}\t{label}\n' for (k, name), label in self.docker.items() if k == kind), ''
+        if cmd[:2] == ['docker', 'volume']:
+            self.volume_calls.append(cmd)
+            if cmd[2] == 'rm' and self.docker.pop(('volume', cmd[3]), None) is None:
+                return 1, '', f'Error response from daemon: get {cmd[3]}: no such volume'
+        return 0, '', ''
+
+    def _compose(self, state, *args, **kw):
+        text = (state / 'compose.yaml').read_text()
+        external = f'\n  subsync-data: {{external: true, name: "{KEPT_VOLUME}"}}\n' in text
+        if 'up' in args:
+            label = re.search(r'org\.aiosubtitles\.install: "(\w+)"', text).group(1)
+            if not external and self.docker.get(('volume', KEPT_VOLUME), label) != label:
+                return 1, '', (f'Volume "{KEPT_VOLUME}" exists but doesn\'t match configuration in compose file. '
+                               'Recreate (data will be lost)? [y/N]')
+            self.docker.update({('container', 'aiosubtitles-subsync'): label, ('network', 'aiosubtitles_default'): label})
+            self.docker.setdefault(('volume', KEPT_VOLUME), label)
+        if 'down' in args:
+            self.docker.pop(('container', 'aiosubtitles-subsync'), None)
+            self.docker.pop(('network', 'aiosubtitles_default'), None)
+            if '-v' in args and not external:
+                self.docker.pop(('volume', KEPT_VOLUME), None)
+        return super()._compose(state, *args, **kw)
+
+    def take_over(self):
+        code, out = self.again()
+        self.assertEqual(code, 0, out)
+        return engine.load_settings(), out
+
+    def test_its_steps_take_it_over_and_keep_its_volume(self):
+        s, out = self.take_over()
+        self.assertIn('✓ Took over the install an earlier setup (1.3.0 or before) made here; its stored copies are '
+                      'kept.', flat(out))
+        self.assertRegex(s['install_id'], r'^[0-9a-f]{16}$')
+        self.assertEqual(s['external_volume'], KEPT_VOLUME)                   # recorded in settings.json
+        compose = self.compose()
+        label = f'{{org.aiosubtitles.install: "{s["install_id"]}"}}'
+        self.assertIn(f'    labels: {label}\n', compose)                              # the container
+        self.assertIn(f'  default: {{labels: {label}}}\n', compose)                   # its network
+        self.assertIn(f'\nvolumes:\n  subsync-data: {{external: true, name: "{KEPT_VOLUME}"}}\n', compose)
+        self.assertEqual(self.docker, {('container', 'aiosubtitles-subsync'): s['install_id'],
+                                       ('volume', KEPT_VOLUME): '',          # never made, labelled or made again
+                                       ('network', 'aiosubtitles_default'): s['install_id']})
+        self.assertEqual(self.volume_calls, [])
+        # a second ./setup passes the guard: the one unlabelled volume is this install's own, nothing is taken over
+        code, out = self.again()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('Took over', out)
+        again = engine.load_settings()
+        self.assertEqual((again['install_id'], again['external_volume']), (s['install_id'], KEPT_VOLUME))
+        self.assertIn(f'  subsync-data: {{external: true, name: "{KEPT_VOLUME}"}}\n', self.compose())
+
+    def test_on_the_page_too(self):
+        e = self.page_engine({})                    # through step 1's guard, AIOStreams and the config
+        e.choices()
+        e.limits()
+        e.review_and_save()
+        e.install()
+        self.assertIn(('ok', engine.TAKEN_OVER), [tuple(r[:2]) for r in e.out.rows])
+        self.assertEqual(engine.load_settings()['external_volume'], KEPT_VOLUME)
+
+    def test_what_another_install_made_still_stops_it(self):
+        # the take-over accepts only what carries no install label at all
+        self.docker[('container', 'aiosubtitles-subsync')] = '0123456789abcdef'
+        code, out = self.again()
+        self.assertEqual(code, 1, out)
+        self.assertIn(engine.GUARD_STOP.format(kind='container', name='aiosubtitles-subsync'), flat(out))
+        self.assertEqual(engine.load_settings(), self.settings_1_3_0)
+        self.assertEqual(self.compose(), COMPOSE_1_3_0)
+
+    def test_a_volume_this_setup_didnt_make_says_what_it_may_hold(self):
+        self.docker[('volume', KEPT_VOLUME)] = '0123456789abcdef'
+        code, out = self.again()
+        self.assertEqual(code, 1, out)
+        self.assertIn("✗ Setup stopped without changing anything: Docker has a volume named aiosubtitles_subsync-data "
+                      "that this setup didn't make. It may hold an AIOSubtitles' stored copies (on a public instance, "
+                      "everyone's records): if it belongs to another AIOSubtitles, run that one's setup; remove it only "
+                      'once you are sure nothing in it is needed.', flat(out))
+        self.assertNotIn('Step 2', out)
+        self.assertEqual(engine.load_settings(), self.settings_1_3_0)
+        # a container or a network keeps the text it had
+        self.assertEqual(engine.GUARD_STOP.format(kind='network', name='aiosubtitles_default'),
+                         "Setup stopped without changing anything: Docker has a network named aiosubtitles_default that "
+                         "this setup didn't make. If it belongs to another AIOSubtitles, run that one's setup; if not, "
+                         'rename or remove it yourself.')
+
+    def test_its_update_goes_through_the_steps_once(self):
+        # its image was built from the code an update replaced, and settings.json has no image: Update can't switch
+        for page, words in ((True, 'This install was made by setup 1.3.0 or before: press Change your answers and go '
+                                   'through the steps once; your answers and stored copies are kept.'),
+                            (False, 'This install was made by setup 1.3.0 or before: run ./setup and go through its '
+                                    'steps once; your answers and stored copies are kept.')):
+            with self.subTest(page=page), self.assertRaises(ui.Stop) as caught:
+                engine.Engine({}, page=page).update()
+            self.assertEqual(caught.exception.message, words)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(['--update'])
+        self.assertEqual(code, 1)
+        self.assertIn('✗ This install was made by setup 1.3.0 or before: run ./setup and go through its steps once; '
+                      'your answers and stored copies are kept.', flat(out.getvalue()))
+        self.assertEqual(engine.load_settings(), self.settings_1_3_0)
+        self.assertEqual(self.compose(), COMPOSE_1_3_0)
+        self.assertFalse([c for c, _ in self.exec_calls if 'copy-databases' in c])
+        # once taken over, it updates like any other install
+        self.take_over()
+        with self.assertRaises(ui.Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, 'This is the newest version.')
+
+    def test_removing_it_takes_its_volume_by_name(self):
+        self.take_over()
+        code, out = self.again('--uninstall', CONFIRM='yes')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.volume_calls, [['docker', 'volume', 'rm', KEPT_VOLUME]])   # Compose never removes it
+        self.assertEqual(self.docker, {})
+        self.assertFalse((self.state / 'settings.json').exists())
+
+    def test_a_removal_that_stopped_after_the_volume_went_finishes(self):
+        self.take_over()
+        self.docker.pop(('volume', KEPT_VOLUME))
+        code, out = self.again('--uninstall', CONFIRM='yes')
+        self.assertEqual(code, 0, out)
+        self.assertFalse((self.state / 'settings.json').exists())
+
+    def test_removing_it_before_it_is_taken_over(self):
+        # it is this folder's own: Compose removes it with its volume, which the 1.3.0 compose file doesn't declare
+        # external
+        code, out = self.again('--uninstall', CONFIRM='yes')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.docker, {})
+        self.assertEqual(self.volume_calls, [])
+
+    def test_a_public_instance_keeps_its_volume_without_the_tick_and_removes_it_with_it(self):
+        settings = {'route': 'host', 'installed': '2026-11-13', 'install_id': 'id-1', 'external_volume': KEPT_VOLUME,
+                    'image': IMAGE, 'version': '1.6.0', 'port': 8790, 'public_base': 'https://subs.example.com'}
+        engine.save_settings(settings)
+        engine.write_compose(settings)
+        self.docker = {('container', 'aiosubtitles-subsync'): 'id-1', ('volume', KEPT_VOLUME): '',
+                       ('network', 'aiosubtitles_default'): 'id-1'}
+        with self.assertRaises(ui.Stop) as caught:
+            engine.Engine({'CONFIRM': 'no'}).remove_host()
+        self.assertEqual(caught.exception.message, 'Nothing was changed.')
+        self.assertIn(('volume', KEPT_VOLUME), self.docker)
+        self.assertEqual(self.volume_calls, [])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            engine.Engine({'CONFIRM': 'yes'}).remove_host()
+        self.assertEqual(self.docker, {})
+        self.assertEqual(self.volume_calls, [['docker', 'volume', 'rm', KEPT_VOLUME]])
+
+    def test_the_old_updaters_second_half_says_how_to_finish(self):
+        # setup 1.3.0's ./setup --update fetches the new files, then runs their wizard.py with --update-finish COMMIT
+        # on this machine's Python; argparse refused the option ("unrecognized arguments")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(['--update-finish', 'f4313df6da78014141458d9e1b16d3b9206c1496'])
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), '\n  !  The files are updated. Run ./setup to finish the update: it keeps your '
+                                         'answers.\n\n')
+        self.assertEqual(engine.load_settings(), self.settings_1_3_0)          # nothing else is done
+
+
+class OldUpdater(unittest.TestCase):
+    def test_its_second_half_runs_on_this_machines_python(self):
+        # as 1.3.0's updater starts it: python3 -I installer/wizard.py --update-finish COMMIT, outside the image, with
+        # nothing on its import path
+        wizard_py = Path(wizard.__file__).resolve()
+        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'PYTHONDONTWRITEBYTECODE': '1'}
+        done = subprocess.run([sys.executable, '-I', str(wizard_py), '--update-finish', 'f4313df'], capture_output=True,
+                              text=True, timeout=60, env=env, stdin=subprocess.DEVNULL, cwd=wizard_py.parent.parent)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(done.stdout, '\n  !  The files are updated. Run ./setup to finish the update: it keeps your '
+                                      'answers.\n\n')
+        self.assertEqual(done.stderr, '')
 
 
 if __name__ == '__main__':

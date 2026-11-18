@@ -161,6 +161,12 @@ class Pieces(unittest.TestCase):
         self.assertNotIn('external: true', text)
         self.assertIn(f'image: {image}\n', text)
         self.assertIn('org.aiosubtitles.install: "id-1"', text)
+        # a public instance setup 1.3.0 or before made keeps its volume, with everyone's records, as it is
+        kept = hosting.compose_yaml(image, 'id-1', 8790, external_volume='aiosubtitles_subsync-data')
+        self.assertTrue(kept.endswith('\nvolumes:\n  subsync-data: {external: true, name: "aiosubtitles_subsync-data"}\n'),
+                        kept)
+        self.assertEqual(kept.replace('{external: true, name: "aiosubtitles_subsync-data"}',
+                                      '{labels: {org.aiosubtitles.install: "id-1"}}'), text)
 
     def test_the_web_server_rule_sends_the_whole_host_with_the_visitors_address(self):
         rule = hosting.web_server_rule(ADDRESS, '127.0.0.1:8790')

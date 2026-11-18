@@ -154,5 +154,12 @@ class CommandLine(FlowFixture):
                       ' '.join(updates.split()))                           # the source route
         self.assertNotIn('Python 3', readme.split('## What you need', 1)[1].split('\n## ', 1)[0])
 
+    def test_the_readme_says_an_answers_file_goes_in_state(self):
+        # setup sees the folder's state/ on both routes; the source route mounts nothing else
+        install = ' '.join((REPO / 'README.md').read_text().split('## Install', 1)[1].split('\n## ', 1)[0].split())
+        self.assertIn('To set it up without the page, give the answers in a file in `state/`: '
+                      '`./setup --answers state/FILE --yes` (see `docs/answers.example`).', install)
+        self.assertNotIn('`./setup --answers FILE --yes`', install)
+
 if __name__ == '__main__':
     unittest.main()

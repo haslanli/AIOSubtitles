@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import installer  # noqa: F401  (its __init__ puts subsync's folder on the import path)
+from subsync import ui
+
 REPO = Path(__file__).resolve().parent.parent.parent
 DOCKERFILE = REPO / 'subsync' / 'Dockerfile'
 ENTRY = REPO / 'installer' / 'image-entry.sh'
@@ -77,6 +80,16 @@ class Dockerfile(unittest.TestCase):
         self.assertIn('CMD ["python", "-u", "-m", "subsync"]', self.final)
         self.assertIn('groupadd --system --gid 10001 subsync && useradd --system --uid 10001 --gid 10001', self.final)
         self.assertIn('COPY --chmod=755 installer/image-entry.sh /opt/aiosubtitles/entry', self.final)
+
+    def test_every_font_file_the_pages_serve_is_fetched_with_a_pinned_sum(self):
+        # the typefaces and their licence the pages serve from static/fonts (setup's page too: installer/web.py), each
+        # from github.com/google/fonts at one pinned revision, the build stopping unless it has its pinned SHA-256
+        added = re.findall(r'^ADD --chmod=644 --checksum=sha256:[0-9a-f]{64} \\\n\s+(\S+) \\\n\s+'
+                           r'\./subsync/static/fonts/(\S+)$', self.final, re.M)
+        self.assertEqual(sorted(name for _, name in added), sorted(ui.FONT_FILES + ('OFL.txt',)))
+        for url, _ in added:
+            self.assertRegex(url, r'^https://raw\.githubusercontent\.com/google/fonts/[0-9a-f]{40}/ofl/')
+        self.assertEqual(len({url.split('/')[5] for url, _ in added}), 1)          # one revision for all three
 
     def test_the_build_context_leaves_out_what_isnt_needed(self):
         ignore = (REPO / '.dockerignore').read_text().split()

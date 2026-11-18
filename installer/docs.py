@@ -53,9 +53,10 @@ def readme_section():
 
 
 def answers_example():
-    out = comment('Answers for ./setup --answers FILE (add --yes to ask nothing). Leave a line out to be asked, or to '
-                  "keep the current value on a re-run; an optional key's empty line (TMDB_KEY=) removes the saved key. "
-                  'A " #" starts a comment. Keep this file private if it holds a password.')
+    out = comment('Answers for ./setup --answers state/FILE (add --yes to ask nothing). Leave a line out to be asked, '
+                  "or to keep the current value on a re-run; an optional key's empty line (TMDB_KEY=) removes the "
+                  'saved key. A " #" starts a comment, except inside quotes. Keep this file private if it holds a '
+                  'password.')
     for key, (example, text) in explain.QUESTIONS.items():
         out += [''] + comment(text) + [f'{key}={example}']
     return '\n'.join(out) + '\n'
