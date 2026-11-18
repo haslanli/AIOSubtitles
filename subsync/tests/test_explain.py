@@ -173,6 +173,9 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(s.daily_budget, int(100e9))                 # 100 GB a day
         self.assertEqual(s.max_users, 200)
 
+    def test_the_audio_route_is_off_unless_asked_for(self):
+        self.assertFalse(Settings({}).audio_route)
+
     def test_each_size_setting_counts_in_its_named_unit(self):
         # A *_MB setting counts MiB, a *_GB setting 10^9 bytes (settings.MB, settings.GB), each kept as it was
         from subsync.settings import GB, MB
@@ -215,6 +218,7 @@ class LimitsTest(unittest.TestCase):
         # 32 MB, and a file whose index is over the cap isn't read again until the cap is raised
         default, text = explain.SETTINGS["SUBSYNC_INDEX_CAP_MB"]
         self.assertEqual(default, "32")
+        self.assertEqual(Settings({}).index_cap, 32 * 1024 * 1024)
         self.assertIn("Recommended: 32.", text)
         self.assertIn("A file whose index is larger keeps its original subtitles and isn't read again until the cap is "
                       "raised.", text)

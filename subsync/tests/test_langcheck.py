@@ -1,14 +1,32 @@
 """The language check: a subtitle whose text isn't in the language it is listed under is refused; a short one,
 or one the check can't tell, never is."""
+import hashlib
+import json
 import random
 import re
 import time
 import unittest
 
-from helpers import DIALOGUE  # noqa: E402
-from subsync import langcheck  # noqa: E402
+from helpers import DIALOGUE
+from subsync import langcheck, RULE_REVISION
 
 ENGLISH, SPANISH, VIETNAMESE, RUSSIAN = (DIALOGUE[code] for code in ("eng", "spa", "vie", "rus"))
+
+# What passes the check, as one fingerprint (check_rules), and the RULE_REVISION it has been judged under since it took
+# this form. A change to it must bump RULE_REVISION, so stored verdicts are judged again: pin the new fingerprint here
+# with the new revision
+CHECK_RULES = "70354b301b1b897c02480133367f93034f91cd8b91ca96628ac41f730b64dfee"
+CHECK_REVISION = 10
+
+
+def check_rules():
+    """The fingerprint of what the check decides by: its thresholds, the scripts' letters and each language's scripts,
+    the common-word lists, and how words and vector drawings are found."""
+    rules = {"thresholds": [langcheck.MIN_WORDS, langcheck.MIN_SCRIPT_SHARE, langcheck.MIN_COMMON_SHARE],
+             "blocks": langcheck._BLOCKS, "scripts": langcheck.SCRIPTS,
+             "words": {code: sorted(words) for code, words in langcheck.WORDS.items()},
+             "patterns": [langcheck._TOKEN.pattern, langcheck._DRAWING.pattern]}
+    return hashlib.sha256(json.dumps(rules, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def ts(t):
@@ -123,9 +141,12 @@ class LanguageCheckTest(unittest.TestCase):
         self.assertEqual(langcheck.script_of("か"), "kana")
 
     def test_the_rule_revision_changed_with_it(self):
-        # a change to what passes: stored verdicts are judged again
-        from subsync import RULE_REVISION
-        self.assertGreaterEqual(RULE_REVISION, 8)
+        # a change to what passes: stored verdicts are judged again. A lower bound alone stayed true whatever
+        # changed; the rules' fingerprint tells
+        self.assertEqual(check_rules(), CHECK_RULES, "the language check's rules changed: bump RULE_REVISION and pin "
+                                                     "the new fingerprint with it (CHECK_RULES, CHECK_REVISION)")
+        self.assertGreaterEqual(RULE_REVISION, CHECK_REVISION)
+        self.assertGreaterEqual(RULE_REVISION, 8)                 # the check came in revision 8
 
 
 if __name__ == "__main__":

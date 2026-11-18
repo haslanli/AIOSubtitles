@@ -3,7 +3,9 @@ data the test modules share.
 
 Every test module imports helpers before anything from subsync: this is the one place that puts the package on the
 import path (the source next to these tests, ahead of any other copy), so all modules test the same copy and each one
-also runs on its own (python3 -m unittest test_x from this folder)."""
+also runs on its own (python3 -m unittest test_x from this folder). The image build is the exception: it tests the
+image's own copy (see IMAGE_BUILD)."""
+import logging
 import os
 import random
 import shutil
@@ -17,7 +19,12 @@ from unittest import mock
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.path.dirname(TESTS)          # subsync/, the folder that holds the package
-sys.path.insert(0, SOURCE)
+# The Dockerfile runs these tests from a read-only view of the source with `python -m unittest` in the image's own
+# folder (which -m puts on the path) and AIOSUBTITLES_IMAGE_BUILD set: there they test the image's copy of the package,
+# the one that holds what the build adds to it, the OCR models and the fonts
+IMAGE_BUILD = bool(os.environ.get("AIOSUBTITLES_IMAGE_BUILD"))
+if not IMAGE_BUILD:
+    sys.path.insert(0, SOURCE)
 FIXTURES = os.path.join(TESTS, "fixtures")
 
 from subsync import realdebrid, sources  # noqa: E402  (the package from the path set just above)
@@ -120,6 +127,34 @@ def closed_after(test, resource):
     """`resource` (a Store), closed when the test ends, so no test leaves its database open."""
     test.addCleanup(resource.close)
     return resource
+
+
+LINK_MARKS = ("127.0.0.1", "/stremio/")   # every link the tests' servers give out is http://127.0.0.1:<port>/...
+
+
+def watch_the_log(test):
+    """README's fixed rule, for one test: subsync's log never holds a link. Every record a subsync logger
+    makes while the test runs, DEBUG and up, is kept (the test's own assertLogs blocks included), and when the test
+    ends it fails if one of them holds a local address or an AIOStreams path."""
+    made, factory = [], logging.getLogRecordFactory()
+    top = logging.getLogger("subsync")
+    level = top.level
+
+    def record(*args, **kwargs):
+        r = factory(*args, **kwargs)
+        if r.name == "subsync" or r.name.startswith("subsync."):
+            made.append(r)
+        return r
+
+    def check():
+        logging.setLogRecordFactory(factory)
+        top.setLevel(level)
+        lines = [logging.Formatter("%(name)s %(levelname)s %(message)s").format(r) for r in made]
+        test.assertEqual([line for line in lines if any(mark in line for mark in LINK_MARKS)], [],
+                         "subsync logged a link")
+    logging.setLogRecordFactory(record)
+    top.setLevel(logging.DEBUG)
+    test.addCleanup(check)
 
 
 LOCAL = ("127.0.0.1", "localhost", "::1")

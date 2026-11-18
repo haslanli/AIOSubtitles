@@ -1,21 +1,39 @@
-"""Range reads and the Matroska index against a local range server; the pipeline on the tiny fixture."""
+"""Range reads and the Matroska and MP4 indexes against a local range server; the pipeline on the tiny fixture; the
+worker's choice among subtitles, its fast and shift paths, its read caps and first-read retries; the installer's
+self-test."""
+import array
+import http.client
 import io
 import json
 import os
+import random
+import shutil
+import statistics
 import sys
+import tempfile
+import threading
+import time
+import tracemalloc
 import types
 import unittest
+import urllib.error
 from unittest import mock
 
-from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_track, RangeServer,  # noqa: E402
-                     realistic, srt_of, TempDir, translated)
-from subsync import pipeline  # noqa: E402
-from subsync.mkv import MkvIndex, NotMatroska, oshash  # noqa: E402
-from subsync.mp4 import Mp4Index, open_index  # noqa: E402
-from subsync.reader import RangeReader, ReadFailed, Refused, Stopped  # noqa: E402
-from subsync.subs import parse, ts  # noqa: E402
+from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_track, RangeServer,
+                     realistic, srt_of, TempDir, translated, watch_the_log)
+from subsync import imageref, pipeline, realdebrid, selftest, sources
+from subsync.addon import App
+from subsync.mkv import MkvIndex, NotMatroska, oshash, pipe_until
+from subsync.mp4 import Mp4Index, open_index
+from subsync.reader import (CapReached, MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused, SIZE_TOLERANCE,
+                            Stopped)
+from subsync.settings import Settings
+from subsync.store import REFUSED_BACKOFF_S, Store
+from subsync.subs import parse, to_srt, ts
+from subsync.worker import Job, JobGuard, READ_RETRY_S, Safety, Turn, Worker
 
 TINY = os.path.join(FIXTURES, "tiny.mkv")
+ALASS = os.environ.get("SUBSYNC_ALASS", "alass")
 
 
 def read_text(name):
@@ -137,6 +155,11 @@ class MkvTest(unittest.TestCase):
         a, b = idx.byte_range(30.0, 10.0)
         self.assertTrue(0 < a < b <= idx.size)
         self.assertLess(b - a, idx.size)
+        # From the cluster cued at or before the window's start (an earlier one would have the decoder start
+        # there), on past the first cluster cued after its end, and a fraction of the file, as an MP4 window's read
+        self.assertEqual(a, max(p for t, p in idx.cue_points if t <= 30.0))
+        self.assertLess(min(p for t, p in idx.cue_points if t > 40.0), b)
+        self.assertLess(b - a, idx.size // 3)
 
     @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
     def test_window_pcm_decodes(self):
@@ -151,7 +174,6 @@ class PipeUntilTest(unittest.TestCase):
     the whole window (a Matroska window's byte range runs to the next seek point, which can be far past the window)."""
 
     def test_feeding_stops_once_the_output_is_complete(self):
-        from subsync.mkv import pipe_until
         taken = []
 
         def chunks():                                        # a 2 MB range
@@ -166,7 +188,6 @@ class PipeUntilTest(unittest.TestCase):
         self.assertLess(len(taken), 40)
 
     def test_a_decoder_that_ends_by_itself_stops_the_feeding(self):
-        from subsync.mkv import pipe_until
         taken = []
 
         def chunks():
@@ -224,8 +245,6 @@ class Mp4Test(unittest.TestCase):
 
     @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
     def test_an_audio_window_is_a_bounded_read_and_starts_where_the_lines_start(self):
-        import array
-        import statistics
         for name in ("tiny.mp4", "tiny-nosub.mp4"):
             idx = self.index(name)
             before = idx.r.bytes
@@ -272,7 +291,7 @@ class ListedSizeTest(unittest.TestCase):
             r.get(0, 64)
 
 
-@unittest.skipUnless(have(os.environ.get("SUBSYNC_ALASS", "alass")), "alass not installed")
+@unittest.skipUnless(have(ALASS), "alass not installed")
 class PipelineTest(unittest.TestCase):
     def setUp(self):
         self.srv = RangeServer(FIXTURES)
@@ -283,8 +302,7 @@ class PipelineTest(unittest.TestCase):
 
     def run_one(self, name):
         text = read_text(name)
-        return pipeline.sync_subtitle(self.idx, text, "eng", alass=os.environ.get("SUBSYNC_ALASS", "alass"),
-                                      audio=False)
+        return pipeline.sync_subtitle(self.idx, text, "eng", alass=ALASS, audio=False)
 
     def test_correct_subtitle_is_in_sync_and_not_republished(self):
         r = self.run_one("tiny.srt")
@@ -298,8 +316,7 @@ class PipelineTest(unittest.TestCase):
                                          if not l.strip().isdigit())
         bad = "0\n00:00:00 --> 00:00:05\nAd line with no milliseconds\n\n" + src
         for text in (vtt, bad):
-            r = pipeline.sync_subtitle(self.idx, text, "eng", alass=os.environ.get("SUBSYNC_ALASS", "alass"),
-                                       audio=False)
+            r = pipeline.sync_subtitle(self.idx, text, "eng", alass=ALASS, audio=False)
             self.assertNotIn("alass_error", r)
             self.assertEqual(r["outcome"], "synced")
 
@@ -316,7 +333,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_a_copy_clearly_better_than_the_original_is_offered_only_with_the_rule_on(self):
         text = self.styled_offset()
-        kw = dict(alass=os.environ.get("SUBSYNC_ALASS", "alass"), audio=False, snap=False)
+        kw = dict(alass=ALASS, audio=False, snap=False)
         off = pipeline.sync_subtitle(self.idx, text, "eng", **kw)
         on = pipeline.sync_subtitle(self.idx, text, "eng", better={}, **kw)
         self.assertFalse(off["gate_synced"]["pass"])
@@ -328,8 +345,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_an_offset_subtitle_is_synced_against_an_mp4s_text_track(self):
         idx = open_index(RangeReader(self.srv.url("tiny.mp4"), "test"))
-        r = pipeline.sync_subtitle(idx, read_text("tiny-offset.srt"), "eng",
-                                   alass=os.environ.get("SUBSYNC_ALASS", "alass"), audio=False)
+        r = pipeline.sync_subtitle(idx, read_text("tiny-offset.srt"), "eng", alass=ALASS, audio=False)
         self.assertEqual((r["route"], r["outcome"]), ("cues", "synced"))
         self.assertEqual(r["reference"]["codec"], "mp4/tx3g")
 
@@ -345,22 +361,6 @@ class PipelineTest(unittest.TestCase):
 
 
 # -- candidate order, image refs ----------------------------------------------------------------------------------
-import random  # noqa: E402
-import statistics  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
-import shutil  # noqa: E402
-import tempfile  # noqa: E402
-
-from subsync import imageref  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.store import Store  # noqa: E402
-from subsync.subs import to_srt  # noqa: E402
-from subsync.worker import Job, Worker  # noqa: E402
-
-ALASS = os.environ.get("SUBSYNC_ALASS", "alass")
-
-
 @unittest.skipUnless(have(ALASS), "alass not installed")
 class ImageRoutePipelineTest(unittest.TestCase):
     def setUp(self):
@@ -429,11 +429,13 @@ class ImageTranslationTest(unittest.TestCase):
         self.assertTrue(r["gate_synced"]["missing_scene"])
 
 
-@unittest.skipUnless(have(ALASS), "alass not installed")
-class WorkerChoiceTest(unittest.TestCase):
-    """The order subtitles are tried in, and an in-sync original further down listed unchanged."""
+class WorkerFixture(unittest.TestCase):
+    """A file whose English text track has 200 lines, and three English candidates in the viewer's order: one with
+    broken timing, one 2.7 s off, one in sync, made for the file's release. No tests of its own: each class below has
+    its own, so none runs again under another class's settings or skips."""
 
     def setUp(self):
+        watch_the_log(self)
         self.dir = tempfile.mkdtemp(prefix="subsync-test-")
         self.ref = realistic(200, 3)
         files = {"broken.srt": to_srt([{"s": 0.02 + i * 0.001, "e": 0.03 + i * 0.001, "text": "x", "kind": "dialogue"}
@@ -457,14 +459,22 @@ class WorkerChoiceTest(unittest.TestCase):
 
     def worker(self, **env):
         store = closed_after(self, Store(os.path.join(self.dir, "store")))
-        base = {"SUBSYNC_ALASS": ALASS, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_MAX_TRIES": "3", "SUBSYNC_RANK_BY_RELEASE": "off",
-                "SUBSYNC_LIST_IN_SYNC": "off", "SUBSYNC_FAST_PATH": "off", "SUBSYNC_PARALLEL_LANGUAGES": "off",
-                "SUBSYNC_IMAGE_REF": "off", "SUBSYNC_BEST_FIT": "off"}   # every switch stated, so each test turns on only what it tests
+        # the switches that choose how the candidates are tried and synced, each stated (the shift path at its default),
+        # so each test turns on or off only what it tests
+        base = {"SUBSYNC_ALASS": ALASS, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_MAX_TRIES": "3",
+                "SUBSYNC_RANK_BY_RELEASE": "off", "SUBSYNC_LIST_IN_SYNC": "off", "SUBSYNC_FAST_PATH": "off",
+                "SUBSYNC_SHIFT_PATH": "on", "SUBSYNC_PARALLEL_LANGUAGES": "off", "SUBSYNC_IMAGE_REF": "off",
+                "SUBSYNC_BEST_FIT": "off"}
         s = Settings(dict(base, **env))
         return Worker(s, store, None, None), store
 
     def sync(self, w, filename="[GroupX] Movie.mkv"):
         return w._sync_language(Job("movie", "tt1"), self.idx, "f-1", "eng", self.cands, "abcd", filename)
+
+
+@unittest.skipUnless(have(ALASS), "alass not installed")
+class WorkerChoiceTest(WorkerFixture):
+    """The order subtitles are tried in, and an in-sync original further down listed unchanged."""
 
     def test_viewer_order_stops_at_the_first_pass(self):
         w, store = self.worker()
@@ -472,7 +482,8 @@ class WorkerChoiceTest(unittest.TestCase):
         r = store.get(key)
         self.assertEqual(r["candidate_id"], "os-offset")      # the broken one is rejected early, the next is synced
         self.assertEqual(store.get(key)["outcome"], "synced")
-        self.assertIn("broken timing", next(x for x in store.db.execute("SELECT reason FROM results WHERE candidate_id='os-broken'"))[0])
+        reason = store.db.execute("SELECT reason FROM results WHERE candidate_id='os-broken'").fetchone()[0]
+        self.assertIn("broken timing", reason)
 
     def test_release_match_first_and_in_sync_listed_unchanged(self):
         w, store = self.worker(SUBSYNC_RANK_BY_RELEASE="on", SUBSYNC_LIST_IN_SYNC="on")
@@ -500,11 +511,9 @@ class WorkerChoiceTest(unittest.TestCase):
 
 
 @unittest.skipUnless(have(ALASS), "alass not installed")
-class BestFitTest(WorkerChoiceTest):
+class BestFitTest(WorkerFixture):
     """Every candidate is judged and the best fit is offered first, not the first that passes; an in-sync
     original (a subtitle made for this release) beats any re-timed copy."""
-    test_viewer_order_stops_at_the_first_pass = test_release_match_first_and_in_sync_listed_unchanged = None
-    test_in_sync_further_down_lists_nothing_by_default = test_switching_list_in_sync_on_lists_a_stored_in_sync_result = None
 
     def test_an_in_sync_original_further_down_beats_a_re_timed_copy(self):
         w, store = self.worker(SUBSYNC_BEST_FIT="on", SUBSYNC_LIST_IN_SYNC="on", SUBSYNC_FAST_PATH="on")
@@ -530,11 +539,15 @@ class BestFitTest(WorkerChoiceTest):
         # so a pick waiting for the language is served the best so far
         w, store = self.worker(SUBSYNC_BEST_FIT="on", SUBSYNC_LIST_IN_SYNC="on")
         seen = []
-        w._publish = lambda alias, lang, key, final=False: seen.append((key, final))
-        best = self.sync(w)
-        self.assertEqual([store.get(k)["candidate_id"] for k, _ in seen], ["os-offset", "os-insync"])
-        self.assertEqual(seen[-1], (best, False))                 # the final publish is the job's, after every language
 
+        def judged(candidate):
+            return store.db.execute("SELECT COUNT(*) FROM results WHERE candidate_id=?", (candidate,)).fetchone()[0]
+        # each publish, with whether the in-sync original had been judged by then
+        w._publish = lambda alias, lang, key, final=False: seen.append((key, final, judged("os-insync")))
+        best = self.sync(w)
+        self.assertEqual([store.get(k)["candidate_id"] for k, _, _ in seen], ["os-offset", "os-insync"])
+        self.assertEqual([at for _, _, at in seen], [0, 1])       # the offset copy before the original was judged
+        self.assertEqual(seen[-1][:2], (best, False))             # the final publish is the job's, after every language
 
     def test_a_stored_pass_counts_as_the_best_so_far(self):
         # review: on a second job the in-sync original is a stored result; it is published as the best so far, so a pick
@@ -569,11 +582,7 @@ class FrameRateTest(unittest.TestCase):
 
 
 # -- fast path, languages in parallel, read caps ---------------------------------------------------------------------
-from subsync.worker import JobGuard, Safety  # noqa: E402
-from subsync.reader import Stopped as GuardStopped  # noqa: E402
-
-
-class FastPathTest(WorkerChoiceTest):
+class FastPathTest(WorkerFixture):
     """With SUBSYNC_FAST_PATH on, every try is downloaded and its original checked first (no alass)."""
 
     def test_in_sync_original_listed_without_alass(self):
@@ -592,13 +601,28 @@ class FastPathTest(WorkerChoiceTest):
         self.assertIsNone(self.sync(w))
         self.assertEqual([x[0] for x in store.db.execute("SELECT outcome FROM results")], ["in_sync"])
 
-    def test_none_in_sync_falls_back_to_re_timing(self):
+    def test_none_in_sync_is_synced_by_one_shift(self):
         self.cands = self.cands[:2]                             # broken + offset: no original is in sync
         w, store = self.worker(SUBSYNC_FAST_PATH="on", SUBSYNC_LIST_IN_SYNC="on")
         key = self.sync(w)
         r = store.get(key)
         self.assertEqual((r["candidate_id"], r["outcome"]), ("os-offset", "synced"))
         self.assertFalse(r["detail"].get("unchanged"))
+        self.assertTrue(r["detail"].get("shift_fit"))           # the shift path's, before any re-timing
+
+    @unittest.skipUnless(have(ALASS), "alass not installed")
+    def test_none_in_sync_falls_back_to_re_timing(self):
+        # With the shift path off the offset one is re-timed (alass); with it on, the shift alone synced it
+        self.cands = self.cands[:2]                             # broken + offset: no original is in sync
+        w, store = self.worker(SUBSYNC_FAST_PATH="on", SUBSYNC_LIST_IN_SYNC="on", SUBSYNC_SHIFT_PATH="off")
+        with mock.patch.object(pipeline, "sync_subtitle", wraps=pipeline.sync_subtitle) as re_timing:
+            key = self.sync(w)
+        r = store.get(key)
+        self.assertEqual((r["candidate_id"], r["outcome"]), ("os-offset", "synced"))
+        self.assertFalse(r["detail"].get("unchanged"))
+        self.assertFalse(r["detail"].get("shift_fit"))
+        self.assertNotIn("one shift", r["reason"])
+        self.assertTrue(re_timing.called)
 
     def test_no_reference_and_audio_route_off_stores_nothing(self):
         # no text or image track and the audio route off: nothing is stored, so turning the route on later syncs it
@@ -610,12 +634,10 @@ class FastPathTest(WorkerChoiceTest):
 
 
 @unittest.skipUnless(have(ALASS), "alass not installed")
-class MagnetTest(WorkerChoiceTest):
+class MagnetTest(WorkerFixture):
     """An original in sync as it is still starts its lines a little off the release's own (Patriot S01E01's English:
     43 ms early throughout; Burning: an author's stray line). Like AutoSync's "magnet", each line is snapped to the release
     line it clearly belongs to, and that copy is listed in place of the unchanged original."""
-    test_viewer_order_stops_at_the_first_pass = test_release_match_first_and_in_sync_listed_unchanged = None
-    test_in_sync_further_down_lists_nothing_by_default = test_switching_list_in_sync_on_lists_a_stored_in_sync_result = None
 
     def early(self):
         return srt_of(self.ref, shift=-0.043)
@@ -733,7 +755,6 @@ class HasReferenceTest(unittest.TestCase):
     """A file with no text or image track a subtitle could be judged against hands over to the audio route at once."""
 
     def test_tracks(self):
-        from subsync.store import Store
         with TempDir() as d:
             w = Worker(Settings({"SUBSYNC_DATA": d, "SUBSYNC_IMAGE_REF": "on"}), closed_after(self, Store(d)), None,
                        None)
@@ -809,11 +830,9 @@ class RecentreTest(unittest.TestCase):
         self.assertGreater(abs(out["recentred_ms"]), 40)
 
 
-class StreamedJudgingTest(WorkerChoiceTest):
+class StreamedJudgingTest(WorkerFixture):
     """With best fit, each download is judged as it arrives: Kingdom of Heaven's first passes (one shift, 0.1 s each) came
     18 s after the request because 20 downloads per language were waited for first, and the pick's 14 s ran out."""
-    test_viewer_order_stops_at_the_first_pass = test_release_match_first_and_in_sync_listed_unchanged = None
-    test_in_sync_further_down_lists_nothing_by_default = test_switching_list_in_sync_on_lists_a_stored_in_sync_result = None
 
     def test_a_pass_is_published_before_a_slow_download_ends(self):
         w, store = self.worker(SUBSYNC_BEST_FIT="on", SUBSYNC_FAST_PATH="on", SUBSYNC_LIST_IN_SYNC="on")
@@ -848,11 +867,9 @@ class StreamedJudgingTest(WorkerChoiceTest):
         self.assertLess(time.time() - t0, 0.3)
 
 
-class ShiftPathTest(WorkerChoiceTest):
+class ShiftPathTest(WorkerFixture):
     """A candidate off by one steady offset is synced by that shift at once, without alass (Finding Nemo's first download was
     an original because alass judged one candidate at a time and the right ones came 26 s after the request)."""
-    test_viewer_order_stops_at_the_first_pass = test_release_match_first_and_in_sync_listed_unchanged = None
-    test_in_sync_further_down_lists_nothing_by_default = test_switching_list_in_sync_on_lists_a_stored_in_sync_result = None
 
     def test_the_shift_alone_syncs_it(self):
         r = pipeline.shift_sync(self.idx, srt_of(self.ref, shift=-1.43, jitter=0.05), "eng")
@@ -878,6 +895,7 @@ class ShiftPathTest(WorkerChoiceTest):
         self.assertEqual((r["candidate_id"], r["outcome"]), ("os-offset", "synced"))
         self.assertTrue(r["detail"].get("shift_fit"))
 
+    @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_off_means_alass_as_before(self):
         self.cands = [self.cands[1]]
         w, store = self.worker(SUBSYNC_BEST_FIT="on", SUBSYNC_FAST_PATH="on", SUBSYNC_SHIFT_PATH="off")
@@ -885,12 +903,10 @@ class ShiftPathTest(WorkerChoiceTest):
         self.assertFalse(r["detail"].get("shift_fit"))
 
 
-class OwnTrackTest(WorkerChoiceTest):
+class OwnTrackTest(WorkerFixture):
     """A candidate with more than twice the lines of the file's own track finds no reference track, but the
     file has one: the candidate is kept, never sent to the audio route (Inception: 3,753 lines against 1,738; the audio
     route started and read 979 MB). Only a file with no usable text or image track needs the audio route."""
-    test_viewer_order_stops_at_the_first_pass = test_release_match_first_and_in_sync_listed_unchanged = None
-    test_in_sync_further_down_lists_nothing_by_default = test_switching_list_in_sync_on_lists_a_stored_in_sync_result = None
 
     def long_text(self):
         return srt_of(realistic(450, 5))                      # 2.25 times the 200 lines of the file's track
@@ -921,10 +937,12 @@ class OwnTrackTest(WorkerChoiceTest):
         self.assertIn("more than twice the lines", reason)
 
 
-class ParallelLanguagesTest(unittest.TestCase):
-    """process() with both languages at once: each is published, results as without parallelism."""
+class TinyFileFixture(unittest.TestCase):
+    """tiny.mkv listed for a film, with an English subtitle 2.7 s off and a Russian one in sync (tiny.srt), served
+    by a local range server. No tests of its own."""
 
     def setUp(self):
+        watch_the_log(self)
         self.dir = tempfile.mkdtemp(prefix="subsync-test-")
         for name in ("tiny.mkv", "tiny.srt", "tiny-offset.srt"):
             shutil.copy(os.path.join(FIXTURES, name), self.dir)
@@ -945,6 +963,10 @@ class ParallelLanguagesTest(unittest.TestCase):
         self.srv.close()
         shutil.rmtree(self.dir)
 
+
+class ParallelLanguagesTest(TinyFileFixture):
+    """process() with both languages at once: each is published, results as without parallelism."""
+
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_both_languages_published(self):
         store = closed_after(self, Store(os.path.join(self.dir, "store")))
@@ -960,10 +982,9 @@ class ParallelLanguagesTest(unittest.TestCase):
         self.assertTrue(rus["detail"].get("unchanged"))          # it is listed as it is, like AutoSync's track 1
 
 
-class PlayedFileHashTest(ParallelLanguagesTest):
+class PlayedFileHashTest(TinyFileFixture):
     """A request that names the played file's hash (Stremio sends it) is checked against the file read; a
     listed row that turns out to be another file is not synced, so its copies never reach this file."""
-    test_both_languages_published = None
 
     def run_job(self, video_hash):
         store = closed_after(self, Store(os.path.join(self.dir, "store")))
@@ -990,18 +1011,15 @@ class GuardCapTest(unittest.TestCase):
     def test_a_job_stops_at_its_byte_cap(self):
         with tempfile.TemporaryDirectory() as d:
             store = closed_after(self, Store(d))
-            JobGuard(Safety(), store, 10 ** 9, 1000).before_read(500)
+            JobGuard(Safety(), store, 10 ** 9, 1000).before_read(500)    # under the job's cap: the read goes on
             g = JobGuard(Safety(), store, 10 ** 9, 1000)
             g.after_read(900)
-            with self.assertRaises(GuardStopped):
+            with self.assertRaises(Stopped):
                 g.before_read(500)                               # over the job's cap
-            self.assertEqual(Settings({}).index_cap, 32 * 1024 * 1024)
-            self.assertFalse(Settings({}).audio_route)           # off unless asked for
 
     def test_only_the_jobs_own_cap_is_a_cap_reached(self):
         # A stop at the job's own byte cap says which cap; the day's budget is a plain stop
-        from subsync.reader import CapReached
-        self.assertTrue(issubclass(CapReached, GuardStopped))
+        self.assertTrue(issubclass(CapReached, Stopped))
         with tempfile.TemporaryDirectory() as d:
             store = closed_after(self, Store(d))
             g = JobGuard(Safety(), store, 10 ** 9, 1000)
@@ -1010,7 +1028,7 @@ class GuardCapTest(unittest.TestCase):
                 g.before_read(500)
             self.assertEqual((caught.exception.cap, str(caught.exception)), (1000, "file byte cap"))
             budget = JobGuard(Safety(), store, 1000, 10 ** 9)
-            with self.assertRaises(GuardStopped) as caught:
+            with self.assertRaises(Stopped) as caught:
                 budget.before_read(1001)
             self.assertNotIsInstance(caught.exception, CapReached)
 
@@ -1041,7 +1059,6 @@ class GuardReservationTest(unittest.TestCase):
         return t, out
 
     def test_two_reads_checked_at_once_never_pass_the_cap_together(self):
-        from subsync.reader import CapReached
         g = JobGuard(Safety(), self.store, 10 ** 9, 100)
         g.before_read(80)                                   # a read running
         t, out = self.meanwhile(lambda: g.before_read(80))
@@ -1069,7 +1086,7 @@ class GuardReservationTest(unittest.TestCase):
         self.assertTrue(t.is_alive())
         day.after_read(80, 80)
         t.join(5)
-        self.assertIsInstance(out[0], GuardStopped)         # the day's budget, as one read after the other
+        self.assertIsInstance(out[0], Stopped)         # the day's budget, as one read after the other
         person = CountedLimits()
         asked = []
         person.before_read = asked.append
@@ -1129,22 +1146,66 @@ class CountedLimits:
         pass
 
 
-def run_once(w, job):
-    """The job through one turn of the worker's loop, in this thread: what _loop does with how it ends (queued again
-    or not), then the loop stops."""
-    w.submit(job)
-    real = w.process
+RUN_ONCE_S = 60.0   # a job of these tests runs in a second or two: one that hasn't started by then never will
+
+
+def run_once(w, job, lane="main", within=RUN_ONCE_S):
+    """The job through one turn of the worker's lane, in this thread: what _loop does with how it ends (queued again
+    or not), then the loop stops. A job that isn't queued, or that doesn't start within `within` seconds (not due, or
+    another lane's), fails the test instead of leaving it waiting for ever."""
+    if w.submit(job) is None:
+        raise AssertionError(f"{job.label} wasn't queued")
+    real, ran = w.process, []
 
     def process(j):
+        ran.append(j)
         try:
             real(j)
         finally:
             w.stop_flag = True
     w.process = process
+    timer = threading.Timer(within, w.stop)
+    timer.start()
     try:
-        w._loop("main")
+        w._loop(lane)
     finally:
+        timer.cancel()
         w.process, w.stop_flag = real, False
+    if not ran:
+        raise AssertionError(f"{job.label} didn't start within {within:g} s")
+
+
+class RunOnceTest(unittest.TestCase):
+    """A job that can't run makes run_once fail, at once when it isn't queued and after `within` seconds when
+    it never comes due; the loop used to wait for it for ever."""
+
+    def worker(self, limits):
+        d = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, d)
+        return Worker(Settings({"SUBSYNC_DATA": d}), closed_after(self, Store(d)), None, Safety(), limits=limits)
+
+    def test_a_job_that_isnt_queued_fails_at_once(self):
+        class Full(CountedLimits):
+            def may_queue(self, queued):
+                return False
+        t0 = time.monotonic()
+        with self.assertRaisesRegex(AssertionError, "wasn't queued"):
+            run_once(self.worker(Full()), Job("movie", "tt1", {"filename": "tiny.mkv"}))
+        self.assertLess(time.monotonic() - t0, 5.0)
+
+    def test_a_job_that_never_comes_due_fails_after_its_time(self):
+        w = self.worker(CountedLimits())
+        later = Job("movie", "tt1", {"filename": "tiny.mkv"})
+        later.not_before = time.time() + 3600
+        audio = Job("movie", "tt2", {"filename": "other.mkv"})
+        audio.audio = True                                   # the audio lane's, not the main lane's
+        for job in (later, audio):
+            with self.subTest(job=job.video_id):
+                t0 = time.monotonic()
+                with self.assertRaisesRegex(AssertionError, "didn't start within 0.2 s"):
+                    run_once(w, job, within=0.2)
+                self.assertLess(time.monotonic() - t0, 5.0)
+                self.assertFalse(w.stop_flag)                # the worker left as it was, for the next run
 
 
 class CapReachedTest(unittest.TestCase):
@@ -1154,8 +1215,7 @@ class CapReachedTest(unittest.TestCase):
     CAP_MB = str(200_000 / 2 ** 20)   # the start of tiny.mkv (188,024 bytes) fits; its index and hash reads don't
 
     def setUp(self):
-        from unittest import mock
-        from subsync import sources
+        watch_the_log(self)
         self.dir = tempfile.mkdtemp(prefix="subsync-test-")
         shutil.copy(TINY, self.dir)
         self.srv = RangeServer(self.dir)
@@ -1191,7 +1251,6 @@ class CapReachedTest(unittest.TestCase):
         return w
 
     def test_an_index_over_the_cap_is_not_queued_again_and_not_read_again(self):
-        from subsync.addon import App
         w = self.worker()
         with self.assertLogs("subsync.worker", "INFO") as logs:
             run_once(w, self.job)
@@ -1247,17 +1306,14 @@ class CapReachedTest(unittest.TestCase):
     def test_an_audio_job_stopped_at_its_audio_cap_leaves_the_index_readable(self):
         # The audio route's own cap (SUBSYNC_FILE_CAP_GB) says nothing about the index: the file isn't marked
         # over the cap, so its next index pass reads it; it waits for another pick, as when the person's day ran out
-        from subsync.reader import CapReached
         w = self.worker(SUBSYNC_AUDIO_ROUTE="on")
         audio = Job("movie", "tt1", dict(self.job.hints))
         audio.audio = True
 
         def stopped(job):
-            w.stop_flag = True                                   # one turn of the audio lane, then the loop ends
             raise CapReached(w._cap(job))
         w.process = stopped
-        w.submit(audio)
-        w._loop("audio")
+        run_once(w, audio, lane="audio")
         self.assertIsNone(self.store.over_cap(self.job.alias))
         self.assertFalse(w.capped(Job("movie", "tt1", dict(self.job.hints))))
         self.assertFalse(w.busy_with(self.job.alias))            # not queued again
@@ -1302,13 +1358,6 @@ class CapReachedTest(unittest.TestCase):
 
 
 # -- a first read that can't reach the file ------------------------------------------------------------
-import urllib.error  # noqa: E402
-from unittest import mock  # noqa: E402
-
-from subsync import realdebrid, sources  # noqa: E402
-from subsync.reader import MAX_RE_RESOLVE  # noqa: E402
-
-
 class Flaky:
     """realdebrid.urlopen with faults, against the local server: the first `faults` requests to the link fail as a
     dropped connection does (URLError); with `moved`, the link answers as one that redirected to another address,
@@ -1373,6 +1422,7 @@ class FirstReadRetryTest(unittest.TestCase):
     of another size and a Usenet file are not tried again."""
 
     def setUp(self):
+        watch_the_log(self)
         self.dir = tempfile.mkdtemp(prefix="subsync-test-")
         shutil.copy(TINY, self.dir)
         self.srv = RangeServer(self.dir)
@@ -1418,7 +1468,6 @@ class FirstReadRetryTest(unittest.TestCase):
         return None if retry is None else round(retry - time.time(), -1)
 
     def test_one_dropped_connection_is_tried_again_and_the_file_read_in_the_same_job(self):
-        from subsync.worker import READ_RETRY_S
         flaky = Flaky(self.link, faults=1)
         self.run_with(flaky)
         self.assertEqual(READ_RETRY_S, 10)
@@ -1430,7 +1479,6 @@ class FirstReadRetryTest(unittest.TestCase):
     def test_the_wait_before_the_second_try_holds_no_place(self):
         """The job keeps its claims through the wait before its second try, but gives its place back, so another
         person's file is worked on meanwhile; it takes the place again for the read."""
-        from subsync.worker import Turn
         turn, inside = Turn(1), []
         self.w.turn = turn
         self.sleep.side_effect = lambda s: inside.append((turn._inside, set(turn._claims)))
@@ -1476,7 +1524,6 @@ class FirstReadRetryTest(unittest.TestCase):
     def test_a_read_that_succeeds_clears_the_failures_before_it(self):
         # The failures of a file added up over its whole life, a refusal's too, so passing faults months
         # apart stopped it for good in the end
-        from subsync.store import REFUSED_BACKOFF_S
         past = time.time() - 2 * 86400
         self.store.clock = lambda: past
         for _ in range(2):
@@ -1507,10 +1554,17 @@ class SelfTestTest(unittest.TestCase):
     def tearDown(self):
         self.srv.close()
 
+    def run_selftest(self, url, *args, **kwargs):
+        """selftest.run(url, ...), checked: what it gives (printed for the installer) holds no link, neither the one
+        given nor the address it was read from, on every path."""
+        out = selftest.run(url, *args, **kwargs)
+        printed = json.dumps(out)
+        for link in (url, "127.0.0.1", f":{self.srv.port}"):
+            self.assertNotIn(link, printed)
+        return out
+
     def test_reads_the_index_within_the_cap(self):
-        from subsync.selftest import run
-        from subsync.settings import Settings
-        out = run(self.srv.url("tiny.mkv"), 4 * 1024 * 1024, Settings({}))
+        out = self.run_selftest(self.srv.url("tiny.mkv"), 4 * 1024 * 1024, Settings({}))
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["container"], "mkv")
         self.assertNotIn("matroska", out)                  # the container says it
@@ -1520,58 +1574,54 @@ class SelfTestTest(unittest.TestCase):
         self.assertNotIn("url", json.dumps(out).lower().replace("ok", ""))
 
     def test_refusal_and_cap_are_reported(self):
-        from subsync.selftest import run
-        from subsync.settings import Settings
         self.srv.fault = "403"
-        self.assertEqual(run(self.srv.url("tiny.mkv"), 4 * 1024 * 1024, Settings({}))["error"], "refused")
+        out = self.run_selftest(self.srv.url("tiny.mkv"), 4 * 1024 * 1024, Settings({}))
+        self.assertEqual(out["error"], "refused")
         self.srv.fault = None
-        self.assertEqual(run(self.srv.url("tiny.mkv"), 1000, Settings({}))["error"], "cap")
+        self.assertEqual(self.run_selftest(self.srv.url("tiny.mkv"), 1000, Settings({}))["error"], "cap")
 
     def test_the_cap_is_subsync_s_own_index_cap_unless_given(self):
         # The wizard's 4 MB cap stopped a 7.3 MB index that subsync itself reads (16 MB then, 32 MB)
-        from subsync.selftest import run
-        from subsync.settings import Settings
-        out = run(self.srv.url("tiny.mkv"), None, Settings({}))
+        out = self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({}))
         self.assertTrue(out["ok"], out)
-        out = run(self.srv.url("tiny.mkv"), None, Settings({"SUBSYNC_INDEX_CAP_MB": "0.001"}))
+        out = self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({"SUBSYNC_INDEX_CAP_MB": "0.001"}))
         self.assertEqual(out["error"], "cap")
         self.assertIn("larger than subsync reads", out["detail"])
 
     def test_a_listed_size_off_by_rounding_is_accepted(self):
-        from subsync.selftest import run
-        from subsync.settings import Settings
         real = os.path.getsize(os.path.join(FIXTURES, "tiny.mkv"))
-        self.assertTrue(run(self.srv.url("tiny.mkv"), None, Settings({}), size=real + 1000)["ok"])
+        self.assertTrue(self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({}), size=real + 1000)["ok"])
 
     def test_the_container_is_named(self):
-        from subsync.selftest import run
-        from subsync.settings import Settings
-        self.assertEqual(run(self.srv.url("tiny.mkv"), None, Settings({}))["container"], "mkv")
-        out = run(self.srv.url("tiny.mp4"), None, Settings({}))
+        self.assertEqual(self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({}))["container"], "mkv")
+        out = self.run_selftest(self.srv.url("tiny.mp4"), None, Settings({}))
         self.assertEqual(out["container"], "mp4")
         self.assertNotIn("matroska", out)
         self.assertTrue(out["text_tracks"])
 
+    def test_a_failed_read_and_another_kind_of_file_are_reported(self):
+        out = self.run_selftest(self.srv.url("nope.mkv"), None, Settings({}))
+        self.assertEqual((out["ok"], out["error"]), (False, "read"))
+        out = self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({"SUBSYNC_SIZE_SLACK_MB": "0"}), size=1000)
+        self.assertEqual((out["ok"], out["error"], out["detail"]), (False, "read", "size differs"))
+        out = self.run_selftest(self.srv.url("tiny.srt"), None, Settings({}))
+        self.assertEqual((out["ok"], out["container"]), (True, None))
+        self.assertIn("neither Matroska nor MP4", out["note"])
+
     def test_rewrite_applies(self):
-        from subsync.selftest import run
-        from subsync.settings import Settings
         s = Settings({"SUBSYNC_URL_REWRITE": f"https://public.example=http://127.0.0.1:{self.srv.port}"})
-        self.assertTrue(run("https://public.example/tiny.mkv", 4 * 1024 * 1024, s)["ok"])
+        self.assertTrue(self.run_selftest("https://public.example/tiny.mkv", 4 * 1024 * 1024, s)["ok"])
 
     def test_the_time_taken_is_measured_on_a_steady_clock(self):
         # The system clock stepped back a day during the read doesn't make its time negative
-        from subsync import selftest
-        from subsync.settings import Settings
         wall, steady = iter([2_000_000_000.0, 1_999_913_600.0]), iter([100.0, 100.25])
         clock = types.SimpleNamespace(time=lambda: next(wall), monotonic=lambda: next(steady))
         with mock.patch.object(selftest, "time", clock):
-            out = selftest.run(self.srv.url("tiny.mkv"), None, Settings({}))
+            out = self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({}))
         self.assertEqual(out["ms"], 250)
 
     def main(self, stdin, *argv):
         """python -m subsync.selftest with `stdin`: (exit code, what it printed)."""
-        from subsync import selftest
-        from subsync.settings import Settings
         printed = io.StringIO()
         with mock.patch.object(sys, "stdin", io.StringIO(stdin)), mock.patch.object(sys, "stdout", printed), \
                 mock.patch.object(sys, "argv", ["selftest", *argv]), \
@@ -1599,10 +1649,6 @@ class SelfTestTest(unittest.TestCase):
             code, printed = self.main(stdin)
             self.assertEqual(code, 2, stdin)
             self.assertEqual(json.loads(printed), {"ok": False, "error": "no link on standard input"})
-
-
-import http.client  # noqa: E402
-import tracemalloc  # noqa: E402
 
 
 class Reply:
@@ -1720,7 +1766,6 @@ class ReplyCheckTest(unittest.TestCase):
 
     def test_the_size_tolerance_is_the_readers(self):
         # The worker and the installer's test read each passed their own 0.0005; now both use the reader's
-        from subsync.reader import SIZE_TOLERANCE
         listed = len(self.data) + int(len(self.data) * SIZE_TOLERANCE)
         r = RangeReader(self.link, "t", size=listed)
         self.assertEqual(r.get(0, 64), self.data[:64])

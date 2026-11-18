@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 
-from helpers import FIXTURES
+from helpers import FIXTURES, IMAGE_BUILD
 import imagesubs as I  # noqa: E402
 from subsync import imagetext, mkv, pipeline, textpair  # noqa: E402
 from subsync.reader import ReadFailed, Refused  # noqa: E402
@@ -220,17 +220,24 @@ class TrackImagesReadTest(unittest.TestCase):
         self.assertEqual([imagetext.pgs_images(got[s])[0].shape[1] for s in starts[:3]], [60, 64, 68])
 
     def test_a_block_over_the_cap_is_skipped(self):
-        r, index = self.index()
-        t, starts = self.starts(index)
-        old = mkv.IMAGE_READ
-        try:
-            mkv.IMAGE_READ = 200
-            before = len(r.reads)
-            got = index.line_images(t["number"], starts[:6])
-            self.assertLess(len(got), 6)
-            self.assertTrue(all(n <= 200 for n in r.reads[before:]))
-        finally:
-            mkv.IMAGE_READ = old
+        # the first six lines' display sets are 236 to 260 bytes, but the fifth's (two rows) is 560: a cap of 400 skips
+        # that one only and keeps the others beside it, a cap of 200 skips them all
+        for cap, kept in ((200, []), (400, [0, 1, 2, 3, 5])):
+            with self.subTest(cap=cap):
+                r, index = self.index()
+                t, starts = self.starts(index)
+                old = mkv.IMAGE_READ
+                try:
+                    mkv.IMAGE_READ = cap
+                    before = len(r.reads)
+                    got = index.line_images(t["number"], starts[:6])
+                    self.assertLess(len(got), 6)
+                    self.assertTrue(all(n <= cap for n in r.reads[before:]))
+                finally:
+                    mkv.IMAGE_READ = old
+                self.assertEqual(sorted(got), [starts[k] for k in kept])
+                self.assertEqual([imagetext.pgs_images(got[s])[0].shape[1] for s in sorted(got)],
+                                 [60 + 4 * k for k in kept])
 
     def test_a_refusal_stops_the_reads(self):
         r, index = self.index()
@@ -440,11 +447,13 @@ class OcrCharacterListsTest(unittest.TestCase):
             self.assertIn("A" if name == "latin" else "Д", chars)
 
 
-@unittest.skipUnless(_models_here(), "the PP-OCRv5 models are put in by the image build (Dockerfile)")
+@unittest.skipUnless(_models_here() or IMAGE_BUILD, "the PP-OCRv5 models are put in by the image build (Dockerfile)")
 class OcrModelTest(unittest.TestCase):
-    """In the image: the models read rendered subtitle rows (our own sentences, decoded from PGS display sets)."""
+    """In the image: the models read rendered subtitle rows (our own sentences, decoded from PGS display sets). The
+    image build always runs it: an image without the models or onnxruntime fails its build."""
 
     def setUp(self):
+        self.assertTrue(_models_here(), f"no PP-OCRv5 models or no onnxruntime for {imagetext.MODEL_DIR}")
         imagetext.set_recogniser(None)
 
     def test_each_models_classes_are_its_characters_and_the_blank(self):

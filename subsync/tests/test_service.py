@@ -19,7 +19,8 @@ import zipfile
 from http.client import HTTPConnection
 from unittest import mock
 
-from helpers import answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only, TempDir  # noqa: E402
+from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only,  # noqa: E402
+                     TempDir, watch_the_log)
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -516,8 +517,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-class AddonTest(unittest.TestCase):
+class AddonFixture(unittest.TestCase):
+    """The addon's server over a worker that is not started (its jobs stay queued), the audio route off. No tests of its
+    own: each class below has its own."""
+
     def setUp(self):
+        watch_the_log(self)
         self.tmp = TempDir()
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_PENDING_ENTRY": "on",
@@ -535,6 +540,8 @@ class AddonTest(unittest.TestCase):
         self.server.server_close()
         self.tmp.__exit__(None, None, None)
 
+
+class AddonTest(AddonFixture):
     def test_manifest(self):
         code, body, _ = http(self.base + "/manifest.json")
         m = json.loads(body)
@@ -624,12 +631,8 @@ class AddonTest(unittest.TestCase):
         self.assertEqual(self.store.day_count("read"), 0)
 
 
-class PickTest(AddonTest):
+class PickTest(AddonFixture):
     """Audio route on: it starts only when the viewer downloads subsync's own entry for the file."""
-    # AddonTest's own cases describe the audio route being off; they are not repeated here
-    test_manifest = test_known_file_lists_labelled_entries_and_serves_them = None
-    test_unknown_file_queues_a_job_and_lists_pending_entries = test_no_hints_no_job = None
-    test_unlisted_file_is_not_looked_for_again = test_no_subtitle_to_sync_reads_nothing = None
     URL = "/subtitles/movie/tt9/filename=b.mp4&videoSize=5.json"
     ALIAS = "name:b.mp4|5"
 
@@ -1285,12 +1288,9 @@ class NoTrack:
         return []
 
 
-class OriginalEntryTest(unittest.TestCase):
-    """A language that has subtitles but no synced copy, on a file that neither waits for a pick nor has a job on
-    it, is listed once, after the synced ones, as "<Language> (original)": the subtitle, unchanged, that the file's
-    judging measured best as it is, else the likeliest by its name, and only one whose text is in that language.
-    Downloading it serves that subtitle's text from this person's own list; it queues no job and reads nothing of the
-    file."""
+class OriginalEntryFixture(unittest.TestCase):
+    """A file with English, Spanish and Russian subtitles, each kept as its original by a stub judging that measures it
+    as CANDS says, behind the addon's server over a worker that is not started. No tests of its own."""
     URL = "/subtitles/movie/tt9/filename=b.mp4&videoSize=5.json"
     ALIAS = "name:b.mp4|5"
     FILE = "f" * 16 + "-5"
@@ -1299,6 +1299,7 @@ class OriginalEntryTest(unittest.TestCase):
              "r1": ("rus", 30.0, 0.40)}
 
     def setUp(self):
+        watch_the_log(self)
         self.tmp = TempDir()
         d = self.tmp.__enter__()
         self.addCleanup(self.tmp.__exit__, None, None, None)
@@ -1358,6 +1359,20 @@ class OriginalEntryTest(unittest.TestCase):
         with self.worker.cv:
             self.worker.jobs.clear()
             self.worker.queue.clear()
+
+    def wait_for(self, check, timeout=3.0):
+        t0 = time.time()
+        while not check() and time.time() - t0 < timeout:
+            time.sleep(0.02)
+        return check()
+
+
+class OriginalEntryTest(OriginalEntryFixture):
+    """A language that has subtitles but no synced copy, on a file that neither waits for a pick nor has a job on
+    it, is listed once, after the synced ones, as "<Language> (original)": the subtitle, unchanged, that the file's
+    judging measured best as it is, else the likeliest by its name, and only one whose text is in that language.
+    Downloading it serves that subtitle's text from this person's own list; it queues no job and reads nothing of the
+    file."""
 
     def test_the_bears_shape(self):
         # three languages wait for a pick; the pick; the audio job judges every candidate "keep original": each language
@@ -1443,12 +1458,6 @@ class OriginalEntryTest(unittest.TestCase):
         self.assertEqual(self.get("http://subsync:8790/original/!!!/eng.srt")[0], 404)
         self.assertEqual((len(self.worker.jobs), self.downloads.asked), (0, []))
 
-    def wait_for(self, check, timeout=3.0):
-        t0 = time.time()
-        while not check() and time.time() - t0 < timeout:
-            time.sleep(0.02)
-        return check()
-
     def test_a_list_asked_again_on_a_requests_time_answers_late_and_is_kept_for_the_next_try(self):
         # A person's list fetched again for an original keeps to the request's deadline: slower, the answer is
         # "late" (the player asks again) and the list, once it comes, is kept for that next try
@@ -1482,14 +1491,10 @@ class OriginalEntryTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: not self.worker.fetching))
 
 
-class MeasuredPickTest(OriginalEntryTest):
+class MeasuredPickTest(OriginalEntryFixture):
     """A pick that nothing passed for by its deadline is served the downloaded original that measured best as it
     is against the file's own track, when it beats the name-ranked guess's measure (3 Idiots and Sherlock got the guess
     at 14 s); its text, checked, from the file's own job's download."""
-    test_the_bears_shape = test_friends_shape = None
-    test_a_language_in_another_language_or_without_subtitles_gets_none = None
-    test_a_file_not_judged_lists_the_likeliest_by_name_and_checks_it_when_served = None
-    test_an_unknown_link_starts_nothing = test_the_original_route_says_what_it_served = None
 
     def setUp(self):
         super().setUp()
@@ -2159,12 +2164,12 @@ class AudioOffEntryTest(unittest.TestCase):
         self.assertEqual([s["label"] for s in subs], ["English (synced)"])
 
 
-class EmptyListTest(unittest.TestCase):
-    """A subtitle list that comes back empty (a slow subtitle addon left out of AIOStreams' answer) is not a
-    "none found": nothing is remembered, and a pick asks for the list again instead of serving the note."""
-    ALIAS = "name:b.mkv|5"
+class ListFixture(unittest.TestCase):
+    """The addon's server over a worker that is not started, whose file is listed at an address that never answers.
+    No tests of its own."""
 
     def setUp(self):
+        watch_the_log(self)
         self.tmp = TempDir()
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus",
@@ -2181,6 +2186,12 @@ class EmptyListTest(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.tmp.__exit__(None, None, None)
+
+
+class EmptyListTest(ListFixture):
+    """A subtitle list that comes back empty (a slow subtitle addon left out of AIOStreams' answer) is not a
+    "none found": nothing is remembered, and a pick asks for the list again instead of serving the note."""
+    ALIAS = "name:b.mkv|5"
 
     def test_an_empty_list_is_not_remembered_as_no_subtitle(self):
         job = Job("movie", "tt9", {"filename": "b.mkv", "videoSize": 5})
@@ -2206,11 +2217,10 @@ class EmptyListTest(unittest.TestCase):
         self.assertEqual([(j.alias, j.type, j.video_id) for j in self.worker.jobs.values()], [(self.ALIAS, "movie", "tt9")])
 
 
-class BestGuessFallbackTest(EmptyListTest):
+class BestGuessFallbackTest(ListFixture):
     """While there is no copy, a download of subsync's entry serves the subtitle likeliest to fit the file
     as it is (a hash match, the release group, the kind of source), not the viewer's first: on Detectorists S01E01 that was
     a DVD rip 41.7 s off, where AutoSync served the WEB subtitle that fits by its name."""
-    test_an_empty_list_is_not_remembered_as_no_subtitle = test_a_pick_after_an_empty_list_asks_for_the_list_again = None
     NAME = "Show.S01E01.WEBRip.x264-GRP.mkv"
 
     def setUp(self):

@@ -994,11 +994,10 @@ class ImageRecallTest(unittest.TestCase):
         self.assertEqual(pipeline.reference_gate({"route": "cues", "cues": [(1.0, 1.0)] * 10}, 1000)[1], 1.0)
 
 
-class AudioClearlyBetterTest(unittest.TestCase):
-    """The audio route's second way to pass. Synthetic speech: each release line is spoken a little off its start
-    (sigma 80 ms); a third-party subtitle has its own timing style (sigma 150 ms) and is 9 s off. Like Primer's YTS
-    MP4, the re-timed copy then fails the speech gate (about 70 % within 200 ms, needs 90 %) and passes this
-    rule."""
+class AudioFitFixture(unittest.TestCase):
+    """The audio route on a synthetic timeline: each release line (self.truth) is spoken a little off its start (sigma
+    80 ms); fit() fits a subtitle's lines to that speech. No tests of its own: each class below has its own
+."""
 
     def setUp(self):
         self.truth = rhythm(700, 11)
@@ -1018,6 +1017,13 @@ class AudioClearlyBetterTest(unittest.TestCase):
     def styled(self, seed, shift, sigma=0.15):
         r = random.Random(seed)
         return [s + shift + r.gauss(0, sigma) for s, _ in self.truth]
+
+
+class AudioClearlyBetterTest(AudioFitFixture):
+    """The audio route's second way to pass. Synthetic speech: each release line is spoken a little off its start
+    (sigma 80 ms); a third-party subtitle has its own timing style (sigma 150 ms) and is 9 s off. Like Primer's YTS
+    MP4, the re-timed copy then fails the speech gate (about 70 % within 200 ms, needs 90 %) and passes this
+    rule."""
 
     def test_a_subtitle_9_s_off_in_another_timing_style_passes_only_the_second_way(self):
         fit = self.fit(self.styled(1, -9.0))
@@ -1076,13 +1082,9 @@ class AudioClearlyBetterTest(unittest.TestCase):
         self.assertEqual(accepted, [])
 
 
-class SparseDialogueTest(AudioClearlyBetterTest):
+class SparseDialogueTest(AudioFitFixture):
     """A film with little dialogue (Upstream Color: 10 lines heard in the windows) gives the audio route too
     few lines when its windows are spread evenly; placed where the subtitle has its lines, the same windows hear enough."""
-    test_a_subtitle_9_s_off_in_another_timing_style_passes_only_the_second_way = None
-    test_a_right_fit_whose_windows_do_not_agree_still_passes = test_without_the_rule_it_is_kept = None
-    test_a_shift_under_one_second_is_not_clearly_better = test_a_subtitle_made_for_this_release_fits_as_it_is = None
-    test_fits_as_it_is_needs_the_rule = test_the_numbers_are_settings = test_another_films_subtitle_is_never_accepted = None
 
     def setUp(self):
         r = random.Random(17)
