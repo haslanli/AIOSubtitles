@@ -9,6 +9,8 @@ import hashlib
 import html
 import os
 
+from .langs import DEFAULT_LANGUAGE
+
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 FONT_FILES = ("AtkinsonHyperlegibleNext-wght.ttf", "AtkinsonHyperlegibleMono-wght.ttf")   # put in by the image build
 
@@ -193,7 +195,7 @@ def language_slots(languages, chosen, limit, labelled_by, help_id, error_id=None
     count = max(limit, len(chosen))
     rows = []
     for i in range(count):
-        current = chosen[i] if i < len(chosen) else ("" if i else "eng")
+        current = chosen[i] if i < len(chosen) else ("" if i else DEFAULT_LANGUAGE)
         options = ("" if i == 0 else f"<option value=\"\"{' selected' if not current else ''}>None</option>") + "".join(
             f"<option value=\"{e(code)}\"{' selected' if code == current else ''}>{e(lang)}</option>"
             for lang, code in languages)

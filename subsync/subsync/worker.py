@@ -22,7 +22,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 
 from . import audiofit, choose, langcheck, pipeline, realdebrid, srclimits
 from . import origlang
-from .langs import lang3
+from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .mkv import NotMatroska
 from .mp4 import open_index
@@ -1435,8 +1435,8 @@ class Worker(threading.Thread):
         non-forced dialogue track, any plausible image track)?"""
         if not hasattr(index, "text_tracks"):
             return False
-        return pipeline.choose_reference(index, 0, self.s.languages[0] if self.s.languages else "eng", self.s.image_ref,
-                                         self.s.prefer_plain, self.s.fallback_reference) is not None
+        return pipeline.choose_reference(index, 0, self.s.languages[0] if self.s.languages else DEFAULT_LANGUAGE,
+                                         self.s.image_ref, self.s.prefer_plain, self.s.fallback_reference) is not None
 
     def _await_pick(self, job, per_lang, filename, oshash):
         """A file with no subtitle track of its own: nothing can be judged until the viewer picks subsync's entry and
@@ -2185,7 +2185,3 @@ class Worker(threading.Thread):
             with ThreadPoolExecutor(max_workers=FETCH_AT_ONCE, thread_name_prefix="subsync-fetch") as pool:
                 got = list(pool.map(lambda rc: self._fetch_one(job, lang, *rc), tries))
         return [g for g in got if g is not None]
-
-
-def lang_list(text):
-    return [lang3(x) for x in (text or "").split(",") if x.strip()]

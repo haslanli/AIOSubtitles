@@ -15,6 +15,8 @@ import statistics
 
 import numpy as np
 
+from .relgate import lands
+
 SCALES = (1.0, 25 / (24000 / 1001), (24000 / 1001) / 25)
 MAX_OFFSET_S = 120.0
 BIN_S = 0.05
@@ -25,26 +27,35 @@ PEAK_TIE = 0.9          # start peaks within this share of the best are a tie th
 PEAK_APART = 10         # bins (0.5 s) between two peaks counted apart
 MAX_PEAKS = 100
 KNOWN_ENDS = 0.5        # ends are used when at least this share of the release's lines have a known end
+STARTS_AT_ONCE = 256    # candidate starts binned together, against only the reference starts they can reach
+PAIRS_AT_ONCE = 1 << 20  # start differences held at once (8 MiB): the histogram's memory doesn't grow with the lines
 
 
 def _votes(cand, ref, offset):
-    n = 0
-    for c in cand:
-        k = bisect.bisect_left(ref, c + offset - NEAR_S)
-        n += k < len(ref) and ref[k] <= c + offset + NEAR_S
-    return n
+    return sum(lands(ref, c + offset, NEAR_S) for c in cand)
 
 
 def _window(cand, ref, max_offset):
-    """Every (reference - candidate) difference within max_offset binned at once (numpy; a 1,500-line subtitle against a
-    1,700-line track is 2.5 million differences, milliseconds), each bin with its two neighbours: (window, n), bin i
-    being the offset (i - n) * BIN_S; None when no difference is within max_offset."""
-    diffs = np.subtract.outer(np.asarray(ref), np.asarray(cand)).ravel()
-    diffs = diffs[np.abs(diffs) <= max_offset]
-    if not diffs.size:
-        return None
+    """Every (reference - candidate) difference within max_offset binned (numpy), each bin with its two neighbours:
+    (window, n), bin i being the offset (i - n) * BIN_S; None when no difference is within max_offset. cand and ref in
+    any order. The candidate starts are taken STARTS_AT_ONCE at a time, each block only against the reference starts
+    it can reach and at most PAIRS_AT_ONCE differences at once, so a long or crafted track (tens of thousands of lines,
+    whose every pair would take gigabytes) costs time, not memory; a 1,500-line subtitle against a 1,700-line track
+    takes milliseconds."""
+    cand, ref = np.sort(np.asarray(cand)), np.sort(np.asarray(ref))
     n = int(round(max_offset / BIN_S))
-    counts = np.bincount(np.rint(diffs / BIN_S).astype(np.int64) + n, minlength=2 * n + 1)
+    counts = np.zeros(2 * n + 1, dtype=np.int64)
+    reach = max_offset + BIN_S                # a bin past the window: rounding never leaves out a pair the test keeps
+    for a in range(0, len(cand), STARTS_AT_ONCE):
+        block = cand[a:a + STARTS_AT_ONCE]
+        near = ref[np.searchsorted(ref, block[0] - reach):np.searchsorted(ref, block[-1] + reach, "right")]
+        step = max(1, PAIRS_AT_ONCE // len(block))
+        for b in range(0, len(near), step):
+            diffs = np.subtract.outer(near[b:b + step], block).ravel()
+            diffs = diffs[np.abs(diffs) <= max_offset]
+            counts += np.bincount(np.rint(diffs / BIN_S).astype(np.int64) + n, minlength=2 * n + 1)
+    if not counts.any():
+        return None
     return np.convolve(counts, np.ones(3, dtype=np.int64), mode="same"), n
 
 
@@ -59,26 +70,20 @@ def _refine(cand, ref, peak):
     return statistics.median(near) if near else peak * BIN_S
 
 
-def _offset(cand, ref, max_offset):
-    """The offset that lands the most of cand on ref, refined to the median of the differences near the peak."""
+def _offset(cand, ref, max_offset, ends=None):
+    """The offset that lands the most of cand on ref (of equal peaks, the smallest offset), refined to the median of
+    the differences near the peak. ends: (candidate ends, sorted release ends); given, start peaks within PEAK_TIE of
+    the best are told apart by their end votes."""
     got = _window(cand, ref, max_offset)
     if got is None:
         return 0.0
     window, n = got
     best = window.max()
-    ties = np.flatnonzero(window == best) - n
-    peak = int(ties[np.argmin(np.abs(ties))])                              # of equal peaks, the smallest offset
-    return _refine(cand, ref, peak)
-
-
-def _offset_with_ends(cand, ref, max_offset, cand_ends, ref_ends):
-    """As _offset, but start peaks within PEAK_TIE of the best are told apart by their end votes."""
-    got = _window(cand, ref, max_offset)
-    if got is None:
-        return 0.0
-    window, n = got
-    best = window.max()
-    order = sorted(np.flatnonzero(window >= PEAK_TIE * best), key=lambda i: (-int(window[i]), abs(int(i) - n)))
+    tie = PEAK_TIE * best if ends else best            # with no ends to tell peaks apart, only the best peak counts
+    order = sorted(np.flatnonzero(window >= tie), key=lambda i: (-int(window[i]), abs(int(i) - n)))
+    if not ends:
+        return _refine(cand, ref, int(order[0]) - n)
+    cand_ends, ref_ends = ends
     peaks = []
     for i in order:
         if all(abs(int(i) - p) >= PEAK_APART for p in peaks):
@@ -116,12 +121,9 @@ def best_shift(cand, ref, max_offset=MAX_OFFSET_S, cand_ends=None, ref_ends=None
     best = None
     for scale in SCALES:
         scaled = sorted(c * scale for c in cand)
-        if ends:
-            offset = _offset_with_ends(scaled, ref, max_offset, sorted(e * scale for e in ends[0]), ends[1])
-        else:
-            offset = _offset(scaled, ref, max_offset)
+        offset = _offset(scaled, ref, max_offset, (sorted(e * scale for e in ends[0]), ends[1]) if ends else None)
         votes = _votes(scaled, ref, offset)
         need = votes if scale == 1.0 else votes / SCALE_MARGIN
         if best is None or need > best[3]:
-            best = (scale, offset, votes, votes if scale == 1.0 else need)
+            best = (scale, offset, votes, need)
     return best[0], best[1], best[2]

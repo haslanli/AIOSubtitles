@@ -1,6 +1,7 @@
 """One explanation for every setting and every fixed rule, written once and shown wherever the user meets it: with each
 ./setup question (and again on "?"), in docs/answers.example, in the README's settings section and above each line of
-state/subsync.env. Tests fail when a setting has no explanation or a documented default differs from the code's.
+state/subsync.env. Settings takes its defaults from here; tests fail when a setting has no explanation or a documented
+default differs from the code's.
 
 Each text says what the setting does, what to choose and why, what changes either way (what you see, what is read or
 downloaded, what gets faster or slower) and what it costs. Nothing in AIOSubtitles is shared between installs, so every
@@ -11,6 +12,8 @@ No packages besides the standard library, so ./setup imports this module too.
 """
 from typing import NamedTuple
 
+from .langs import DEFAULT_LANGUAGE
+from .langs import name as lang_name
 from .realdebrid import REASON
 
 # ------------------------------------------------------------------------------------------- fixed rules
@@ -224,7 +227,7 @@ QUESTIONS = {
         "doesn't store it; subsync gets its own config with its own random password. Removing subsync and restoring a "
         "saved copy ask for it again. If you put it in an answers file, keep that file private."),
     "LANGUAGES": (
-        "English",
+        lang_name(DEFAULT_LANGUAGE),
         "The subtitle languages to sync, up to four, the first one first; English if you choose none. In an answers "
         "file, names or codes separated by commas, like English, Spanish, ru. For each language and each file you "
         "play, subsync downloads that language's subtitles from your subtitle sources and the ones it searches itself, "
@@ -369,7 +372,7 @@ GROUPS = [
             "make it read files; synced files and /health stay open for your apps. Made by ./setup; keep it private. "
             "Empty: no key and every route open, safe only where nobody else can reach subsync."),
         "SUBSYNC_LANGUAGES": (
-            "eng",
+            DEFAULT_LANGUAGE,
             "The languages to sync, as codes separated by commas, like eng,rus: ./setup writes your answer to its "
             "languages question. Each language is a separate sync for every file you play, with its own subtitle "
             "downloads and a few seconds of work; the video file is read only once."),

@@ -10,6 +10,7 @@ and UI_WORDS below; nothing else is shown.
 """
 from . import explain, ui
 from .aiosconfig import LANGUAGES, usenet_names
+from .langs import DEFAULT_LANGUAGE
 from .settings import MB
 from .ui import e
 
@@ -126,7 +127,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
     """The start page and the sign-up layer. After a problem the layer is open with the summary first and the field
     marked; the languages keep their order, and the answer for files with no subtitles of their own (`audio`)
     stays picked; the link, the password and the invite code are never sent back."""
-    order = ["eng"] if order is None else order
+    order = [DEFAULT_LANGUAGE] if order is None else order
     limit = settings.max_languages      # 1 to aiosconfig.MAX_LANGUAGES: the service doesn't start with another value
     steps = STEPS if settings.invite else STEPS[1:]
     # the summary sits right above every screen: a field with the problem is marked and described by it

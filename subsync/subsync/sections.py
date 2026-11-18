@@ -17,6 +17,7 @@ no sectioned fit (the one-shift path covers it).
 import bisect
 
 from . import shift
+from .relgate import lands
 
 NEAR_S = shift.NEAR_S
 END_WEIGHT = shift.END_WEIGHT
@@ -31,11 +32,6 @@ MAX_OFFSETS = 12
 MIN_PEAK = 10            # landings a shift needs to be tried at all
 MAX_OFFSET_S = 600.0     # an extended cut adds scenes of minutes; one shift looks only 120 s either way
 OVERLAP_S = 0.5
-
-
-def _lands(ref, t):
-    k = bisect.bisect_left(ref, t - NEAR_S)
-    return k < len(ref) and ref[k] <= t + NEAR_S
 
 
 def offsets(starts, ref, max_offset=MAX_OFFSET_S):
@@ -67,8 +63,8 @@ def _assign(s, e, ref, ref_e, offs, anchors):
             if a is not None and abs(a - o) <= NEAR_S:
                 row.append(1.0 + END_WEIGHT)
                 continue
-            x = 1.0 if _lands(ref, s[i] + o) else 0.0
-            if ref_e and _lands(ref_e, e[i] + o):
+            x = 1.0 if lands(ref, s[i] + o, NEAR_S) else 0.0
+            if ref_e and lands(ref_e, e[i] + o, NEAR_S):
                 x += END_WEIGHT
             row.append(x)
         v.append(row)
@@ -146,7 +142,7 @@ def fit(lines, ref_cues, anchors=None):
     for g in groups:
         span = s[g[-1]] - s[g[0]]
         o = shift._refine([s[i] for i in g], ref, round(offs[assign[g[0]]] / shift.BIN_S))
-        landed = sum(_lands(ref, s[i] + o) for i in g)
+        landed = sum(lands(ref, s[i] + o, NEAR_S) for i in g)
         agree = sum(1 for i in g if i in anchors and abs(anchors[i] - o) <= NEAR_S)
         summary.append({"from_s": round(s[g[0]], 1), "to_s": round(s[g[-1]], 1), "lines": len(g),
                         "offset_s": round(o, 3), "landed": round(landed / len(g), 3), "anchors": agree})

@@ -85,13 +85,50 @@ class PublicSettingsTest(unittest.TestCase):
                 self.assertIsNone(s.syncs_at_once)
                 self.assertTrue(any("SUBSYNC_SYNCS_AT_ONCE" in p for p in s.conflicts()))
 
+    def test_a_number_int_cannot_read_is_a_conflict_not_a_crash(self):
+        # Isdigit takes superscripts ("2²") that int refuses, and int reads no more than 4,300 digits;
+        # either was a traceback at start instead of the setting's sentence
+        for name, field in (("SUBSYNC_SYNCS_AT_ONCE", "syncs_at_once"), ("SUBSYNC_AUDIO_AT_ONCE", "audio_at_once"),
+                            ("SUBSYNC_MAX_LANGUAGES", "max_languages")):
+            for wrong in ("²", "2²", "1" * 5000):
+                with self.subTest(name=name, value=wrong[:8]):
+                    s = Settings({name: wrong, "SUBSYNC_PUBLIC": "on"})
+                    self.assertIsNone(getattr(s, field))
+                    self.assertTrue(any(p.startswith(name + " must be a whole number") for p in s.conflicts()))
+        self.assertEqual(Settings({"SUBSYNC_MAX_LANGUAGES": "٣"}).max_languages, 3)   # a decimal digit int() reads
+
     def test_available_cpus_follows_the_containers_limit(self):
         from subsync import settings as settings_module
-        self.assertEqual(settings_module.available_cpus(cpu_max=self.route_file("max 100000\n"), count=lambda: 2), 2)
-        self.assertEqual(settings_module.available_cpus(cpu_max=self.route_file("150000 100000\n"), count=lambda: 4), 2)
-        self.assertEqual(settings_module.available_cpus(cpu_max=self.route_file("50000 100000\n"), count=lambda: 4), 1)
-        self.assertEqual(settings_module.available_cpus(cpu_max="/nonexistent/cpu.max", count=lambda: 6), 6)
-        self.assertEqual(settings_module.available_cpus(cpu_max="/nonexistent/cpu.max", count=lambda: None), 1)
+        cpus = settings_module.available_cpus
+        self.assertEqual(cpus(cpu_max=self.route_file("max 100000\n"), processors=lambda: 2), 2)
+        self.assertEqual(cpus(cpu_max=self.route_file("150000 100000\n"), processors=lambda: 4), 2)
+        self.assertEqual(cpus(cpu_max=self.route_file("50000 100000\n"), processors=lambda: 4), 1)
+        self.assertEqual(cpus(cpu_max="/nonexistent/cpu.max", cfs_dir="/nonexistent", processors=lambda: 6), 6)
+        self.assertEqual(cpus(cpu_max="/nonexistent/cpu.max", cfs_dir="/nonexistent", processors=lambda: None), 1)
+
+    def test_available_cpus_follows_a_cgroup_v1_limit(self):
+        # A cgroup v1 host has no cpu.max; its limit is in cpu.cfs_quota_us and cpu.cfs_period_us
+        from unittest import mock
+        from subsync import settings as settings_module
+
+        def cfs(quota, period="100000\n"):
+            folder = os.path.dirname(self.route_file(quota))
+            os.replace(os.path.join(folder, "route"), os.path.join(folder, "cpu.cfs_quota_us"))
+            with open(os.path.join(folder, "cpu.cfs_period_us"), "w") as f:
+                f.write(period)
+            return folder
+        cpus = settings_module.available_cpus
+        self.assertEqual(cpus(cpu_max="/nonexistent/cpu.max", cfs_dir=cfs("150000\n"), processors=lambda: 8), 2)
+        self.assertEqual(cpus(cpu_max="/nonexistent/cpu.max", cfs_dir=cfs("50000\n"), processors=lambda: 8), 1)
+        self.assertEqual(cpus(cpu_max="/nonexistent/cpu.max", cfs_dir=cfs("-1\n"), processors=lambda: 8), 8)   # none
+        self.assertEqual(cpus(cpu_max="/nonexistent/cpu.max", cfs_dir=cfs("garbled\n"), processors=lambda: 8), 8)
+        # cgroup v2's file, when there is one, is the limit
+        self.assertEqual(cpus(cpu_max=self.route_file("max 100000\n"), cfs_dir=cfs("150000\n"), processors=lambda: 8),
+                         8)
+        with mock.patch.object(settings_module, "CPU_MAX_FILE", "/nonexistent/cpu.max"), \
+                mock.patch.object(settings_module, "CFS_DIR", cfs("300000\n")):
+            self.assertEqual(Settings({"SUBSYNC_SYNCS_AT_ONCE": "auto"}).syncs_at_once,
+                             min(3, os.process_cpu_count() or 1))
 
     def test_missing_in_public_mode(self):
         self.assertEqual(Settings({"SUBSYNC_PUBLIC": "on"}).missing(), ["SUBSYNC_SECRET_KEY", "SUBSYNC_PUBLIC_BASE"])

@@ -42,6 +42,18 @@ class ExplainTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(vars(Settings({name: default})), defaults)
 
+    def test_settings_take_their_defaults_from_here(self):
+        # Each default is written once, here, and Settings reads it (no second literal in settings.py)
+        from unittest import mock
+        cases = (("SUBSYNC_MAX_TRIES", "7", lambda s: s.max_tries, 7),
+                 ("SUBSYNC_BETTER_PAIRED", "0.9", lambda s: s.better["paired"], 0.9),
+                 ("SUBSYNC_AUDIO_BETTER_MATCHED", "30", lambda s: s.audio_better["matched"], 30),
+                 ("SUBSYNC_AUDIO_ON_PICK", "off", lambda s: s.audio_when, "open"))
+        for name, value, read, expected in cases:
+            with self.subTest(name=name), \
+                    mock.patch.dict(explain.SETTINGS, {name: (value, explain.SETTINGS[name][1])}):
+                self.assertEqual(read(Settings({})), expected)
+
     def test_required_settings_have_no_default(self):
         required = {name for name, (default, _) in explain.SETTINGS.items() if default is None}
         self.assertEqual(required, set(Settings({}).missing()))

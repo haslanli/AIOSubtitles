@@ -1,4 +1,7 @@
-"""Settings from the environment. The source config's address and the addon key are secrets and are never logged."""
+"""Settings from the environment. The source config's address and the addon key are secrets and are never logged.
+
+Every default is the documented one (explain.SETTINGS). No packages besides the standard library, so hostcmd, which
+only reads settings, loads none of the sync's code (numpy, the worker)."""
 import base64
 import binascii
 import hashlib
@@ -8,11 +11,9 @@ import os
 import socket
 import struct
 
-from . import ALGO_VERSION, RULE_REVISION
+from . import ALGO_VERSION, RULE_REVISION, explain
 from .aiosconfig import MAX_LANGUAGES
-from .audiofit import BETTER as AUDIO_BETTER
-from .relgate import BETTER
-from .worker import lang_list
+from .langs import lang_list
 
 # The units of the size settings, each chosen once and kept (changing one would change every limit set in it): a *_MB
 # setting counts MiB, a *_GB setting 10^9 bytes. A figure shown for a setting is shown in that setting's unit.
@@ -24,8 +25,14 @@ def _on(value):
     return str(value).strip().lower() in ("1", "on", "true", "yes")
 
 
+def _default(name):
+    """A setting's documented default, written once in explain.SETTINGS; "" for a required setting (it has none)."""
+    return explain.SETTINGS[name][0] or ""
+
+
 ROUTE_FILE = "/proc/net/route"            # Linux: the kernel's IPv4 routing table
 CPU_MAX_FILE = "/sys/fs/cgroup/cpu.max"   # cgroup v2: the container's processor limit ("max 100000" when none)
+CFS_DIR = "/sys/fs/cgroup/cpu"            # cgroup v1: the same limit, cpu.cfs_quota_us ("-1" when none) and period
 
 
 def default_gateway(path=None):
@@ -49,40 +56,54 @@ def default_gateway(path=None):
     return None
 
 
-def _processors():
+def _cpu_limit(cpu_max, cfs_dir):
+    """The container's processor limit as (quota, period): cgroup v2's cpu.max, or on a cgroup v1 host (no cpu.max) its
+    two files; the quota is "max" or "-1" when there is none."""
     try:
-        return len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        return os.cpu_count()
+        with open(cpu_max, encoding="ascii") as f:
+            return f.read().split()[:2]
+    except FileNotFoundError:
+        pass
+    with open(os.path.join(cfs_dir, "cpu.cfs_quota_us"), encoding="ascii") as quota, \
+            open(os.path.join(cfs_dir, "cpu.cfs_period_us"), encoding="ascii") as period:
+        return quota.read().strip(), period.read().strip()
 
 
-def available_cpus(cpu_max=None, count=None):
+def available_cpus(cpu_max=None, cfs_dir=None, processors=None):
     """The processors this process may use: the ones it may run on, within the container's limit, at least 1."""
-    n = (count or _processors)() or 1
+    n = (processors or os.process_cpu_count)() or 1
     try:
-        with open(cpu_max or CPU_MAX_FILE, encoding="ascii") as f:
-            quota, period = f.read().split()[:2]
-        if quota != "max":
+        quota, period = _cpu_limit(cpu_max or CPU_MAX_FILE, cfs_dir or CFS_DIR)
+        if quota not in ("max", "-1"):
             n = min(n, max(1, math.ceil(int(quota) / int(period))))
     except (OSError, ValueError):
         pass
     return max(1, n)
 
 
+def _whole(value, at_most=None):
+    """A whole number from 1 (to `at_most`) written in digits; None otherwise. isdecimal, not isdigit, which also takes
+    the superscripts int() refuses ("2²")."""
+    value = str(value).strip()
+    if not value.isdecimal():
+        return None
+    try:
+        n = int(value)
+    except ValueError:                      # more digits than int() converts
+        return None
+    return n if n >= 1 and (at_most is None or n <= at_most) else None
+
+
 def _places(value):
     """SUBSYNC_SYNCS_AT_ONCE: a whole number from 1, or auto (the processors available); None when it is neither."""
     value = str(value).strip().lower()
-    if value == "auto":
-        return available_cpus()
-    return int(value) if value.isdigit() and int(value) >= 1 else None
+    return available_cpus() if value == "auto" else _whole(value)
 
 
 def _audio_at_once(value):
     """SUBSYNC_AUDIO_AT_ONCE: auto, or a whole number from 1; None when it is neither."""
     value = str(value).strip().lower()
-    if value == "auto":
-        return "auto"
-    return int(value) if value.isdigit() and int(value) >= 1 else None
+    return "auto" if value == "auto" else _whole(value)
 
 
 def _audio_when(env):
@@ -90,7 +111,7 @@ def _audio_when(env):
     SUBSYNC_AUDIO_ON_PICK, still read: off means open."""
     value = env.get("SUBSYNC_AUDIO_WHEN")
     if value is None or not str(value).strip():
-        return "pick" if _on(env.get("SUBSYNC_AUDIO_ON_PICK", "on")) else "open"
+        return "pick" if _on(env.get("SUBSYNC_AUDIO_ON_PICK", _default("SUBSYNC_AUDIO_ON_PICK"))) else "open"
     value = str(value).strip().lower()
     return value if value in ("pick", "open") else None
 
@@ -103,8 +124,7 @@ AUDIO_CHOICES = ("off", "pick", "open")
 def _language_limit(value):
     """SUBSYNC_MAX_LANGUAGES: a whole number from 1 to MAX_LANGUAGES (the pages name four places at most); None
     otherwise."""
-    value = str(value).strip()
-    return int(value) if value.isdigit() and 1 <= int(value) <= MAX_LANGUAGES else None
+    return _whole(value, MAX_LANGUAGES)
 
 
 def _overrides(value):
@@ -116,143 +136,144 @@ def _overrides(value):
 class Settings:
     def __init__(self, env=None):
         e = env if env is not None else os.environ
-        g = lambda k, d: e.get(k, d)  # noqa: E731
-        self.port = int(g("SUBSYNC_PORT", "8790"))
-        self.data = g("SUBSYNC_DATA", "/data")
+        g = lambda k: e.get(k, _default(k))  # noqa: E731
+        self.port = int(g("SUBSYNC_PORT"))
+        self.data = g("SUBSYNC_DATA")
         # where players fetch the synced files, and the AIOStreams config subsync finds files through: no defaults
-        self.public_base = g("SUBSYNC_PUBLIC_BASE", "").rstrip("/")
-        self.source_manifest = g("SUBSYNC_SOURCE_MANIFEST", "")
-        self.source_password = g("SUBSYNC_SOURCE_PASSWORD", "")    # subsync reads its config with it: the Real-Debrid check
-        self.languages = lang_list(g("SUBSYNC_LANGUAGES", "eng"))
-        self.max_tries = int(g("SUBSYNC_MAX_TRIES", "6"))                      # subtitles tried per language and file
-        self.cap_bytes = int(float(g("SUBSYNC_STORE_CAP_MB", "2048")) * MB)
-        self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB", "100")) * GB)
-        self.backoff_s = int(g("SUBSYNC_403_BACKOFF_S", "900"))
-        self.retry_stopped_s = int(g("SUBSYNC_RETRY_STOPPED_S", "600"))
+        self.public_base = g("SUBSYNC_PUBLIC_BASE").rstrip("/")
+        self.source_manifest = g("SUBSYNC_SOURCE_MANIFEST")
+        self.source_password = g("SUBSYNC_SOURCE_PASSWORD")  # subsync reads its config with it: the Real-Debrid check
+        self.languages = lang_list(g("SUBSYNC_LANGUAGES"))
+        self.max_tries = int(g("SUBSYNC_MAX_TRIES"))  # subtitles tried per language and file
+        self.cap_bytes = int(float(g("SUBSYNC_STORE_CAP_MB")) * MB)
+        self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB")) * GB)
+        self.backoff_s = int(g("SUBSYNC_403_BACKOFF_S"))
+        self.retry_stopped_s = int(g("SUBSYNC_RETRY_STOPPED_S"))
         # the audio route: a file with no text or image subtitle track is timed from its speech, reading audio windows
         # within SUBSYNC_AUDIO_BUDGET_GB per file (shorter windows on high-bitrate files, none when they would be
         # too short); off, every file is read index only (SUBSYNC_INDEX_CAP_MB)
-        self.audio_route = _on(g("SUBSYNC_AUDIO_ROUTE", "off"))
-        self.audio_budget = int(float(g("SUBSYNC_AUDIO_BUDGET_GB", "1")) * GB) or None
-        self.file_cap = int(float(g("SUBSYNC_FILE_CAP_GB", "6")) * GB) or None
+        self.audio_route = _on(g("SUBSYNC_AUDIO_ROUTE"))
+        self.audio_budget = int(float(g("SUBSYNC_AUDIO_BUDGET_GB")) * GB) or None
+        self.file_cap = int(float(g("SUBSYNC_FILE_CAP_GB")) * GB) or None
         # when a file with no usable track starts its audio sync: pick, only when the viewer downloads subsync's
         # own entry for the file (proof of play: a plain subtitle request also comes for files nobody played, as
         # AIOMetadata asks for the first listed version); open, as soon as it is opened, within the checks of
         # Worker._may_open. In public mode each person's own choice replaces it (public.user_settings), "off" included
         self.audio_when = _audio_when(e)
         # Audio syncs one viewer may start a UTC day, picked or opened, and of those, opened
-        self.user_audio_per_day = max(0, int(g("SUBSYNC_USER_AUDIO_PER_DAY", "20")))
-        self.user_opened_per_day = max(0, int(g("SUBSYNC_USER_OPENED_PER_DAY", "5")))
+        self.user_audio_per_day = max(0, int(g("SUBSYNC_USER_AUDIO_PER_DAY")))
+        self.user_opened_per_day = max(0, int(g("SUBSYNC_USER_OPENED_PER_DAY")))
         # a pick (the "(Subsync)" entry's download) waits this long for the file's result, like AutoSync; AIOMetadata
         # gives up on a subtitle after 15 s
-        self.pick_wait = float(g("SUBSYNC_PICK_WAIT_MS", "14000")) / 1000
+        self.pick_wait = float(g("SUBSYNC_PICK_WAIT_MS")) / 1000
         # Every candidate judged, the best fit offered first (up to SUBSYNC_MAIN_ALTERNATIVES for the first language)
-        self.best_fit = _on(g("SUBSYNC_BEST_FIT", "on"))
-        self.alternatives = max(1, int(g("SUBSYNC_MAIN_ALTERNATIVES", "3")))
-        self.skip_ai = _on(g("SUBSYNC_SKIP_AI", "on"))                     # AI-made, machine-translated, forced: never tried
-        self.prefer_plain = _on(g("SUBSYNC_PREFER_PLAIN_TRACK", "on"))     # the plain track as the reference, not the SDH one
+        self.best_fit = _on(g("SUBSYNC_BEST_FIT"))
+        self.alternatives = max(1, int(g("SUBSYNC_MAIN_ALTERNATIVES")))
+        self.skip_ai = _on(g("SUBSYNC_SKIP_AI"))                  # AI-made, machine-translated, forced: never tried
+        self.prefer_plain = _on(g("SUBSYNC_PREFER_PLAIN_TRACK"))  # the plain track as the reference, not the SDH one
         # Sources subsync searches itself (extra.py): the keyless ones by default; SubDL,
         # SubSource and Wyzie only with a key (in public mode the service's keys, and never Wyzie); TheSubtitleDB's key
         # only raises its download limit
-        self.extra_sources = [x.strip().lower() for x in g("SUBSYNC_EXTRA_SOURCES", "osv3,osv3plus,tsdb,gestdown").split(",")
+        self.extra_sources = [x.strip().lower() for x in g("SUBSYNC_EXTRA_SOURCES").split(",")
                               if x.strip()]
-        self.subdl_key = g("SUBSYNC_SUBDL_KEY", "").strip()
-        self.subsource_key = g("SUBSYNC_SUBSOURCE_KEY", "").strip()
-        self.tsdb_key = g("SUBSYNC_TSDB_KEY", "").strip()
-        self.wyzie_key = g("SUBSYNC_WYZIE_KEY", "").strip()
-        self.source_timeout = float(g("SUBSYNC_SOURCE_TIMEOUT_S", "5"))
+        self.subdl_key = g("SUBSYNC_SUBDL_KEY").strip()
+        self.subsource_key = g("SUBSYNC_SUBSOURCE_KEY").strip()
+        self.tsdb_key = g("SUBSYNC_TSDB_KEY").strip()
+        self.wyzie_key = g("SUBSYNC_WYZIE_KEY").strip()
+        self.source_timeout = float(g("SUBSYNC_SOURCE_TIMEOUT_S"))
         # a source the AIOStreams config already has as a subtitle addon is asked once, through the config
-        self.skip_config_sources = _on(g("SUBSYNC_SKIP_CONFIG_SOURCES", "on"))
-        self.osv3_url = g("SUBSYNC_OSV3_URL", "https://opensubtitles-v3.strem.io").rstrip("/")
-        self.subsource_url = g("SUBSYNC_SUBSOURCE_URL", "https://api.subsource.net/api/v1").rstrip("/")
-        self.tsdb_url = g("SUBSYNC_TSDB_URL", "https://api.thesubtitledb.org").rstrip("/")
-        self.cinemeta_url = g("SUBSYNC_CINEMETA_URL", "https://v3-cinemeta.strem.io").rstrip("/")
-        self.gestdown_url = g("SUBSYNC_GESTDOWN_URL", "https://api.gestdown.info").rstrip("/")
-        self.subdl_url = g("SUBSYNC_SUBDL_URL", "https://api.subdl.com").rstrip("/")
-        self.subdl_download_url = g("SUBSYNC_SUBDL_DOWNLOAD_URL", "https://dl.subdl.com").rstrip("/")
-        self.wyzie_url = g("SUBSYNC_WYZIE_URL", "https://sub.wyzie.io").rstrip("/")
-        self.osv3plus_url = g("SUBSYNC_OSV3PLUS_URL", "https://opensubtitles.stremio.homes").rstrip("/")
+        self.skip_config_sources = _on(g("SUBSYNC_SKIP_CONFIG_SOURCES"))
+        self.osv3_url = g("SUBSYNC_OSV3_URL").rstrip("/")
+        self.subsource_url = g("SUBSYNC_SUBSOURCE_URL").rstrip("/")
+        self.tsdb_url = g("SUBSYNC_TSDB_URL").rstrip("/")
+        self.cinemeta_url = g("SUBSYNC_CINEMETA_URL").rstrip("/")
+        self.gestdown_url = g("SUBSYNC_GESTDOWN_URL").rstrip("/")
+        self.subdl_url = g("SUBSYNC_SUBDL_URL").rstrip("/")
+        self.subdl_download_url = g("SUBSYNC_SUBDL_DOWNLOAD_URL").rstrip("/")
+        self.wyzie_url = g("SUBSYNC_WYZIE_URL").rstrip("/")
+        self.osv3plus_url = g("SUBSYNC_OSV3PLUS_URL").rstrip("/")
         # a title's original language (origlang.py): looked up by its id, so subtitles are timed to the file's track in
         # it; TMDB with a key (the instance's, or in public mode each person's own), Wikidata always; an operator's
         # list overrides any lookup
-        self.original_language = _on(g("SUBSYNC_ORIGINAL_LANGUAGE", "on"))
-        self.tmdb_key = g("SUBSYNC_TMDB_KEY", "").strip()
-        self.tmdb_personal = _on(g("SUBSYNC_TMDB_PERSONAL", "off"))
-        self.original_languages = _overrides(g("SUBSYNC_ORIGINAL_LANGUAGES", ""))
-        self.tmdb_url = g("SUBSYNC_TMDB_URL", "https://api.themoviedb.org/3").rstrip("/")
-        self.wikidata_url = g("SUBSYNC_WIKIDATA_URL", "https://query.wikidata.org/sparql")
-        self.kitsu_url = g("SUBSYNC_KITSU_URL", "https://kitsu.app/api/edge").rstrip("/")
-        self.anilist_url = g("SUBSYNC_ANILIST_URL", "https://graphql.anilist.co")
+        self.original_language = _on(g("SUBSYNC_ORIGINAL_LANGUAGE"))
+        self.tmdb_key = g("SUBSYNC_TMDB_KEY").strip()
+        self.tmdb_personal = _on(g("SUBSYNC_TMDB_PERSONAL"))
+        self.original_languages = _overrides(g("SUBSYNC_ORIGINAL_LANGUAGES"))
+        self.tmdb_url = g("SUBSYNC_TMDB_URL").rstrip("/")
+        self.wikidata_url = g("SUBSYNC_WIKIDATA_URL")
+        self.kitsu_url = g("SUBSYNC_KITSU_URL").rstrip("/")
+        self.anilist_url = g("SUBSYNC_ANILIST_URL")
         # best fit: originals checked (no alass) for up to this many candidates; alass only on SUBSYNC_MAX_TRIES of them
-        self.gate_tries = max(1, int(g("SUBSYNC_GATE_TRIES", "20")))
-        self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB", "32")) * MB)
-        self.audio_lead = float(g("SUBSYNC_AUDIO_LEAD_MS", "190")) / 1000
+        self.gate_tries = max(1, int(g("SUBSYNC_GATE_TRIES")))
+        self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB")) * MB)
+        self.audio_lead = float(g("SUBSYNC_AUDIO_LEAD_MS")) / 1000
         # a "(synced)" entry for a file still being worked on, served as the original until the copy is ready
-        self.pending_entry = _on(g("SUBSYNC_PENDING_ENTRY", "off"))
-        self.pending_wait = float(g("SUBSYNC_PENDING_WAIT_MS", "1000")) / 1000
-        self.url_rewrite = g("SUBSYNC_URL_REWRITE", "")
-        self.read_timeout = float(g("SUBSYNC_READ_TIMEOUT_S", "60"))
-        self.size_slack = int(float(g("SUBSYNC_SIZE_SLACK_MB", "5.5")) * MB)   # listed sizes are rounded to 0.01 GiB
-        self.alass = g("SUBSYNC_ALASS", "alass")
-        self.ffmpeg = g("SUBSYNC_FFMPEG", "ffmpeg")
-        self.snap = _on(g("SUBSYNC_SNAP", "on"))                              # per-line snap after alass
-        self.snap_within = float(g("SUBSYNC_SNAP_WITHIN", "0.95"))           # a snapped copy's bar for "within 200 ms"
+        self.pending_entry = _on(g("SUBSYNC_PENDING_ENTRY"))
+        self.pending_wait = float(g("SUBSYNC_PENDING_WAIT_MS")) / 1000
+        self.url_rewrite = g("SUBSYNC_URL_REWRITE")
+        self.read_timeout = float(g("SUBSYNC_READ_TIMEOUT_S"))
+        self.size_slack = int(float(g("SUBSYNC_SIZE_SLACK_MB")) * MB)  # listed sizes are rounded to 0.01 GiB
+        self.alass = g("SUBSYNC_ALASS")
+        self.ffmpeg = g("SUBSYNC_FFMPEG")
+        self.snap = _on(g("SUBSYNC_SNAP"))                  # per-line snap after alass
+        self.snap_within = float(g("SUBSYNC_SNAP_WITHIN"))  # a snapped copy's bar for "within 200 ms"
         # the second way to pass: a re-timed copy clearly closer to the release's track than the original
-        self.better = {"paired": float(g("SUBSYNC_BETTER_PAIRED", BETTER["paired"])),
-                       "median_ms": float(g("SUBSYNC_BETTER_MEDIAN_MS", BETTER["median_ms"])),
-                       "ratio": float(g("SUBSYNC_BETTER_RATIO", BETTER["ratio"])),
+        self.better = {"paired": float(g("SUBSYNC_BETTER_PAIRED")),
+                       "median_ms": float(g("SUBSYNC_BETTER_MEDIAN_MS")),
+                       "ratio": float(g("SUBSYNC_BETTER_RATIO")),
                        # against another language's track: the alignment's median error (relgate.aligned)
-                       "cross_median_ms": float(g("SUBSYNC_BETTER_CROSS_MEDIAN_MS", BETTER["cross_median_ms"])),
-                       "cross_paired": float(g("SUBSYNC_BETTER_CROSS_PAIRED", BETTER["cross_paired"]))} \
-            if _on(g("SUBSYNC_BETTER", "on")) else None
+                       "cross_median_ms": float(g("SUBSYNC_BETTER_CROSS_MEDIAN_MS")),
+                       "cross_paired": float(g("SUBSYNC_BETTER_CROSS_PAIRED"))} \
+            if _on(g("SUBSYNC_BETTER")) else None
         # with no track in a subtitle's language, a track in one of these languages is its reference first
-        self.fallback_reference = tuple(lang_list(g("SUBSYNC_FALLBACK_REFERENCE", "eng")))
+        self.fallback_reference = tuple(lang_list(g("SUBSYNC_FALLBACK_REFERENCE")))
         # the audio route's second way to pass: a re-timed copy clearly closer to the speech than the original
-        self.audio_better = {"matched": int(g("SUBSYNC_AUDIO_BETTER_MATCHED", AUDIO_BETTER["matched"])),
-                             "miss": float(g("SUBSYNC_AUDIO_BETTER_MISS", AUDIO_BETTER["miss"])),
-                             "median_ms": float(g("SUBSYNC_AUDIO_BETTER_MEDIAN_MS", AUDIO_BETTER["median_ms"])),
-                             "within": float(g("SUBSYNC_AUDIO_BETTER_WITHIN", AUDIO_BETTER["within"])),
-                             "min_shift_s": float(g("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S", AUDIO_BETTER["min_shift_s"]))} \
-            if _on(g("SUBSYNC_AUDIO_BETTER", "on")) else None
-        self.gate_splits = _on(g("SUBSYNC_GATE_SPLITS", "on"))               # a line that splits a release line counts as paired
-        self.rank_by_release = _on(g("SUBSYNC_RANK_BY_RELEASE", "on"))       # subtitles made for this release tried first
-        self.anchored_guess = _on(g("SUBSYNC_ANCHORED_GUESS", "on"))         # a waiting file's other languages: shifted onto the main guess
-        self.list_in_sync = _on(g("SUBSYNC_LIST_IN_SYNC", "on"))             # an in-sync original further down listed as is
-        self.image_ref = _on(g("SUBSYNC_IMAGE_REF", "on"))                   # image subtitles' cue times as the reference
-        self.fast_path = _on(g("SUBSYNC_FAST_PATH", "on"))                   # originals checked first, in-sync listed at once
-        self.shift_path = _on(g("SUBSYNC_SHIFT_PATH", "on"))                 # then one steady offset (shift.py), alass after
+        self.audio_better = {"matched": int(g("SUBSYNC_AUDIO_BETTER_MATCHED")),
+                             "miss": float(g("SUBSYNC_AUDIO_BETTER_MISS")),
+                             "median_ms": float(g("SUBSYNC_AUDIO_BETTER_MEDIAN_MS")),
+                             "within": float(g("SUBSYNC_AUDIO_BETTER_WITHIN")),
+                             "min_shift_s": float(g("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S"))} \
+            if _on(g("SUBSYNC_AUDIO_BETTER")) else None
+        self.gate_splits = _on(g("SUBSYNC_GATE_SPLITS"))          # a line that splits a release line counts as paired
+        self.rank_by_release = _on(g("SUBSYNC_RANK_BY_RELEASE"))  # subtitles made for this release tried first
+        # a waiting file's other languages: shifted onto the main guess
+        self.anchored_guess = _on(g("SUBSYNC_ANCHORED_GUESS"))
+        self.list_in_sync = _on(g("SUBSYNC_LIST_IN_SYNC"))        # an in-sync original further down listed as is
+        self.image_ref = _on(g("SUBSYNC_IMAGE_REF"))              # image subtitles' cue times as the reference
+        self.fast_path = _on(g("SUBSYNC_FAST_PATH"))              # originals checked first, in-sync listed at once
+        self.shift_path = _on(g("SUBSYNC_SHIFT_PATH"))            # then one steady offset (shift.py), alass after
         # Lines paired by their words where timing hasn't settled a language (textpair.py; D1, D2)
-        self.text_pairing = _on(g("SUBSYNC_TEXT_PAIRING", "on"))
-        self.sections = _on(g("SUBSYNC_SECTIONS", "on"))                    # D4: other cuts fitted in sections
-        self.audio_extra = max(0, int(g("SUBSYNC_AUDIO_EXTRA_WINDOWS", "12")))   # D5: windows a close call may add
-        self.parallel_languages = _on(g("SUBSYNC_PARALLEL_LANGUAGES", "on")) # languages at the same time
+        self.text_pairing = _on(g("SUBSYNC_TEXT_PAIRING"))
+        self.sections = _on(g("SUBSYNC_SECTIONS"))                        # D4: other cuts fitted in sections
+        self.audio_extra = max(0, int(g("SUBSYNC_AUDIO_EXTRA_WINDOWS")))  # D5: windows a close call may add
+        self.parallel_languages = _on(g("SUBSYNC_PARALLEL_LANGUAGES"))    # languages at the same time
         # a private path key for the routes that start work or show status (manifest, subtitles, status), so a published
         # port or a reverse-proxy route can't be used to make subsync read files; the synced files and /health stay
         # open. And an optional path prefix (e.g. /subsync) that a reverse proxy forwards unchanged.
-        self.addon_key = g("SUBSYNC_ADDON_KEY", "").strip().strip("/")
-        base = g("SUBSYNC_BASE_PATH", "").strip().strip("/")
+        self.addon_key = g("SUBSYNC_ADDON_KEY").strip().strip("/")
+        base = g("SUBSYNC_BASE_PATH").strip().strip("/")
         self.base_path = "/" + base if base else ""
         # rows of these addons (comma-separated names) are never read (empty by default)
-        self.skip_addons = tuple(n.strip() for n in g("SUBSYNC_SKIP_ADDONS", "").split(",") if n.strip())
+        self.skip_addons = tuple(n.strip() for n in g("SUBSYNC_SKIP_ADDONS").split(",") if n.strip())
         # public mode: one service for many people, each signed up with their own AIOStreams (public.py)
-        self.public = _on(g("SUBSYNC_PUBLIC", "off"))
-        self.secret_key = g("SUBSYNC_SECRET_KEY", "").strip()                  # encrypts users' records; never logged
-        self.invite = g("SUBSYNC_PUBLIC_INVITE", "").strip()
-        self.max_users = int(g("SUBSYNC_MAX_USERS", "200"))
-        self.signups_per_hour = int(g("SUBSYNC_SIGNUPS_PER_HOUR", "5"))      # per address
-        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "200"))
-        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "10000")) * MB)
-        self.user_queue = int(g("SUBSYNC_USER_QUEUE", "3"))
+        self.public = _on(g("SUBSYNC_PUBLIC"))
+        self.secret_key = g("SUBSYNC_SECRET_KEY").strip()  # encrypts users' records; never logged
+        self.invite = g("SUBSYNC_PUBLIC_INVITE").strip()
+        self.max_users = int(g("SUBSYNC_MAX_USERS"))
+        self.signups_per_hour = int(g("SUBSYNC_SIGNUPS_PER_HOUR"))  # per address
+        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY"))
+        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB")) * MB)
+        self.user_queue = int(g("SUBSYNC_USER_QUEUE"))
         # the most languages a person may choose on the sign-up and settings pages
-        self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES", "4"))
-        self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS", "100"))
-        self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN", "30")) * 60
-        self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS", "180"))
+        self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES"))
+        self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS"))
+        self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN")) * 60
+        self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS"))
         # each person's AIOStreams checked again, at most this often, while they use the service (recheck.py); 0: never
-        self.recheck_hours = float(g("SUBSYNC_RECHECK_HOURS", "24"))
+        self.recheck_hours = float(g("SUBSYNC_RECHECK_HOURS"))
         # the web server's addresses; "gateway" is this container's default gateway, found at start (the address a
         # web server reaching subsync through a port Docker publishes comes from), so no fixed Docker network is needed
-        proxies = [a.strip() for a in g("SUBSYNC_TRUSTED_PROXY", "127.0.0.1").split(",") if a.strip()]
+        proxies = [a.strip() for a in g("SUBSYNC_TRUSTED_PROXY").split(",") if a.strip()]
         self.gateway_missing = False
         trusted = []
         for proxy in proxies:
@@ -263,19 +284,19 @@ class Settings:
             if proxy and proxy not in trusted:
                 trusted.append(proxy)
         self.trusted_proxy = tuple(trusted)
-        self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS", "256"))
+        self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS"))
         # files worked on at once for everyone (each person's worker takes a place of one shared turn)
-        self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE", "auto"))
+        self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE"))
         # audio syncs at once for everyone (public mode's audio places, worker.audio_places): auto is half the places
-        self.audio_at_once = _audio_at_once(g("SUBSYNC_AUDIO_AT_ONCE", "auto"))
+        self.audio_at_once = _audio_at_once(g("SUBSYNC_AUDIO_AT_ONCE"))
         # Usenet: off by default. On: files are also looked for through a second config, the Usenet
         # config, when the sync config doesn't have them, at most SUBSYNC_USENET_LISTINGS_PER_DAY times a day (per
         # person in public mode, where "on" lets each person turn it on for themselves and their record holds the
         # Usenet config's link); a file with no usable track takes the audio route like a debrid one
-        self.usenet = _on(g("SUBSYNC_USENET", "off"))
-        self.usenet_listings_per_day = max(0, int(g("SUBSYNC_USENET_LISTINGS_PER_DAY", "10")))
-        self.usenet_manifest = g("SUBSYNC_USENET_MANIFEST", "")
-        self.usenet_password = g("SUBSYNC_USENET_PASSWORD", "")
+        self.usenet = _on(g("SUBSYNC_USENET"))
+        self.usenet_listings_per_day = max(0, int(g("SUBSYNC_USENET_LISTINGS_PER_DAY")))
+        self.usenet_manifest = g("SUBSYNC_USENET_MANIFEST")
+        self.usenet_password = g("SUBSYNC_USENET_PASSWORD")
 
     def secret_bytes(self):
         """The public mode's secret: base64url of at least 32 random bytes. ValueError otherwise."""

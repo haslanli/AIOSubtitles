@@ -51,6 +51,12 @@ def within(ms, limit_ms):
     return ms <= limit_ms + EPS_S * 1000
 
 
+def lands(times, t, near):
+    """Whether one of `times` (sorted) is within `near` seconds of t: a line start landing on another track's."""
+    k = bisect.bisect_left(times, t - near)
+    return k < len(times) and times[k] <= t + near
+
+
 def _tenths(cand):
     """Each tenth of the candidate's span, first to last start (the last tenth closed): (tenth, the indexes of its
     lines). cand sorted."""
@@ -89,8 +95,7 @@ def missing_scene(ref, cand, window=WINDOW):
         return 0, 0.0
     best, run = (0, 0.0), []
     for r in ref[bisect.bisect_left(ref, cand[0]):bisect.bisect_right(ref, cand[-1])]:
-        k = bisect.bisect_left(cand, r - window)
-        if k < len(cand) and cand[k] <= r + window:
+        if lands(cand, r, window):
             run = []
             continue
         run.append(r)

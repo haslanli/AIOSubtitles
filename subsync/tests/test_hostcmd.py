@@ -92,6 +92,19 @@ class HostCmdTest(unittest.TestCase):
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 2)
                 self.assertEqual(sorted(os.listdir(self.data)), before)          # nothing made beside it
 
+    def test_reading_settings_loads_none_of_the_sync(self):
+        # Settings imported lang_list from the worker, so `hostcmd status` (and anything else that only reads
+        # settings) loaded the worker, the sync's 20-odd modules and numpy: "Standard library only" above was false
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        probe = ("import sys\nsys.path.insert(0, sys.argv[1])\nimport subsync.hostcmd\nfrom subsync.settings import "
+                 "Settings\nSettings({})\nprint(sorted(m for m in sys.modules if m == 'numpy' or m.startswith("
+                 "('numpy.', 'subsync.worker', 'subsync.pipeline', 'subsync.audiofit'))))")
+        run = subprocess.run([sys.executable, "-I", "-c", probe, root], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=60, env={"PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
+        self.assertEqual(run.stdout.strip(), "[]")
+
 
 if __name__ == "__main__":
     unittest.main()

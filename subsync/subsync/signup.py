@@ -28,6 +28,8 @@ from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, PUBLIC_RETRY_WAIT
                          AiosApi, AiosError, install_link, is_subsync_preset, new_key, parse_languages, sync_config,
                          sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins,
                          without_subsync)
+from .langs import DEFAULT_LANGUAGE
+from .langs import name as lang_name
 from .settings import AUDIO_CHOICES
 from .users import new_token
 
@@ -172,9 +174,10 @@ def _password(form):
 
 
 def _languages(text, limit=MAX_LANGUAGES):
-    """The chosen languages as codes, at most `limit` (the instance's SUBSYNC_MAX_LANGUAGES); English when none."""
+    """The chosen languages as codes, at most `limit` (the instance's SUBSYNC_MAX_LANGUAGES); DEFAULT_LANGUAGE (English)
+    when none."""
     if not (text or "").strip():
-        text = "English"
+        text = lang_name(DEFAULT_LANGUAGE)
     langs, problem = parse_languages(text, limit or MAX_LANGUAGES)
     if problem:
         raise SignupError(problem, field="languages")

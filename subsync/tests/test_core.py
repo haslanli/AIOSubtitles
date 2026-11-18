@@ -718,6 +718,75 @@ class BestShiftTest(unittest.TestCase):
     def test_nothing_to_go_on(self):
         self.assertEqual(shift.best_shift([], self.ref), (1.0, 0.0, 0))
 
+    def test_of_equal_peaks_the_smallest_offset_and_then_the_earlier(self):
+        # One peak picker with ends and without
+        self.assertEqual(shift._offset([10.0], [8.0, 13.0], 120.0), -2.0)
+        self.assertEqual(shift._offset([10.0], [8.0, 12.0], 120.0), -2.0)
+        self.assertEqual(shift._offset([10.0], [8.0, 12.0], 120.0, ([11.0], [9.0, 13.0])), -2.0)
+        self.assertEqual(shift._offset([10.0], [8.0, 12.0], 120.0, ([11.0], [13.0])), 2.0)     # the end decides
+        self.assertEqual(shift._offset([10.0], [200.0], 120.0), 0.0)                          # nothing in reach
+
+
+class StartWindowTest(unittest.TestCase):
+    """The start-difference histogram is taken a block at a time, against only the reference starts a block can
+    reach: the same bins as every pair at once, in memory that doesn't grow with the line counts."""
+
+    @staticmethod
+    def every_pair(cand, ref, max_offset):
+        """The histogram as it was made from the whole |ref| x |cand| difference matrix."""
+        import numpy as np
+        diffs = np.subtract.outer(np.asarray(ref), np.asarray(cand)).ravel()
+        diffs = diffs[np.abs(diffs) <= max_offset]
+        if not diffs.size:
+            return None
+        n = int(round(max_offset / shift.BIN_S))
+        counts = np.bincount(np.rint(diffs / shift.BIN_S).astype(np.int64) + n, minlength=2 * n + 1)
+        return np.convolve(counts, np.ones(3, dtype=np.int64), mode="same").tolist(), n
+
+    def cases(self):
+        rng = random.Random(5)
+        yield [], [1.0, 2.0]
+        yield [1.0, 2.0], []
+        yield [0.0], [120.0, -120.0, 120.000001, 600.0, -600.0]           # exactly at the window's edges, and past
+        yield [10.0], [10.025, 10.075, 9.975, 12.525, 129.975, 129.9749]  # half bins
+        for _ in range(40):
+            ref = [round(rng.uniform(0, 3600), rng.choice([3, 6])) for _ in range(rng.randint(1, 400))]
+            off = rng.choice([0.0, 1.43, -60.0, 119.975, 300.0])
+            cand = [r - off + rng.gauss(0, 0.05) for r in ref if rng.random() < 0.7]
+            cand += [rng.uniform(0, 3600) for _ in range(rng.randint(0, 200))]
+            cand += [rng.choice(ref) - rng.choice([120.0, -120.0, 600.0, 0.025, -2.525]) for _ in range(5)]
+            rng.shuffle(cand)
+            yield cand, ref
+
+    def test_the_bins_are_those_of_every_pair_whatever_the_blocks(self):
+        from unittest import mock
+        for starts, pairs in ((shift.STARTS_AT_ONCE, shift.PAIRS_AT_ONCE), (7, 50), (1, 1)):
+            with mock.patch.object(shift, "STARTS_AT_ONCE", starts), mock.patch.object(shift, "PAIRS_AT_ONCE", pairs):
+                for i, (cand, ref) in enumerate(self.cases()):
+                    for max_offset in (120.0, 600.0):
+                        with self.subTest(blocks=(starts, pairs), case=i, max_offset=max_offset):
+                            got = shift._window(cand, sorted(ref), max_offset)
+                            want = self.every_pair(cand, ref, max_offset)
+                            self.assertEqual(None if got is None else (got[0].tolist(), got[1]), want)
+
+    def test_a_long_or_dense_track_takes_little_memory(self):
+        # every pair at once: 1,700 x 8,000 starts peaked at ~220 MiB; a crafted track of 20,000 cues within five
+        # minutes against 1,000 lines at ~380 MiB. Blocked: a few arrays of PAIRS_AT_ONCE (2^20) differences at most
+        import tracemalloc
+        rng = random.Random(9)
+        long_ = (sorted(rng.uniform(0, 7200) for _ in range(8000)), sorted(rng.uniform(0, 7200) for _ in range(1700)))
+        dense = (sorted(rng.uniform(900, 1400) for _ in range(1000)),
+                 sorted([rng.uniform(1000, 1300) for _ in range(20000)] + [7000.0]))
+        for name, (cand, ref) in (("long", long_), ("dense", dense)):
+            with self.subTest(track=name):
+                tracemalloc.start()
+                try:
+                    self.assertIsNotNone(shift._window(cand, ref, 120.0))
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak, 32 * 2 ** 20)
+
 
 class MissingSceneTest(unittest.TestCase):
     """A subtitle for another cut lacks the scenes this release adds: a stretch of the release's lines with no candidate

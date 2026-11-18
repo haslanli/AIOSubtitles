@@ -65,6 +65,8 @@ NAMES = {"aar": "Afar", "abk": "Abkhazian", "afr": "Afrikaans", "aka": "Akan", "
          "wol": "Wolof", "xho": "Xhosa", "yid": "Yiddish", "yor": "Yoruba", "zha": "Zhuang", "zul": "Zulu"}
 BY_NAME = {v.lower(): k for k, v in NAMES.items()}
 TWO_OF = {three: two for two, three in TWO.items()}     # ISO 639-2/B -> ISO 639-1
+# the language synced when none is chosen: SUBSYNC_LANGUAGES' default, the sign-up's first language
+DEFAULT_LANGUAGE = "eng"
 
 
 # TMDB's original languages are ISO 639-1 codes, plus two of its own: "cn" (Cantonese, which Matroska tracks tag as
@@ -89,6 +91,11 @@ def lang3(code):
     if key in TWO:
         return TWO[key]
     return BY_NAME.get(raw.lower(), key or "und")
+
+
+def lang_list(text):
+    """Comma-separated codes (a setting's value) as three-letter codes, in their order."""
+    return [lang3(x) for x in (text or "").split(",") if x.strip()]
 
 
 def lang2(code):
