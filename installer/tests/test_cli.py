@@ -107,12 +107,6 @@ class CommandLine(FlowFixture):
         self.assertEqual(code, 1)
         self.assertIn('Port 8790 on this machine is already in use.', out)
 
-    def answers_file(self, answers):
-        path = os.path.join(self.tmp.name, 'answers-cli')
-        with open(path, 'w') as f:
-            f.write(''.join(f'{k}={v}\n' for k, v in answers.items()))
-        return path
-
     def test_the_readme_says_how_setup_and_updates_work_now(self):
         readme = (REPO / 'README.md').read_text()
         install = readme.split('## Install', 1)[1].split('\n## ', 1)[0]

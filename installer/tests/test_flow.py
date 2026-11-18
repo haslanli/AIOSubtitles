@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import io
+import itertools
 import json
 import os
 import socket
@@ -16,12 +17,13 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, engine, plan, where, wizard
-from subsync import explain, realdebrid
+from subsync import aiosconfig, explain, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
 PASSWORD = 'viewer-secret-password'
 PUBLIC = 'https://aio.example.com'
 IMAGE = 'ghcr.io/haslanli/aiosubtitles:1.0.0@sha256:' + 'c' * 64
+POLL = 0.05     # how often a stand-in server looks for shutdown(): closing one waits up to this long
 
 
 SERVICE_NAMES = {'aiostreams': 'AIOStreams', 'nzbdav': 'NzbDAV', 'altmount': 'AltMount', 'torbox': 'TorBox',
@@ -85,6 +87,7 @@ class FakeAios:
         self.setting_source = 'database'   # 'environment': fixed by SUBTITLE_CACHE_TTL, not changed through the API
         self.has_cache_setting = True      # False: an AIOStreams version without the subtitle cache setting
         self.keeps_setting = True          # False: a change of the setting is answered but not kept
+        self.made = itertools.count(1)     # numbers each new config: no ID is given twice, a deleted one included
         self.log = []
         outer = self
 
@@ -225,7 +228,7 @@ class FakeAios:
                     return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_CONFIG', 'message': refused}})
                 if not outer.manifests_ok(body['config']):
                     return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_CONFIG', 'message': 'fetch failed'}})
-                uuid = f'9{len(outer.users)}aaaaaa-1234-4abc-8def-0123456789ab'
+                uuid = f'9{next(outer.made)}'.ljust(8, 'a') + '-1234-4abc-8def-0123456789ab'
                 outer.users[uuid] = {'password': body['password'], 'config': body['config']}
                 return self._json(201, {'success': True, 'data': {'uuid': uuid, 'encryptedPassword': 'ENC-' + uuid[:4]}})
 
@@ -239,6 +242,7 @@ class FakeAios:
 
             def do_PATCH(self):
                 body = self._body()
+                outer.log.append(('PATCH', urllib.parse.urlsplit(self.path).path, None))
                 if self._refused_unless_admin():
                     return
                 if outer.keeps_setting:
@@ -247,7 +251,7 @@ class FakeAios:
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), H)
         self.url = f'http://127.0.0.1:{self.server.server_address[1]}'
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': POLL}, daemon=True).start()
 
     def manifests_ok(self, config):
         """Like AIOStreams: a config listing a custom addon is saved only if that addon's manifest answers."""
@@ -258,15 +262,35 @@ class FakeAios:
         self.server.server_close()
 
 
-class FlowFixture(unittest.TestCase):
-    """A stand-in AIOStreams with Docker stubbed out (no tests here: test_web.py drives the page on it too)."""
+class AnswersRun:
+    """./setup run as `./setup --answers FILE --yes`, its answers file written in the test's folder (self.tmp); used
+    by FlowFixture, test_hosting's RouteFixture and test_cli."""
+
+    def answers_file(self, answers):
+        path = Path(self.tmp.name) / 'answers'
+        path.write_text('\n'.join(f'{k}={v}' for k, v in answers.items()) + '\n')
+        return str(path)
+
+    def run_setup(self, answers, *extra):
+        """(exit code, what setup printed)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(['--answers', self.answers_file(answers), '--yes', *extra])
+        return code, out.getvalue()
+
+
+class FlowFixture(AnswersRun, unittest.TestCase):
+    """A stand-in AIOStreams with Docker stubbed out (no tests here: test_web.py drives the page on it too). Everything
+    it sets up is undone by cleanups, last first, so a subclass patching a name again (Bridge's PLACE) gets its own
+    value back first, and a setUp that fails halfway leaves nothing behind for later tests."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.state = Path(self.tmp.name) / 'state'
         self.aios = FakeAios()
+        self.addCleanup(self.aios.close)
         self.exec_calls = []
-        self.built = False
         self.selftest = {'ok': True, 'container': 'mkv', 'matroska': True, 'size': 1000,
                          'text_tracks': [{'language': 'eng', 'lines': 900, 'forced': False}], 'image_tracks': 0,
                          'bytes': 700000, 'requests': 4}
@@ -283,7 +307,7 @@ class FlowFixture(unittest.TestCase):
 
         self.place = where.Place('image', 'host', 'c0ffee', IMAGE, False, 'ghcr.io/haslanli/aiosubtitles:latest', None,
                                  '/home/me/aiosubtitles', (os.getuid(), os.getgid()), '')
-        self.patches = [
+        for p in (
             mock.patch.object(engine, 'STATE', self.state),
             mock.patch.object(engine, 'REPO', Path(self.tmp.name)),
             mock.patch.object(engine, 'PLACE', self.place),
@@ -296,12 +320,12 @@ class FlowFixture(unittest.TestCase):
             mock.patch.object(dockerenv, 'lan_address', lambda: '192.168.1.5'),
             mock.patch.object(dockerenv, 'container_state', lambda n: 'running healthy'),
             mock.patch.object(dockerenv, 'compose', self._compose),
-            mock.patch.object(dockerenv, 'run', lambda *a, **k: (0, '["sha256:built"]' if self.built else '', '')),
+            mock.patch.object(dockerenv, 'run', lambda *a, **k: (0, '', '')),
             mock.patch.object(dockerenv, 'exec_in', exec_in),
             mock.patch.object(engine.Aios, 'call', self._call_public_health(engine.Aios.call, self.aios)),
-        ]
-        for p in self.patches:
+        ):
             p.start()
+            self.addCleanup(p.stop)
 
     def _compose(self, state, *args, **kw):
         self.assertNotIn('build', args)                     # nothing is built: the image is setup's own
@@ -319,20 +343,6 @@ class FlowFixture(unittest.TestCase):
                 return (200, b'ok') if aios.subsync_up else (502, b'')
             return real(self, method, path, *a, **k)
         return call
-
-    def tearDown(self):
-        for p in self.patches:
-            p.stop()
-        self.aios.close()
-        self.tmp.cleanup()
-
-    def run_setup(self, answers, *extra):
-        path = Path(self.tmp.name) / 'answers'
-        path.write_text('\n'.join(f'{k}={v}' for k, v in answers.items()) + '\n')
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--answers', str(path), '--yes', *extra])
-        return code, out.getvalue()
 
     ANSWERS = {'AIOS_CONFIG_ID': f'{PUBLIC}/stremio/{UUID}/ENC/manifest.json', 'AIOS_CONFIG_PASSWORD': PASSWORD,
                'LANGUAGES': 'English, Russian', 'TEST_READ': 'yes'}
@@ -377,7 +387,7 @@ class Flow(FlowFixture):
         self.assertIn('--size', selftest[0][0])
         listing_agents = {ua for m, p, ua in self.aios.log if m == 'GET' and '/stream/' in str(p)}
         self.assertTrue(all(ua.startswith('AIO') for ua in listing_agents))
-        self.assertIn('reads 1 MB', out.replace('Read 0.7 MB', 'reads 1 MB'))
+        self.assertIn('Read 0.7 MB in 4 requests', out)                   # the self-test's bytes and requests
 
         # a re-run with all answers kept: the viewer config is not saved again, the sync config is updated in place
         puts_before = sum(1 for m, *_ in self.aios.log if m == 'PUT')
@@ -422,6 +432,7 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', engine.read_kv(self.state / 'subsync.env'))
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
+        self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')   # remembered
 
     def test_the_audio_question_has_three_answers(self):
@@ -502,15 +513,19 @@ class Flow(FlowFixture):
                 self.assertEqual(env_path.read_text(), before)
         self.assertEqual(plan.audio_answer('1'), None)                     # never read as an answer either way
 
-    def test_the_answers_example_runs_as_it_is(self):
-        # docs/answers.example's own values are answers setup takes (the audio question's "no" included)
+    def test_the_answers_examples_values_are_answers_setup_takes(self):
+        # docs/answers.example's own values, the audio question's "no" included, with only the config filled in. Its
+        # AIOS_URL line is left out: an address given turns off finding AIOStreams' container, which this run needs
         from installer import docs
         example = plan.parse_env(docs.answers_example())
         self.assertEqual(plan.audio_answer(example['AUDIO']), 'no')
         self.assertEqual(example['SUBSYNC_AUDIO_ROUTE'], 'no')
-        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO=example['AUDIO']))
+        answers = dict(example, AIOS_CONFIG_ID=UUID, AIOS_CONFIG_PASSWORD=PASSWORD)
+        del answers['AIOS_URL']
+        code, out = self.run_setup(answers)
         self.assertEqual(code, 0, out)
-        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_ROUTE'], 'off')
+        env = engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_LANGUAGES']), ('off', 'eng'))
 
     def test_an_audio_limit_set_by_hand_is_kept_while_the_audio_route_is_off(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
@@ -523,10 +538,10 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(env_path)['SUBSYNC_AUDIO_BUDGET_GB'], '3')
 
-    def test_a_wrong_audio_limit_is_asked_again(self):
+    def test_a_wrong_audio_limit_stops_an_answers_file_run(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='yes', AUDIO_BUDGET='3'))
-        self.assertNotEqual(code, 0)
-        self.assertIn('0.5, 1, 2 or 4', out)
+        self.assertEqual(code, 1, out)
+        self.assertIn('AUDIO_BUDGET: Type 0.5, 1, 2 or 4 (GB per file).', out)    # the refusal, not the question
 
     def test_an_unknown_config_id_is_caught_before_the_password(self):
         # test 13: a well-formed but unknown ID used to ask for the password forever
@@ -608,6 +623,7 @@ class Flow(FlowFixture):
 
     def test_the_web_server_rule_is_shown_only_while_it_is_needed(self):
         code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
         self.assertIn('Your web server needs one rule', out)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
         self.assertEqual(code, 0, out)
@@ -615,7 +631,8 @@ class Flow(FlowFixture):
         self.assertIn('already reaches subsync', out)
 
     def test_uninstall_says_what_stays(self):
-        self.run_setup(self.ANSWERS)
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
         self.assertIn(f'docker image rm {IMAGE}', out)
@@ -632,6 +649,7 @@ class Flow(FlowFixture):
         self.assertNotIn('subdl-secret-key', out)
         self.assertNotIn('wyzie-secret-key', out)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps them
+        self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_SUBDL_KEY'], 'subdl-secret-key')
 
     def test_a_tmdb_key_reaches_subsync_and_is_never_shown(self):
@@ -643,24 +661,35 @@ class Flow(FlowFixture):
         self.assertIn('TMDB API key (optional)', out)
         self.assertIn('not endorsed, certified, or otherwise approved by TMDB', out)      # TMDB's notice by the question
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # a re-run keeps it
+        self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_TMDB_KEY'], 'tmdb-secret-key')
         self.assertNotIn('tmdb-secret-key', out)
 
     def test_without_keys_nothing_is_written(self):
-        self.run_setup(self.ANSWERS)
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
         env = engine.read_kv(self.state / 'subsync.env')
         self.assertNotIn('SUBSYNC_SUBDL_KEY', env)
         self.assertNotIn('SUBSYNC_WYZIE_KEY', env)
         self.assertNotIn('SUBSYNC_TMDB_KEY', env)
 
     def test_short_rate_limit_is_waited_out(self):
+        # twice "too many requests, retry after 1 s": the client waits what AIOStreams asks (not really slept here),
+        # and says so once
         self.aios.throttle = 2
-        code, out = self.run_setup(self.ANSWERS)
+        said = io.StringIO()
+        with mock.patch.object(aiosconfig, 'time', spec=['sleep', 'monotonic']) as clock, \
+                contextlib.redirect_stderr(said):
+            clock.monotonic.side_effect = time.monotonic           # a body's read deadline keeps the real clock
+            code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.aios.throttle, 0)
+        self.assertEqual(clock.sleep.call_args_list, [mock.call(1), mock.call(1)])
+        self.assertEqual(said.getvalue().count('AIOStreams asks to slow down; waiting 1 s'), 1)
 
     def test_quoted_lines_are_read_as_compose_reads_them_and_kept_as_written(self):
-        self.run_setup(self.ANSWERS)
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
         with open(self.state / 'subsync.env', 'a') as f:
             f.write('SUBSYNC_EXTRA_SOURCES="a #b"\nSUBSYNC_MAX_TRIES=\'9\' # mine\nSUBSYNC_DAILY_BUDGET_GB="50"\n')
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': '"' + PASSWORD + '"', 'TEST_READ': 'no'})   # quoted too
@@ -671,7 +700,8 @@ class Flow(FlowFixture):
         self.assertIn('\nSUBSYNC_DAILY_BUDGET_GB=50\n', text)                    # read as 50: the answer it keeps
 
     def test_a_rerun_keeps_settings_added_by_hand(self):
-        self.run_setup(self.ANSWERS)
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
         with open(self.state / 'subsync.env', 'a') as f:
             f.write('SUBSYNC_MAX_TRIES=9\nSUBSYNC_EXTRA_SOURCES=\nSUBSYNC_LANGUAGES=fre\n')
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
@@ -722,11 +752,11 @@ class Flow(FlowFixture):
         row['streamData']['service']['id'] = 'torbox'
         self.assertTrue(engine.readable(row))
 
-    def test_wrong_password_is_asked_again_then_stops(self):
+    def test_a_wrong_password_stops_an_answers_file_run(self):
         code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_PASSWORD='nope'))
         self.assertEqual(code, 1)
         self.assertIn("don't match", out)
-        self.assertNotIn('nope', out.replace('(from the answers file)', ''))
+        self.assertNotIn('nope', out)
 
     def test_gated_instance_signs_in_and_cache_setting(self):
         self.aios.gated = True
@@ -734,6 +764,7 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         self.assertIn('Signed in', out)
         self.assertEqual(self.aios.setting, {'*': 300, 'aiosubtitles-subsync': -1})
+        self.assertIn(('PATCH', '/api/v1/dashboard/settings', None), self.aios.log)   # the change is in the log
         self.assertNotIn('adminpw', out)
 
 
@@ -741,14 +772,6 @@ class Flow(FlowFixture):
 
     def page_engine(self, answers):
         return engine.Engine(answers, page=True)
-
-    def test_the_stand_in_refuses_an_addon_naming_a_service_the_config_lacks(self):
-        config = {'services': [{'id': 'torbox', 'enabled': True, 'credentials': {}}],
-                  'presets': [{'type': 'prowlarr', 'enabled': True, 'options': {'name': 'Prowlarr',
-                                                                                'services': ['torbox', 'nzbdav']}}]}
-        self.assertIn('You have specified NzbDAV in your configuration for Prowlarr', refusal(config))
-        config['presets'][0]['options']['services'] = ['torbox']
-        self.assertIsNone(refusal(config))
 
     def test_a_prowlarr_addon_naming_usenet_doesnt_stop_setup(self):
         # the sync config leaves Usenet out, so each kept addon's own Services choice loses it too
@@ -779,6 +802,7 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_DAILY_BUDGET_GB'], '20')
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})       # kept on a re-run
+        self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_DAILY_BUDGET_GB'], '20')
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no',
                                     'SUBSYNC_DAILY_BUDGET_GB': '100'})
@@ -794,8 +818,9 @@ class Flow(FlowFixture):
             ({'AIOS_CONFIG_ID': 'nope'}, 'read_viewer', 'AIOS_CONFIG_ID', 'That has no config ID in it'),
             ({'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': 'wrong'}, 'read_viewer', 'AIOS_CONFIG_PASSWORD',
              "don't match"),
-            ({'LANGUAGES': 'Klingon'}, 'choices', 'LANGUAGES', ''),
-            ({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': 'ftp://x'}, 'choices', 'PUBLIC_ADDRESS', ''),
+            ({'LANGUAGES': 'Klingon'}, 'choices', 'LANGUAGES', 'Not a language I know: Klingon'),
+            ({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': 'ftp://x'}, 'choices', 'PUBLIC_ADDRESS',
+             'Type a full address that starts with http:// or https://'),
             ({'LANGUAGES': 'English', 'SUBSYNC_DAILY_BUDGET_GB': '0'}, 'limits', 'SUBSYNC_DAILY_BUDGET_GB',
              'A number above 0, like 100.'),
         ]
@@ -852,7 +877,8 @@ class Flow(FlowFixture):
                          "After adding it on AIOStreams' configure page, go back one step and continue again.")
 
     def test_the_status_as_the_page_after_setup_shows_it(self):
-        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
         rows, details = self.page_engine({}).status_parts()
         self.assertEqual(rows[0], ('ok', 'container aiosubtitles-subsync: running healthy', None))
         self.assertEqual(dict(details)['AIOStreams'], PUBLIC)
@@ -862,8 +888,9 @@ class Flow(FlowFixture):
         self.assertEqual(dict(details)['logs'], 'docker logs aiosubtitles-subsync')
 
     def test_removing_on_the_page(self):
-        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
-        e = self.page_engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'})
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        e =self.page_engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'})
         e.remove()
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
         self.assertIn(('ok', 'Done.'), [tuple(r[:2]) for r in e.out.rows])
@@ -871,8 +898,9 @@ class Flow(FlowFixture):
         self.assertFalse((self.state / 'settings.json').exists())
 
     def test_removing_needs_the_config_password(self):
-        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
-        e = self.page_engine({'CONFIRM': 'yes'})
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        e =self.page_engine({'CONFIRM': 'yes'})
         with self.assertRaises(engine.Problem) as caught:
             e.remove()
         self.assertEqual(caught.exception.field, 'AIOS_CONFIG_PASSWORD')
@@ -908,16 +936,12 @@ class RealDebridGate(unittest.TestCase):
                 self.send_header('Content-Length', '0')
                 self.end_headers()
         server = ThreadingHTTPServer(('127.0.0.1', 0), H)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, kwargs={'poll_interval': POLL}, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         with self.assertLogs('subsync.realdebrid', 'WARNING'):
             with self.assertRaises(engine.AiosError):
                 engine.Aios(f'http://127.0.0.1:{server.server_address[1]}').call('GET', '/api/v1/status')
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class Bridge(FlowFixture):
@@ -936,7 +960,7 @@ class Bridge(FlowFixture):
                   mock.patch.object(dockerenv, 'join', lambda net, c: self.joined.append((net, c)) or True),
                   mock.patch.object(dockerenv, 'probe', probe)):
             p.start()
-            self.patches.append(p)
+            self.addCleanup(p.stop)
 
     def container(self, **kw):
         return dict({'name': 'aiostreams', 'image': 'ghcr.io/viren070/aiostreams:latest', 'port': 3000, 'base_url': '',
@@ -990,7 +1014,7 @@ class Bridge(FlowFixture):
         self.assertEqual(code, 1)
         self.assertNotIn('Step 2', out)                                    # stopped at "This machine"
         self.assertFalse(self.state.exists() and any(self.state.iterdir()))
-        self.assertFalse([m for m, *_ in self.aios.log if m in ('POST', 'PUT', 'DELETE')])   # AIOStreams untouched
+        self.assertFalse([m for m, *_ in self.aios.log if m in ('POST', 'PUT', 'DELETE', 'PATCH')])   # untouched
 
     def test_the_install_writes_the_folders_setup_and_labels_its_compose(self):
         with mock.patch.object(engine.Engine, 'aios_urls', lambda e, c: [self.aios.url]), \
@@ -1018,7 +1042,8 @@ class ImageNames(FlowFixture):
     """A pinned image's full name is one long word: what to remove is shown by its short ID (the 16-shape check)."""
 
     def test_the_image_to_remove_is_named_by_its_short_id(self):
-        self.run_setup(self.ANSWERS)
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 0, out)
 
         def run(cmd, timeout=60, stdin=None):
             if cmd[:3] == ['docker', 'image', 'inspect'] and cmd[-1] == IMAGE:
@@ -1031,3 +1056,64 @@ class ImageNames(FlowFixture):
 
     def test_an_image_docker_doesnt_know_keeps_its_name(self):
         self.assertEqual(engine.image_handle(IMAGE), IMAGE)
+
+
+class Fixtures(unittest.TestCase):
+    """The stand-in AIOStreams and FlowFixture themselves, which the flow tests here and in other modules rely on."""
+
+    def patched_names(self):
+        return engine.STATE, engine.PLACE, dockerenv.compose, engine.Aios.call
+
+    def test_the_stand_in_refuses_an_addon_naming_a_service_the_config_lacks(self):
+        config = {'services': [{'id': 'torbox', 'enabled': True, 'credentials': {}}],
+                  'presets': [{'type': 'prowlarr', 'enabled': True, 'options': {'name': 'Prowlarr',
+                                                                                'services': ['torbox', 'nzbdav']}}]}
+        self.assertIn('You have specified NzbDAV in your configuration for Prowlarr', refusal(config))
+        config['presets'][0]['options']['services'] = ['torbox']
+        self.assertIsNone(refusal(config))
+
+    def test_the_stand_in_never_gives_a_config_id_twice(self):
+        # a config made after a delete took the ID of the last one made, and replaced it
+        aios = FakeAios()
+        self.addCleanup(aios.close)
+        api = engine.Aios(aios.url)
+        empty = {'services': [], 'presets': []}
+        first, _ = api.create_config(empty, 'first')
+        second, _ = api.create_config(empty, 'second')
+        api.delete_config(first, 'first')
+        third, _ = api.create_config(empty, 'third')
+        self.assertEqual(len({UUID, first, second, third}), 4)
+        self.assertEqual((aios.users[second]['password'], aios.users[third]['password']), ('second', 'third'))
+
+    def test_a_flow_test_leaves_every_name_as_it_found_it(self):
+        # Bridge patches PLACE again over FlowFixture's: stopped first to last, FlowFixture's image route stayed for
+        # every later test (test_hosting and test_web then took another path than when run alone)
+        before = self.patched_names()
+        result = unittest.TestResult()
+        Bridge('test_the_machines_ports_and_address_come_from_the_helper').run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(self.patched_names(), before)
+
+    def test_a_set_up_that_fails_halfway_still_undoes_everything(self):
+        made = []
+
+        class Broken(FlowFixture):
+            def setUp(self):
+                super().setUp()
+                made.append((self.aios, Path(self.tmp.name)))
+                raise RuntimeError('a later step of setUp failed')
+
+            def test_nothing(self):
+                pass
+        before = self.patched_names()
+        result = unittest.TestResult()
+        Broken('test_nothing').run(result)
+        self.assertEqual(len(result.errors), 1)
+        self.assertEqual(self.patched_names(), before)
+        aios, folder = made[0]
+        self.assertEqual(aios.server.socket.fileno(), -1)                     # the stand-in is closed
+        self.assertFalse(folder.exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -181,7 +181,7 @@ class Offline(FlowFixture):
             return real(address, *args, **kwargs)
         for patch in (mock.patch('socket.create_connection', local_only), mock.patch.object(ui, 'COLOR', False)):
             patch.start()
-            self.patches.append(patch)
+            self.addCleanup(patch.stop)
 
     def keys(self):
         return engine.read_kv(self.state / 'secrets.env')
@@ -529,7 +529,7 @@ class OnBridge(Offline):
                   mock.patch.object(dockerenv, 'join', lambda net, c: self.joined.append((net, c)) or True),
                   mock.patch.object(dockerenv, 'probe', probe)):
             p.start()
-            self.patches.append(p)
+            self.addCleanup(p.stop)
         self.status = engine.Aios(self.aios.url).status()
 
     def test_a_rerun_with_the_last_address_filled_in_finds_aiostreams_again(self):
@@ -632,7 +632,7 @@ class SavedAiostreams(Offline):
                   mock.patch.object(dockerenv, 'probe', lambda image, checks: {'lan': '192.168.1.7', 'taken': []}),
                   mock.patch('socket.create_connection', docker_dns)):
             p.start()
-            self.patches.append(p)
+            self.addCleanup(p.stop)
         self.install()
         self.assertEqual(engine.load_settings()['aios_url'], 'http://aiostreams:3000')      # found by its name
         self.joined.clear()                                 # the next ./setup: a new container

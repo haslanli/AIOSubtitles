@@ -1,10 +1,8 @@
 """The hosting route: a public instance set up by ./setup."""
 import ast
 import base64
-import contextlib
 import gc
 import http.server
-import io
 import json
 import os
 import stat
@@ -15,7 +13,8 @@ import warnings
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, hosting, limits, plan, wizard
+from installer import dockerenv, engine, hosting, limits, plan
+from installer.tests.test_flow import AnswersRun
 
 ADDRESS = 'https://subs.example.com'
 SECRET_WORDS = 'kept it in state/subsync.env'
@@ -226,7 +225,7 @@ class Fetch(unittest.TestCase):
         self.assertEqual(hosting.fetch(self.base + '/health')[::2], (200, b'ok'))
 
 
-class RouteFixture(unittest.TestCase):
+class RouteFixture(AnswersRun, unittest.TestCase):
     """Docker and the address faked (no tests here: test_web.py drives the page on it too)."""
 
     def setUp(self):
@@ -266,15 +265,6 @@ class RouteFixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(self.tmp.cleanup)
-
-    def run_setup(self, answers, *extra):
-        path = Path(self.tmp.name) / 'answers'
-        path.write_text('\n'.join(f'{k}={v}' for k, v in answers.items()) + '\n')
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--answers', str(path), '--yes', *extra])
-        return code, out.getvalue()
-
 
 
 class Route(RouteFixture):
@@ -316,6 +306,7 @@ class Route(RouteFixture):
         env = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual((env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_AUDIO_BUDGET_GB']), ('on', '0.5'))
         code, out = self.run_setup({})                                   # a re-run keeps both
+        self.assertEqual(code, 0, out)
         again = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual((again['SUBSYNC_AUDIO_ROUTE'], again['SUBSYNC_AUDIO_BUDGET_GB']), ('on', '0.5'))
         code, out = self.run_setup({'SUBSYNC_AUDIO_ROUTE': 'no'})        # turned off: its limit goes too

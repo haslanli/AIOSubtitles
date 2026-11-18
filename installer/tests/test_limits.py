@@ -167,7 +167,7 @@ class Checks(unittest.TestCase):
 
 class InTheEnvFile(unittest.TestCase):
     def test_a_value_set_by_hand_is_the_current_value(self):
-        lim = self.daily = limits.personal(audio=False)[0]
+        lim = limits.personal(audio=False)[0]
         self.assertEqual(limits.current(lim, {}), '100')
         self.assertEqual(limits.current(lim, {'SUBSYNC_DAILY_BUDGET_GB': '20'}), '20')
 

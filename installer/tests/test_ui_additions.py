@@ -25,7 +25,6 @@ class UiAdditions(unittest.TestCase):
 
     def test_a_long_address_in_a_check_row_wraps(self):
         # the 16-shape check at 360 x 640: an address in a check row pushed the page sideways
-        import re
         self.assertRegex(ui.APP_CSS, r'\.checks \.tx\{[^}]*overflow-wrap:anywhere')
 
     def test_command_lines_are_escaped_and_kept_as_they_are(self):
