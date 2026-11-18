@@ -194,6 +194,17 @@ class WorkflowRules(unittest.TestCase):
 
     def test_pinned_tools(self):
         self.assertIn('version: v0.39.0', self.build)
+        sums = set()
+        for name, text in self.files.items():
+            steps = text.split('      - uses: docker/setup-buildx-action@')[1:]
+            self.assertTrue(steps, name)
+            for step in steps:     # each buildx set-up is followed at once by the check of its binary
+                after = step.split('\n      - ', 1)[1]
+                self.assertTrue(after.startswith('name: Check buildx against its published sums\n'), name)
+                found = re.findall(r'^          BUILDX_(AMD64|ARM64): ([0-9a-f]{64})$', after.split('\n      - ', 1)[0], re.M)
+                self.assertEqual([arch for arch, _ in found], ['AMD64', 'ARM64'], name)
+                sums.add(tuple(found))
+        self.assertEqual(len(sums), 1, sums)                     # the same sums wherever buildx is set up
         self.assertRegex(self.build, r'image=moby/buildkit:v[\d.]+@sha256:[0-9a-f]{64}')
         self.assertRegex(self.build, r'buildkit-syft-scanner:[\d.]+@sha256:[0-9a-f]{64}')
         for text in self.files.values():
@@ -286,6 +297,45 @@ class StartCheckGreps(unittest.TestCase):
                 for line in script.splitlines():
                     if not line.lstrip().startswith('#'):
                         self.assertNotRegex(line, r'\|\s*grep\s+(-\w+\s+)*-\w*q', name)
+
+
+class BuildxSumCheck(unittest.TestCase):
+    """The step that checks the buildx binary docker uses against v0.39.0's published sums, run in bash with a
+    stand-in for docker that names a file of ours."""
+
+    def setUp(self):
+        if not (shutil.which('bash') and shutil.which('sha256sum')):
+            self.skipTest('needs bash and sha256sum')
+        step = read('image-build.yml').split('- name: Check buildx against its published sums', 1)[1]
+        self.script = run_scripts(step.split('\n      - ', 1)[0])[0]
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        self.bin = os.path.join(folder, 'docker-buildx')
+        Path(self.bin).write_bytes(b'buildx as published')
+        self.sum = subprocess.run(['sha256sum', self.bin], capture_output=True, text=True, check=True,
+                                  stdin=subprocess.DEVNULL).stdout.split()[0]
+
+    def check(self, arch, amd64, arm64, plugin=None):
+        docker = 'docker() { printf "%s\\n" "$PLUGIN"; }'
+        done = subprocess.run(['bash', '-c', docker + '\n' + self.script], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL,
+                              env=dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), RUNNER_ARCH=arch,
+                                       BUILDX_AMD64=amd64, BUILDX_ARM64=arm64,
+                                       PLUGIN=self.bin if plugin is None else plugin))
+        return done.returncode, done.stdout.strip().splitlines()[-1:]
+
+    def test_the_published_binary_passes(self):
+        self.assertEqual(self.check('X64', self.sum, '0' * 64), (0, [f'{self.bin}: buildx v0.39.0 as published']))
+        self.assertEqual(self.check('ARM64', '0' * 64, self.sum), (0, [f'{self.bin}: buildx v0.39.0 as published']))
+
+    def test_any_other_binary_stops_the_job(self):
+        code, out = self.check('X64', '0' * 64, self.sum)       # the arm64 sum on an amd64 runner
+        self.assertEqual(code, 1)
+        self.assertEqual(out, [f'::error::{self.bin} is not buildx v0.39.0 as published (sha256 {self.sum})'])
+
+    def test_an_unknown_runner_or_no_plugin_stops_the_job(self):
+        self.assertEqual(self.check('X86', self.sum, self.sum), (1, ['::error::No published buildx sum for X86']))
+        self.assertEqual(self.check('X64', self.sum, self.sum, plugin=''), (1, ['::error::Docker has no buildx plugin']))
 
 
 if __name__ == '__main__':
