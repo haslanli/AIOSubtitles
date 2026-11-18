@@ -187,6 +187,8 @@ class RouteFixture(unittest.TestCase):
             return 200, {'Content-Security-Policy': "default-src 'none'; script-src 'self'"}, b'<!doctype html>'
 
         def exec_in(name, cmd, stdin=None, timeout=120):
+            if cmd == engine.HEALTH:                        # subsync's /health, once it runs
+                return (0, 'ok\n', '') if self.up else (1, '', 'Connection refused')
             return 0, json.dumps({'public': True, 'people': 0, 'max_people': 200, 'read_today': 0,
                                   'daily_budget': 50e9}), ''
         for p in (mock.patch.object(engine, 'STATE', self.state), mock.patch.object(engine, 'REPO', Path(self.tmp.name)),

@@ -74,6 +74,8 @@ class FakeAios:
                         {'type': 'newznab', 'instanceId': 'nzb', 'enabled': True, 'options': {'name': 'Geek'}}],
             'failover': {'enabled': True}, 'preloadStreams': {'enabled': True}}}}
         self.gated, self.signed_in, self.subsync_up, self.throttle = gated, False, False, 0
+        self.subsync_calls = 0      # the subtitle requests AIOStreams sent on to subsync (subsync's own /status count)
+        self.reaches_subsync = True  # False: AIOStreams can't reach subsync at the address in the config
         self.head_check = True      # stock 2.37: HEAD /api/v1/user?uuid= says whether a config exists
         self.sizes = [1000]         # the ready files the sync config lists
         self.aliases = {}           # alias links (stock: /stremio/u/<alias>/… redirects to the full link)
@@ -167,7 +169,10 @@ class FakeAios:
                     if resource == 'manifest.json' and uuid in outer.users:   # each config's manifest
                         return self._json(200, {'id': 'com.aiostreams', 'name': 'AIOStreams', 'resources': ['stream']})
                     if resource == 'subtitles':
-                        outer.subtitle_calls = getattr(outer, 'subtitle_calls', 0) + 1
+                        # passed on to subsync only by a config that lists it, while it runs and AIOStreams reaches it
+                        presets = (outer.users.get(uuid) or {}).get('config', {}).get('presets') or []
+                        if outer.subsync_up and outer.reaches_subsync and any(plan.is_subsync_preset(p) for p in presets):
+                            outer.subsync_calls += 1
                         return self._json(200, {'subtitles': []})
                     if resource == 'stream':
                         data = self.headers.get('User-Agent', '').startswith('AIO')
@@ -270,9 +275,11 @@ class FlowFixture(unittest.TestCase):
 
         def exec_in(name, cmd, stdin=None, timeout=120):
             self.exec_calls.append((cmd, stdin))
+            if cmd == engine.HEALTH:                        # subsync's /health, once it runs
+                return (0, 'ok\n', '') if self.aios.subsync_up else (1, '', 'Connection refused')
             if 'subsync.selftest' in cmd:
                 return (0 if self.selftest.get('ok') else 1), json.dumps(self.selftest) + '\n', ''
-            return 0, json.dumps({'subtitle_requests': getattr(self.aios, 'subtitle_calls', 0)}), ''
+            return 0, json.dumps({'subtitle_requests': self.aios.subsync_calls}), ''
 
         self.place = where.Place('image', 'host', 'c0ffee', IMAGE, False, 'ghcr.io/haslanli/aiosubtitles:latest', None,
                                  '/home/me/aiosubtitles', (os.getuid(), os.getgid()), '')

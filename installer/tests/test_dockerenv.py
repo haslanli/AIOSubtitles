@@ -165,6 +165,27 @@ class CheckImage(unittest.TestCase):
         self.assertIn(['docker', 'rm', '-f'], cmds)
         self.assertIn(['docker', 'volume', 'rm'], cmds)
 
+    def test_a_version_that_doesnt_start_fails_with_dockers_reason_and_leaves_nothing(self):
+        docker = FakeDocker([(['docker', 'run', '-d'], (125, '', 'Unable to find image\ndocker: manifest unknown.\n'))])
+        with mock.patch.object(dockerenv, 'run', docker), mock.patch.object(dockerenv.time, 'sleep', lambda s: None):
+            good, reason = dockerenv.check_image(IMAGE, 'aiosubtitles', 'id-1')
+        self.assertEqual((good, reason), (False, 'docker: manifest unknown.'))
+        cmds = [c[:3] for c, _ in docker.calls]
+        self.assertNotIn(['docker', 'exec'], [c[:2] for c in cmds])
+        self.assertIn(['docker', 'rm', '-f'], cmds)
+        self.assertIn(['docker', 'volume', 'rm'], cmds)
+
+    def test_a_version_that_stops_fails_at_once(self):
+        docker = FakeDocker([(['docker', 'exec'], (1, '', 'container is not running')),
+                             (['docker', 'inspect'], (0, 'exited ', ''))])
+        with mock.patch.object(dockerenv, 'run', docker), mock.patch.object(dockerenv.time, 'sleep', lambda s: None):
+            good, reason = dockerenv.check_image(IMAGE, 'aiosubtitles', 'id-1')
+        self.assertEqual((good, reason), (False, 'it stopped'))
+        self.assertEqual(len([c for c, _ in docker.calls if c[:2] == ['docker', 'exec']]), 1)   # no wait for the rest
+        cmds = [c[:3] for c, _ in docker.calls]
+        self.assertIn(['docker', 'rm', '-f'], cmds)
+        self.assertIn(['docker', 'volume', 'rm'], cmds)
+
 
 class Restore(unittest.TestCase):
     def test_the_old_image_puts_the_copy_back_as_the_services_user(self):

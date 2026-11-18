@@ -21,6 +21,10 @@ AUDIO_QUESTION = 'Offer syncing files that have no subtitles of their own, from 
 # asked when no TMDB key is given for everyone: let each person add their own (explain.SETTINGS['SUBSYNC_TMDB_PERSONAL'])
 TMDB_PERSONAL_QUESTION = 'Let each person add their own TMDB key?'
 ADDRESS_WORDS = 'The web address of your public instance, with https, like https://subtitles.example.com.'   # the address question's own words
+# an address that doesn't answer from this machine, on both routes: the warning and the notes under it
+NO_ANSWER = "{address}/health doesn't answer from this machine."
+NO_ANSWER_NOTES = ('If you just added the web server rule, reload the web server; some routers also block a machine',
+                   'from reaching its own public address, so check it from your phone too: it should say "ok".')
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
          'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_KEY',
@@ -115,9 +119,9 @@ def check(address, out):
         out.ok(f'People can reach AIOSubtitles at {address}')
     else:
         good = False
-        out.warn(f"{address}/health doesn't answer from this machine.")
-        out.note('If you just added the web server rule, reload the web server; some routers also block a machine')
-        out.note('from reaching its own public address, so check it from your phone too: it should say "ok".')
+        out.warn(NO_ANSWER.format(address=address))
+        for line in NO_ANSWER_NOTES:
+            out.note(line)
     try:
         status, headers, _ = fetch(address + '/')
         headers = {k.lower(): v for k, v in headers.items()}

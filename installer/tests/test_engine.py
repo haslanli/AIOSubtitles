@@ -1,9 +1,12 @@
 """The engine's own rules and its less common paths: the state files it writes and reads, what reaches the terminal,
-the step headings, the address checks, AIOStreams' error codes, the recovery paths of the configs it keeps, and the
+the step headings, the address checks, AIOStreams' error codes, the recovery paths of the configs it keeps, the
 shapes of AIOStreams other than one container on a Docker network (host network, elsewhere on the network, two of
-them), against the stand-in AIOStreams of test_flow with Docker stubbed out. Nothing connects beyond 127.0.0.1."""
+them), the saved AIOStreams reached again by a later ./setup, the last step's checks when they don't hold, the wait for
+the service, a public instance's port and the one wording of each question, against the stand-in AIOStreams of
+test_flow with Docker stubbed out. Nothing connects beyond 127.0.0.1."""
 import contextlib
 import io
+import os
 import re
 import socket
 import tempfile
@@ -14,7 +17,7 @@ from unittest import mock
 from installer import dockerenv, engine, hosting, plan, screens, ui, wizard
 from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
-from subsync import aiosconfig
+from subsync import aiosconfig, explain
 
 LAN_AIOS = 'http://192.168.1.5:3000'     # an AIOStreams elsewhere on the network, by its LAN address
 HEADING = re.compile(r'Step (\d+) of (\d+) · (.+)')
@@ -600,6 +603,282 @@ class OnBridge(Offline):
             e.public_address()
         self.assertIn('Enter = http://192.168.1.7:8790', out.getvalue())
         self.assertEqual(len(self.lan_lookups()), 1)
+
+
+class SavedAiostreams(Offline):
+    """Removing subsync and restoring a copy of the config reach the AIOStreams the install found. On the bridge network
+    each ./setup runs in a new container, and Docker resolves AIOStreams' container name only for a container on its
+    network."""
+
+    def setUp(self):
+        super().setUp()
+        self.place = self.place._replace(network='bridge', gateway='172.17.0.1', page_port=8789)
+        self.joined, self.joins = [], True
+        connect = socket.create_connection                  # Offline's: nothing beyond this machine
+        fake = ('127.0.0.1', self.aios.server.server_address[1])
+
+        def docker_dns(address, *args, **kwargs):
+            if address[0] == 'aiostreams':
+                if not self.joined:
+                    raise socket.gaierror(socket.EAI_NONAME, 'Name or service not known')
+                address = fake
+            return connect(address, *args, **kwargs)
+
+        def join(network, container):
+            if self.joins:
+                self.joined.append((network, container))
+            return self.joins
+        for p in (mock.patch.object(engine, 'PLACE', self.place), mock.patch.object(dockerenv, 'join', join),
+                  mock.patch.object(dockerenv, 'probe', lambda image, checks: {'lan': '192.168.1.7', 'taken': []}),
+                  mock.patch('socket.create_connection', docker_dns)):
+            p.start()
+            self.patches.append(p)
+        self.install()
+        self.assertEqual(engine.load_settings()['aios_url'], 'http://aiostreams:3000')      # found by its name
+        self.joined.clear()                                 # the next ./setup: a new container
+
+    def test_removing_on_the_page_joins_aiostreams_network_again(self):
+        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'}, page=True)
+        e.remove()
+        self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
+        self.assertEqual(self.ours(), [])
+        self.assertIn(('ok', 'Done.'), [tuple(r[:2]) for r in e.out.rows])
+
+    def test_uninstall_in_a_terminal_joins_aiostreams_network_again(self):
+        sync_id = self.keys()['SYNC_UUID']
+        code, out = self.again('--uninstall', CONFIRM='yes')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.ours(), [])
+        self.assertNotIn(sync_id, self.aios.users)
+
+    def test_restore_joins_aiostreams_network_again(self):
+        copy = next((self.state / 'backups').iterdir())
+        answers = Path(self.tmp.name) / 'restore-answers'
+        answers.write_text(f'AIOS_CONFIG_PASSWORD={PASSWORD}\nCONFIRM=yes\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(['--restore', str(copy), '--answers', str(answers), '--yes'])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
+        self.assertEqual(self.ours(), [])                                         # the copy from before subsync
+
+    def test_aiostreams_own_address_when_the_saved_one_cant_be_reached(self):
+        self.joins = False                                   # its network is gone (renamed by its compose project)
+        s = engine.load_settings()
+        engine.save_settings(dict(s, aios_public=self.aios.url))
+        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'}, page=True)
+        e.remove()
+        self.assertEqual(self.ours(), [])
+
+
+class SelfCheck(Offline):
+    """The personal route's last step when a check doesn't hold: its row, and code 3 for the whole run."""
+
+    def test_the_stand_in_passes_subtitle_requests_on_only_from_a_config_that_lists_subsync(self):
+        keys = self.install()
+        aios, before = engine.Aios(self.aios.url), self.aios.subsync_calls
+        aios.addon_get(f'{self.aios.url}/stremio/{UUID}/ENC-1a2b', '/subtitles/movie/tt0816692.json')
+        self.assertEqual(self.aios.subsync_calls, before + 1)
+        aios.addon_get(f"{self.aios.url}/stremio/{keys['SYNC_UUID']}/ENC", '/subtitles/movie/tt0816692.json')
+        self.assertEqual(self.aios.subsync_calls, before + 1)                   # subsync's own config leaves it out
+
+    def test_aiostreams_not_reaching_subsync_is_a_problem(self):
+        self.aios.reaches_subsync = False
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 3, out)
+        self.assertIn('✗  AIOStreams did not reach subsync.', out)
+        self.assertIn('It calls http://aiosubtitles-subsync:8790/…; check that address works from AIOStreams.', flat(out))
+        self.assertNotIn('AIOStreams asks subsync for subtitles', out)
+        self.assertIn('Installed, with warnings (see above)', out)
+
+    def test_the_address_apps_use_not_answering_is_a_warning(self):
+        real = engine.Aios.call
+
+        def call(aios, method, path, *a, **k):
+            if aios.base.startswith(PUBLIC) and path == '/health':        # the web server has no rule for it yet
+                return 502, b''
+            return real(aios, method, path, *a, **k)
+        with mock.patch.object(engine.Aios, 'call', call):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 3, out)
+        self.assertIn(f"!  {PUBLIC}/subsync/health doesn't answer from this machine.", out)
+        self.assertIn(flat(' '.join(hosting.NO_ANSWER_NOTES)), flat(out))     # the hosting route's notes, word for word
+        self.assertIn('AIOStreams asks subsync for subtitles', out)              # the other checks still run
+
+    def test_no_ready_file_for_the_two_films_is_a_warning(self):
+        self.aios.sizes = []
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 3, out)
+        self.assertIn("!  subsync's config found no ready debrid file for two well-known films.", out)
+        self.assertIn('If your apps do show ready files for them, run ./setup --status and send its output with a bug '
+                      'report.', flat(out))
+        self.assertEqual([c for c in self.exec_calls if 'subsync.selftest' in c[0]], [])     # nothing to read
+
+    def test_the_usenet_config_not_answering_is_a_warning(self):
+        real = engine.Aios.addon_get
+
+        def addon_get(aios, base, path, **kw):
+            if path == '/manifest.json':
+                raise engine.AiosError('AIOStreams answered HTTP 500 for manifest.json.')
+            return real(aios, base, path, **kw)
+        with mock.patch.object(engine.Aios, 'addon_get', addon_get):
+            code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', TEST_READ='no'))
+        self.assertEqual(code, 3, out)
+        self.assertIn(flat("!  subsync's Usenet config doesn't answer. Run ./setup again, or send the output of "
+                           './setup --status with a bug report.'), flat(out))
+
+    def test_each_test_read_result(self):
+        cases = [
+            ({'ok': False, 'error': 'refused', 'bytes': 0, 'requests': 1}, 3,
+             ['!  The test read was refused by the debrid service (HTTP 403 or 429), most likely a limit on your account.',
+              'subsync itself is installed and waits a while after a refusal. Try ./setup again later.']),
+            ({'ok': True, 'note': 'subsync reads this file another way', 'bytes': 100000, 'requests': 1}, 0,
+             ['✓  Read works (0.1 MB in 1 requests); subsync reads this file another way']),
+            ({'ok': False, 'error': 'read', 'detail': 'the link answered HTTP 404', 'bytes': 0, 'requests': 1}, 3,
+             ["!  The test read didn't work: the link answered HTTP 404.",
+              'subsync is installed. Run ./setup again later, or send the output of ./setup --status with a bug '
+              'report.']),
+            ({'ok': False}, 3, ["!  The test read didn't work: no answer from subsync."]),
+        ]
+        for selftest, expected, lines in cases:
+            with self.subTest(selftest=selftest):
+                self.selftest = selftest
+                code, out = self.run_setup(self.ANSWERS)
+                self.assertEqual(code, expected, out)
+                for line in lines:
+                    self.assertIn(flat(line), flat(out))
+
+    def test_an_update_or_a_rollback_whose_check_fails_ends_with_code_3(self):
+        for flag, method in (('--update', 'update'), ('--rollback', 'rollback')):
+            for result, expected in ((True, 0), (False, 3)):
+                with self.subTest(flag=flag, result=result), \
+                        mock.patch.object(engine.Engine, method, lambda e, *a, result=result, **k: result), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(wizard.main([flag]), expected)
+
+
+class WaitHealthy(TmpState):
+    """The wait for the service after a start: its /health asked inside its container, not Docker's health check, whose
+    first probe runs only after 30 seconds on Docker Engine 23 and 24."""
+
+    def wait(self, answers, seconds=90):
+        clock, asked, slept = [0.0], [], []
+
+        def exec_in(name, cmd, stdin=None, timeout=120):
+            asked.append((name, cmd))
+            return answers(len(asked))
+
+        def sleep(s):
+            slept.append(s)
+            clock[0] += s
+            if len(slept) > 100:          # a wait that would never end (90 seconds is 45 questions)
+                raise AssertionError('the wait never ends')
+        with mock.patch.object(dockerenv, 'exec_in', exec_in), \
+                mock.patch.object(dockerenv, 'container_state', lambda name: 'running starting'), \
+                mock.patch.object(engine.time, 'sleep', sleep), \
+                mock.patch.object(engine.time, 'monotonic', lambda: clock[0]):
+            return engine.Engine({}, page=True).wait_healthy(seconds), asked, slept
+
+    def test_the_service_answering_ends_the_wait_at_once(self):
+        healthy, asked, slept = self.wait(lambda n: (0, 'ok\n', '') if n == 3 else (1, '', 'Connection refused'))
+        self.assertTrue(healthy)                          # while Docker's own check still says "starting"
+        self.assertEqual(asked, [(engine.CONTAINER, engine.HEALTH)] * 3)
+        self.assertEqual(slept, [2, 2])
+
+    def test_a_service_that_never_answers_is_given_its_seconds(self):
+        healthy, asked, slept = self.wait(lambda n: (1, '', 'Connection refused'))
+        self.assertFalse(healthy)
+        self.assertEqual(sum(slept), 90)
+        self.assertEqual(len(asked), 45)
+
+    def test_the_question_goes_to_the_port_subsync_listens_on(self):
+        opened = []
+
+        class Answer:
+            def read(self):
+                return b'ok'
+
+        def urlopen(url, timeout):
+            opened.append(url)
+            return Answer()
+        for setting, port in ((None, '8790'), ('8791', '8791')):          # SUBSYNC_PORT is set on the host network
+            with self.subTest(setting=setting), mock.patch.dict(os.environ), \
+                    mock.patch('urllib.request.urlopen', urlopen), contextlib.redirect_stdout(io.StringIO()) as out:
+                os.environ.pop('SUBSYNC_PORT', None)
+                if setting:
+                    os.environ['SUBSYNC_PORT'] = setting
+                self.assertEqual(engine.HEALTH[:2], ['python', '-c'])
+                exec(compile(engine.HEALTH[2], 'health', 'exec'), {'__name__': '__main__'})
+            self.assertEqual(opened[-1], f'http://127.0.0.1:{port}/health')
+            self.assertEqual(out.getvalue(), 'ok\n')
+
+
+class HostPort(TmpState):
+    """A public instance's port: its own on a re-run, never a personal install's; checked unless this install's
+    container already holds it."""
+
+    def host_address(self, prev, running=True, taken=()):
+        engine.save_settings(prev)
+        asked = []
+
+        def in_use(port, host='0.0.0.0'):
+            asked.append((port, host))
+            return port in taken
+        with mock.patch.object(dockerenv, 'container_state', lambda name: 'running healthy' if running else ''), \
+                mock.patch.object(dockerenv, 'port_in_use', in_use):
+            e = engine.Engine({'HOST_ADDRESS': 'https://subs.example.com'}, page=True)
+            e.host_address()
+        return e.s['port'], asked
+
+    def test_a_personal_installs_port_is_never_taken_over(self):
+        # a personal address typed without a port listens on 80: the hoster's web server needs that one
+        personal = {'route': 'yourself', 'port': 80, 'public_base': 'http://192.168.1.10', 'public_kind': 'port'}
+        self.assertEqual(self.host_address(personal), (hosting.PORT, [(hosting.PORT, '127.0.0.1')]))
+        with self.assertRaises(engine.Stop) as caught:
+            self.host_address(personal, taken={hosting.PORT})
+        self.assertEqual(caught.exception.message, f'Port {hosting.PORT} on this machine is already in use.')
+
+    def test_the_port_this_installs_container_holds_is_not_checked(self):
+        for prev in ({'route': 'yourself', 'port': hosting.PORT}, {'route': 'host', 'port': 8791}):
+            with self.subTest(prev=prev):
+                self.assertEqual(self.host_address(prev), (prev['port'], []))
+
+    def test_a_public_instances_port_without_its_container_is_checked(self):
+        with self.assertRaises(engine.Stop):
+            self.host_address({'route': 'host', 'port': 8791}, running=False, taken={8791})
+        self.assertEqual(self.host_address({'route': 'host', 'port': 8791}, running=False), (8791, [(8791, '127.0.0.1')]))
+
+
+class Labels(Offline):
+    """Each question has one wording: the label the page shows is the question the engine asks and names."""
+
+    def test_a_label_reworded_is_reworded_on_both(self):
+        with mock.patch.dict(screens.LABELS, {'AIOS_CONFIG_ID': 'The config', 'HOST_ADDRESS': 'The address'}):
+            e = engine.Engine({}, page=True)
+            e.check_machine()
+            e.find_aios()
+            with self.assertRaises(engine.Problem) as caught:
+                e.read_viewer()
+            self.assertEqual(caught.exception.message, '"The config" needs an answer.')
+            self.assertIn('The config', screens.config([]))
+            with self.assertRaises(engine.Problem) as caught:
+                engine.Engine({}, page=True).host_address()
+            self.assertEqual(caught.exception.message, '"The address" needs an answer.')
+            self.assertIn('The address', screens.host_address())
+
+    def test_the_routes_and_their_question_are_the_pages(self):
+        self.assertEqual(engine.Engine.ROUTES, [('yourself', 'Install it for yourself'), ('host', 'Host a public instance')])
+        self.assertEqual(engine.Engine.ROUTES, [(value, title) for value, title, _ in screens.WAYS])
+        e = engine.Engine({}, page=True)
+        e.ask = mock.Mock(**{'choose.return_value': 'host'})
+        self.assertEqual(e.choose_route(), 'host')
+        e.ask.choose.assert_called_once_with('ROUTE', screens.QUESTION, engine.Engine.ROUTES, current='yourself')
+
+    def test_every_label_is_an_approved_word_with_its_explanation(self):
+        for key, label in screens.LABELS.items():
+            with self.subTest(key=key):
+                self.assertIn(label, screens.INSTALLER_WORDS)
+                self.assertTrue(explain.QUESTIONS.get(key) or explain.SETTINGS.get(key))
 
 
 if __name__ == '__main__':

@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from installer import dockerenv, engine, plan, web, where  # noqa: E402
-from installer.aios import Aios, AiosError  # noqa: E402
+from installer.aios import AiosError  # noqa: E402
 from installer.ui import Asker, Stop, bad, note, ok, paint, say, stop, warn, wrap  # noqa: E402
 from installer.engine import backup, load_settings, short, subsync_status  # noqa: E402,F401
 
@@ -47,8 +47,7 @@ def cmd_status():
 
 def cmd_restore(args, path):
     data = json.loads(Path(path).read_text())
-    s = load_settings()
-    aios = Aios(s.get('aios_url') or 'http://127.0.0.1:3000')
+    aios = engine.saved_aios(load_settings())
     ask = Asker(plan.parse_env(Path(args.answers).read_text()) if args.answers else {}, args.yes)
     uuid = data['uuid']
     password = ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)

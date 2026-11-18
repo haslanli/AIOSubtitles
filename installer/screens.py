@@ -34,6 +34,38 @@ WAYS = (('yourself', 'Install it for yourself', 'This adds it to the AIOStreams 
         ('host', 'Host a public instance', 'Runs here with its own sign-up page, so other people can use it with '
                                            'their own AIOStreams.'))
 QUESTION = 'How do you want to use it?'
+# Each question the page and the engine both ask, by its answers-file key: the page's label is the engine's question
+# (the terminal's prompt, and the page's '"…" needs an answer.'), so the two never drift apart.
+LABELS = {
+    'ROUTE': QUESTION,
+    'AIOS_CONTAINER': 'More than one AIOStreams runs here. Which one do your apps use?',
+    'AIOS_URL': 'What address do you open AIOStreams at?',
+    'AIOS_CONFIG_ID': 'Config ID (or paste your Stremio link)',
+    'AIOS_CONFIG_PASSWORD': 'Its password',
+    'LANGUAGES': 'Which subtitle languages should be synced?',
+    'AUDIO': plan.AUDIO_QUESTION,
+    'USENET': 'Sync files you play from Usenet too?',
+    'SUBDL_KEY': 'SubDL API key (optional)',
+    'WYZIE_KEY': 'Wyzie Subs API key (optional)',
+    'TMDB_KEY': 'TMDB API key (optional)',
+    'ADD_OPENSUBTITLES': 'Your config has no subtitle source, so there is nothing to sync yet. Add OpenSubtitles (free, '
+                         'no account needed)?',
+    'PUBLIC_ADDRESS': "subsync's address for your apps",
+    'CACHE': "Turn off AIOStreams' 5-minute subtitle cache for subsync?",
+    'AIOS_PASSWORD': 'Its password',
+    'TEST_READ': 'Do the test read now?',
+    'REMOVE_OPENSUBTITLES': 'setup also added OpenSubtitles to your config. Take that out too?',
+    'HOST_ADDRESS': 'Web address',
+    'SUBSYNC_TRUSTED_PROXY': 'Trusted proxy',
+    'SUBSYNC_SUBSOURCE_KEY': 'SubSource API key (optional)',
+    'SUBSYNC_TMDB_PERSONAL': hosting.TMDB_PERSONAL_QUESTION,
+    'SUBSYNC_USENET': 'Let people sync Usenet files too?',
+    'SUBSYNC_AUDIO_ROUTE': hosting.AUDIO_QUESTION,
+}
+TMDB_FOR_EVERYONE = 'TMDB API key for everyone (optional)'          # TMDB_KEY's label on a public instance
+SIGN_IN_ADMIN = 'AIOStreams sign-in (admin): username'              # AIOS_USERNAME's: for the cache setting,
+SIGN_IN_TO_SAVE = 'AIOStreams sign-in to save configs: username'    # and for an AIOStreams that asks one to save
+CONFIG_PASSWORD = 'Password of your config {config}'                # AIOS_CONFIG_PASSWORD's when removing subsync
 RUN_AGAIN = 'Run ./setup again to see its status, update it, change your answers or remove it.'
 ENDED = 'This setup page has ended. Run ./setup again for a new address.'
 CHECK_AGAIN = 'Check again'
@@ -54,31 +86,25 @@ INSTALLER_WORDS = (
     *[heading for heading, _ in limit_list.HOSTING],
     'GB', 'MB', 'files',
     'Save these changes',
-    'Web address', 'Trusted proxy', 'Secret key', 'SubSource API key (optional)',
-    # the original-language lookup: the TMDB key's questions, TMDB's notice and its logo's name
-    'TMDB API key (optional)', 'TMDB API key for everyone (optional)', hosting.TMDB_PERSONAL_QUESTION,
+    # the questions, as labels and headings (the terminal setup's questions too)
+    *LABELS.values(), TMDB_FOR_EVERYONE, SIGN_IN_ADMIN, SIGN_IN_TO_SAVE,
+    'Secret key',
+    # the original-language lookup: TMDB's notice and its logo's name
     explain.TMDB_NOTICE, 'TMDB',
     'Updates', 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
     RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, REMOVE_HOST, REMOVE_HOST_TEXT,
     REMOVE_TEXT,
     update.ABOUT, update.ABOUT_HOSTING, update.NEWEST, update.ROLLBACK_HEADING, update.ROLLBACK_ABOUT,
     update.RESTORE_HELP,
-    # the terminal setup's questions and lines, as labels and headings
-    'What address do you open AIOStreams at?', 'More than one AIOStreams runs here. Which one do your apps use?',
-    'Config ID (or paste your Stremio link)', 'Its password', 'Which subtitle languages should be synced?',
-    'SubDL API key (optional)',
-    'Wyzie Subs API key (optional)', "subsync's address for your apps",
-    'Your config has no subtitle source, so there is nothing to sync yet. Add OpenSubtitles (free, no account needed)?',
-    "Turn off AIOStreams' 5-minute subtitle cache for subsync?", 'AIOStreams sign-in (admin): username',
-    'AIOStreams sign-in to save configs: username', 'Do the test read now?', 'AIOSubtitles · subsync status',
+    # the terminal setup's lines, as headings
+    'AIOSubtitles · subsync status',
     'Already set up here: your answers are kept unless you change them.', 'Removing subsync',
-    'setup also added OpenSubtitles to your config. Take that out too?',
     'These stay, in case you set it up again; remove them when you no longer need them:',
     'AIOStreams', 'languages', 'audio', 'config', "subsync's config", 'logs',
     # Usenet
-    'Sync files you play from Usenet too?', 'Let people sync Usenet files too?', "subsync's Usenet config",
-    # the audio route: the personal route's question and its answers, a public instance's
-    plan.AUDIO_QUESTION, *[answer for _, answer in plan.AUDIO_ANSWERS], hosting.AUDIO_QUESTION,
+    "subsync's Usenet config",
+    # the audio route's answers
+    *[answer for _, answer in plan.AUDIO_ANSWERS],
     "subsync's Usenet config (new)", "subsync's Usenet config (update)",
     "subsync's Usenet config answers (no search made, to spare your indexer's daily calls)",
     "subsync's Usenet config doesn't answer. Run ./setup again, or send the output of ./setup --status with a bug report.",
@@ -205,18 +231,18 @@ def aios(rows, ask=None, value='', problem=None, containers=(), done=False, stop
     """Your AIOStreams: what was found; the address question when it wasn't found; the choice when several run."""
     body = _rows(rows) + _stop(stop)
     if ask == 'AIOS_CONTAINER':
-        body += ui.radio_group('More than one AIOStreams runs here. Which one do your apps use?',
+        body += ui.radio_group(LABELS['AIOS_CONTAINER'],
                                [ui.radio_row('AIOS_CONTAINER', name, name, image, checked=name == value)
                                 for name, image in containers])
     elif ask == 'AIOS_URL':
-        body += _input('AIOS_URL', 'What address do you open AIOStreams at?', value, problem, kind='url', mono=True)
+        body += _input('AIOS_URL', LABELS['AIOS_URL'], value, problem, kind='url', mono=True)
     return step('yourself', 'aios', body, _back_and_continue('yourself', 'aios', enabled=not stop))
 
 
 def config(rows, config_id='', problem=None, stop=None):
     """The config your apps use: its ID and password (never filled in again), and what was found in it."""
-    body = (_input('AIOS_CONFIG_ID', 'Config ID (or paste your Stremio link)', config_id, problem, mono=True)
-            + _input('AIOS_CONFIG_PASSWORD', 'Its password', '', problem, kind='password', reveal=True)
+    body = (_input('AIOS_CONFIG_ID', LABELS['AIOS_CONFIG_ID'], config_id, problem, mono=True)
+            + _input('AIOS_CONFIG_PASSWORD', LABELS['AIOS_CONFIG_PASSWORD'], '', problem, kind='password', reveal=True)
             + _rows(rows) + _stop(stop))
     return step('yourself', 'config', body, _back_and_continue('yourself', 'config', enabled=not stop))
 
@@ -228,25 +254,23 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
     keys, OpenSubtitles when the config has no subtitle source, and subsync's address for your apps. `stop`: a config
     without a debrid service answered no to Usenet."""
     error = _error(problem, 'LANGUAGES')
-    langs = ('<div class="field"><span class="label" id="languages-l">Which subtitle languages should be synced?</span>'
+    langs = (f'<div class="field"><span class="label" id="languages-l">{e(LABELS["LANGUAGES"])}</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
              + ui.language_slots([(name, code) for name, _, code in LANGUAGES], languages, limit, 'languages-l',
                                  'languages-help', 'languages-error' if error else None, name='LANGUAGES')
              + f'<p class="help" id="languages-help">{e(_explanation("LANGUAGES"))}</p></div>')
-    usenet_box = (_choice('USENET', 'Sync files you play from Usenet too?', usenet),) if usenet is not None else ()
+    usenet_box = (_choice('USENET', LABELS['USENET'], usenet),) if usenet is not None else ()
     audio_rows = [ui.radio_row('AUDIO', value, answer, '', checked=value == audio)
                   for value, answer in plan.AUDIO_ANSWERS]
-    body = (_stop(stop) + langs + ui.radio_group(plan.AUDIO_QUESTION, audio_rows, help_text=_explanation('AUDIO'),
+    body = (_stop(stop) + langs + ui.radio_group(LABELS['AUDIO'], audio_rows, help_text=_explanation('AUDIO'),
                                                  id='audio')
             + (ui.choices(*usenet_box) if usenet_box else '')
-            + _input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
-            + _input('WYZIE_KEY', 'Wyzie Subs API key (optional)', '', problem, kind='password', mono=True, reveal=True)
-            + _tmdb('TMDB API key (optional)', problem))
+            + _input('SUBDL_KEY', LABELS['SUBDL_KEY'], '', problem, kind='password', mono=True, reveal=True)
+            + _input('WYZIE_KEY', LABELS['WYZIE_KEY'], '', problem, kind='password', mono=True, reveal=True)
+            + _tmdb(LABELS['TMDB_KEY'], problem))
     if offer_opensubtitles:
-        body += ui.choices(_choice('ADD_OPENSUBTITLES', 'Your config has no subtitle source, so there is nothing to sync '
-                                                        'yet. Add OpenSubtitles (free, no account needed)?',
-                                   add_opensubtitles))
-    body += _input('PUBLIC_ADDRESS', "subsync's address for your apps", public_address, problem, kind='url', mono=True)
+        body += ui.choices(_choice('ADD_OPENSUBTITLES', LABELS['ADD_OPENSUBTITLES'], add_opensubtitles))
+    body += _input('PUBLIC_ADDRESS', LABELS['PUBLIC_ADDRESS'], public_address, problem, kind='url', mono=True)
     return step('yourself', 'choices', body, _back_and_continue('yourself', 'choices'))
 
 
@@ -281,11 +305,10 @@ def limits(route, values, problem=None, audio=False, usenet=False):
 
 def review(sections, cache=False, sign_in=False, problem=None, username=''):
     """Your AIOStreams configs: the changes to both, the cache setting with its sign-in, and Save these changes."""
-    body = ui.config_changes(sections) + ui.choices(_choice('CACHE', "Turn off AIOStreams' 5-minute subtitle cache for "
-                                                                     "subsync?", cache))
+    body = ui.config_changes(sections) + ui.choices(_choice('CACHE', LABELS['CACHE'], cache))
     if sign_in or cache:
-        body += (_input('AIOS_USERNAME', 'AIOStreams sign-in (admin): username', username, problem)
-                 + _input('AIOS_PASSWORD', 'Its password', '', problem, kind='password', reveal=True))
+        body += (_input('AIOS_USERNAME', SIGN_IN_ADMIN, username, problem)
+                 + _input('AIOS_PASSWORD', LABELS['AIOS_PASSWORD'], '', problem, kind='password', reveal=True))
     body += f'<p class="help">{e(_explanation("CONFIRM"))}</p>'
     actions = _back('limits') + ui.button('Save these changes', 'primary', type='submit',
                                           attrs='name="CONFIRM" value="yes"')
@@ -314,7 +337,7 @@ def check(route, rows, running, offer_test_read=False, stop=None):
     if running:
         return step(route, step_id, body, _continue(False), back=False, refresh=2)
     if offer_test_read:
-        body += ui.choices(_choice('TEST_READ', 'Do the test read now?', False))
+        body += ui.choices(_choice('TEST_READ', LABELS['TEST_READ'], False))
     actions = _continue(True)
     if route == 'host':
         actions = ui.button(CHECK_AGAIN, 'secondary', type='submit', attrs='name="go" value="again"') + actions
@@ -335,8 +358,8 @@ def done(route, title, lines, after):
 # ------------------------------------------------------------------------------------------- host a public instance
 
 def host_address(address='', proxy='gateway', problem=None, stop=None):
-    body = (_input('HOST_ADDRESS', 'Web address', address, problem, kind='url', mono=True)
-            + _input('SUBSYNC_TRUSTED_PROXY', 'Trusted proxy', proxy, problem, mono=True) + _stop(stop))
+    body = (_input('HOST_ADDRESS', LABELS['HOST_ADDRESS'], address, problem, kind='url', mono=True)
+            + _input('SUBSYNC_TRUSTED_PROXY', LABELS['SUBSYNC_TRUSTED_PROXY'], proxy, problem, mono=True) + _stop(stop))
     return step('host', 'address', body, _back_and_continue('host', 'address'))
 
 
@@ -355,13 +378,13 @@ def _tmdb(label, problem):
 
 
 def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False):
-    body = (_input('SUBDL_KEY', 'SubDL API key (optional)', '', problem, kind='password', mono=True, reveal=True)
-            + _input('SUBSYNC_SUBSOURCE_KEY', 'SubSource API key (optional)', '', problem, kind='password', mono=True,
+    body = (_input('SUBDL_KEY', LABELS['SUBDL_KEY'], '', problem, kind='password', mono=True, reveal=True)
+            + _input('SUBSYNC_SUBSOURCE_KEY', LABELS['SUBSYNC_SUBSOURCE_KEY'], '', problem, kind='password', mono=True,
                      reveal=True)
-            + _tmdb('TMDB API key for everyone (optional)', problem)
-            + ui.choices(_choice('SUBSYNC_TMDB_PERSONAL', hosting.TMDB_PERSONAL_QUESTION, tmdb_personal),
-                         _choice('SUBSYNC_USENET', 'Let people sync Usenet files too?', usenet),
-                         _choice('SUBSYNC_AUDIO_ROUTE', hosting.AUDIO_QUESTION, audio)))
+            + _tmdb(TMDB_FOR_EVERYONE, problem)
+            + ui.choices(_choice('SUBSYNC_TMDB_PERSONAL', LABELS['SUBSYNC_TMDB_PERSONAL'], tmdb_personal),
+                         _choice('SUBSYNC_USENET', LABELS['SUBSYNC_USENET'], usenet),
+                         _choice('SUBSYNC_AUDIO_ROUTE', LABELS['SUBSYNC_AUDIO_ROUTE'], audio)))
     return step('host', 'hostchoices', body, _back_and_continue('host', 'hostchoices'))
 
 
@@ -406,11 +429,10 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
                     + f'<div class="actions">{ui.button(REMOVE_HOST, "danger", type="submit")}</div>')
         about = REMOVE_HOST_TEXT
     else:
-        controls = _input('AIOS_CONFIG_PASSWORD', f'Password of your config {config}', '', problem, kind='password',
-                          reveal=True)
+        controls = _input('AIOS_CONFIG_PASSWORD', CONFIG_PASSWORD.format(config=config), '', problem,
+                          kind='password', reveal=True)
         if offer_opensubtitles:
-            controls += ui.choices(_choice('REMOVE_OPENSUBTITLES', 'setup also added OpenSubtitles to your config. Take '
-                                                                   'that out too?', True))
+            controls += ui.choices(_choice('REMOVE_OPENSUBTITLES', LABELS['REMOVE_OPENSUBTITLES'], True))
         controls += ('<input type="hidden" name="CONFIRM" value="yes">'
                      f'<div class="actions">{ui.button("Remove subsync", "danger", type="submit")}</div>')
         about = REMOVE_TEXT

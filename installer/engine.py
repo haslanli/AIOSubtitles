@@ -18,6 +18,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import stat
 import textwrap
 import time
 import urllib.parse
@@ -38,6 +40,9 @@ GUARD_STOP = ("Setup stopped without changing anything: Docker has a {kind} name
 CANT_REACH = ("Setup runs in a container, so it can't reach an AIOStreams that only listens on this machine's "
               '127.0.0.1. Give its address on your network, or use the source route (README).')
 STARTING = 'Starting {name}'
+# subsync's /health, asked inside its container on the port it listens on there (SUBSYNC_PORT, else 8790)
+HEALTH = ['python', '-c', 'import os,urllib.request;print(urllib.request.urlopen("http://127.0.0.1:%s/health"%'
+                          'os.environ.get("SUBSYNC_PORT","8790"),timeout=5).read().decode())']
 TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'The Matrix'),
                ('movie', 'tt0110912', 'Pulp Fiction')]
 # the Real-Debrid stop's way out: on the page and in a terminal
@@ -150,6 +155,33 @@ def backup(config, uuid, label='viewer'):
     return path
 
 
+# A copy of the databases is made inside the service's container, so a link in it is never followed: setup runs as root
+# with Docker's socket, and a link could point it at anything it can reach.
+def real_folder(path):
+    """Whether `path` is a folder itself, not a link to one."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def plain_databases(folder):
+    """The names of the databases in a copy's folder that are plain files; none when the folder isn't a real one."""
+    if not real_folder(folder):
+        return set()
+    return {p.name for p in Path(folder).iterdir()
+            if p.name in dockerenv.DATABASES and stat.S_ISREG(p.lstat().st_mode)}
+
+
+def remove_entry(path):
+    """Removes a file, a link (never what it points to) or a folder with all in it; nothing when there is none."""
+    try:
+        folder = stat.S_ISDIR(os.lstat(path).st_mode)
+    except FileNotFoundError:
+        return
+    shutil.rmtree(path) if folder else os.unlink(path)
+
+
 def setup_version():
     """This setup's own version (its image's VERSION file)."""
     return update.running(REPO)
@@ -186,6 +218,21 @@ def lan_address():
     if bridge():
         return (dockerenv.probe(PLACE.image, []) or {}).get('lan', '')
     return dockerenv.lan_address()
+
+
+def saved_aios(s):
+    """The AIOStreams of the setup saved in `s` (state/settings.json), as this run reaches it. On the bridge network each
+    ./setup runs in a new container, which joins AIOStreams' Docker network again before asking it by name; AIOStreams'
+    own address is used when the saved one doesn't answer."""
+    if bridge() and s.get('mode') == 'network' and s.get('networks'):
+        dockerenv.join(s['networks'][0], PLACE.container)
+    for url in dict.fromkeys(u for u in (s.get('aios_url'), s.get('aios_public')) if u):
+        try:
+            Aios(url, timeout=8).status()
+        except AiosError:
+            continue
+        return Aios(url)
+    return Aios(s.get('aios_url') or 'http://127.0.0.1:3000')
 
 
 def guard(install_id):
@@ -414,8 +461,8 @@ class Engine:
         container = None
         if len(found) > 1:
             names = [(c['name'], f"{c['name']}  ({c['image']})") for c in found]
-            pick = self.ask.choose('AIOS_CONTAINER', 'More than one AIOStreams runs here. Which one do your apps use?',
-                                   names, current=self.prev.get('container'))
+            pick = self.ask.choose('AIOS_CONTAINER', screens.LABELS['AIOS_CONTAINER'], names,
+                                   current=self.prev.get('container'))
             container = next(c for c in found if c['name'] == pick)
         elif found:
             container = found[0]
@@ -435,7 +482,7 @@ class Engine:
         if not url:
             if container:
                 self.out.warn(f"The container \"{container['name']}\" looks like AIOStreams, but I can't reach it from here.")
-            url = self.ask.text('AIOS_URL', 'What address do you open AIOStreams at?', current=self.prev.get('aios_url'),
+            url = self.ask.text('AIOS_URL', screens.LABELS['AIOS_URL'], current=self.prev.get('aios_url'),
                                 default=None if (self.prev.get('aios_url') or self.page or bridge())
                                 else 'http://127.0.0.1:3000', check=self._check_aios)
         self.aios = Aios(url)
@@ -516,9 +563,10 @@ class Engine:
                 return False, e.message, value
             return True, 'Config found', value
         current = self.keys.get('VIEWER_UUID')
-        self.uuid = self.ask.text('AIOS_CONFIG_ID', 'Config ID (or paste your Stremio link)', current=current,
+        self.uuid = self.ask.text('AIOS_CONFIG_ID', screens.LABELS['AIOS_CONFIG_ID'], current=current,
                                   shown=short(current or ''), check=check_id)
-        self.password = self.ask.text('AIOS_CONFIG_PASSWORD', 'Its password', secret=True, check=check_password)
+        self.password = self.ask.text('AIOS_CONFIG_PASSWORD', screens.LABELS['AIOS_CONFIG_PASSWORD'], secret=True,
+                                      check=check_password)
         names = plan.debrid_names(self.viewer)
         subs = plan.subtitle_sources(self.viewer)
         self.out.say()
@@ -551,14 +599,14 @@ class Engine:
         def check_langs(value):
             langs, error = plan.parse_languages(value)
             return (False, error, value) if error else (True, '', value)
-        text = self.ask.text('LANGUAGES', 'Which subtitle languages should be synced?', current=prev_langs, default='English',
+        text = self.ask.text('LANGUAGES', screens.LABELS['LANGUAGES'], current=prev_langs, default='English',
                              check=check_langs)
         self.languages = plan.parse_languages(text)[0]
         self.audio_when = self.ask_audio()
         self.audio = self.audio_when != 'no'
         self.usenet = False
         if self.usenet_services:
-            self.usenet = self.ask.yesno('USENET', 'Sync files you play from Usenet too?', self.prev.get('usenet', False))
+            self.usenet = self.ask.yesno('USENET', screens.LABELS['USENET'], self.prev.get('usenet', False))
         elif self.answers.get('USENET', '').strip().lower() in ('yes', 'y', 'on') and self.usenet_why:
             self.out.note(explain.USENET_WHY[self.usenet_why])
         if not self.has_sync and not self.usenet:
@@ -568,8 +616,7 @@ class Engine:
         self.source_keys()
         self.add_os = False
         if not plan.subtitle_sources(self.viewer):
-            self.add_os = self.ask.yesno('ADD_OPENSUBTITLES', 'Your config has no subtitle source, so there is nothing to '
-                                                              'sync yet. Add OpenSubtitles (free, no account needed)?', True)
+            self.add_os = self.ask.yesno('ADD_OPENSUBTITLES', screens.LABELS['ADD_OPENSUBTITLES'], True)
         self.public_address()
 
     def known_audio(self):
@@ -594,7 +641,7 @@ class Engine:
             del self.ask.answers['AUDIO']
         elif given is not None:
             self.ask.answers['AUDIO'] = plan.audio_answer(given) or given
-        return self.ask.choose('AUDIO', plan.AUDIO_QUESTION, plan.AUDIO_ANSWERS, current=self.known_audio())
+        return self.ask.choose('AUDIO', screens.LABELS['AUDIO'], plan.AUDIO_ANSWERS, current=self.known_audio())
 
     def known_audio_budget(self):
         """The last answer to the audio limit question, or a value set by hand in state/subsync.env before; None."""
@@ -615,11 +662,11 @@ class Engine:
     def source_keys(self):
         """Optional free keys for subtitle sources subsync searches itself (TheSubtitleDB, OpenSubtitles V3+ and
         Gestdown need none)."""
-        for key, label in (('SUBDL_KEY', 'SubDL API key'), ('WYZIE_KEY', 'Wyzie Subs API key')):
-            value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key))
+        for key in ('SUBDL_KEY', 'WYZIE_KEY'):
+            value = self.ask.text(key, screens.LABELS[key], secret=True, optional=True, current=self.keys.get(key))
             if value:
                 self.keys[key] = value
-        self.tmdb_key_question('TMDB API key (optional)')
+        self.tmdb_key_question(screens.LABELS['TMDB_KEY'])
 
     def tmdb_key_question(self, label):
         """The original-language lookup's optional TMDB key, with TMDB's notice under it (its terms ask for it)."""
@@ -637,7 +684,7 @@ class Engine:
         answered = self.page and str(self.ask.answers.get('PUBLIC_ADDRESS') or '').strip()
         lan = lan_address() if not (prev or answered) and plan.is_local_host(plan.host_of(self.s['aios_public'])) else ''
         _, default = plan.public_default(self.s['aios_public'], lan)
-        url = self.ask.text('PUBLIC_ADDRESS', 'subsync\'s address for your apps', current=prev, default=default,
+        url = self.ask.text('PUBLIC_ADDRESS', screens.LABELS['PUBLIC_ADDRESS'], current=prev, default=default,
                             check=plan.check_public)
         kind = 'path' if plan.base_path_of(url) else 'port'
         port = urllib.parse.urlsplit(url).port
@@ -801,11 +848,11 @@ class Engine:
             if not needs_sign_in(e) or self.aios.signed_in:
                 raise
             self.out.warn(e.message)
-            self.sign_in('to save configs')
+            self.sign_in(screens.SIGN_IN_TO_SAVE)
             return action()
 
-    def sign_in(self, why):
-        user = self.ask.text('AIOS_USERNAME', f'AIOStreams sign-in {why}: username')
+    def sign_in(self, question):
+        user = self.ask.text('AIOS_USERNAME', question)
 
         def check(value):
             try:
@@ -813,15 +860,15 @@ class Engine:
             except AiosError as e:
                 return False, e.message, value
             return True, 'Signed in', value
-        self.ask.text('AIOS_PASSWORD', 'Its password', secret=True, check=check)
+        self.ask.text('AIOS_PASSWORD', screens.LABELS['AIOS_PASSWORD'], secret=True, check=check)
 
     def offer_cache_setting(self):
         """AIOStreams keeps each addon's subtitle answer 5 minutes; without that for subsync, a synced copy shows the
         next time a film is opened instead of up to 5 minutes later. Needs AIOStreams' admin sign-in."""
-        if not self.ask.yesno('CACHE', 'Turn off AIOStreams\' 5-minute subtitle cache for subsync?', False):
+        if not self.ask.yesno('CACHE', screens.LABELS['CACHE'], False):
             return None
         if not self.aios.signed_in:
-            self.sign_in('(admin)')
+            self.sign_in(screens.SIGN_IN_ADMIN)
         if not getattr(self, 'admin', False):
             self.out.warn('That account is not an admin; the setting stays as it is.')
             return None
@@ -918,11 +965,15 @@ class Engine:
         self.out.ok(running)
 
     def wait_healthy(self, seconds=90):
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            if 'healthy' in dockerenv.container_state(CONTAINER).split()[-1:]:
+        """Whether the service answers within `seconds`: its /health asked inside its container every 2 seconds, as
+        the new version's start check asks. Docker's own health check is no use here: on Docker Engine 23 and 24 its
+        first probe runs only after 30 seconds."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            code, out, _ = dockerenv.exec_in(CONTAINER, HEALTH, timeout=20)
+            if code == 0 and out.strip() == 'ok':
                 return True
-            time.sleep(3)
+            time.sleep(2)
         return False
 
     def public_health(self):
@@ -965,9 +1016,9 @@ class Engine:
             self.out.ok(f"Your apps can reach subsync at {self.s['public_base']}")
         else:
             self.good = False
-            self.out.warn(f"{self.s['public_base']}/health doesn't answer from this machine.")
-            self.out.note('If you just added the web server rule, reload the web server; some routers also block a machine')
-            self.out.note('from reaching its own public address, so check it from your phone too: it should say "ok".')
+            self.out.warn(hosting.NO_ANSWER.format(address=self.s['public_base']))
+            for line in hosting.NO_ANSWER_NOTES:
+                self.out.note(line)
         # b) AIOStreams asks subsync for subtitles
         before = self.subsync_status().get('subtitle_requests', 0)
         viewer_base = f"{self.s['aios_url']}/stremio/{self.uuid}/{self.viewer_encrypted}"
@@ -1025,7 +1076,7 @@ class Engine:
         """d) one small read, only if the user says yes (the default is no)."""
         if not rows:
             return True
-        if self.ask.yesno('TEST_READ', 'Do the test read now?', False):
+        if self.ask.yesno('TEST_READ', screens.LABELS['TEST_READ'], False):
             return self.test_read(rows)
         self.out.note('Skipped the test read.')
         return True
@@ -1129,11 +1180,11 @@ class Engine:
         return good
 
     # ------------------------------------------------------------------------------------- the hosting route
-    ROUTES = [('yourself', 'Install it for yourself'), ('host', 'Host a public instance')]
+    ROUTES = [(value, title) for value, title, _ in screens.WAYS]
 
     def choose_route(self):
         """Install it for yourself, or host a public instance: the last setup's route on a re-run."""
-        self.route = self.ask.choose('ROUTE', 'How do you want to use it?', self.ROUTES,
+        self.route = self.ask.choose('ROUTE', screens.LABELS['ROUTE'], self.ROUTES,
                                      current=self.prev.get('route') or 'yourself')
         return self.route
 
@@ -1141,12 +1192,15 @@ class Engine:
         self.show_step('address', 'host')
         env = env_values()
         kept = self.prev.get('public_base') if self.prev.get('route') == 'host' else None
-        self.address = self.ask.text('HOST_ADDRESS', 'Web address', current=kept, check=hosting.check_address)
-        self.trusted_proxy = self.ask.text('SUBSYNC_TRUSTED_PROXY', 'Trusted proxy',
+        self.address = self.ask.text('HOST_ADDRESS', screens.LABELS['HOST_ADDRESS'], current=kept,
+                                     check=hosting.check_address)
+        self.trusted_proxy = self.ask.text('SUBSYNC_TRUSTED_PROXY', screens.LABELS['SUBSYNC_TRUSTED_PROXY'],
                                            current=env.get('SUBSYNC_TRUSTED_PROXY'), default='gateway')
-        port = int(self.prev.get('port') or hosting.PORT)
-        if port != self.prev.get('port') and port_taken(port, '127.0.0.1') \
-                and not dockerenv.container_state(CONTAINER):
+        # a public instance keeps its own port on a re-run; a personal install's (80, say) is never taken over. The port
+        # is checked unless this install's own container holds it.
+        port = int(self.prev.get('port') or hosting.PORT) if self.prev.get('route') == 'host' else hosting.PORT
+        held = self.prev.get('port') if dockerenv.container_state(CONTAINER) else None
+        if port != held and port_taken(port, '127.0.0.1'):
             stop(f'Port {port} on this machine is already in use.')
         self.s.update(route='host', public_base=self.address, port=port, version=setup_version())
 
@@ -1168,21 +1222,22 @@ class Engine:
 
     def host_choices(self):
         self.show_step('hostchoices', 'host')
-        for key, label in (('SUBDL_KEY', 'SubDL API key'), ('SUBSYNC_SUBSOURCE_KEY', 'SubSource API key')):
-            value = self.ask.text(key, f'{label} (optional)', secret=True, optional=True, current=self.keys.get(key))
+        for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY'):
+            value = self.ask.text(key, screens.LABELS[key], secret=True, optional=True, current=self.keys.get(key))
             if value:
                 self.keys[key] = value
         # the original-language lookup: a TMDB key for everyone, or (with none) each person's own, or Wikidata alone
         self.host_tmdb_personal = False
-        if self.tmdb_key_question('TMDB API key for everyone (optional)'):
+        if self.tmdb_key_question(screens.TMDB_FOR_EVERYONE):
             self.ask.answers.pop('SUBSYNC_TMDB_PERSONAL', None)     # a key for everyone: never each person's too
         else:
             kept = env_values().get('SUBSYNC_TMDB_PERSONAL', 'off').strip().lower() in ('on', 'yes', 'true', '1')
-            self.host_tmdb_personal = self.ask.yesno('SUBSYNC_TMDB_PERSONAL', hosting.TMDB_PERSONAL_QUESTION, kept)
+            self.host_tmdb_personal = self.ask.yesno('SUBSYNC_TMDB_PERSONAL', screens.LABELS['SUBSYNC_TMDB_PERSONAL'],
+                                                     kept)
         kept = env_values().get('SUBSYNC_USENET', 'off').strip().lower() in ('on', 'yes', 'true', '1')
-        self.host_usenet = self.ask.yesno('SUBSYNC_USENET', 'Let people sync Usenet files too?', kept)
+        self.host_usenet = self.ask.yesno('SUBSYNC_USENET', screens.LABELS['SUBSYNC_USENET'], kept)
         kept = env_values().get('SUBSYNC_AUDIO_ROUTE', 'off').strip().lower() in ('on', 'yes', 'true', '1')
-        self.host_audio = self.ask.yesno('SUBSYNC_AUDIO_ROUTE', hosting.AUDIO_QUESTION, kept)
+        self.host_audio = self.ask.yesno('SUBSYNC_AUDIO_ROUTE', screens.LABELS['SUBSYNC_AUDIO_ROUTE'], kept)
 
     def host_limits(self):
         """Every limit, in its three groups, the current value or subsync's default filled in."""
@@ -1323,7 +1378,7 @@ class Engine:
         s, keys = self.prev, self.keys
         if not s:
             stop('subsync is not set up here.')
-        aios = Aios(s['aios_url'])
+        aios = saved_aios(s)
         self.out.say(self.out.paint('1', '  Removing subsync'))
         uuid = keys.get('VIEWER_UUID')
 
@@ -1333,14 +1388,14 @@ class Engine:
             except AiosError as e:
                 return False, e.message, value
             return True, '', value
-        password = self.ask.text('AIOS_CONFIG_PASSWORD', f'Password of your config {short(uuid)}', secret=True,
-                                 check=check_password)
+        password = self.ask.text('AIOS_CONFIG_PASSWORD', screens.CONFIG_PASSWORD.format(config=short(uuid)),
+                                 secret=True, check=check_password)
         new, removed = plan.without_subsync(self.viewer, s.get('manifest_url'))
         self.out.say(f'  This takes subsync out of your config ({removed} entr{"y" if removed == 1 else "ies"}), deletes subsync\'s own config,')
         self.out.say('  and removes the subsync container with its stored copies. Your other subtitle sources stay.')
         added = s.get('added_opensubtitles')
         if added and any(p.get('instanceId') == added for p in new.get('presets') or []):
-            if self.ask.yesno('REMOVE_OPENSUBTITLES', 'setup also added OpenSubtitles to your config. Take that out too?', True):
+            if self.ask.yesno('REMOVE_OPENSUBTITLES', screens.LABELS['REMOVE_OPENSUBTITLES'], True):
                 new['presets'] = [p for p in new['presets'] if p.get('instanceId') != added]
                 removed += 1
         if not self.ask.yesno('CONFIRM', 'Remove subsync?', False):
@@ -1381,7 +1436,7 @@ class Engine:
         s = self.prev
         if not s:
             stop('subsync is not set up here.')
-        if not self.ask.yesno('CONFIRM', "Delete everyone's records and stored copies", False):
+        if not self.ask.yesno('CONFIRM', screens.DELETE_RECORDS, False):
             raise Problem('CONFIRM', '', missing=True)
         if (STATE / 'compose.yaml').exists():
             guard(s.get('install_id'))
@@ -1413,7 +1468,7 @@ class Engine:
         if not prev:
             raise Stop(update.NO_ROLLBACK)
         copy = prev.get('databases') if restore else None
-        if copy and not (STATE / 'backups' / copy).is_dir():
+        if copy and not real_folder(STATE / 'backups' / copy):
             raise Stop(update.FAILED.format(reason=f'{copy} is not in state/backups', version=self.prev.get('version')))
         return self.switch(prev['image'], prev.get('local', False), prev['version'], back=True, restore=copy)
 
@@ -1426,7 +1481,7 @@ class Engine:
         if self.public_health():
             out.ok(f"Your apps can reach subsync at {self.s['public_base']}")
             return True
-        out.warn(f"{self.s['public_base']}/health doesn't answer from this machine.")
+        out.warn(hosting.NO_ANSWER.format(address=self.s['public_base']))
         return False
 
     def switch(self, image, local, version, back=False, restore=None):
@@ -1446,14 +1501,15 @@ class Engine:
         self.out.working(update.SWITCHING.format(version=version))
         s.update(image=image, local=bool(local), version=version)
         write_compose(s)
-        answers = dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)[0] == 0 and self.wait_healthy() \
-            and self.databases_ok()
-        if answers and restore:
+        if restore:        # put back first: the version it is for may not read the databases as they are now
             answers = self.databases_back(image, STATE / 'backups' / restore)
+        else:
+            answers = dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)[0] == 0 \
+                and self.wait_healthy() and self.databases_ok()
         if answers and held and not self.route_check():
             answers = False
         if not answers:
-            self.go_back(old, copy, version)
+            self.go_back(old, copy, version, restored=bool(restore))
         if back:
             s.pop('previous', None)
         else:
@@ -1465,23 +1521,28 @@ class Engine:
             self.out.note(update.OLD_IMAGES.format(image=image_handle(old['image'])))
         return self.route_check(self.out)
 
-    def go_back(self, old, copy, new_version):
-        """The new version didn't answer: the old one again, on the data as it is, else on the copy. Always raises."""
+    def go_back(self, old, copy, new_version, restored=False):
+        """The new version didn't answer: the old one again, on the data as it is, else on the copy. When this switch
+        has put other databases back (`restored`, a rollback's), the data as it is isn't the old version's any more: it
+        goes back on the copy at once, so everything is as before the switch. Always raises."""
         write_compose(dict(self.s, **old))
-        dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
         message = update.ROLLED_BACK.format(new=new_version, old=old['version'])
-        if self.wait_healthy() and self.databases_ok():
-            raise Stop(message)
-        if self.databases_back(old['image'], copy):
-            raise Stop(message + update.WITH_DATABASES)
+        if restored:
+            if self.databases_back(old['image'], copy):
+                raise Stop(message)
+        else:
+            dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
+            if self.wait_healthy() and self.databases_ok():
+                raise Stop(message)
+            if self.databases_back(old['image'], copy):
+                raise Stop(message + update.WITH_DATABASES)
         raise Stop(update.STILL_DOWN.format(old=old['version'], container=CONTAINER))
 
     def databases_back(self, image, folder):
         """The databases of a copy in `folder` put back into the service's volume by `image`, with the service
         stopped, then started again. True when it answers."""
         folder = Path(folder)
-        files = {p.name: p.read_bytes() for p in folder.iterdir() if p.name in dockerenv.DATABASES} \
-            if folder.is_dir() else {}
+        files = {name: (folder / name).read_bytes() for name in sorted(plain_databases(folder))}
         dockerenv.compose(STATE, 'stop', timeout=120)
         good, _ = dockerenv.restore_databases(image, f'{plan.project()}_subsync-data', files)
         dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
@@ -1503,21 +1564,31 @@ class Engine:
         inside = f'/data/before-update-{stamp}'
         code, out, err = dockerenv.exec_in(CONTAINER, ['python', '-m', 'subsync.hostcmd', 'copy-databases', inside],
                                            timeout=600)
-        dest = STATE / 'backups' / f'databases-{stamp}'
+        backups = STATE / 'backups'
+        dest = backups / f'databases-{stamp}'
         if code == 0:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.parent.chmod(0o700)
+            backups.mkdir(parents=True, exist_ok=True)
+            backups.chmod(0o700)
+            own(backups)
             code, out, err = dockerenv.run(['docker', 'cp', f'{CONTAINER}:{inside}', str(dest)], timeout=600)
+            if code == 0 and not real_folder(dest):
+                code, out, err = 1, '', update.COPY_NOT_A_FOLDER
+            if code != 0:
+                remove_entry(dest)      # what the copy that failed left: never kept as one of the copies
         dockerenv.exec_in(CONTAINER, ['python', '-c', f'import shutil; shutil.rmtree({inside!r}, ignore_errors=True)'])
         if code != 0:
             reason = ((err or out).strip().splitlines() or ['no answer'])[-1]
             raise Stop(update.FAILED.format(reason=reason.rstrip('.'), version=old_version))
+        databases = plain_databases(dest)
+        for path in list(dest.iterdir()):
+            if path.name not in databases:
+                remove_entry(path)      # a link above all: only the databases' own files are kept
         dest.chmod(0o700)
         own(dest)
-        for path in dest.iterdir():
-            path.chmod(0o600)
-            own(path)
-        update.keep_newest(STATE / 'backups', 'databases-', 3, keep=set(keep) | {dest.name})
+        for name in databases:
+            (dest / name).chmod(0o600)
+            own(dest / name)
+        update.keep_newest(backups, 'databases-', 3, keep=set(keep) | {dest.name})
         self.out.ok(update.SAVED_DATABASES.format(path=shown(dest)))
         return dest
 

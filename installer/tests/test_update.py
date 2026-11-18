@@ -333,6 +333,168 @@ class EngineUpdate(unittest.TestCase):
             engine.Engine({}, page=True).rollback()
         self.assertEqual(caught.exception.message, update.NO_ROLLBACK)
 
+    # ------------------------------------------------------------------ what goes wrong, and the copies' files
+
+    def rollback_with_its_copy(self, route='yourself'):
+        """1.4.0 runs, after an update from 1.3.0 whose copy (copy A) is in state/backups."""
+        self.install(route=route, image=NEW, version='1.4.0',
+                     previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-20261113-000000'})
+        before = self.state / 'backups' / 'databases-20261113-000000'
+        before.mkdir(parents=True)
+        (before / 'users.sqlite3').write_bytes(b'copy A')
+        return before
+
+    def test_an_old_version_that_reads_only_its_own_copy_gets_it_before_it_starts(self):
+        # 1.3.0 can't read the databases as 1.4.0 left them: the reason to put its copy back
+        self.rollback_with_its_copy()
+        self.readable = lambda image: image == NEW or 'restore' in self.kinds()
+        self.assertTrue(engine.Engine({}, page=True).rollback(restore=True))
+        self.assertEqual(self.running, OLD)
+        self.assertEqual(self.restored, {'users.sqlite3': b'copy A'})
+        kinds = self.kinds()
+        self.assertLess(kinds.index('restore'), self.events.index(('up', OLD)))     # never started on 1.4.0's data
+        self.assertEqual(engine.load_settings()['version'], '1.3.0')
+
+    def test_a_rollback_with_its_copy_that_fails_after_puts_the_data_back_too(self):
+        # the copy went back, then the check that held before fails: 1.4.0 runs again on its own data, never on copy A
+        for case in ('the check fails', 'the old version fails on its copy'):
+            with self.subTest(case=case):
+                if self.state.exists():
+                    import shutil
+                    shutil.rmtree(self.state)
+                self.events.clear()
+                self.rollback_with_its_copy(route='host')
+                if case == 'the check fails':
+                    self.public_ok = [True, False]
+                else:
+                    self.public_ok = [True, True]
+                    self.answers[OLD] = False
+                with self.assertRaises(Stop) as caught:
+                    engine.Engine({}, page=True).rollback(restore=True)
+                self.assertEqual(caught.exception.message, update.ROLLED_BACK.format(new='1.3.0', old='1.4.0'))
+                restores = [ev for ev in self.events if ev[0] == 'restore']
+                self.assertEqual([ev[1] for ev in restores], [OLD, NEW])      # copy A by 1.3.0, then copy B by 1.4.0
+                self.assertEqual(self.restored, {'users.sqlite3': b'users before', 'subsync.sqlite3': b'store before'})
+                self.assertEqual(self.running, NEW)
+                s = engine.load_settings()
+                self.assertEqual((s['version'], s['previous']['version']), ('1.4.0', '1.3.0'))
+
+    def test_neither_version_answering_says_so(self):
+        self.install()
+        self.answers = {OLD: False, NEW: False}
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.STILL_DOWN.format(old='1.3.0', container=engine.CONTAINER))
+        self.assertIn('restore', self.kinds())                                # the copy was tried too
+        self.assertEqual(self.running, OLD)
+
+    def test_a_rollback_whose_copy_is_gone_changes_nothing(self):
+        self.install(image=NEW, version='1.4.0',
+                     previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-x'})
+        elsewhere = Path(self.tmp.name) / 'elsewhere'
+        elsewhere.mkdir()
+        for copy in (None, elsewhere):            # not there, or there only as a link
+            with self.subTest(copy=copy):
+                if copy:
+                    (self.state / 'backups').mkdir(exist_ok=True)
+                    (self.state / 'backups' / 'databases-x').symlink_to(copy)
+                with self.assertRaises(Stop) as caught:
+                    engine.Engine({}, page=True).rollback(restore=True)
+                self.assertEqual(caught.exception.message,
+                                 update.FAILED.format(reason='databases-x is not in state/backups', version='1.4.0'))
+                self.assertEqual(self.events, [])
+        self.assertTrue(engine.Engine({}, page=True).rollback())               # without the copy it goes ahead
+
+    def copying(self, cp):
+        """An update whose `docker cp` is `cp(dest)`: (code, out, err)."""
+        def run(cmd, timeout=60, stdin=None):
+            if cmd[:2] == ['docker', 'cp']:
+                self.events.append(('cp', cmd[2]))
+                return cp(Path(cmd[3]))
+            return 0, '', ''
+        return mock.patch.object(dockerenv, 'run', run)
+
+    def test_a_copy_that_fails_on_its_way_out_stops_and_leaves_nothing(self):
+        self.install()
+
+        def cp(dest):
+            dest.mkdir(parents=True)
+            (dest / 'users.sqlite3').write_bytes(b'half')
+            return 1, '', 'Error response from daemon: no space left on device\n'
+        with self.copying(cp), self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message,
+                         update.FAILED.format(reason='Error response from daemon: no space left on device',
+                                              version='1.3.0'))
+        self.assertNotIn('check', self.kinds())
+        self.assertEqual(list((self.state / 'backups').glob('databases-*')), [])   # never one of the copies kept
+        self.assertIn('rmtree', self.events[-1][1])                        # the copy inside the container is removed
+
+    def test_links_in_a_copy_are_never_followed(self):
+        # the copy is made in the service's container, and setup runs as root with Docker's socket
+        self.install()
+        outside = Path(self.tmp.name) / 'docker.sock'
+        outside.write_text('not to be touched')
+        outside.chmod(0o644)
+
+        def cp(dest):
+            dest.mkdir(parents=True)
+            (dest / 'users.sqlite3').symlink_to(outside)
+            (dest / 'subsync.sqlite3').write_bytes(b'store before')
+            (dest / 'extra').symlink_to(outside.parent)
+            return 0, '', ''
+        owned = []
+        with self.copying(cp), mock.patch.object(engine.os, 'geteuid', lambda: 0), \
+                mock.patch.object(engine.os, 'chown', lambda path, uid, gid: owned.append((Path(path), os.path.islink(path)))):
+            self.assertTrue(engine.Engine({}, page=True).update())
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o644)
+        copy = next((self.state / 'backups').glob('databases-*'))
+        self.assertEqual(sorted(p.name for p in copy.iterdir()), ['subsync.sqlite3'])   # the links are gone
+        self.assertEqual([path for path, link in owned if link], [])
+        self.assertNotIn(outside, [path.resolve() for path, _ in owned])
+        self.assertEqual(stat.S_IMODE(outside.parent.stat().st_mode), stat.S_IMODE(Path(self.tmp.name).stat().st_mode))
+
+    def test_a_copy_that_is_a_link_is_refused(self):
+        self.install()
+        elsewhere = Path(self.tmp.name) / 'elsewhere'
+        elsewhere.mkdir(mode=0o755)
+        (elsewhere / 'users.sqlite3').write_text('not a copy')
+        (elsewhere / 'users.sqlite3').chmod(0o644)
+
+        def cp(dest):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.symlink_to(elsewhere)
+            return 0, '', ''
+        with self.copying(cp), self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).update()
+        self.assertEqual(caught.exception.message, update.FAILED.format(reason=update.COPY_NOT_A_FOLDER, version='1.3.0'))
+        self.assertNotIn('check', self.kinds())
+        self.assertEqual(list((self.state / 'backups').iterdir()), [])          # the link is gone, its target stays
+        self.assertEqual(stat.S_IMODE(elsewhere.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((elsewhere / 'users.sqlite3').stat().st_mode), 0o644)
+
+    def test_a_restore_never_reads_through_a_link(self):
+        copy = self.rollback_with_its_copy()
+        secret = Path(self.tmp.name) / 'secrets.env'
+        secret.write_bytes(b'KEY=topsecret')
+        (copy / 'users.sqlite3').unlink()
+        (copy / 'users.sqlite3').symlink_to(secret)
+        (copy / 'subsync.sqlite3').write_bytes(b'copy A')
+        self.assertTrue(engine.Engine({}, page=True).rollback(restore=True))
+        self.assertEqual(self.restored, {'subsync.sqlite3': b'copy A'})
+
+    def test_the_copies_belong_to_the_folders_owner(self):
+        # a public instance writes no config backups: its first update makes state/backups
+        self.install(route='host')
+        owned = []
+        with mock.patch.object(engine.os, 'geteuid', lambda: 0), \
+                mock.patch.object(engine.os, 'chown', lambda path, uid, gid: owned.append((Path(path).name, uid, gid))):
+            self.assertTrue(engine.Engine({}, page=True).update())
+        owner = place().owner
+        copy = next((self.state / 'backups').glob('databases-*')).name
+        for name in ('backups', copy, 'users.sqlite3', 'subsync.sqlite3'):
+            self.assertIn((name, *owner), owned)
+
 
 class Backups(unittest.TestCase):
     def test_keep_the_newest_three(self):
