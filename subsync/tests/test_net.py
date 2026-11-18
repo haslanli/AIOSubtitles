@@ -217,5 +217,15 @@ class _Closable:
         pass
 
 
+class RetryAfterTest(unittest.TestCase):
+    def test_a_number_of_seconds_or_none(self):
+        # One reading of Retry-After for the clients that pause or wait on it; "nan" is none, as every
+        # comparison with it is false and no bound holds it
+        for value, seconds in (("120", 120.0), (" 7 ", 7.0), ("1.5", 1.5), ("0", 0.0), ("inf", float("inf"))):
+            self.assertEqual(net.retry_after(value), seconds)
+        for value in (None, "", "nan", "NaN", "Wed, 21 Oct 2026 07:28:00 GMT"):
+            self.assertIsNone(net.retry_after(value))
+
+
 if __name__ == "__main__":
     unittest.main()

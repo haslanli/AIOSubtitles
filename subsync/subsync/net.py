@@ -14,6 +14,7 @@ Standard library only, so ./setup can import it.
 """
 import http.client
 import ipaddress
+import math
 import socket
 import urllib.error
 import urllib.parse
@@ -122,6 +123,16 @@ def credentials_follow(url, new_url):
         return True
     old, new = origin(url), origin(new_url)
     return old is not None and new is not None and old == ("http", new[1], 80) and new == ("https", old[1], 443)
+
+
+def retry_after(value):
+    """The seconds a "too many requests" answer's Retry-After asks to wait, as a number; None without one or for one
+    that isn't a number (an HTTP-date, "nan"): each caller then takes its own default, and applies its own bounds."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(seconds) else seconds
 
 
 def _guarded_create_connection(address, *args, **kwargs):

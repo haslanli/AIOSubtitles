@@ -286,6 +286,15 @@ class FailureTest(Base):
         self.assertEqual(got["tmdb"], "eng")
         self.assert_no_secret(logs, got)
 
+    def test_a_retry_after_that_is_no_number_pauses_for_the_default(self):
+        # "nan" paused the service for a second, not PAUSE_S (every comparison with it is false)
+        for asked, pause in (("nan", origlang.PAUSE_S), ("120", 120), ("0", origlang.PAUSE_MIN_S)):
+            with self.subTest(asked=asked):
+                self.store.db.execute("DELETE FROM title_language")
+                self.lookup.paused.clear()
+                self.failing(code=429, headers=(("Retry-After", asked),))
+                self.assertEqual(self.lookup.paused["tmdb"], self.clock() + pause)
+
     def test_not_found(self):
         got = self.ask("tt9999999")
         self.assertEqual((got["tmdb"], got["wikidata"], got["failed"]), (None, [], []))

@@ -524,13 +524,14 @@ class AiosApi:
     network or of an answer's shape, comes back as an AiosError."""
 
     def __init__(self, base, timeout=CALL_TIMEOUT, user_agent=UA, on_wait=None, max_timeout=None,
-                 retry_wait_cap=RETRY_WAIT_CAP):
+                 retry_wait_cap=RETRY_WAIT_CAP, tries=TRIES):
         self.base = base.rstrip('/')
         self.timeout = timeout
         # the longest any call waits (the public sign-up's own bound): to connect, for each read, and (checked between
         # reads) for its whole answer
         self.max_timeout = max_timeout
         self.retry_wait_cap = retry_wait_cap    # a "too many requests" asking for a longer wait is reported, not waited
+        self.tries = tries                      # tries at a call AIOStreams asks to slow down
         self.user_agent = user_agent
         self.on_wait = on_wait if on_wait is not None else _say_wait
         self.jar = http.cookiejar.CookieJar()
@@ -543,9 +544,9 @@ class AiosApi:
     def call(self, method, path, body=None, auth=None, timeout=None, raw=False):
         """One request. A short "too many requests" (stock AIOStreams allows 5 config API calls per 5 seconds) is
         waited out and retried; a long one (10 new configs per hour) is reported."""
-        for attempt in range(TRIES):
+        for attempt in range(self.tries):
             status, payload, wait = self._call(method, path, body, auth, timeout, raw)
-            if wait is None or wait > self.retry_wait_cap or attempt == TRIES - 1:
+            if wait is None or wait > self.retry_wait_cap or attempt == self.tries - 1:
                 return status, payload
             if attempt == 0:
                 self.on_wait(wait)

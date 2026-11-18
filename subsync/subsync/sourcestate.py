@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 
-from . import srclimits
+from . import net, srclimits
 
 log = logging.getLogger("subsync.sources")
 
@@ -71,12 +71,11 @@ class Health:
             log.info("source %s paused for %d min (%s)", source, srclimits.PAUSE_S // 60, why or "failures")
 
     def limited(self, source, retry_after=None):
-        """The site said "too many requests": paused for its Retry-After (at least a minute, at most an hour)."""
-        try:
-            wait = float(retry_after) if retry_after is not None else srclimits.PAUSE_S
-        except (TypeError, ValueError):
-            wait = srclimits.PAUSE_S
-        wait = min(max(wait, 60.0), srclimits.RETRY_AFTER_MAX_S)
+        """The site said "too many requests": paused for its Retry-After (at least a minute, at most an hour), PAUSE_S
+        when it names no number of seconds."""
+        wait = net.retry_after(retry_after)
+        wait = min(max(srclimits.PAUSE_S if wait is None else wait, srclimits.RETRY_AFTER_MIN_S),
+                   srclimits.RETRY_AFTER_MAX_S)
         with self.lock:
             self.probing.discard(source)
             self.paused_until[source] = max(self.paused_until.get(source, 0), self.clock() + wait)
@@ -109,6 +108,7 @@ class Ledger:
         return srclimits.LIMITS.get((source, kind, bool(self.keyed.get(source))), [])
 
     def _windows(self, source, kind):
+        """[(span, limit, the current window's start)] of the source's limits, from one reading of the clock."""
         now = int(self.clock())
         return [(span, limit, now - now % span) for span, limit in self.limits(source, kind)]
 
@@ -126,7 +126,11 @@ class Ledger:
                 self.db.execute("DELETE FROM counts WHERE start < ?", (int(self.clock()) - 2 * 86400,))
 
     def used(self, source, kind, span, who=""):
-        start = int(self.clock()) - int(self.clock()) % span
+        """The count in the current window of `span` seconds."""
+        now = int(self.clock())
+        return self._used(source, kind, span, now - now % span, who)
+
+    def _used(self, source, kind, span, start, who=""):
         with self.lock:
             row = self.db.execute("SELECT n FROM counts WHERE source=? AND kind=? AND span=? AND start=? AND who=?",
                                   (source, kind, span, start, who or "")).fetchone()
@@ -134,13 +138,13 @@ class Ledger:
 
     def exhausted(self, source, kind):
         """No room left in some window: the source isn't used for this kind until the window ends."""
-        return any(self.used(source, kind, span) >= limit for span, limit, _ in self._windows(source, kind))
+        return any(self._used(source, kind, span, start) >= limit for span, limit, start in self._windows(source, kind))
 
     def tight(self, source, kind, who=None):
         """Near a limit (srclimits.FAIR_SHARE_AT): True when this person (public mode) already used more than their
         share, or, without a person, as soon as the limit is near."""
         for span, limit, start in self._windows(source, kind):
-            used = self.used(source, kind, span)
+            used = self._used(source, kind, span, start)
             if used < srclimits.FAIR_SHARE_AT * limit:
                 continue
             if not who:
@@ -149,6 +153,6 @@ class Ledger:
                 people = self.db.execute("SELECT COUNT(*) FROM counts WHERE source=? AND kind=? AND span=? AND start=? "
                                          "AND who != ''", (source, kind, span, start)).fetchone()[0]
             share = max(limit / max(people, 1), srclimits.MIN_SHARE * limit)
-            if self.used(source, kind, span, who) >= share:
+            if self._used(source, kind, span, start, who) >= share:
                 return True
         return False

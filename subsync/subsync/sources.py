@@ -10,7 +10,8 @@ Real-Debrid is never used (realdebrid.py): before every request through the link
 its password (SUBSYNC_SOURCE_PASSWORD) and nothing is asked when it could reach Real-Debrid or can't be read; a listed
 Real-Debrid row is never read.
 """
-import base64
+import gzip
+import io
 import json
 import logging
 import re
@@ -19,9 +20,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
-from . import realdebrid, srclimits
-from .aiosconfig import USENET_READABLE
+from . import net, realdebrid, srclimits
+from .aiosconfig import USENET_READABLE, AiosApi, AiosError
 from .langs import lang3
 
 log = logging.getLogger("subsync.sources")
@@ -62,9 +64,15 @@ def parse_extras(text):
     for k, v in urllib.parse.parse_qsl(text, keep_blank_values=True):
         if k in ("videoHash", "filename"):
             out[k] = v
-        elif k == "videoSize" and v.isdigit():
+        elif k == "videoSize" and v.isascii() and v.isdigit():   # isdigit alone takes "²", which int() refuses
             out[k] = int(v)
     return out
+
+
+def resource_path(type_, video_id):
+    """A Stremio resource's "<type>/<id>" in an addon's address, each one path segment: a "/" in either is escaped, so
+    an id never reaches another path; ":" stays as Stremio writes it ("tt1:1:2")."""
+    return f"{urllib.parse.quote(type_, safe='')}/{urllib.parse.quote(video_id, safe=':')}"
 
 
 def _get_json(url, timeout):
@@ -200,28 +208,19 @@ class Aios:
         return cls(manifest_url, own_bases=(own_base,), skip_addons=settings.skip_addons,
                    size_slack=settings.size_slack, password=password)
 
-    CONFIG_RETRY_MAX_S = 5   # AIOStreams' user API answers 429 past a few calls in 5 s: one wait and a second try
+    # AIOStreams' user API answers 429 past a few calls in 5 s: a wait it asks for up to this is waited out, once
+    CONFIG_RETRY_MAX_S = 5
+    CONFIG_TRIES = 2
 
     def _read_config(self):
+        """The config behind the link, read with its password by the one AIOStreams client (aiosconfig.AiosApi, with
+        its rules for a call that carries a password); raises AiosError, or ValueError without a link and password."""
         link = CONFIG_LINK.match(self.base)
         if not link or not self.password:
             raise ValueError("no config link and password")
-        auth = base64.b64encode(f"{link['uuid']}:{self.password}".encode()).decode()
-        req = urllib.request.Request(link["instance"] + "/api/v1/user", headers={
-            "accept": "application/json", "user-agent": USER_AGENT, "authorization": "Basic " + auth, "Connection": "close"})
-        try:
-            r = realdebrid.urlopen(req, timeout=self.timeout)
-        except urllib.error.HTTPError as e:
-            if e.code != 429:
-                raise
-            time.sleep(min(_wait_429(e, 1), self.CONFIG_RETRY_MAX_S))
-            e.close()
-            r = realdebrid.urlopen(req, timeout=self.timeout)
-        with r:
-            body = json.loads(r.read(16 * 1024 * 1024))
-        if not body.get("success"):
-            raise ValueError("refused")
-        return body["data"]["userData"]
+        api = AiosApi(link["instance"], timeout=self.timeout, user_agent=USER_AGENT, on_wait=lambda seconds: None,
+                      retry_wait_cap=self.CONFIG_RETRY_MAX_S, tries=self.CONFIG_TRIES)
+        return api.get_config(link["uuid"], self.password)[0]
 
     def check_config(self):
         """Before every request through the link: the config behind it must hold no way to Real-Debrid (AIOStreams
@@ -229,11 +228,10 @@ class Aios:
         could reach Real-Debrid or can't be read."""
         try:
             config = self._read_config()
-        except urllib.error.HTTPError as e:
-            reason = f"HTTP {e.code}"
-            e.close()
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            reason = str(e) if isinstance(e, ValueError) else type(e).__name__
+        except AiosError as e:   # named by its code only: its words can hold the AIOStreams address
+            reason = f"HTTP {e.code}" if isinstance(e.code, int) else e.code or "no answer"
+        except ValueError as e:
+            reason = str(e)
         else:
             _, ways = realdebrid.without_real_debrid(config)
             if not ways:
@@ -250,8 +248,7 @@ class Aios:
         if not self.base:
             return []
         self.check_config()
-        url = f"{self.base}/stream/{urllib.parse.quote(type_)}/{urllib.parse.quote(video_id)}.json"
-        return _get_json(url, self.timeout).get("streams") or []
+        return _get_json(f"{self.base}/stream/{resource_path(type_, video_id)}.json", self.timeout).get("streams") or []
 
     def find_row(self, type_, video_id, hints):
         """The listed cached debrid row of the file a viewer opened, from one listing: `match`."""
@@ -264,15 +261,14 @@ class Aios:
         of that name whose listed size no video file can have (Torrentio listed 1,679 bytes for a 3 GB file: the first
         reply gives the real size; of several such rows the first).
         Another size of the same name is another file. The file's own hash, read with its index, settles it."""
-        name, size = hints.get("filename"), hints.get("videoSize")
-        video_hash = str(hints.get("videoHash") or "").lower()
+        name, size, video_hash = hints.get("filename"), hints.get("videoSize"), hints.get("videoHash")
         real_debrid = sum(1 for s in listed if realdebrid.row_service(s) == realdebrid.SERVICE)
         if real_debrid:
             log.warning("Real-Debrid check: %d listed Real-Debrid file%s skipped, never read", real_debrid,
                         "" if real_debrid == 1 else "s")
         rows = [s for s in listed if unreadable(s, self.skip, usenet=usenet) is None]
         if video_hash:
-            listed = next((s for s in rows if str(row_hints(s).get("videoHash") or "").lower() == video_hash), None)
+            listed = next((s for s in rows if same_hash(row_hints(s).get("videoHash"), video_hash)), None)
             if listed is not None:
                 return listed
         found = self._by_name_and_size(rows, name, size)
@@ -300,7 +296,7 @@ class Aios:
             return []
         self.check_config()
         ex = extras(hints)
-        url = f"{self.base}/subtitles/{urllib.parse.quote(type_)}/{urllib.parse.quote(video_id)}{'/' + ex if ex else ''}.json"
+        url = f"{self.base}/subtitles/{resource_path(type_, video_id)}{'/' + ex if ex else ''}.json"
         out = []
         for s in _get_json(url, self.timeout).get("subtitles") or []:
             u = s.get("url")
@@ -335,6 +331,8 @@ def release_info(sub):
 PACED_HOSTS = ("opensubtitles", "strem.io")
 PACE = 2
 RETRIES_429 = 2
+RETRY_STEP_S = 1.5       # a 429 is tried again after at least this many seconds times the try's number,
+RETRY_WAIT_MAX_S = 5.0   # and after at most this many, whatever its Retry-After asks
 _gates, _gates_lock = {}, threading.Lock()
 
 
@@ -346,16 +344,14 @@ def _gate(host):
 
 
 def _wait_429(err, attempt):
-    try:
-        wait = float(err.headers.get("Retry-After") or 0)
-    except (TypeError, ValueError):
-        wait = 0.0
-    return min(max(wait, 1.5 * attempt), 5.0)
+    asked = net.retry_after(err.headers.get("Retry-After") if err.headers else None)
+    return min(max(asked or 0.0, RETRY_STEP_S * attempt), RETRY_WAIT_MAX_S)
 
 
 def fetch_subtitle(url, timeout=30, headers=None):
     """A subtitle's bytes. Gzip is unpacked; a zip (SubDL, SubSource) gives its subtitle file, the one named for the
-    episode when the link ends in #SxxEyy. `headers`: what the source needs besides (a key, never in the address)."""
+    episode when the link ends in #SxxEyy. `headers`: what the source needs besides (a key, never in the address).
+    MAX_SUBTITLE_BYTES bounds what is downloaded and, again, what is unpacked from it."""
     url, _, frag = url.partition("#")
     gate = _gate((urllib.parse.urlsplit(url).hostname or "").lower())
     for attempt in range(1, RETRIES_429 + 2):
@@ -373,27 +369,43 @@ def fetch_subtitle(url, timeout=30, headers=None):
         except urllib.error.HTTPError as e:
             if e.code != 429 or attempt > RETRIES_429:
                 raise
-            time.sleep(_wait_429(e, attempt))
+            wait = _wait_429(e, attempt)
+            e.close()   # its connection isn't held through the wait
+            time.sleep(wait)
     if len(raw) > MAX_SUBTITLE_BYTES:
         raise ValueError("subtitle too large")
     if raw[:2] == b"\x1f\x8b":
-        import gzip
-        raw = gzip.decompress(raw)
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as unpacking:   # every member, as gzip.decompress
+            raw = _unpacked(unpacking)
     if raw[:4] == b"PK\x03\x04":
         raw = _from_zip(raw, frag)
     return raw
 
 
+def _unpacked(unpacking):
+    """What a file object unpacks, read with a bound (a few kilobytes of gzip or deflate can stand for gigabytes, and an
+    archive's own sizes are written by whoever made it); ValueError past MAX_SUBTITLE_BYTES."""
+    data = unpacking.read(MAX_SUBTITLE_BYTES + 1)
+    if len(data) > MAX_SUBTITLE_BYTES:
+        raise ValueError("subtitle too large")
+    return data
+
+
+SUBTITLE_FILES = (".srt", ".ass", ".ssa", ".vtt")
+# the zip methods subtitle sites use, and the ones zipfile unpacks a bounded piece at a time (bzip2, LZMA and zstd
+# members are unpacked whole by each read, whatever size it asks for)
+ZIP_METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+
+
 def _from_zip(raw, frag):
-    import io
-    import zipfile
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        names = [i for i in z.infolist() if i.filename.lower().endswith((".srt", ".ass", ".ssa", ".vtt"))
-                 and i.file_size <= MAX_SUBTITLE_BYTES]
+        names = [i for i in z.infolist() if i.filename.lower().endswith(SUBTITLE_FILES)
+                 and i.file_size <= MAX_SUBTITLE_BYTES and i.compress_type in ZIP_METHODS]
         if not names:
             raise ValueError("no subtitle in the zip")
         if frag:
             want = frag.lower()
             hits = [i for i in names if want in i.filename.lower().replace(" ", "").replace(".", "")]
             names = hits or names
-        return z.read(names[0])
+        with z.open(names[0]) as member:
+            return _unpacked(member)

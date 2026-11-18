@@ -246,6 +246,7 @@ class FakeAiostreams:
 
     def __init__(self, config):
         self.config, self.calls, self.limited = config, [], 0
+        self.moved = False      # the user API answers with a redirect to another path on the same host
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -262,8 +263,15 @@ class FakeAiostreams:
 
             def do_GET(self):
                 path = self.path.split('?')[0]
-                if path == '/api/v1/user':
+                if path == '/api/v1/user' and outer.moved:
                     outer.calls.append('config')
+                    self.send_response(302)
+                    self.send_header('Location', '/api/v1/user-moved')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                if path in ('/api/v1/user', '/api/v1/user-moved'):
+                    outer.calls.append('config' if path == '/api/v1/user' else 'moved')
                     if outer.limited:
                         outer.limited -= 1
                         self.send_response(429)
@@ -343,6 +351,18 @@ class ListingCheckTest(unittest.TestCase):
         self.fake.limited = 1
         aios.streams('movie', 'tt1')
         self.assertEqual(self.fake.calls, ['config', 'config', 'streams'])
+
+    def test_the_config_read_with_its_password_follows_no_redirect(self):
+        # The config was read by a second, hand-written AIOStreams client, which followed a redirect on the
+        # same host with the password; it is read by aiosconfig's client now, whose calls with a password follow none
+        aios = self.aios(self.SAFE)
+        self.fake.moved = True
+        with self.assertLogs('subsync.sources', 'WARNING') as logs:
+            with self.assertRaises(realdebrid.Blocked):
+                aios.streams('movie', 'tt1')
+        self.assertEqual(self.fake.calls, ['config'])
+        self.assertIn("can't read", logs.output[0])
+        self.assertNotIn(FakeAiostreams.PASSWORD, logs.output[0])
 
     def test_without_its_password_nothing_is_listed(self):
         aios = self.aios(self.SAFE, password='')

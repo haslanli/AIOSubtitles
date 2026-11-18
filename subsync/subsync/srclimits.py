@@ -1,6 +1,7 @@
 """Fixed values for the subtitle sources AIOSubtitles asks itself, in one place: their order,
 the limits each site publishes, how many subtitles a file may take from a site with a tight limit, when a failing site
-is paused, how long answers are kept, and how a source in a user's AIOStreams config is recognised.
+is paused, how much is asked and read of a site, how long answers are kept, and how a source in a user's AIOStreams
+config is recognised. (Every subtitle download's own bounds, its size and its pacing, are in sources.py.)
 
 The limits are the sites' own published numbers, read 2026-11-12 (`docs/server/aiosubtitles-builtin-sources-plan.md`):
 TheSubtitleDB downloads 1,000 an hour without a key, 100,000 a day with one (lookups unlimited); SubDL 2,000 requests a
@@ -13,9 +14,7 @@ per free key; Wyzie 1,000 requests a day per free key. A site without published 
 # played file by its hash or know a subtitle's line count first.
 SOURCE_ORDER = ("osv3", "osv3plus", "tsdb", "subdl", "subsource", "gestdown", "wyzie")
 KEYLESS = ("osv3", "osv3plus", "tsdb", "gestdown")          # asked without any key (SUBSYNC_EXTRA_SOURCES)
-
-NAMES = {"osv3": "OpenSubtitles (Stremio's v3)", "osv3plus": "OpenSubtitles V3+", "tsdb": "TheSubtitleDB",
-         "subdl": "SubDL", "subsource": "SubSource", "gestdown": "Gestdown", "wyzie": "Wyzie Subs"}
+KEYED = tuple(s for s in SOURCE_ORDER if s not in KEYLESS)  # asked only with a key, each within its request limits
 
 # (source, kind, with a key?) -> [(window in seconds, how many)]. Windows are aligned to the clock (a day is a UTC day).
 LIMITS = {
@@ -45,7 +44,13 @@ TOP_TIER = 2                       # choose.tier: 0 the viewer's first, 1 a hash
 PAUSE_FAILURES = 3
 PAUSE_WINDOW_S = 600
 PAUSE_S = 600
-RETRY_AFTER_MAX_S = 3600           # a site's own Retry-After pauses it at most this long
+RETRY_AFTER_MIN_S = 60             # a site's own Retry-After pauses it at least this long,
+RETRY_AFTER_MAX_S = 3600           # and at most this long
+
+# A site's answer is read up to ANSWER_MAX_BYTES, its request waits at least MIN_TIMEOUT_S (a shorter
+# SUBSYNC_SOURCE_TIMEOUT_S still bounds how long a file waits for the answers)
+ANSWER_MAX_BYTES = 4 * 1024 * 1024
+MIN_TIMEOUT_S = 5.0
 
 # Answers kept for every person: a found list for SEARCH_TTL_S, "nothing found" for EMPTY_TTL_S.
 SEARCH_TTL_S = 6 * 3600
@@ -54,7 +59,10 @@ SEARCH_CACHE_ENTRIES = 2000
 CALLS_AT_ONCE = 16                 # source calls running at the same time, for every file together
 FINGERPRINT_EDGE = 3               # lines left out at each end of a longer subtitle when telling duplicates apart (sites add notices there)
 TSDB_RELEASE_SCORE = 0.8          # TheSubtitleDB's release-name match: at least this score is a match (0.57 was another film)
-TSDB_PAGES = 5                     # TheSubtitleDB pages of 100 by IMDb id; the torrent and release lookups take one
+TSDB_PAGES = 5                     # TheSubtitleDB pages by IMDb id; the torrent and release lookups take one
+TSDB_PAGE_SIZE = 100               # subtitles a page: TheSubtitleDB's
+SUBDL_PAGE_SIZE = 30               # SubDL's
+SUBSOURCE_PAGE_SIZE = 100          # SubSource's (one page)
 # Public mode: a person's copies rebuilt from their originals are kept this long, at most this many, for them only;
 # the subtitles of their lists, by id, for finding a stored copy's original again
 TEXT_KEEP_S = 3600

@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from . import choose, net, realdebrid, srclimits
 from .langs import lang2, lang3, name as lang_name
 from .sourcestate import Health, Ledger
-from .sources import extras, release_info, release_name
+from .sources import extras, release_info, release_name, resource_path
 
 log = logging.getLogger("subsync.extra")
 USER_AGENT = "AIOSubtitles/1.6 (subsync)"
@@ -102,8 +102,8 @@ class ExtraSources:
         req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                    **(headers or {})})
         try:
-            with realdebrid.urlopen(req, timeout=timeout or max(self.s.source_timeout, 5.0)) as r:
-                return json.loads(r.read(4 * 1024 * 1024) or b"null")
+            with realdebrid.urlopen(req, timeout=timeout or max(self.s.source_timeout, srclimits.MIN_TIMEOUT_S)) as r:
+                return json.loads(r.read(srclimits.ANSWER_MAX_BYTES) or b"null")
         except urllib.error.HTTPError as e:
             code, retry = e.code, e.headers.get("Retry-After") if e.headers else None
             e.close()
@@ -178,7 +178,7 @@ class ExtraSources:
             if got and now - got[0] < (srclimits.SEARCH_TTL_S if got[1] else srclimits.EMPTY_TTL_S):
                 answers[source] = got[1]
                 continue
-            if source in ("subdl", "subsource", "wyzie") and self.ledger is not None \
+            if source in srclimits.KEYED and self.ledger is not None \
                     and self.ledger.exhausted(source, "request"):
                 continue
             if not self.health.allowed(source):
@@ -254,8 +254,8 @@ class ExtraSources:
         if not imdb:
             return []
         ex = extras(hints)
-        got = self._get(f"{self.s.osv3_url}/subtitles/{urllib.parse.quote(type_)}/"
-                        f"{urllib.parse.quote(video_id, safe=':')}{'/' + ex if ex else ''}.json") or {}
+        got = self._get(f"{self.s.osv3_url}/subtitles/{resource_path(type_, video_id)}"
+                        f"{'/' + ex if ex else ''}.json") or {}
         out = []
         for it in got.get("subtitles") or []:
             if not isinstance(it.get("url"), str) or not it["url"]:
@@ -275,8 +275,8 @@ class ExtraSources:
         opts = f"ai-translated={'false' if self.s.skip_ai else 'true'}|from=all|auto-adjustment=false"
         config = urllib.parse.quote("|".join(codes), safe="") + "/" + urllib.parse.quote(opts, safe="")
         ex = extras(hints)
-        got = self._get(f"{self.s.osv3plus_url}/{config}/subtitles/{urllib.parse.quote(type_)}/"
-                        f"{urllib.parse.quote(video_id, safe=':')}{'/' + ex if ex else ''}.json") or {}
+        got = self._get(f"{self.s.osv3plus_url}/{config}/subtitles/{resource_path(type_, video_id)}"
+                        f"{'/' + ex if ex else ''}.json") or {}
         out = []
         for it in got.get("subtitles") or []:
             if not isinstance(it.get("url"), str) or not it["url"]:
@@ -303,7 +303,7 @@ class ExtraSources:
             if tags:
                 season, episode = tags[0][0], tags[0][1]
         headers = {"Authorization": f"Bearer {self.s.tsdb_key}"} if self.s.tsdb_key else {}
-        query = {"lang": ",".join(codes), "limit": 100}
+        query = {"lang": ",".join(codes), "limit": srclimits.TSDB_PAGE_SIZE}
         if self.s.skip_ai:
             query["ai"] = "exclude"
         out, errors, tried = [], [], 0
@@ -440,7 +440,7 @@ class ExtraSources:
         if not imdb or not codes:
             return []
         q = {"api_key": self.s.subdl_key, "imdb_id": imdb, "type": "tv" if season is not None else "movie",
-             "languages": ",".join(code.upper() for code in codes), "subs_per_page": 30}
+             "languages": ",".join(code.upper() for code in codes), "subs_per_page": srclimits.SUBDL_PAGE_SIZE}
         if season is not None:
             q.update(season_number=season, episode_number=episode)
         self._count("subdl")
@@ -482,7 +482,8 @@ class ExtraSources:
             return []
         self._count("subsource")
         got = self._get(f"{self.s.subsource_url}/subtitles?" + urllib.parse.urlencode(
-            {"movieId": movie, "language": ",".join(names), "sort": "popular", "limit": 100}), headers)
+            {"movieId": movie, "language": ",".join(names), "sort": "popular", "limit": srclimits.SUBSOURCE_PAGE_SIZE}),
+            headers)
         items = got if isinstance(got, list) else (got or {}).get("data") or (got or {}).get("subtitles") or []
         frag = f"#S{season:02d}E{episode:02d}" if season is not None else ""
         out = []

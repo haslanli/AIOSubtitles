@@ -1,14 +1,19 @@
 """Store, safety, sources filters and the addon's answers."""
+import gzip
+import io
 import json
 import os
 import socket
 import sys
 import threading
 import time
+import tracemalloc
+import types
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from http.client import HTTPConnection
 from unittest import mock
 
@@ -18,7 +23,9 @@ from helpers import FakeDownloads, TempDir, answers, dialogue_srt, exchange, loc
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
-from subsync.sources import Aios, expected_size, extras, parse_extras, same_hash, unreadable  # noqa: E402
+from subsync import sources  # noqa: E402
+from subsync.sources import (Aios, expected_size, extras, fetch_subtitle, parse_extras, same_hash,  # noqa: E402
+                             unreadable)
 from subsync.store import REFUSED_BACKOFF_S, Store, result_key  # noqa: E402
 from subsync.reader import Stopped  # noqa: E402
 from subsync.worker import Job, JobGuard, Safety, Worker, rewrite  # noqa: E402
@@ -205,6 +212,26 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(parse_extras(""), {})
         self.assertEqual(parse_extras("videoSize=x&other=1&filename="), {"filename": ""})
 
+    def test_a_size_in_other_digits_is_no_size(self):
+        # Isdigit took "²", which int refuses (the request failed), and read other scripts' digits
+        for size in ("\u00b2", "\u0661\u0662", "\uff11\uff12", "1\u00b2"):
+            with self.subTest(size=size):
+                self.assertEqual(parse_extras("filename=a.mkv&videoSize=" + urllib.parse.quote(size)),
+                                 {"filename": "a.mkv"})
+
+    def test_an_id_is_one_path_segment_of_aiostreams_address(self):
+        # A "/" in an id ("%2F" in the request) went on into the listing's address as a path
+        a = Aios("http://aios/stremio/u1/E1")
+        a.check_config = lambda: None
+        asked = []
+        with mock.patch.object(sources, "_get_json", lambda url, timeout: asked.append(url) or {}):
+            a.streams("movie", "tt5/../../../../api/v1/user")
+            a.subtitles("series", "tt5/../x", {"videoSize": 3})
+            a.streams("series", "tt1:2:3")
+        self.assertEqual(asked, ["http://aios/stremio/u1/E1/stream/movie/tt5%2F..%2F..%2F..%2F..%2Fapi%2Fv1%2Fuser"
+                                 ".json", "http://aios/stremio/u1/E1/subtitles/series/tt5%2F..%2Fx/videoSize=3.json",
+                                 "http://aios/stremio/u1/E1/stream/series/tt1:2:3.json"])
+
 
 class FindRowTest(unittest.TestCase):
     """The played file is found when its listed size is rounded or wrong. Stremio sends the real
@@ -247,6 +274,14 @@ class FindRowTest(unittest.TestCase):
         self.assertEqual(self.find({"videoHash": "AB12", "videoSize": self.REAL},
                                    self.row("other name.mkv", self.REAL, "http://x/1"),
                                    self.row("renamed.mkv", self.REAL, "http://x/2", video_hash="ab12")), "http://x/2")
+
+    def test_a_hash_sent_without_its_leading_zero_finds_its_row(self):
+        # The hashes were compared as text, so this request found no row by its hash, and without a file name
+        # none at all
+        self.assertEqual(self.find({"videoHash": "8e245d9679d31e1", "videoSize": self.REAL},
+                                   self.row("other name.mkv", self.REAL, "http://x/1"),
+                                   self.row("renamed.mkv", self.REAL, "http://x/2", video_hash="08e245d9679d31e1")),
+                         "http://x/2")
 
     def test_same_name_rows_with_sizes_no_video_has_take_the_first(self):
         self.assertEqual(self.find({"filename": self.NAME, "videoSize": 1679},
@@ -1696,6 +1731,20 @@ class ConnectionTest(unittest.TestCase):
             self.assertEqual(code, 200)
         self.assertEqual(len(self.queued()), 3)
 
+    def test_an_id_with_a_slash_is_404(self):
+        # "%2F" became "/" in the id, which went on into AIOStreams' address as a path; no title's id has one
+        with self.assertNoLogs("subsync", level="INFO"):
+            for vid in ("tt5%2F..%2F..%2F..%2F..%2Fapi%2Fv1%2Fuser", "tt1%2F2"):
+                code, body, _ = http(self.base + f"/subtitles/movie/{vid}/filename=q.mkv&videoSize=3.json")
+                self.assertEqual((code, body), (404, b""))
+        self.assertEqual((self.queued(), self.app.subtitle_requests), ([], 0))
+
+    def test_a_size_in_other_digits_is_left_out_not_a_failure(self):
+        # "videoSize=²" answered 500
+        code, _, _ = http(self.base + "/subtitles/movie/tt1/filename=a.mkv&videoSize=%C2%B2.json")
+        self.assertEqual(code, 200)
+        self.assertEqual(self.queued(), [{"filename": "a.mkv"}])
+
     def test_extras_are_split_before_each_value_is_decoded(self):
         # The whole segment was decoded before its split: "Tom%20%26%20Jerry.mkv" arrived as "Tom ", a file
         # never found in the listing
@@ -1708,6 +1757,103 @@ class ConnectionTest(unittest.TestCase):
             with self.subTest(segment=segment):
                 self.assertEqual(http(self.base + f"/subtitles/movie/tt1/{segment}.json")[0], 200)
                 self.assertEqual(self.queued(), [{"filename": name, "videoSize": 5}])
+
+
+class FetchSubtitleTest(unittest.TestCase):
+    """sources.fetch_subtitle: what is unpacked from a download is bounded as the download is, and a
+    "too many requests" answer is let go before the wait."""
+    MAX = sources.MAX_SUBTITLE_BYTES
+    TEXT = b"1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+    BOMB = 32 * 1024 * 1024          # unpacked; a few kilobytes packed
+
+    def fetch(self, body, url="https://subs.test/a.srt"):
+        with mock.patch.object(sources.realdebrid, "urlopen", lambda req, timeout: io.BytesIO(body)):
+            return fetch_subtitle(url)
+
+    def peak(self, body):
+        """(what fetching `body` gave, in short: its size or the error; the most memory Python held meanwhile)."""
+        tracemalloc.start()
+        try:
+            try:
+                got = f"{len(self.fetch(body))} bytes"
+            except Exception as e:
+                got = f"{type(e).__name__}: {e}"
+            return got, tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    @staticmethod
+    def zipped(data, method, declared=None):
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", method) as z:
+            z.writestr("a.srt", data)
+            if declared is not None:   # the central directory's size of it: whoever made the zip writes that
+                z.filelist[-1].file_size = declared
+        return out.getvalue()
+
+    def test_gzip_is_unpacked_within_the_size_limit(self):
+        # The download was bounded, its gunzip wasn't: a few kilobytes came out at hundreds of megabytes
+        self.assertEqual(self.fetch(gzip.compress(self.TEXT[:20]) + gzip.compress(self.TEXT[20:])), self.TEXT)
+        self.assertEqual(len(self.fetch(gzip.compress(b"x" * self.MAX))), self.MAX)
+        got, peak = self.peak(gzip.compress(bytes(self.BOMB)))
+        self.assertEqual(got, "ValueError: subtitle too large")
+        self.assertLess(peak, 3 * self.MAX)
+
+    def test_a_zip_member_is_unpacked_within_the_size_limit(self):
+        # A member was unpacked whole by one read (deflate up to 1 GiB, bzip2 and LZMA without any bound)
+        # before the size the zip declares for it was checked
+        for method in (zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED):
+            self.assertEqual(self.fetch(self.zipped(self.TEXT, method)), self.TEXT)
+        for method in (zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA):   # no subtitle site's, and unpacked without a bound
+            with self.subTest(method=method), self.assertRaisesRegex(ValueError, "no subtitle in the zip"):
+                self.fetch(self.zipped(self.TEXT, method))
+        # members declaring 100 bytes that unpack to BOMB: deflate's is read to its declared size (its check sum then
+        # fails), bzip2's isn't read
+        for method, outcome in ((zipfile.ZIP_DEFLATED, r"^BadZipFile: Bad CRC-32"),
+                                (zipfile.ZIP_BZIP2, r"^ValueError: no subtitle in the zip$")):
+            with self.subTest(bomb=method):
+                got, peak = self.peak(self.zipped(bytes(self.BOMB), method, declared=100))
+                self.assertRegex(got, outcome)
+                self.assertLess(peak, 3 * self.MAX)
+
+    def test_a_429_is_let_go_before_the_wait(self):
+        # Its connection was held through the wait
+        refusal = urllib.error.HTTPError("https://dl.opensubtitles.test/a.srt", 429, "Too Many Requests",
+                                         {"Retry-After": "2"}, io.BytesIO(b"slow down"))
+        answers = [refusal, io.BytesIO(self.TEXT)]
+
+        def urlopen(req, timeout):
+            got = answers.pop(0)
+            if isinstance(got, Exception):
+                raise got
+            return got
+        waits = []
+
+        def sleep(seconds):   # (the wait, whether the 429 was let go by then)
+            waits.append((seconds, refusal.fp.closed))
+        with mock.patch.object(sources.realdebrid, "urlopen", urlopen), \
+                mock.patch.object(sources, "time", types.SimpleNamespace(sleep=sleep)):
+            self.assertEqual(fetch_subtitle("https://dl.opensubtitles.test/a.srt"), self.TEXT)
+        self.assertEqual(waits, [(2.0, True)])
+
+    def test_a_retry_after_that_is_no_number_waits_the_step(self):
+        # "nan" was waited as it was: time.sleep refused it, and the download failed
+        for asked, wait in (("nan", sources.RETRY_STEP_S), ("Wed, 21 Oct 2026 07:28:00 GMT", sources.RETRY_STEP_S),
+                            ("inf", sources.RETRY_WAIT_MAX_S), ("0", sources.RETRY_STEP_S)):
+            with self.subTest(asked=asked):
+                answers = [urllib.error.HTTPError("https://subs.test/a.srt", 429, "Too Many Requests",
+                                                  {"Retry-After": asked}, io.BytesIO(b"")), io.BytesIO(self.TEXT)]
+
+                def urlopen(req, timeout):
+                    got = answers.pop(0)
+                    if isinstance(got, Exception):
+                        raise got
+                    return got
+                waits = []
+                with mock.patch.object(sources.realdebrid, "urlopen", urlopen), \
+                        mock.patch.object(sources, "time", types.SimpleNamespace(sleep=waits.append)):
+                    self.assertEqual(fetch_subtitle("https://subs.test/a.srt"), self.TEXT)
+                self.assertEqual(waits, [wait])
 
 
 class PlayerAddressTest(unittest.TestCase):

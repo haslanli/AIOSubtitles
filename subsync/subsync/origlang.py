@@ -37,6 +37,7 @@ DAY = 86400
 NOT_FOUND_S = 7 * DAY        # a found answer is kept with no expiry
 FAILED_S = 600
 PAUSE_S = 60                 # a 429 or 503 without Retry-After
+PAUSE_MIN_S, PAUSE_MAX_S = 1.0, 3600.0   # the pause a Retry-After asks for is kept within these
 BAD_KEY_S = 3600             # a key TMDB refused isn't tried again for an hour
 MAX_PENDING = 200            # lookups waiting at once; a title past that is looked up on a later request
 ANILIST_GAP_S = 2.0          # AniList allows 30 requests a minute at present
@@ -365,11 +366,9 @@ class Lookup:
                 return None
             why = f"HTTP {code}"
             if code in (429, 503):
-                try:
-                    wait = float(retry) if retry else PAUSE_S
-                except ValueError:
-                    wait = PAUSE_S
-                self.paused[service] = self.clock() + max(1.0, min(wait, 3600.0))
+                wait = net.retry_after(retry)
+                wait = PAUSE_S if wait is None else min(max(wait, PAUSE_MIN_S), PAUSE_MAX_S)
+                self.paused[service] = self.clock() + wait
         except (urllib.error.URLError, OSError, ValueError) as e:
             why = "timed out" if "timed out" in str(getattr(e, "reason", e)) else type(e).__name__
         except Exception as e:

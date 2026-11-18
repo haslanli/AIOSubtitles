@@ -183,6 +183,16 @@ class Clock:
         return self.t
 
 
+class Ticking:
+    """A clock that gives `times` one reading after another, then stays at the last."""
+
+    def __init__(self, *times):
+        self.times = list(times)
+
+    def __call__(self):
+        return self.times.pop(0) if len(self.times) > 1 else self.times[0]
+
+
 class SourcesBase(unittest.TestCase):
     def setUp(self):
         self.guard = local_network_only()
@@ -585,6 +595,30 @@ class StateTest(unittest.TestCase):
         clock.t += 86400                                                # a new UTC day
         self.assertFalse(ledger.exhausted("subdl", "download"))
         self.assertEqual(ledger.limits("osv3", "download"), [])          # no published limit: nothing counted
+
+    def test_a_window_is_read_from_one_reading_of_the_clock(self):
+        # Used read the clock twice; a second that began between the two readings looked in a window that
+        # doesn't exist, so a full window read as empty and let a request past the site's limit
+        clock = Clock()
+        clock.t += 39.9999                                              # the end of second 39 of a minute window
+        ledger = Ledger(clock=clock, keyed={"subsource": True})
+        ledger.count("subsource", "request", 60)                        # SubSource's minute is full
+        ledger.clock = Ticking(clock.t, clock.t + 0.0001)
+        self.assertEqual(ledger.used("subsource", "request", 60), 60)
+        ledger.clock = Ticking(clock.t, clock.t, clock.t + 0.0001)
+        self.assertTrue(ledger.exhausted("subsource", "request"))
+        ledger.clock = Ticking(clock.t, clock.t, clock.t + 0.0001)
+        self.assertTrue(ledger.tight("subsource", "request"))
+
+    def test_a_retry_after_that_is_no_number_pauses_for_the_default(self):
+        # "nan" paused nothing (every comparison with it is false); a number is kept within the bounds
+        for asked, pause in (("nan", srclimits.PAUSE_S), ("soon", srclimits.PAUSE_S), (None, srclimits.PAUSE_S),
+                             ("5", srclimits.RETRY_AFTER_MIN_S), ("120", 120), ("inf", srclimits.RETRY_AFTER_MAX_S)):
+            with self.subTest(asked=asked):
+                clock = Clock()
+                h = Health(clock)
+                h.limited("x", asked)
+                self.assertEqual(h.status(), {"x": clock.t + pause})
 
     def test_health_trial_after_a_pause(self):
         clock = Clock()

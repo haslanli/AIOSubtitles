@@ -184,13 +184,15 @@ def choices(*rows):
 
 
 ORDINALS = ("First", "Second", "Third", "Fourth")
+REMOVE = "Remove: "   # a slot's remove button is named this and its language (the script names it again on a change)
 
 
 def language_slots(languages, chosen, limit, labelled_by, help_id, error_id=None, name="lang"):
     """The language slots: one select per place, "First" to the limit, each listing every language
     ("None" after the first). The page shows every slot; the script shows the filled ones and "Add language" up to the
-    limit (`data-max-languages`), and greys out a language already chosen in another slot. `languages`: (name, code)
-    pairs. A record holding more languages than the limit (a lowered limit) shows all of them."""
+    limit (`data-max-languages`), greys out a language already chosen in another slot, and names each remove button
+    by its slot's language (after the words in `data-remove-label`). `languages`: (name, code) pairs. A record holding
+    more languages than the limit (a lowered limit) shows all of them."""
     chosen = [c for c in dict.fromkeys(chosen) if any(c == code for _, code in languages)]
     count = max(limit, len(chosen))
     rows = []
@@ -202,14 +204,14 @@ def language_slots(languages, chosen, limit, labelled_by, help_id, error_id=None
         label = ORDINALS[i] if i < len(ORDINALS) else str(i + 1)
         current_name = next((lang for lang, code in languages if code == current), label)
         remove = ("<span></span>" if i == 0 else
-                  f"<button class=\"tool\" type=\"button\" data-remove-slot aria-label=\"Remove: {e(current_name)}\" "
+                  f"<button class=\"tool\" type=\"button\" data-remove-slot aria-label=\"{e(REMOVE)}{e(current_name)}\" "
                   f"hidden>{CROSS}</button>")
         rows.append(f"<div class=\"slot\" data-slot><label for=\"{e(name)}-{i + 1}\">{e(label)}</label><div class=\"sel\">"
                     f"<select id=\"{e(name)}-{i + 1}\" name=\"{e(name)}\"{'' if current else ' class=\"empty\"'}>{options}"
                     f"</select>{CHEVRON}</div>{remove}</div>")
     return (f"<input type=\"hidden\" name=\"lang_ui\" value=\"1\"><div class=\"slots\" id=\"languages\" role=\"group\" "
             f"aria-labelledby=\"{e(labelled_by)}\" aria-describedby=\"{described(error_id, help_id)}\" "
-            f"data-max-languages=\"{int(limit)}\">{''.join(rows)}</div>"
+            f"data-max-languages=\"{int(limit)}\" data-remove-label=\"{e(REMOVE)}\">{''.join(rows)}</div>"
             f"<button class=\"btn secondary add\" type=\"button\" data-add hidden>{PLUS}Add language</button>")
 
 

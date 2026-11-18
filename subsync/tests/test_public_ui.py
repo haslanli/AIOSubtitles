@@ -243,7 +243,7 @@ class Visible(html.parser.HTMLParser):
         a = dict(attrs)
         if tag in ("script", "style"):
             self.skip += 1
-        for name in ("aria-label", "placeholder", "data-show", "data-hide", "data-done"):
+        for name in ("aria-label", "placeholder", "data-show", "data-hide", "data-done", "data-remove-label"):
             if a.get(name):
                 self.found.append(a[name])
 
@@ -285,6 +285,16 @@ class LookTest(unittest.TestCase):
                        ("danger", "ground"), ("danger", "surface")):
             with self.subTest(edge=fg, bg=bg):
                 self.assertGreaterEqual(contrast(t[fg], t[bg]), 3.0)
+
+    def test_a_colour_a_token_holds_is_written_as_the_token(self):
+        # --accent-bg's #0C447C (five times) and --surface's #141414 were written out after the token block,
+        # where a change of the token wouldn't reach them
+        from subsync.ui import APP_CSS
+        tokens, _, rules = APP_CSS.partition(":root{")[2].partition("}")
+        held = {value.upper() for value in re.findall(r"--[\w-]+:(#[0-9A-Fa-f]{3,8});", tokens)}
+        written = {c.upper() for c in re.findall(r"(?<=[:\s,(])#[0-9A-Fa-f]{3,8}\b", rules)}
+        self.assertLessEqual({value.upper() for value in self.TOKENS.values()}, held)   # the block was read
+        self.assertEqual(written & held, set())
 
     def test_reduced_motion_stops_every_animation_and_transition(self):
         from subsync.ui import APP_CSS
@@ -795,6 +805,26 @@ class ScriptTest(unittest.TestCase):
                                     r"document\.write|localStorage|sessionStorage|fetch\(|XMLHttpRequest|sendBeacon|"
                                     r"setAttribute\(\s*['\"]style")
         self.assertNotRegex(APP_JS, r"\bAD\d{1,3}\b|S4-\d+")
+
+    def test_a_submit_before_the_last_screen_is_continue(self):
+        # Only Enter in a text box was stopped; Enter on a checkbox or a select (the browser's implicit
+        # submission) sent the sign-up from the middle, with the config screen's choices never seen
+        from subsync.ui import APP_JS
+        guard = re.search(r'form\.addEventListener\("submit", function \(e\) \{(?P<body>.*?)\}\);', APP_JS, re.S)
+        self.assertIsNotNone(guard, "the sign-up form has no submit guard")
+        self.assertRegex(guard["body"], r"^\s*if \(at === screens\.length - 1\) return;\s*e\.preventDefault\(\);\s*"
+                                        r"at \+= 1;\s*paint\(false\);\s*$")
+
+    def test_the_script_writes_no_words_of_its_own(self):
+        # The script wrote the remove button's "Remove: " itself, a copy of an approved word that could drift
+        # from the page's; every word it shows comes from the page (data-show, data-hide, data-done, data-remove-label)
+        from subsync import ui
+        code = re.sub(r"//[^\n]*", "", ui.APP_JS)
+        words = {a or b for a, b in re.findall(r"\"([A-Z][^\"]*)\"|'([A-Z][^']*)'", code)}
+        self.assertEqual(words - {"Enter", "Escape"}, set())            # key names, not shown to anyone
+        slots = ui.language_slots([("English", "eng"), ("Spanish", "spa")], ["eng", "spa"], 2, "l", "h")
+        self.assertIn('data-remove-label="Remove: "', slots)
+        self.assertIn('aria-label="Remove: Spanish"', slots)
 
     def test_the_script_uses_only_approved_words(self):
         from subsync.ui import APP_JS

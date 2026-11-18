@@ -100,7 +100,7 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .choice input{appearance:none;-webkit-appearance:none;width:24px;height:24px;margin:1px 0 0;border-radius:6px;
   border:2px solid var(--text-3);background:transparent;display:grid;place-content:center;cursor:pointer;
   transition:background-color var(--t-quick) var(--ease),border-color var(--t-quick) var(--ease)}
-.choice input::after{content:"";width:12px;height:7px;border:solid #0C447C;border-width:0 0 2.5px 2.5px;
+.choice input::after{content:"";width:12px;height:7px;border:solid var(--accent-bg);border-width:0 0 2.5px 2.5px;
   transform:translateY(-1px) rotate(-45deg);opacity:0;transition:opacity var(--t-quick) var(--ease)}
 .choice input:checked{background:var(--text);border-color:var(--text)}
 .choice input:checked::after{opacity:1}
@@ -122,7 +122,7 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .way input{appearance:none;-webkit-appearance:none;width:24px;height:24px;margin:2px 0 0;border-radius:50%;
   border:2px solid var(--text-3);background:transparent;display:grid;place-content:center;cursor:pointer;
   transition:border-color var(--t-quick) var(--ease),background-color var(--t-quick) var(--ease)}
-.way input::after{content:"";width:10px;height:10px;border-radius:50%;background:#0C447C;opacity:0}
+.way input::after{content:"";width:10px;height:10px;border-radius:50%;background:var(--accent-bg);opacity:0}
 .way input:checked{background:var(--text);border-color:var(--text)}
 .way input:checked::after{opacity:1}
 .way input:focus-visible{outline:2px solid var(--accent-link);outline-offset:3px}
@@ -149,7 +149,7 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .sel select:focus{outline:none;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
 .sel select.empty{color:var(--text-3)}
 .sel select:not(.empty){border-color:var(--accent-link);background:var(--accent-bg);color:var(--text)}
-.sel option{background:#141414;color:var(--text)}
+.sel option{background:var(--surface);color:var(--text)}
 .sel svg{position:absolute;right:16px;top:18px;width:20px;height:20px;color:var(--text-2);pointer-events:none}
 .tool{appearance:none;display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border:0;
   border-radius:8px;background:transparent;color:var(--text-2);cursor:pointer;
@@ -219,7 +219,6 @@ h1 br.phone{display:none}
 .p-start .grid>form{grid-column:7/13;margin-top:clamp(48px,7vh,72px);min-width:0}
 .p-start .what h2{margin-top:32px}
 .dock{display:none}
-.start-problem{grid-column:1/-1;margin-bottom:40px}
 
 /* ---------- the sign-up layer: slides in from the right; Back or Escape reverses it ---------- */
 .layer{position:fixed;inset:0;z-index:20;visibility:hidden;transition:visibility 0s linear var(--t-move)}
@@ -319,7 +318,7 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .rail li{display:grid;grid-template-columns:24px minmax(0,1fr);column-gap:12px;align-items:center;min-height:40px;
   padding:6px 12px 6px 10px;border-radius:10px;color:var(--text-3);font-size:16px;line-height:1.3}
 .rail .dot{width:22px;height:22px;border-radius:50%;border:2px solid #4A4A4A;display:grid;place-content:center}
-.rail .dot svg{width:14px;height:14px;color:#0C447C}
+.rail .dot svg{width:14px;height:14px;color:var(--accent-bg)}
 .rail li.done{color:var(--text-2)}
 .rail li.done .dot{background:var(--accent-link);border-color:var(--accent-link)}
 .rail li[aria-current=step]{color:var(--text);font-weight:700;background:var(--surface)}
@@ -331,7 +330,6 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .steparea .actions{position:sticky;bottom:0;z-index:5;margin-top:40px;padding:20px 0 28px;background:var(--ground)}
 .fbar,.segs{display:none}
 .segs{grid-auto-flow:column;grid-auto-columns:minmax(0,1fr)}
-.aside{font-size:15px;color:var(--text-3)}
 
 /* number field with its unit inside; takes a number or auto */
 .num{position:relative;display:inline-flex;align-items:center;margin-top:10px;height:56px;min-width:180px;background:var(--field);
@@ -343,8 +341,6 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .num .unit{padding:0 16px 0 6px;color:var(--text-3);font-size:17px}
 .num:not(.has-unit) input{padding-right:16px}
 .limits{display:grid;gap:40px}
-.group+.group{margin-top:56px}
-.group .limits{margin-top:20px}
 
 /* segmented choice: one value of a few, joined rectangles (no pills) */
 .seg-row{display:flex;align-items:center;gap:12px;margin-top:10px}
@@ -364,7 +360,7 @@ body.open .sheet,.layer:target .sheet{transform:none}
   border-radius:12px;background:var(--surface)}
 .checks .ic{width:28px;height:28px;border-radius:50%;display:grid;place-content:center}
 .checks .ic svg{width:16px;height:16px}
-.checks .ok .ic{background:var(--accent-link);color:#0C447C}
+.checks .ok .ic{background:var(--accent-link);color:var(--accent-bg)}
 .checks .warn .ic{background:transparent;color:var(--warn-text)}
 .checks .warn .ic svg{width:24px;height:24px}
 .checks .bad .ic{background:var(--danger-text);color:#501313}
@@ -380,7 +376,7 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .progress li.done:not(:last-child)::after{background:var(--accent-link)}
 .progress .ic{width:28px;height:28px;border-radius:50%;display:grid;place-content:center;border:2px solid #4A4A4A}
 .progress .ic svg{width:16px;height:16px}
-.progress .done .ic{background:var(--accent-link);border-color:var(--accent-link);color:#0C447C}
+.progress .done .ic{background:var(--accent-link);border-color:var(--accent-link);color:var(--accent-bg)}
 .progress .now .ic{border-color:var(--track);border-top-color:var(--accent);animation:turn 1s linear infinite}
 .progress .tx{padding-top:2px}
 .progress .done .tx{color:var(--text-2)}
@@ -469,12 +465,13 @@ html:not(.js) .screens{margin-top:24px}
   .slot{grid-template-columns:minmax(0,1fr) 44px;row-gap:8px;column-gap:8px}
   .slot label{grid-column:1/-1}
   .add,.row .slots+.add{align-self:flex-start;width:calc(100% - 52px);height:52px;margin-left:0}
-  .p-done .key{margin:28px calc(var(--page) * -1 + 4px) 0;padding:24px 20px}
+  /* the personal link's card, on the signed-up and the settings page alike: it reaches into the page's margins on
+     purpose, to 4 px from the screen's edges */
+  .p-done .key,.band .key{margin:28px calc(var(--page) * -1 + 4px) 0;padding:24px 20px}
   .key .btn{width:100%;height:56px}
   .then{margin-top:36px;padding-bottom:40px}
   .then .btn{width:100%;height:56px}
   .p-settings h1,.p-letter h1{font-size:40px;margin-top:32px}
-  .band .key{margin:28px calc(var(--page) * -1 + 4px) 0;padding:24px 20px}
   .today{margin-top:40px;padding-top:0}
   .rows{margin-top:56px;gap:56px}
   .row .controls{margin-top:20px}

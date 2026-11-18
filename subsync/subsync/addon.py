@@ -80,7 +80,8 @@ PENDING_ROUTE = re.compile(r"^/pending/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 PICK_ROUTE = re.compile(r"^/pick/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 ORIGINAL_ROUTE = re.compile(r"^/original/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 # a Stremio id is short ("tt0944947:1:1", "kitsu:46474:1"): a longer one, or one with a line break or another control
-# character, names no title and is answered 404 (it would reach the log as it is)
+# character, names no title and is answered 404 (it would reach the log as it is); so is one with a "/" (sent as %2F: it
+# would be more of the path in AIOStreams' address)
 MAX_VIDEO_ID = 256
 REPROCESS_S = 24 * 3600
 # A pick or pending entry stops waiting for the job this long before its deadline while the original it would serve
@@ -435,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
             m = SUB_ROUTE.match(path)
             if m:
                 vid = urllib.parse.unquote(m.group(2))
-                if len(vid) > MAX_VIDEO_ID or not vid.isprintable():
+                if len(vid) > MAX_VIDEO_ID or not vid.isprintable() or "/" in vid:
                     return self._send(404, b"")
                 app.subtitle_requests += 1
                 app.last_subtitle_request = int(time.time())

@@ -74,8 +74,9 @@
         if (at === 0) close(); else { at -= 1; paint(true); }
       } else if (t.hasAttribute("data-next")) { at = Math.min(at + 1, screens.length - 1); paint(false); }
     });
-    form.addEventListener("keydown", function (e) {
-      if (e.key !== "Enter" || !e.target.matches("input.input") || at === screens.length - 1) return;
+    // Enter (or a phone keyboard's Go) in any field submits the form: before the last screen that is Continue
+    form.addEventListener("submit", function (e) {
+      if (at === screens.length - 1) return;
       e.preventDefault();
       at += 1;
       paint(false);
@@ -123,6 +124,7 @@
   // ---------------------------------------------------------------------------------------------- the language slots
   each(".slots[data-max-languages]", function (group) {
     var max = parseInt(group.getAttribute("data-max-languages"), 10);   // always written: the instance's limit
+    var removeWords = group.getAttribute("data-remove-label");           // always written: a remove button's words
     var rows = Array.prototype.slice.call(group.querySelectorAll("[data-slot]"));
     var selects = rows.map(function (r) { return r.querySelector("select"); });
     var add = group.parentNode.querySelector("[data-add]");
@@ -144,7 +146,7 @@
         var remove = rows[i].querySelector("[data-remove-slot]");
         if (remove) {
           remove.hidden = false;
-          remove.setAttribute("aria-label", "Remove: " + nameOf(select));
+          remove.setAttribute("aria-label", removeWords + nameOf(select));
         }
       });
       if (add) add.hidden = shown >= Math.min(max, rows.length);
