@@ -412,6 +412,13 @@ class Files(unittest.TestCase):
         self.assertEqual(plan.container_name(), 'aiosubtitles-subsync')
         self.assertIn('name: aiosubtitles\n', self.compose(bind='127.0.0.1'))
 
+    def test_the_tests_run_on_the_default_project(self):
+        # an exported AIOSUBTITLES_PROJECT (an isolated test install's own) once failed the test above and three in
+        # test_hosting, test_flow and test_update: engine.CONTAINER is read once, when the engine is imported
+        from installer import engine
+        self.assertNotIn('AIOSUBTITLES_PROJECT', os.environ)
+        self.assertEqual(engine.CONTAINER, 'aiosubtitles-subsync')
+
     def test_proxy_snippets_keep_the_path(self):
         s = plan.proxy_snippets('https://a.example.com/subsync', '127.0.0.1:8790')
         self.assertIn('    reverse_proxy /subsync/* 127.0.0.1:8790', s['Caddy'])

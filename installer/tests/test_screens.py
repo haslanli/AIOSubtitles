@@ -5,7 +5,7 @@ import unittest
 from html.parser import HTMLParser
 from unittest import mock
 
-from installer import dockerenv, limits, plan, screens
+from installer import dockerenv, limits, plan, screens, update
 from installer.aios import Aios
 from installer.tests import samples
 import html as htmllib
@@ -180,10 +180,12 @@ class Structure(unittest.TestCase):
         for name, (html, _) in samples.every_state().items():
             tree = Tree(html)
             ids = {attrs.get('id') for _, attrs in tree.tags}
-            labelled = {attrs.get('for') for tag, attrs in tree.tags if tag == 'label'}
+            # a label wrapping its radio or box has no for=: None isn't a field's label
+            labelled = {attrs.get('for') for tag, attrs in tree.tags if tag == 'label'} - {None}
             for tag, attrs in tree.tags:
                 if tag in ('input', 'select') and attrs.get('type') not in ('hidden', 'radio', 'checkbox'):
-                    with self.subTest(screen=name, field=attrs.get('id')):
+                    with self.subTest(screen=name, field=attrs.get('id') or attrs.get('name')):
+                        self.assertTrue(attrs.get('id'), f'{name}: a field without an id: {attrs}')
                         self.assertIn(attrs.get('id'), labelled)
                         for ref in (attrs.get('aria-describedby') or '').split():
                             self.assertIn(ref, ids)
@@ -251,16 +253,41 @@ class Rules(unittest.TestCase):
         self.assertNotIn('name="SUBSYNC_SECRET_KEY"', html)
 
     def test_every_value_is_escaped(self):
+        # every screen that shows a typed value, a value Docker or AIOStreams gives, or a problem or stop text
         rows = [('ok', HOSTILE, HOSTILE), ('bad', HOSTILE, None)]
-        for html in (screens.machine('yourself', rows), screens.config(rows, HOSTILE, problem=('AIOS_CONFIG_ID', HOSTILE)),
-                     screens.host_address(HOSTILE, HOSTILE), screens.host_signups(HOSTILE),
-                     screens.choices(['eng'], 'no', HOSTILE, problem=('LANGUAGES', HOSTILE)),
-                     screens.review([(HOSTILE, [('+', HOSTILE)], HOSTILE)]),
-                     screens.done('yourself', HOSTILE, [HOSTILE, HOSTILE], [('code', HOSTILE), ('p', HOSTILE)]),
-                     screens.after_setup('yourself', rows, [(HOSTILE, HOSTILE)], HOSTILE, None, config=HOSTILE),
-                     screens.removed(HOSTILE, rows, [HOSTILE])):
-            self.assertNotIn('<script>alert', html)
-            self.assertNotIn('<b>x</b>', html)
+        stop = (HOSTILE, HOSTILE)
+        shown = {
+            'machine': screens.machine('yourself', rows),
+            'aios-address': screens.aios(rows, ask='AIOS_URL', value=HOSTILE, problem=('AIOS_URL', HOSTILE), stop=stop),
+            'aios-containers': screens.aios(rows, ask='AIOS_CONTAINER', value=HOSTILE, containers=[(HOSTILE, HOSTILE)]),
+            'config': screens.config(rows, HOSTILE, problem=('AIOS_CONFIG_ID', HOSTILE)),
+            'host-address': screens.host_address(HOSTILE, HOSTILE),
+            'host-signups': screens.host_signups(HOSTILE),
+            'choices': screens.choices(['eng'], 'no', HOSTILE, problem=('LANGUAGES', HOSTILE)),
+            'limits': screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': HOSTILE},
+                                     problem=('SUBSYNC_DAILY_BUDGET_GB', HOSTILE)),
+            'limits-audio': screens.limits('yourself', {limits.AUDIO.setting: HOSTILE},
+                                           problem=(limits.AUDIO.setting, HOSTILE), audio=True),
+            'host-limits': screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': HOSTILE},
+                                          problem=('SUBSYNC_SYNCS_AT_ONCE', HOSTILE)),
+            'review': screens.review([(HOSTILE, [('+', HOSTILE)], HOSTILE)]),
+            'installing': screens.installing('host', rows, running=False, stop=stop, rule={HOSTILE: [HOSTILE]},
+                                             rule_intro=HOSTILE),
+            'check': screens.check('host', rows, running=False, offer_test_read=True, stop=stop),
+            'host-choices': screens.host_choices(problem=('SUBDL_KEY', HOSTILE)),
+            'done': screens.done('yourself', HOSTILE, [HOSTILE, HOSTILE], [('code', HOSTILE), ('p', HOSTILE)]),
+            'after-setup': screens.after_setup('yourself', rows, [(HOSTILE, HOSTILE)], HOSTILE, None, config=HOSTILE),
+            'after-setup-host': screens.after_setup('host', rows, [(HOSTILE, HOSTILE)], HOSTILE,
+                                                    update.Ready(HOSTILE, 'ready'), problem=('CONFIRM', HOSTILE),
+                                                    rollback=(HOSTILE, HOSTILE)),
+            'working': screens.working(HOSTILE, rows, running=False, stop=stop),
+            'removed': screens.removed(HOSTILE, rows, [HOSTILE]),
+        }
+        for name, html in shown.items():
+            with self.subTest(screen=name):
+                self.assertNotIn('<script>alert', html)
+                self.assertNotIn('<b>x</b>', html)
+                self.assertNotIn('"&gt;&lt;script', html)        # the value's quote left raw would end its attribute
 
     def test_the_steps_are_the_approved_ones(self):
         self.assertEqual(screens.PERSONAL, ('This machine', 'Your AIOStreams', 'The config your apps use',

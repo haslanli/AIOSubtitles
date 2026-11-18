@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from installer import update
 
@@ -16,9 +17,34 @@ SCRIPT = (REPO / 'setup').read_text()
 
 
 def git(cwd, *args):
+    """git with none of the developer's own git settings (commit signing, hooks, ...): only these and the folder's."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
     return subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c',
                            'init.defaultBranch=main', *args], cwd=cwd, check=True, capture_output=True, text=True,
-                          stdin=subprocess.DEVNULL, timeout=60).stdout.strip()
+                          stdin=subprocess.DEVNULL, timeout=60, env=env).stdout.strip()
+
+
+@unittest.skipUnless(shutil.which('git'), 'needs git')
+class GitHelper(unittest.TestCase):
+    def test_the_developers_git_settings_dont_reach_the_tests_commits(self):
+        # a developer's commit signing (or hooks) once stopped every test below in its setUp
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        hooks = tmp / 'hooks'
+        hooks.mkdir()
+        (hooks / 'pre-commit').write_text('#!/bin/sh\nexit 1\n')
+        (hooks / 'pre-commit').chmod(0o755)
+        mine = tmp / 'gitconfig'
+        mine.write_text(f'[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n[core]\n\thooksPath = {hooks}\n')
+        folder = tmp / 'folder'
+        folder.mkdir()
+        (folder / 'VERSION').write_text('1.4.0\n')
+        with mock.patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(mine)}):
+            git(folder, 'init', '-q')
+            git(folder, 'add', '-A')
+            git(folder, 'commit', '-qm', 'one')
+            self.assertEqual(git(folder, 'log', '--format=%s'), 'one')
 
 
 @unittest.skipUnless(shutil.which('git') and shutil.which('bash'), 'needs git and bash')

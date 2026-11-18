@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from installer import engine, update, web
+from installer import engine, tests, update, web
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
 from subsync import ui
@@ -73,6 +73,46 @@ class Browser:
                 return status, headers, text
             time.sleep(0.05)
         raise AssertionError(f'{step} still running')
+
+
+def started(test, app):
+    """The app's server on a real socket on 127.0.0.1, stopped when the test ends."""
+    server = web.start(app)
+
+    def stop():
+        app.finish_in(0)
+        app.finished.wait(5)
+        server.server_close()
+    test.addCleanup(stop)
+    return server
+
+
+class BackgroundWork:
+    """For the page tests on a fixture: the background work (installing, checking, updating, removing) of every Session
+    the test makes is done before the fixture's fakes go. Left running, it would meet the real Docker and state; a job
+    still running JOB_WAIT seconds after the test fails it."""
+
+    JOB_WAIT = 30
+
+    def setUp(self):
+        super().setUp()
+        sessions = []
+
+        class Recorded(web.Session):
+            def __init__(self, *args):
+                super().__init__(*args)
+                sessions.append(self)
+        p = mock.patch.object(web, 'Session', Recorded)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.await_jobs, sessions)          # cleanups run last first: this one before the fakes go
+
+    def await_jobs(self, sessions):
+        deadline = time.monotonic() + self.JOB_WAIT
+        while any(s.running(step) for s in sessions for step in list(s.jobs)):
+            if time.monotonic() > deadline:
+                self.fail(f'background work still running {self.JOB_WAIT} s after the test')
+            time.sleep(0.05)
 
 
 class Security(unittest.TestCase):
@@ -172,16 +212,17 @@ class Security(unittest.TestCase):
         self.assertEqual(lines[-1], 'The page stops when you finish, after 60 minutes without use, or with Ctrl-C.')
 
     def test_the_server_listens_on_this_machine_only_and_stops_when_idle(self):
-        app = web.App(idle_s=0.3)
-        server = web.start(app)
-        self.addCleanup(server.server_close)
+        # idle only after the request: a 0.3 s idle time from the start once stopped the server first on a slow machine
+        app = web.App(idle_s=60)
+        server = started(self, app)
         self.assertEqual(server.server_address[0], '127.0.0.1')
         with urllib.request.urlopen(f'http://127.0.0.1:{app.port}/{app.key}/', timeout=5) as r:
             self.assertEqual(r.status, 200)
+        app.idle_s = 0.3
         self.assertTrue(app.finished.wait(5))
 
 
-class Personal(FlowFixture):
+class Personal(BackgroundWork, FlowFixture):
     """Install it for yourself, through the page."""
 
     def setUp(self):
@@ -432,7 +473,7 @@ class Pieces(unittest.TestCase):
         self.assertNotIn('now', [kind for kind, _, _ in s.rows['install']])
 
 
-class Hosting(RouteFixture):
+class Hosting(BackgroundWork, RouteFixture):
     def test_a_busy_port_says_so_on_the_address_step(self):
         # a stop on a busy port once showed nothing, so the page looked unchanged
         app = web.App(port=8808)
@@ -483,13 +524,7 @@ class Lengths(unittest.TestCase):
 
     def setUp(self):
         self.app = web.App()
-        server = web.start(self.app)
-
-        def stop():
-            self.app.finish_in(0)
-            self.app.finished.wait(5)
-            server.server_close()
-        self.addCleanup(stop)
+        started(self, self.app)
 
     def status(self, length, body=b'ROUTE=host'):
         """The answer's status code, the connection left open after the body (as a slow client leaves it)."""
@@ -515,7 +550,7 @@ class Lengths(unittest.TestCase):
         self.assertTrue(web.Handler.timeout and web.Handler.timeout <= 60)
 
 
-class Rollback(FlowFixture):
+class Rollback(BackgroundWork, FlowFixture):
     """The page after setup offers going back while an earlier version is recorded."""
 
     def setUp(self):
@@ -568,6 +603,43 @@ class Rollback(FlowFixture):
         _, _, text = b.get('')
         self.assertIn('action="rollback"', text)
         self.assertNotIn('name="RESTORE_DATABASES"', text)
+
+
+class Fixtures(unittest.TestCase):
+    """What every page test stands on."""
+
+    def test_no_page_test_reads_a_real_state_folder(self):
+        # Security's and Pieces' pages once read state/ of a folder ./setup had set up (or an exported
+        # AIOSUBTITLES_STATE), with its secrets, and ran docker against its running service
+        self.assertEqual(engine.STATE, Path(tests.STATE))
+        self.assertTrue(engine.STATE.is_dir())
+        self.assertFalse(engine.STATE.is_relative_to(REPO))
+
+    def test_a_page_test_ends_after_its_background_work(self):
+        # work still running when a page test ended once went on after the fakes were gone
+        seen = []
+
+        class Ends(Personal):
+            def test_it(self):
+                web.Session('yourself', {}).start_job('install', lambda: (time.sleep(0.3), seen.append(engine.STATE)))
+        case, result = Ends('test_it'), unittest.TestResult()
+        case.run(result)
+        self.assertEqual((result.errors, result.failures), ([], []))
+        self.assertEqual(seen, [case.state])                  # done while the test's own state folder was in place
+
+    def test_work_that_doesnt_end_fails_its_test(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class Hangs(Personal):
+            JOB_WAIT = 0.2
+
+            def test_it(self):
+                web.Session('yourself', {}).start_job('install', lambda: release.wait(10))
+        result = unittest.TestResult()
+        Hangs('test_it').run(result)
+        self.assertEqual(len(result.failures), 1, result.errors)
+        self.assertIn('background work still running 0.2 s after the test', result.failures[0][1])
 
 
 if __name__ == '__main__':

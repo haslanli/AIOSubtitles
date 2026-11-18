@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,10 +21,17 @@ ON_PUSH_ONLY = ("github.event_name == 'push' && (github.ref == 'refs/heads/main'
                 "startsWith(github.ref, 'refs/tags/v'))")
 PIN = re.compile(r'^\s*(?:-\s+)?uses:\s+([\w.-]+/[\w.-]+)@([0-9a-f]{40}) # v\d+\.\d+\.\d+$')
 LOCAL = re.compile(r'^\s*(?:-\s+)?uses:\s+\./\.github/workflows/[\w-]+\.yml$')
+# a YAML block scalar's header: | or >, its indentation and chomping indicators in either order, and a comment
+BLOCK = re.compile(r'^[|>]([1-9]?[+-]?|[+-]?[1-9]?)\s*(#.*)?$')
 
 
 def read(name):
     return (FLOWS / name).read_text()
+
+
+def workflows(folder):
+    """The files GitHub runs as workflows in `folder`: every .yml and .yaml file, dot-named ones too."""
+    return sorted(p.name for p in folder.iterdir() if p.suffix in ('.yml', '.yaml'))
 
 
 def blocks(text, parent):
@@ -50,7 +58,7 @@ def run_scripts(text):
         m = re.match(r'^(\s*)(?:-\s+)?run:\s*(.*)$', line)
         if not m:
             continue
-        if m.group(2) not in ('|', '>'):
+        if not BLOCK.match(m.group(2)):
             scripts.append(m.group(2))
             continue
         indent, body = len(m.group(1)), []
@@ -68,7 +76,14 @@ class WorkflowRules(unittest.TestCase):
         self.files = {'image.yml': self.main, 'image-build.yml': self.build}
 
     def test_only_these_two_files(self):
-        self.assertEqual(sorted(p.name for p in FLOWS.iterdir()), ['image-build.yml', 'image.yml'])
+        self.assertEqual(workflows(FLOWS), ['image-build.yml', 'image.yml'])
+
+    def test_every_file_github_would_run_counts_and_nothing_else(self):
+        # Finder's .DS_Store there once failed the test above; a dot-named workflow still counts
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ('image.yml', 'other.yaml', '.hidden.yml', '.DS_Store', 'image.yml~', '.image.yml.swp'):
+                (Path(tmp) / name).write_text('')
+            self.assertEqual(workflows(Path(tmp)), ['.hidden.yml', 'image.yml', 'other.yaml'])
 
     def test_every_action_pinned_to_a_commit(self):
         for name, text in self.files.items():
@@ -162,6 +177,15 @@ class WorkflowRules(unittest.TestCase):
         for name, text in self.files.items():
             for script in run_scripts(text):
                 self.assertNotIn('${{', script, name)
+
+    def test_a_block_script_is_read_whatever_its_header(self):
+        # a header with a chomping or indentation indicator, or a comment, once made only the header the script
+        body = '          echo "${{ github.event.pull_request.title }}"'
+        for header in ('|', '>', '|-', '>-', '|+', '>+', '|2', '|2-', '>-2', '| # a note', '>-  # a note'):
+            with self.subTest(header=header):
+                text = '    steps:\n      - run: ' + header + '\n' + body + '\n      - name: Next\n'
+                self.assertEqual(run_scripts(text), [body])
+        self.assertEqual(run_scripts('      - run: echo one # a note\n'), ['echo one # a note'])
 
     def test_no_workflow_artifacts(self):
         self.assertIn('\n      DOCKER_BUILD_RECORD_UPLOAD: false', self.build)    # build-push-action uploads one otherwise

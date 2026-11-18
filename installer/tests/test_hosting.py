@@ -40,10 +40,12 @@ class Pieces(unittest.TestCase):
                 self.assertIn('with https, like https://subtitles.example.com', message)
 
     def test_the_env_passes_subsyncs_own_checks_never_has_wyzie_and_audio_only_when_chosen(self):
+        # WYZIE_KEY and AUDIO are a personal install's answers: neither may reach a public instance's lines; the limits
+        # come in their own argument, as host_install passes them
         answers = {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'SUBSYNC_PUBLIC_INVITE': 'abcd-efgh-jkmn',
-                   'SUBDL_KEY': 'sd', 'SUBSYNC_SUBSOURCE_KEY': 'ss', 'WYZIE_KEY': 'wz', 'AUDIO': 'yes',
-                   'SUBSYNC_MAX_USERS': '150', 'SUBSYNC_SYNCS_AT_ONCE': 'auto'}
-        env = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_MAX_USERS': '150'})
+                   'SUBDL_KEY': 'sd', 'SUBSYNC_SUBSOURCE_KEY': 'ss', 'WYZIE_KEY': 'wz', 'AUDIO': 'yes'}
+        env = hosting.public_env(answers, hosting.new_secret(), {'SUBSYNC_MAX_USERS': '150',
+                                                                 'SUBSYNC_SYNCS_AT_ONCE': 'auto'})
         self.assertEqual(env['SUBSYNC_PUBLIC'], 'on')
         self.assertEqual(env['SUBSYNC_PUBLIC_BASE'], ADDRESS)
         self.assertEqual(env['SUBSYNC_MAX_USERS'], '150')
@@ -163,8 +165,13 @@ class Pieces(unittest.TestCase):
         self.assertIn('location / {', rule['nginx'])
         self.assertIn('rule: Host(`subs.example.com`)', rule['Traefik'])
 
-    def test_the_hosting_limits_are_the_three_groups(self):
-        self.assertEqual(hosting.LIMITS, limits.hosting(usenet=True, audio=True))   # every limit the route may write
+    def test_every_limit_the_route_may_write_is_its_own(self):
+        # OWNED: a limit's line set by hand gives way to the answer, whichever of Usenet and the audio route is on
+        self.assertEqual(hosting.LIMITS, limits.hosting(usenet=True, audio=True))   # the widest set
+        for usenet in (False, True):
+            for audio in (False, True):
+                with self.subTest(usenet=usenet, audio=audio):
+                    self.assertLessEqual(set(limits.names(limits.hosting(usenet, audio))), set(hosting.OWNED))
 
 
 class Switches(unittest.TestCase):
@@ -335,6 +342,16 @@ class Route(RouteFixture):
         self.assertNotIn('Audio syncs at a time', out)
         off = engine.read_kv(self.state / 'subsync.env')
         self.assertFalse({'SUBSYNC_USER_AUDIO_PER_DAY', 'SUBSYNC_USER_OPENED_PER_DAY', 'SUBSYNC_AUDIO_AT_ONCE'} & set(off))
+
+    def test_a_wyzie_key_written_by_hand_goes_on_a_rerun(self):
+        # public mode refuses a Wyzie Subs key (subsync wouldn't start): the line is setup's on this route too
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        with open(self.state / 'subsync.env', 'a') as env:
+            env.write('SUBSYNC_WYZIE_KEY=wz\n')
+        code, out = self.run_setup({})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('SUBSYNC_WYZIE_KEY', engine.read_kv(self.state / 'subsync.env'))
 
     def test_the_status_and_removing_a_public_instance(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
