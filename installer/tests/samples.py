@@ -85,6 +85,8 @@ def every_state():
     lang_problem = ('LANGUAGES', plan.parse_languages('Klingon')[1])
     add('choices-problem', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', problem=lang_problem),
         f'{PUBLIC}/subsync', lang_problem[1])
+    add('choices-saved-keys', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', saved={'SUBDL_KEY', 'TMDB_KEY'}),
+        f'{PUBLIC}/subsync')
     add('limits', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50'}))
     add('limits-audio', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.AUDIO.setting: '2'},
                                        audio=True))
@@ -157,6 +159,7 @@ def every_state():
     add('host-choices', screens.host_choices())
     add('host-choices-usenet', screens.host_choices(usenet=True))
     add('host-choices-audio', screens.host_choices(usenet=True, audio=True))
+    add('host-choices-saved-keys', screens.host_choices(saved={'SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY'}))
     add('host-limits', screens.limits('host', {}))
     add('host-limits-usenet', screens.limits('host', {}, usenet=True))
     add('host-limits-audio', screens.limits('host', {}, usenet=True, audio=True))

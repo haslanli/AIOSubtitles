@@ -77,6 +77,9 @@ REMOVE_HOST_TEXT = ("This stops AIOSubtitles and removes its container with ever
 SECRET_DOTS = '•' * 16
 REMOVE_TEXT = ("This takes subsync out of your config (1 entry), deletes subsync's own config, and removes the subsync "
                "container with its stored copies. Your other subtitle sources stay.")
+REMOVE_SAVED_KEY = 'Remove the saved key'       # under an optional key's field while one is saved
+KEPT_ANSWERS = ('Already set up here: your answers are kept unless you change them. To switch between installing it '
+                'for yourself and hosting a public instance, remove it first.')
 
 # words the screens use besides explain.py's texts and the site's UI_WORDS, each approved by the owner
 INSTALLER_WORDS = (
@@ -93,7 +96,7 @@ INSTALLER_WORDS = (
     explain.TMDB_NOTICE, 'TMDB',
     'Updates', 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
     RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, REMOVE_HOST, REMOVE_HOST_TEXT,
-    REMOVE_TEXT,
+    REMOVE_TEXT, REMOVE_SAVED_KEY, KEPT_ANSWERS,
     update.ABOUT, update.ABOUT_HOSTING, update.NEWEST, update.ROLLBACK_HEADING, update.ROLLBACK_ABOUT,
     update.RESTORE_HELP,
     # the terminal setup's lines, as headings
@@ -240,19 +243,20 @@ def aios(rows, ask=None, value='', problem=None, containers=(), done=False, stop
 
 
 def config(rows, config_id='', problem=None, stop=None):
-    """The config your apps use: its ID and password (never filled in again), and what was found in it."""
+    """The config your apps use: its ID and password (never filled in again), and what was found in it. After a stop
+    about the config, Continue reads it again."""
     body = (_input('AIOS_CONFIG_ID', LABELS['AIOS_CONFIG_ID'], config_id, problem, mono=True)
             + _input('AIOS_CONFIG_PASSWORD', LABELS['AIOS_CONFIG_PASSWORD'], '', problem, kind='password', reveal=True)
             + _rows(rows) + _stop(stop))
-    return step('yourself', 'config', body, _back_and_continue('yourself', 'config', enabled=not stop))
+    return step('yourself', 'config', body, _back_and_continue('yourself', 'config'))
 
 
 def choices(languages, audio, public_address, problem=None, offer_opensubtitles=False, add_opensubtitles=True,
-            limit=4, usenet=None, stop=None):
+            limit=4, usenet=None, stop=None, saved=()):
     """Your choices: the languages (the site's slots), the audio route (`audio`: the answer picked, no, pick or
     open), Usenet when the config has a Usenet service subsync reads through (`usenet` not None), the optional
-    keys, OpenSubtitles when the config has no subtitle source, and subsync's address for your apps. `stop`: a config
-    without a debrid service answered no to Usenet."""
+    keys (`saved`: those with a saved key), OpenSubtitles when the config has no subtitle source, and subsync's address
+    for your apps. `stop`: a config without a debrid service answered no to Usenet."""
     error = _error(problem, 'LANGUAGES')
     langs = (f'<div class="field"><span class="label" id="languages-l">{e(LABELS["LANGUAGES"])}</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
@@ -265,9 +269,9 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
     body = (_stop(stop) + langs + ui.radio_group(LABELS['AUDIO'], audio_rows, help_text=_explanation('AUDIO'),
                                                  id='audio')
             + (ui.choices(*usenet_box) if usenet_box else '')
-            + _input('SUBDL_KEY', LABELS['SUBDL_KEY'], '', problem, kind='password', mono=True, reveal=True)
-            + _input('WYZIE_KEY', LABELS['WYZIE_KEY'], '', problem, kind='password', mono=True, reveal=True)
-            + _tmdb(LABELS['TMDB_KEY'], problem))
+            + _key('SUBDL_KEY', LABELS['SUBDL_KEY'], problem, saved)
+            + _key('WYZIE_KEY', LABELS['WYZIE_KEY'], problem, saved)
+            + _tmdb(LABELS['TMDB_KEY'], problem, saved))
     if offer_opensubtitles:
         body += ui.choices(_choice('ADD_OPENSUBTITLES', LABELS['ADD_OPENSUBTITLES'], add_opensubtitles))
     body += _input('PUBLIC_ADDRESS', LABELS['PUBLIC_ADDRESS'], public_address, problem, kind='url', mono=True)
@@ -371,17 +375,24 @@ def host_signups(invite, problem=None):
     return step('host', 'signups', body, _back_and_continue('host', 'signups'))
 
 
-def _tmdb(label, problem):
+def _key(key, label, problem, saved):
+    """An optional key's field, never filled in, with the box that removes the saved key under it while one is saved
+    (`saved`: the keys saved)."""
+    field = _input(key, label, '', problem, kind='password', mono=True, reveal=True)
+    if key in saved:
+        field += ui.choices(ui.choice(f'remove-{key.lower()}', REMOVE_SAVED_KEY, '', name=f'REMOVE_{key}', value='yes'))
+    return field
+
+
+def _tmdb(label, problem, saved):
     """The original-language lookup's TMDB key, with TMDB's logo and notice under it (its terms ask for them)."""
-    return (_input('TMDB_KEY', label, '', problem, kind='password', mono=True, reveal=True)
-            + ui.tmdb_credit(explain.TMDB_NOTICE))
+    return _key('TMDB_KEY', label, problem, saved) + ui.tmdb_credit(explain.TMDB_NOTICE)
 
 
-def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False):
-    body = (_input('SUBDL_KEY', LABELS['SUBDL_KEY'], '', problem, kind='password', mono=True, reveal=True)
-            + _input('SUBSYNC_SUBSOURCE_KEY', LABELS['SUBSYNC_SUBSOURCE_KEY'], '', problem, kind='password', mono=True,
-                     reveal=True)
-            + _tmdb(TMDB_FOR_EVERYONE, problem)
+def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False, saved=()):
+    body = (_key('SUBDL_KEY', LABELS['SUBDL_KEY'], problem, saved)
+            + _key('SUBSYNC_SUBSOURCE_KEY', LABELS['SUBSYNC_SUBSOURCE_KEY'], problem, saved)
+            + _tmdb(TMDB_FOR_EVERYONE, problem, saved)
             + ui.choices(_choice('SUBSYNC_TMDB_PERSONAL', LABELS['SUBSYNC_TMDB_PERSONAL'], tmdb_personal),
                          _choice('SUBSYNC_USENET', LABELS['SUBSYNC_USENET'], usenet),
                          _choice('SUBSYNC_AUDIO_ROUTE', LABELS['SUBSYNC_AUDIO_ROUTE'], audio)))
@@ -419,7 +430,7 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
         panel += ui.row('rb-h', update.ROLLBACK_HEADING, f'<p class="help">{e(update.ROLLBACK_ABOUT)}</p>',
                         f'<form class="controls" method="post" action="rollback">{controls}</form>')
     answers = ui.row('ans-h', 'Your answers',
-                     f'<p class="help">{e("Already set up here: your answers are kept unless you change them.")}</p>',
+                     f'<p class="help">{e(KEPT_ANSWERS)}</p>',
                      f'<form class="controls" method="post" action="answers"><div class="actions">'
                      f'{ui.button("Change your answers", "secondary", type="submit")}</div></form>')
     if route == 'host':

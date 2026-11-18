@@ -179,8 +179,9 @@ state/ into it, and run ./setup there.
 ./setup
 ```
 
-Where it is set up, the page after setup: its status, updates, your answers (Change your answers opens the steps again,
-filled in) and removing it.
+Where it is set up, the page after setup: its status, updates, your answers (Change your answers opens the same steps
+again, filled in; to switch between installing it for yourself and hosting a public instance, remove it first) and
+removing it.
 
 ```bash
 ./setup --status

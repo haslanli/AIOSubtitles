@@ -60,7 +60,7 @@ def cmd_restore(args, path):
 
 def cmd_uninstall(args):
     answers = plan.parse_env(Path(args.answers).read_text()) if args.answers else {}
-    e = engine.Engine(answers)
+    e = engine.Engine(answers, yes=args.yes)
     e.remove_host() if e.prev.get('route') == 'host' else e.remove()
     return 0
 
@@ -132,7 +132,7 @@ def main(argv=None):
         say()
         say(paint('1', '  AIOSubtitles · subsync setup'))
         answers = plan.parse_env(Path(args.answers).read_text()) if args.answers else {}   # KEY= is an answer too
-        e = engine.Engine(answers)
+        e = engine.Engine(answers, yes=args.yes)
         if e.prev:
             say(paint('2', '  Already set up here: your answers are kept unless you change them.'))
         return 0 if e.run_answers() else 3

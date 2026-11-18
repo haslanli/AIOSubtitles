@@ -1,5 +1,6 @@
-# Answers for ./setup --answers FILE (add --yes to ask nothing). Leave a line out to be asked, or to keep the current
-# value on a re-run. A " #" starts a comment. Keep this file private if it holds a password.
+# Answers for ./setup --answers FILE (add --yes to ask nothing). Leave a line out to be asked, or to keep the
+# current value on a re-run; an optional key's empty line (TMDB_KEY=) removes the saved key. A " #" starts a
+# comment. Keep this file private if it holds a password.
 
 # Install it for yourself (yourself, the default). This adds it to the AIOStreams you already run. Host a public
 # instance (host). Runs here with its own sign-up page, so other people can use it with their own AIOStreams.

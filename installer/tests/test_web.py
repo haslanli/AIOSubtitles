@@ -17,6 +17,7 @@ from unittest import mock
 from installer import engine, tests, update, web
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
+from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
 from subsync import ui
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -382,6 +383,76 @@ class Personal(BackgroundWork, FlowFixture):
         status, headers, _ = self.b.get('review')
         self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/machine'))
 
+    def walk_to_config(self):
+        self.b.post('', {'ROUTE': 'yourself'})
+        self.b.get('machine')
+        self.b.follow('machine', {'go': 'next'})
+        self.b.follow('aios', {'go': 'next'})
+
+    def test_after_the_real_debrid_stop_continue_reads_the_config_again(self):
+        # the stop's way out: once the config has another debrid service, Continue there goes on, with no retyping
+        config = self.aios.users[UUID]['config']
+        services = config['services']
+        config['services'] = [{'id': 'realdebrid', 'enabled': True, 'credentials': {}}]
+        self.walk_to_config()
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD,
+                                            'go': 'next'})
+        self.assertIn("After adding it on AIOStreams' configure page, press Continue again: setup reads the config "
+                      'again.', text)
+        self.assertIn('<button class="btn primary" type="submit" name="go" value="next">Continue', self.b.pages[-1])
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'go': 'next'})       # not added yet: the same
+        self.assertIn('press Continue again', text)
+        config['services'] = services                                   # TorBox added on AIOStreams
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'go': 'next'})
+        self.assertIn('Debrid services: TorBox', text)
+        self.assertNotIn('press Continue again', text)
+        status, headers, _ = self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/choices'))
+        self.assertFalse(any(PASSWORD in page for page in self.b.pages))
+
+    def test_after_a_stop_at_your_choices_continue_reads_the_config_again(self):
+        # a config usable only through Usenet, Usenet answered no: once TorBox is added, Continue goes on
+        config = self.aios.users[UUID]['config'] = {'services': [ENGINE], 'presets': [NEWZNAB, SUBS],
+                                                    'failover': {'enabled': True}}
+        self.walk_to_config()
+        self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        _, _, text = self.b.follow('config', {'AIOS_CONFIG_ID': self.LINK, 'go': 'next'})
+        self.assertIn('Sync files you play from Usenet too?', text)
+        form = {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync', 'ADD_OPENSUBTITLES': 'yes', 'go': 'next'}
+        _, _, text = self.b.post('choices', form)
+        self.assertIn(engine.NO_USENET, text)
+        self.assertIn("Answer yes to the Usenet question, or add a debrid service (TorBox, …) on AIOStreams' "
+                      'configure page, then press Continue again.', text)
+        config['services'].insert(0, TORBOX)                            # TorBox added on AIOStreams
+        config['presets'].insert(0, ZILEAN)
+        status, headers, _ = self.b.post('choices', form)
+        self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/limits'))
+        self.assertTrue(self.app.session.e.has_sync)
+
+    def test_a_saved_key_can_be_removed_on_the_page(self):
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no', SUBDL_KEY='subdl-key-1', TMDB_KEY='tmdb-key-1'))
+        self.b.post('answers', {})
+        self.b.get('machine')
+        self.b.follow('machine', {'go': 'next'})
+        self.b.follow('aios', {'go': 'next'})
+        self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        _, _, text = self.b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+        self.assertIn('Remove the saved key', text)
+        self.assertIn('name="REMOVE_SUBDL_KEY"', text)
+        self.assertIn('name="REMOVE_TMDB_KEY"', text)
+        self.assertNotIn('name="REMOVE_WYZIE_KEY"', text)                # none saved: no box
+        _, _, text = self.b.follow('choices', {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
+                                               'REMOVE_SUBDL_KEY': 'yes', 'go': 'next'})
+        self.assertIn('Data a day in total', text)
+        self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        keys, env = engine.read_kv(self.state / 'secrets.env'), engine.read_kv(self.state / 'subsync.env')
+        self.assertNotIn('SUBDL_KEY', keys)
+        self.assertNotIn('SUBSYNC_SUBDL_KEY', env)
+        self.assertEqual((keys['TMDB_KEY'], env['SUBSYNC_TMDB_KEY']), ('tmdb-key-1', 'tmdb-key-1'))
+        self.assertFalse(any('subdl-key-1' in page or 'tmdb-key-1' in page for page in self.b.pages))
+
     def test_the_page_after_setup(self):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8803)
@@ -403,16 +474,23 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertFalse((self.state / 'settings.json').exists())
         self.assertFalse(any(PASSWORD in page for page in b.pages))
 
-    def test_change_your_answers_opens_the_steps_filled_in(self):
+    def test_change_your_answers_opens_the_same_steps_filled_in(self):
+        # the installed route's own steps, without the route question: it is never switched in place
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8804)
         b = Browser(app)
-        b.get('')
-        status, headers, _ = b.post('answers', {})
-        self.assertEqual(status, 303)
         _, _, text = b.get('')
-        self.assertIn('How do you want to use it?', text)
-        b.post('', {'ROUTE': 'yourself'})
+        self.assertIn('Already set up here: your answers are kept unless you change them. To switch between '
+                      'installing it for yourself and hosting a public instance, remove it first.', text)
+        status, headers, _ = b.post('answers', {})
+        self.assertEqual((status, headers['Location']), (303, f'/{app.key}/machine'))
+        self.assertEqual(app.session.route, 'yourself')
+        _, _, text = b.get('')                                          # the start page: the page after setup
+        self.assertNotIn('How do you want to use it?', text)
+        self.assertIn('AIOSubtitles · subsync status', text)
+        status, headers, _ = b.post('', {'ROUTE': 'host'})
+        self.assertEqual((status, headers['Location']), (303, f'/{app.key}/'))
+        self.assertEqual(app.session.route, 'yourself')
         b.get('machine')
         b.follow('machine', {'go': 'next'})
         _, _, text = b.follow('aios', {'go': 'next'})
@@ -474,6 +552,21 @@ class Pieces(unittest.TestCase):
 
 
 class Hosting(BackgroundWork, RouteFixture):
+    def test_change_your_answers_opens_the_public_instances_own_steps(self):
+        # never "Install it for yourself" in place: that is removing it first
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        app = web.App(port=8809)
+        b = Browser(app)
+        status, headers, _ = b.post('answers', {})
+        self.assertEqual((status, headers['Location']), (303, f'/{app.key}/machine'))
+        self.assertEqual(app.session.route, 'host')
+        b.post('', {'ROUTE': 'yourself'})
+        self.assertEqual(app.session.route, 'host')
+        b.get('machine')
+        _, _, text = b.follow('machine', {'go': 'next'})
+        self.assertIn(f'value="{ADDRESS}"', text)                       # its own steps, filled in
+
     def test_a_busy_port_says_so_on_the_address_step(self):
         # a stop on a busy port once showed nothing, so the page looked unchanged
         app = web.App(port=8808)

@@ -376,6 +376,33 @@ class Route(RouteFixture):
         self.assertIn(f'Your web server needs one rule so {ADDRESS} reaches AIOSubtitles on this machine.', ' '.join(out.split()))
         self.assertIn('reverse_proxy 127.0.0.1:8790', out)
 
+    def test_a_removed_tmdb_key_asks_each_persons_question_again(self):
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'TMDB_KEY': 'tmdb-key-1'})
+        self.assertEqual(code, 0, out)
+        env = engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual((env['SUBSYNC_TMDB_KEY'], env['SUBSYNC_TMDB_PERSONAL']), ('tmdb-key-1', 'off'))
+        code, out = self.run_setup({'SUBSYNC_TMDB_PERSONAL': 'yes'})       # no line: kept, the question not asked
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_TMDB_PERSONAL'], 'off')
+        code, out = self.run_setup({'TMDB_KEY': '', 'SUBSYNC_TMDB_PERSONAL': 'yes'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('Removed the saved TMDB API key', out)
+        env = engine.read_kv(self.state / 'subsync.env')
+        self.assertNotIn('SUBSYNC_TMDB_KEY', env)
+        self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'on')
+        self.assertNotIn('TMDB_KEY', engine.read_kv(self.state / 'secrets.env'))
+
+    def test_a_public_instance_isnt_turned_into_an_install_for_yourself(self):
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        before = (self.state / 'subsync.env').read_text()
+        code, out = self.run_setup({'ROUTE': 'yourself', 'AIOS_URL': 'http://127.0.0.1:9'})
+        self.assertEqual(code, 1, out)
+        self.assertIn("A public instance runs here; setup can't turn it into an install for yourself.", out)
+        self.assertIn("Run ./setup --uninstall first (it deletes everyone's records), then ./setup again.", out)
+        self.assertEqual((self.state / 'subsync.env').read_text(), before)
+        self.assertEqual(json.loads((self.state / 'settings.json').read_text())['route'], 'host')
+
     def test_a_wrong_limit_stops_the_run(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_SYNCS_AT_ONCE': 'many'})
         self.assertEqual(code, 1, out)

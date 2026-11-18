@@ -865,7 +865,7 @@ class Flow(FlowFixture):
             e.find_aios()
             self.assertIn(('ok', 'AIOStreams 2.37.0 answers there'), [tuple(r[:2]) for r in e.out.rows])
 
-    def test_the_real_debrid_stop_on_the_page_says_go_back(self):
+    def test_the_real_debrid_stop_on_the_page_says_press_continue_again(self):
         self.aios.users[UUID]['config']['services'] = [{'id': 'realdebrid', 'enabled': True, 'credentials': {}}]
         e = self.page_engine({'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD})
         e.check_machine()
@@ -874,7 +874,22 @@ class Flow(FlowFixture):
             e.read_viewer()
         self.assertIn("AIOSubtitles can't work with Real-Debrid only", caught.exception.message)
         self.assertEqual(caught.exception.page_fix,
-                         "After adding it on AIOStreams' configure page, go back one step and continue again.")
+                         "After adding it on AIOStreams' configure page, press Continue again: setup reads the config "
+                         "again.")
+        self.assertEqual(caught.exception.fix, "After adding it on AIOStreams' configure page, run ./setup again.")
+
+    def test_a_config_without_a_debrid_service_says_press_continue_again_on_the_page(self):
+        self.aios.users[UUID]['config']['services'] = []
+        e = self.page_engine({'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD})
+        e.check_machine()
+        e.find_aios()
+        with self.assertRaises(engine.Stop) as caught:
+            e.read_viewer()
+        self.assertTrue(caught.exception.message.startswith("subsync can't work with this config: "))
+        self.assertEqual(caught.exception.page_fix, "Add a debrid service other than Real-Debrid (TorBox, …) on "
+                                                    "AIOStreams' configure page, then press Continue again.")
+        self.assertEqual(caught.exception.fix, "Add a debrid service other than Real-Debrid (TorBox, ...) on "
+                                               "AIOStreams' configure page, then run ./setup again.")
 
     def test_the_status_as_the_page_after_setup_shows_it(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))

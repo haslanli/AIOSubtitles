@@ -1,5 +1,6 @@
 """The setup page's screens: approved words only, the parts' structure, every value
-escaped, no inline style, no way forward while installing or on a stop, and the secret never on a page."""
+escaped, no inline style, no way forward while installing or on a stop (but one about the config, whose Continue reads
+it again), and the secret never on a page."""
 import re
 import unittest
 from html.parser import HTMLParser
@@ -220,7 +221,7 @@ class Structure(unittest.TestCase):
 
 
 class Rules(unittest.TestCase):
-    def test_no_way_forward_while_installing_or_on_the_real_debrid_stop(self):
+    def test_no_way_forward_while_installing_and_continue_reads_the_config_again_after_its_stop(self):
         states = samples.every_state()
         for name in ('install-running', 'check-running', 'updating'):
             html, _ = states[name]
@@ -228,16 +229,33 @@ class Rules(unittest.TestCase):
                 self.assertIn('<meta http-equiv="refresh" content="2">', html)
                 self.assertNotIn('aria-label="Back"', html)
                 self.assertNotIn('>Back<', html)
-        for name in ('install-running', 'config-rd-only', 'machine-stop'):
+        for name in ('install-running', 'machine-stop'):
             html, _ = states[name]
             with self.subTest(screen=name):
                 self.assertRegex(html, r'<button class="btn primary" type="button" disabled>Continue')
+        # the Real-Debrid stop's way out: Continue stays a submit button, which reads the config again (web.py)
         html, _ = states['config-rd-only']
+        self.assertRegex(html, r'<button class="btn primary" type="submit" name="go" value="next">Continue')
+        self.assertNotIn('type="button" disabled', html)
         self.assertIn('>Back<', html)
         for name, (html, _) in states.items():
             if name not in ('install-running', 'check-running', 'updating'):
                 with self.subTest(screen=name):
                     self.assertNotIn('http-equiv="refresh"', html)
+
+    def test_a_saved_key_has_the_box_that_removes_it_under_its_field(self):
+        states = samples.every_state()
+        html, _ = states['choices-saved-keys']
+        names = re.findall(r'name="([A-Z_]+)"', html)
+        for key in ('SUBDL_KEY', 'TMDB_KEY'):
+            with self.subTest(key=key):
+                self.assertEqual(names[names.index(key) + 1], f'REMOVE_{key}')     # right under its field
+        self.assertNotIn('name="REMOVE_WYZIE_KEY"', html)                  # none saved: no box
+        self.assertEqual(html.count('<b>Remove the saved key</b>'), 2)
+        html, _ = states['host-choices-saved-keys']
+        self.assertEqual(html.count('<b>Remove the saved key</b>'), 3)
+        self.assertNotIn('Remove the saved key', states['choices'][0])
+        self.assertNotIn('Remove the saved key', states['host-choices'][0])
 
     def test_installing_shows_one_progress_list(self):
         # as installer piece 3's installing screen: done lines and the running one in one list, problems as check rows

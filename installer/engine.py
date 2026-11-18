@@ -1,9 +1,10 @@
 """The work of AIOSubtitles' setup, step by step, without asking or printing anything itself.
 
 Two front ends drive it: the setup page (installer/web.py), which puts each step's answers
-in and shows what comes back as rows, and an answers file (./setup --answers FILE), which runs every step at once
-and prints as the terminal setup did. Asking is `self.ask`: a question with no answer yet raises Problem(missing=True)
-for the page and stops an answers-file run; a wrong answer raises Problem at its field. Output is `self.out`.
+in and shows what comes back as rows, and the terminal (./setup --answers FILE, ./setup --uninstall), which runs every
+step at once and prints as the terminal setup did. Asking is `self.ask`: a question with no answer yet raises
+Problem(missing=True) for the page, is asked in a terminal, and stops a run with --yes; a wrong answer raises Problem
+at its field. Output is `self.out`.
 
 It installs one thing, the subsync service (in Docker, from the image setup itself runs from), and makes two config
 changes in
@@ -45,15 +46,34 @@ HEALTH = ['python', '-c', 'import os,urllib.request;print(urllib.request.urlopen
                           'os.environ.get("SUBSYNC_PORT","8790"),timeout=5).read().decode())']
 TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'The Matrix'),
                ('movie', 'tt0110912', 'Pulp Fiction')]
-# the Real-Debrid stop's way out: on the page and in a terminal
-RD_WAY_OUT_PAGE = "After adding it on AIOStreams' configure page, go back one step and continue again."
+# The stops about the config, each with its way out on the page (where Continue reads the config again:
+# installer/web.py) and in a terminal. The Real-Debrid stop's:
+RD_WAY_OUT_PAGE = "After adding it on AIOStreams' configure page, press Continue again: setup reads the config again."
 RD_WAY_OUT = "After adding it on AIOStreams' configure page, run ./setup again."
 # A config with no debrid service but Usenet, answered no to the Usenet question
 NO_USENET = "subsync can't work with this config without Usenet: it has no debrid service other than Real-Debrid."
 NO_USENET_WAY_OUT_PAGE = ("Answer yes to the Usenet question, or add a debrid service (TorBox, …) on AIOStreams' "
-                          "configure page, then continue again.")
+                          "configure page, then press Continue again.")
 NO_USENET_WAY_OUT = ("Answer yes to the Usenet question, or add a debrid service (TorBox, …) on AIOStreams' configure "
                      "page, then run ./setup again.")
+# A config whose own config for subsync can't work, with no Usenet route either
+NO_DEBRID_WAY_OUT_PAGE = ("Add a debrid service other than Real-Debrid (TorBox, …) on AIOStreams' configure page, "
+                          "then press Continue again.")
+NO_DEBRID_WAY_OUT = ("Add a debrid service other than Real-Debrid (TorBox, ...) on AIOStreams' configure page, then "
+                     "run ./setup again.")
+# AIOStreams elsewhere, reached over plain http: the config's password would cross the network unencrypted
+PLAIN_HTTP = ("AIOStreams at {address} uses plain http, so the config's password would go over the network "
+              "unencrypted. Use its https address if it has one.")
+KEY_REMOVED = 'Removed the saved {name}'
+# Setup never turns an installed folder into the other route: it is removed first
+ROUTE_STOPS = {
+    'yourself': ("A public instance runs here; setup can't turn it into an install for yourself.",
+                 "Run ./setup --uninstall first (it deletes everyone's records), then ./setup again."),
+    'host': ("subsync is installed here for yourself; setup can't turn it into a public instance.",
+             'Run ./setup --uninstall first, then ./setup again.'),
+}
+# The status line's words for the outcomes a check of a subtitle has (store.stats), in the order shown
+OUTCOMES = {'synced': 'synced', 'in_sync': 'already in sync', 'keep_original': 'original kept'}
 # an alias link at the config question
 ALIAS_UNKNOWN = "This AIOStreams doesn't know that alias. Check the link, or paste the config ID or the full install link."
 ALIAS_NO_CONFIG = ("Setup couldn't get the config from that alias link. Paste the config ID, or the full link: open the "
@@ -277,7 +297,8 @@ class Problem(Exception):
 class PageAsk:
     """The page's answers: what the page sent, else the current value or the default. Nothing is printed: a good
     check's message becomes a row, a wrong answer raises Problem at its field, an unanswered required one raises
-    Problem(missing=True), so the page shows that question."""
+    Problem(missing=True), so the page shows that question. An optional answer sent empty (its "Remove the saved key"
+    box) removes the current one: '' is returned."""
 
     def __init__(self, answers, out):
         self.answers, self.out = answers, out
@@ -286,6 +307,8 @@ class PageAsk:
              shown=None, skip_hint=None):
         (explain.QUESTIONS.get(key) or explain.SETTINGS[key])    # every question has its one explanation
         given = self.answers.get(key)
+        if optional and current and given == '':
+            return ''
         value = (given or '').strip() if isinstance(given, str) else given
         if not value:
             value = current or default or ''
@@ -401,11 +424,12 @@ class Rows:
 # ------------------------------------------------------------------------------------------- the steps
 
 class Engine:
-    def __init__(self, answers=None, page=False, out=None):
+    def __init__(self, answers=None, page=False, out=None, yes=True):
+        """`yes`: in a terminal, nothing is asked (./setup --yes); False asks what `answers` leaves out."""
         self.answers = dict(answers or {})
         self.page = page
         self.out = out or (Rows() if page else Terminal())
-        self.ask = PageAsk(self.answers, self.out) if page else Asker(self.answers, yes=True)
+        self.ask = PageAsk(self.answers, self.out) if page else Asker(self.answers, yes=yes)
         self.prev = load_settings()
         self.keys = read_kv(STATE / 'secrets.env')
         self.s = {}            # this run's settings (saved as state/settings.json)
@@ -487,6 +511,8 @@ class Engine:
             url = self.ask.text('AIOS_URL', screens.LABELS['AIOS_URL'], current=self.prev.get('aios_url'),
                                 default=None if (self.prev.get('aios_url') or self.page or bridge())
                                 else plan.AIOS_DEFAULT_URL, check=self._check_aios)
+        if urllib.parse.urlsplit(url).scheme == 'http' and not plan.is_private_host(plan.host_of(url)):
+            self.out.warn(PLAIN_HTTP.format(address=url))      # before the config's password is asked
         self.aios = Aios(url)
         settings = self.status['settings']
         public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
@@ -522,9 +548,22 @@ class Engine:
         return [u for u in urls if not (u in seen or seen.append(u))]
 
     def _check_aios(self, value):
+        """AIOStreams answering at the address typed. One without http:// or https:// is tried with https first unless
+        its host is local or private, then with http: the status check sends no password."""
         value = value.strip().rstrip('/')
-        if not re.match(r'^https?://', value):
-            value = 'http://' + value
+        if re.match(r'^https?://', value):
+            tries = [value]
+        elif plan.is_private_host(plan.host_of('http://' + value)):
+            tries = ['http://' + value]
+        else:
+            tries = ['https://' + value, 'http://' + value]
+        for address in tries:
+            found = self._aios_at(address)
+            if found[0]:
+                break
+        return found
+
+    def _aios_at(self, value):
         value = re.sub(r'/(stremio|configure|jellyfin)(/.*)?$', '', value)
         local = plan.is_local_host(plan.host_of(value))
         if bridge() and local:    # 127.0.0.1 is setup's own container here: the machine is its gateway
@@ -594,9 +633,8 @@ class Engine:
                 self.out.note(f'  {line}')
         problems = plan.sync_config_problems(plan.sync_config(self.viewer), usenet=True)
         if problems and not self.usenet_services:
-            stop('subsync can\'t work with this config: ' + '; '.join(problems) + '.',
-                 'Add a debrid service other than Real-Debrid (TorBox, ...) on AIOStreams\' configure page, then run '
-                 './setup again.')
+            raise Stop('subsync can\'t work with this config: ' + '; '.join(problems) + '.', NO_DEBRID_WAY_OUT,
+                       page_fix=NO_DEBRID_WAY_OUT_PAGE)
 
     # 4 -------------------------------------------------------------------------------------------------------
     def choices(self):
@@ -670,18 +708,27 @@ class Engine:
         """Optional free keys for subtitle sources subsync searches itself (TheSubtitleDB, OpenSubtitles V3+ and
         Gestdown need none)."""
         for key in ('SUBDL_KEY', 'WYZIE_KEY'):
-            value = self.ask.text(key, screens.LABELS[key], secret=True, optional=True, current=self.keys.get(key))
-            if value:
-                self.keys[key] = value
+            self.optional_key(key, screens.LABELS[key])
         self.tmdb_key_question(screens.LABELS['TMDB_KEY'])
 
     def tmdb_key_question(self, label):
         """The original-language lookup's optional TMDB key, with TMDB's notice under it (its terms ask for it)."""
-        value = self.ask.text('TMDB_KEY', label, secret=True, optional=True, current=self.keys.get('TMDB_KEY'))
-        if value:
-            self.keys['TMDB_KEY'] = value
+        value = self.optional_key('TMDB_KEY', label)
         self.out.note(explain.TMDB_NOTICE)
-        return value or self.keys.get('TMDB_KEY', '')
+        return value
+
+    def optional_key(self, key, label):
+        """An optional key: a new one replaces the saved one, no answer keeps it, and the answer that removes it (the
+        page's "Remove the saved key" box, remove typed in a terminal, KEY= in an answers file) removes it. Returns
+        the key in use, or ''."""
+        saved = self.keys.get(key)
+        value = self.ask.text(key, label, secret=True, optional=True, current=saved)
+        if value:
+            self.keys[key] = value
+        elif saved:
+            del self.keys[key]
+            self.out.ok(KEY_REMOVED.format(name=screens.LABELS[key].removesuffix(' (optional)')))
+        return value
 
     def public_address(self):
         prev = self.prev.get('public_base')
@@ -895,6 +942,7 @@ class Engine:
         if self.prev.get('cache_before') is None:
             self.s['cache_before'] = {'key': key, 'value': value}
         self.aios.set_setting(key, new)
+        save_settings(self.s)      # the record of the change, which later runs' closing text and removing read
         _, after, _ = self.aios.subtitle_cache_setting()
         (self.out.ok if after == new else self.out.warn)('AIOStreams: no subtitle cache for subsync' if after == new
                                                          else 'AIOStreams did not keep the cache setting; synced copies may take 5 minutes.')
@@ -1141,7 +1189,8 @@ class Engine:
         lines = ['subsync is running on this machine and is in your AIOStreams config.',
                  f'You will see "<Language> (Subsync)" next to the usual subtitles ({plan.language_names(self.languages)}) '
                  'while subsync works on a file, and "<Language> (synced)" once a copy timed to that exact file is ready. '
-                 'When no copy is clearly closer than the original, nothing is added and the originals stay.',
+                 'When no copy is clearly closer than the original, no synced copy is added: the originals stay, and '
+                 'the one that fits the file best is listed once as "<Language> (original)".',
                  'Stremio: playing a file starts subsync on it (a few seconds); the synced copy shows the next time '
                  'you open that file' + ('.' if cache_off else ' (after up to 5 minutes, AIOStreams\' subtitle cache).'),
                  'AIOStreams\' own Jellyfin server: the same, shown as "(synced)".',
@@ -1190,9 +1239,16 @@ class Engine:
     ROUTES = [(value, title) for value, title, _ in screens.WAYS]
 
     def choose_route(self):
-        """Install it for yourself, or host a public instance: the last setup's route on a re-run."""
-        self.route = self.ask.choose('ROUTE', screens.LABELS['ROUTE'], self.ROUTES,
-                                     current=self.prev.get('route') or 'yourself')
+        """Install it for yourself, or host a public instance. Where it is installed, its route, not asked again: an
+        answer for the other one stops, since setup never turns one into the other (it is removed first)."""
+        installed = (self.prev.get('route') or 'yourself') if self.prev.get('installed') else None
+        if installed and 'ROUTE' not in self.answers:
+            self.route = installed
+        else:
+            self.route = self.ask.choose('ROUTE', screens.LABELS['ROUTE'], self.ROUTES,
+                                         current=self.prev.get('route') or 'yourself')
+        if installed and self.route != installed:
+            raise Stop(*ROUTE_STOPS[self.route])
         return self.route
 
     def host_address(self):
@@ -1230,9 +1286,7 @@ class Engine:
     def host_choices(self):
         self.show_step('hostchoices', 'host')
         for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY'):
-            value = self.ask.text(key, screens.LABELS[key], secret=True, optional=True, current=self.keys.get(key))
-            if value:
-                self.keys[key] = value
+            self.optional_key(key, screens.LABELS[key])
         # the original-language lookup: a TMDB key for everyone, or (with none) each person's own, or Wikidata alone
         self.host_tmdb_personal = False
         if self.tmdb_key_question(screens.TMDB_FOR_EVERYONE):
@@ -1362,10 +1416,11 @@ class Engine:
         st = subsync_status()
         if st:
             results = (st.get('store') or {}).get('results') or {}
+            order = [k for k in OUTCOMES if k in results] + sorted(k for k in results if k not in OUTCOMES)
+            checked = ', '.join(f'{results[k]} {OUTCOMES.get(k, k)}' for k in order) or 'none yet'
             rows.append(('ok', f"subtitle requests since start: {st.get('subtitle_requests', 0)}; waiting jobs: {st.get('queue', 0)}",
                          f"synced copies offered: {results.get('synced', 0)}; subtitles checked: {sum(results.values())} "
-                         f"({', '.join(f'{v} {k}' for k, v in sorted(results.items())) or 'none yet'}) "
-                         f"read today: {st.get('bytes_today', 0) / 1e6:.1f} MB"))
+                         f"({checked}); read today: {st.get('bytes_today', 0) / 1e6:.1f} MB"))
             if st.get('backing_off'):
                 rows.append(('warn', 'backing off after a refused read (it waits before reading again)', None))
         when = s.get('audio_when') if s.get('audio_when') in ('pick', 'open') else plan.audio_when_of(env_values())

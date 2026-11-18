@@ -881,5 +881,204 @@ class Labels(Offline):
                 self.assertTrue(explain.QUESTIONS.get(key) or explain.SETTINGS.get(key))
 
 
+@contextlib.contextmanager
+def typing(*answers):
+    """What a person types at the terminal's questions, in order (a password too); then the input ends, so a question
+    asked once more than expected stops the run ("No more input.") instead of waiting."""
+    typed = mock.Mock(side_effect=[*answers, EOFError])
+    with mock.patch('builtins.input', typed), mock.patch.object(ui.getpass, 'getpass', typed):
+        yield typed
+
+
+class TerminalAsks(Offline):
+    """In a terminal, ./setup asks what an answers file leaves out, unless --yes is given: ./setup --uninstall asks for
+    the config's password, as the README and the password's explanation say."""
+
+    def run_main(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(list(argv))
+        return code, out.getvalue()
+
+    def test_uninstall_in_a_terminal_asks_for_the_config_password(self):
+        self.install()
+        code, out = self.run_main('--uninstall', '--yes')                # --yes: nothing asked, as before
+        self.assertEqual(code, 1)
+        self.assertIn(f'"Password of your config {UUID[:8]}…" needs an answer.', out)
+        self.assertTrue((self.state / 'settings.json').exists())
+        with typing(PASSWORD, 'y', 'y') as typed:                         # the password, OpenSubtitles out, confirm
+            code, out = self.run_main('--uninstall')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(typed.call_count, 3)
+        self.assertNotIn(PASSWORD, out)
+        self.assertIn('Done.', out)
+        self.assertFalse((self.state / 'settings.json').exists())
+        self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
+
+    def test_an_answers_file_without_yes_asks_the_lines_left_out(self):
+        # docs/answers.example: "Leave a line out to be asked"; with --yes nothing is asked
+        answers = dict(self.ANSWERS, ROUTE='yourself', AIOS_CONFIG_ID=self.LINK, AUDIO='no', USENET='no', SUBDL_KEY='',
+                       WYZIE_KEY='', TMDB_KEY='', ADD_OPENSUBTITLES='yes', PUBLIC_ADDRESS=f'{PUBLIC}/subsync',
+                       SUBSYNC_DAILY_BUDGET_GB='50', CACHE='no', CONFIRM='yes', TEST_READ='no')
+        del answers['AIOS_CONFIG_PASSWORD']
+        path = self.answers_file(answers)
+        code, out = self.run_main('--answers', path, '--yes')
+        self.assertEqual(code, 1)
+        self.assertIn('"Its password" needs an answer.', out)
+        with typing(PASSWORD, '') as typed:                              # the password; Enter after the web server rule
+            code, out = self.run_main('--answers', path)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(typed.call_count, 2)
+        self.assertNotIn(PASSWORD, out)
+        self.assertTrue(any(p['type'] == 'custom' for p in self.aios.users[UUID]['config']['presets']))
+
+
+class OptionalKeys(Offline):
+    """A saved optional key can be removed: remove typed in a terminal, its empty line in an answers file (no line keeps
+    it), or the page's "Remove the saved key" box."""
+
+    def asked(self, answers, *typed, yes=False):
+        out = io.StringIO()
+        with typing(*typed), contextlib.redirect_stdout(out):
+            value = ui.Asker(answers, yes=yes).text('SUBDL_KEY', screens.LABELS['SUBDL_KEY'], secret=True,
+                                                    optional=True, current='k' * 32)
+        return value, out.getvalue()
+
+    def test_the_terminal_says_how_and_takes_remove(self):
+        value, out = self.asked({}, 'remove')
+        self.assertEqual(value, '')
+        self.assertIn('Enter keeps: set (32 characters); type remove to delete it', out)
+        self.assertEqual(self.asked({}, '')[0], 'k' * 32)                  # Enter keeps it
+        self.assertEqual(self.asked({'SUBDL_KEY': ''})[0], '')             # an answers file's empty line
+        self.assertEqual(self.asked({'SUBDL_KEY': ''}, yes=True)[0], '')
+        self.assertEqual(self.asked({}, yes=True)[0], 'k' * 32)            # no line: kept
+        out = io.StringIO()
+        with typing(), contextlib.redirect_stdout(out):                  # a question that isn't optional: no remove
+            ui.Asker({}, yes=True).text('AIOS_URL', 'Address', current='http://127.0.0.1:3000')
+        self.assertNotIn('type remove', out.getvalue())
+
+    def test_an_answers_files_empty_line_removes_the_saved_key(self):
+        self.install(SUBDL_KEY='subdl-key-1', TMDB_KEY='tmdb-key-1')
+        code, out = self.again()                                         # no line: both kept
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.keys()['SUBDL_KEY'], self.env()['SUBSYNC_SUBDL_KEY']), ('subdl-key-1', 'subdl-key-1'))
+        code, out = self.again(SUBDL_KEY='')
+        self.assertEqual(code, 0, out)
+        self.assertIn('Removed the saved SubDL API key', out)
+        self.assertNotIn('SUBDL_KEY', self.keys())
+        self.assertNotIn('SUBSYNC_SUBDL_KEY', self.env())
+        self.assertEqual(self.env()['SUBSYNC_TMDB_KEY'], 'tmdb-key-1')       # the other key stays
+
+    def test_the_pages_box_removes_the_saved_key(self):
+        self.install(TMDB_KEY='tmdb-key-1')
+        e = self.page_engine({'TMDB_KEY': ''})
+        e.choices()
+        self.assertNotIn('TMDB_KEY', e.keys)
+        self.assertIn(('ok', 'Removed the saved TMDB API key'), [tuple(r[:2]) for r in e.out.rows])
+        e = self.page_engine({})                                         # no answer: kept
+        e.choices()
+        self.assertEqual(e.keys['TMDB_KEY'], 'tmdb-key-1')
+
+
+class PlainHttp(Offline):
+    """An AIOStreams address typed without http:// or https:// is tried with https first when its host isn't local or
+    private; plain http to such a host gets a warning before the config's password is asked."""
+
+    def found(self, address, https=True):
+        tried = []
+
+        def status(aios):
+            tried.append(aios.base)
+            if aios.base.startswith('https://') and not https:
+                raise engine.AiosError(f"Can't reach AIOStreams at {aios.base}.")
+            return {'version': '2.37.0', 'settings': {'baseUrl': 'https://aio.example.com'}}
+        with mock.patch.object(dockerenv, 'aios_containers', lambda: []), \
+                mock.patch.object(engine.Aios, 'status', status):
+            e = engine.Engine({'AIOS_URL': address}, page=True)
+            e.find_aios()
+        warned = [r[1] for r in e.out.rows if r[0] == 'warn']
+        return e.s['aios_url'], tried, warned
+
+    def test_https_first_for_a_public_host(self):
+        self.assertEqual(self.found('aio.example.com'), ('https://aio.example.com', ['https://aio.example.com'], []))
+
+    def test_http_when_https_doesnt_answer_with_a_warning(self):
+        url, tried, warned = self.found('aio.example.com:3000', https=False)
+        self.assertEqual((url, tried), ('http://aio.example.com:3000',
+                                        ['https://aio.example.com:3000', 'http://aio.example.com:3000']))
+        self.assertEqual(warned, ["AIOStreams at http://aio.example.com:3000 uses plain http, so the config's "
+                                  'password would go over the network unencrypted. Use its https address if it has '
+                                  'one.'])
+
+    def test_plain_http_typed_to_a_public_host_is_kept_with_the_warning(self):
+        url, tried, warned = self.found('http://aio.example.com')
+        self.assertEqual((url, tried), ('http://aio.example.com', ['http://aio.example.com']))
+        self.assertEqual(warned, [engine.PLAIN_HTTP.format(address='http://aio.example.com')])
+
+    def test_local_and_private_hosts_keep_http_without_a_warning(self):
+        for address in ('192.168.1.5:3000', 'localhost:3000', 'aiostreams:3000', 'nas.local:3000'):
+            with self.subTest(address=address):
+                self.assertEqual(self.found(address), (f'http://{address}', [f'http://{address}'], []))
+
+
+class CacheRecord(Offline):
+    def test_turning_the_subtitle_cache_off_is_saved(self):
+        # the closing text of later runs and removing's note read it
+        self.install(AIOS_USERNAME='admin', AIOS_PASSWORD='adminpw', CACHE='yes')
+        self.assertEqual(engine.load_settings()['cache_before'],
+                         {'key': 'resources.cache.subtitle.ttl', 'value': {'*': 300}})
+        code, out = self.again()
+        self.assertEqual(code, 0, out)
+        flat_out = flat(out.replace('│', ' '))
+        self.assertIn('the synced copy shows the next time you open that file.', flat_out)
+        self.assertNotIn('after up to 5 minutes', flat_out)
+        code, out = self.again('--uninstall', CONFIRM='yes', REMOVE_OPENSUBTITLES='yes')
+        self.assertEqual(code, 0, out)
+        self.assertIn("AIOStreams' subtitle cache setting for subsync stays; it does nothing without subsync.", out)
+
+
+class ClosingWords(Offline):
+    def test_the_closing_text_says_how_an_original_is_listed(self):
+        self.install()
+        e = engine.Engine({})
+        e.languages, e.add_os = plan.parse_languages('English')[0], False
+        _, lines, _ = e.summary_parts(True)
+        self.assertIn('When no copy is clearly closer than the original, no synced copy is added: the originals stay, '
+                      'and the one that fits the file best is listed once as "<Language> (original)".', lines[1])
+        self.assertNotIn('nothing is added', lines[1])
+
+    def test_the_status_line_says_the_outcomes_in_words(self):
+        self.install()
+
+        def status(results):
+            st = {'subtitle_requests': 12, 'queue': 0, 'bytes_today': 4.2e6, 'store': {'results': results}}
+            with mock.patch.object(engine, 'subsync_status', lambda: st):
+                return engine.Engine({}).status_parts()[0][1][2]
+        self.assertEqual(status({'in_sync': 2, 'keep_original': 5, 'synced': 3}),
+                         'synced copies offered: 3; subtitles checked: 10 (3 synced, 2 already in sync, 5 original '
+                         'kept); read today: 4.2 MB')
+        self.assertEqual(status({}), 'synced copies offered: 0; subtitles checked: 0 (none yet); read today: 4.2 MB')
+        self.assertEqual(status({'other': 1, 'keep_original': 1}),       # an outcome without words: its own name, last
+                         'synced copies offered: 0; subtitles checked: 2 (1 original kept, 1 other); read today: '
+                         '4.2 MB')
+
+
+class RouteKept(Offline):
+    """Setup never turns an installed folder into the other route: an answers file asking for it stops."""
+
+    def test_a_personal_install_isnt_turned_into_a_public_instance(self):
+        self.install()
+        before = (self.state / 'settings.json').read_text()
+        with mock.patch.object(hosting, 'fetch', side_effect=OSError('not reached')):
+            code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': 'https://subs.example.com'})
+        self.assertEqual(code, 1, out)
+        self.assertIn("subsync is installed here for yourself; setup can't turn it into a public instance.", out)
+        self.assertIn('Run ./setup --uninstall first, then ./setup again.', out)
+        self.assertEqual((self.state / 'settings.json').read_text(), before)
+        code, out = self.run_setup({'ROUTE': 'yourself', 'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+        self.assertEqual(code, 0, out)                                   # its own route goes on
+        self.assertNotIn('How do you want to use it?', self.again()[1])  # and isn't asked again
+
+
 if __name__ == '__main__':
     unittest.main()

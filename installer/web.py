@@ -30,6 +30,8 @@ DONE_S = 60          # the page stays up this long after setup is done, so the b
 FONT = re.compile(r'^/static/fonts/([A-Za-z0-9-]+\.(?:ttf|txt))$')
 
 STOPS = ('Setup is done; the page has stopped.',)
+PERSONAL_KEYS = ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY')          # the optional keys each route asks
+HOST_KEYS = ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY')
 
 
 def terminal_lines(port, url):
@@ -38,6 +40,23 @@ def terminal_lines(port, url):
             'On another computer, run this there first, then open the same address:',
             f'  ssh -L {port}:127.0.0.1:{port} you@this-server   (your usual ssh login to this machine)',
             'The page stops when you finish, after 60 minutes without use, or with Ctrl-C.']
+
+
+def take_keys(e, one, keys):
+    """The optional keys a step's form sent: one typed in, or its "Remove the saved key" box ticked (an empty answer,
+    which removes it). A key typed earlier in this run stays: its field is never filled in again."""
+    for key in keys:
+        if one.get(key):
+            e.answers[key] = one[key]
+        elif one.get(f'REMOVE_{key}'):
+            e.answers[key] = ''
+        elif e.answers.get(key) == '':
+            del e.answers[key]              # the box ticked before, not now
+
+
+def saved_keys(e, keys):
+    """The keys of `keys` that are saved: their fields get the "Remove the saved key" box."""
+    return {key for key in keys if e.keys.get(key)}
 
 
 class Session:
@@ -129,7 +148,6 @@ class App:
         self.session = None
         self.after = None            # the page after setup's own engine and work (updating, removing)
         self.after_lock = threading.Lock()
-        self.changing = False
 
     # ------------------------------------------------------------------------------------- HTTP
     def handle(self, method, path, headers, body):
@@ -179,14 +197,11 @@ class App:
         one = {k: v[-1] for k, v in form.items()}
         installed = bool(engine.load_settings().get('installed'))
         if name == '':
-            if installed and not self.changing and (not self.session or self.finishing is not None):
+            # where it is installed, the page after setup: its route is never switched in place (it is removed first)
+            if installed:
                 return self.after_setup() if method == 'GET' else self.go('')
             if method == 'POST':
-                route = one.get('ROUTE') if one.get('ROUTE') in ('yourself', 'host') else 'yourself'
-                answers = engine.Engine({}, page=True).prefill() if installed else {}
-                self.session = Session(route, {k: v for k, v in answers.items() if k != 'installed'})
-                self.session.e.answers['ROUTE'] = route
-                return self.go('machine')
+                return self.start_session(one.get('ROUTE') if one.get('ROUTE') in ('yourself', 'host') else 'yourself')
             prev = engine.load_settings().get('route') or 'yourself'
             return self.page(screens.start(self.session.route if self.session else prev))
         if name in ('update', 'updating', 'rollback', 'remove', 'answers'):
@@ -238,6 +253,8 @@ class App:
                 e.answers['AIOS_CONFIG_ID'] = one.get('AIOS_CONFIG_ID', '')
                 e.answers['AIOS_CONFIG_PASSWORD'] = password
                 s.run('config', e.read_viewer)
+            elif 'config' in s.stops and one.get('AIOS_CONFIG_ID') == e.answers.get('AIOS_CONFIG_ID'):
+                s.run('config', e.read_viewer)      # after a stop: read again, with the ID and password given
             elif one.get('go') == 'next' and 'config' in s.done:
                 return self.go('choices')
             else:
@@ -260,10 +277,11 @@ class App:
                 e.answers['USENET'] = 'yes' if one.get('USENET') else 'no'
             if offer:
                 e.answers['ADD_OPENSUBTITLES'] = 'yes' if one.get('ADD_OPENSUBTITLES') else 'no'
-            for key in ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY'):
-                if one.get(key):
-                    e.answers[key] = one[key]
+            take_keys(e, one, PERSONAL_KEYS)
             e.answers['PUBLIC_ADDRESS'] = one.get('PUBLIC_ADDRESS', '')
+            # its stops are about the config: it is read again first, with the ID and password given in this run
+            if 'choices' in s.stops and not s.run('config', e.read_viewer):
+                return self.go('config')
             if s.run('choices', e.choices):
                 return self.go('limits')
         filled = e.prefill()
@@ -276,7 +294,8 @@ class App:
             plan.public_default(e.s['aios_public'], dockerenv.lan_address())[1]
         return self.page(screens.choices(languages, audio, address, s.problems.get('choices'), offer_opensubtitles=offer,
                                          add_opensubtitles=e.answers.get('ADD_OPENSUBTITLES', 'yes') == 'yes',
-                                         usenet=usenet, stop=s.stops.get('choices')))
+                                         usenet=usenet, stop=s.stops.get('choices'),
+                                         saved=saved_keys(e, PERSONAL_KEYS)))
 
     def step_limits(self, s, method, form, one):
         e = s.e
@@ -383,9 +402,7 @@ class App:
     def step_hostchoices(self, s, method, form, one):
         e = s.e
         if method == 'POST':
-            for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY'):
-                if one.get(key):
-                    e.answers[key] = one[key]
+            take_keys(e, one, HOST_KEYS)
             e.answers['SUBSYNC_TMDB_PERSONAL'] = 'yes' if one.get('SUBSYNC_TMDB_PERSONAL') else 'no'
             e.answers['SUBSYNC_USENET'] = 'yes' if one.get('SUBSYNC_USENET') else 'no'
             e.answers['SUBSYNC_AUDIO_ROUTE'] = 'yes' if one.get('SUBSYNC_AUDIO_ROUTE') else 'no'
@@ -397,7 +414,8 @@ class App:
                 plan.is_on(engine.env_values().get(key, 'off'))
         return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=chosen['SUBSYNC_USENET'],
                                               audio=chosen['SUBSYNC_AUDIO_ROUTE'],
-                                              tmdb_personal=chosen['SUBSYNC_TMDB_PERSONAL']))
+                                              tmdb_personal=chosen['SUBSYNC_TMDB_PERSONAL'],
+                                              saved=saved_keys(e, HOST_KEYS)))
 
     def step_hostlimits(self, s, method, form, one):
         e = s.e
@@ -448,9 +466,17 @@ class App:
                                              config=engine.short(e.keys.get('VIEWER_UUID', '')), rollback=rollback))
 
     def after_answers(self, method, one):
-        if method == 'POST':
-            self.changing, self.session = True, None
-        return self.go('')
+        """Change your answers: the installed route's own steps, filled in."""
+        if method != 'POST':
+            return self.go('')
+        return self.start_session(engine.load_settings().get('route') or 'yourself')
+
+    def start_session(self, route):
+        """A run through `route`'s steps, filled in with the last setup's answers where it is installed."""
+        answers = engine.Engine({}, page=True).prefill() if engine.load_settings().get('installed') else {}
+        self.session = Session(route, {k: v for k, v in answers.items() if k != 'installed'})
+        self.session.e.answers['ROUTE'] = route
+        return self.go('machine')
 
     def after_remove(self, method, one):
         if method != 'POST':

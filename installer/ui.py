@@ -89,11 +89,15 @@ def masked(value):
     return f'set ({len(value)} characters)' if value else 'not set'
 
 
+REMOVE = 'remove'      # typed at an optional question with a current answer: removes it
+
+
 class Asker:
     """Questions with defaults, each shown with its one explanation (subsync/subsync/explain.py, by the question's
     answers-file key; a key without one is refused). Enter keeps the current answer (or takes the default); '?' shows
     the question and its explanation again. Answers can come from a KEY=value file (--answers) and, with --yes, nothing
-    is asked."""
+    is asked. An optional question's current answer is removed by typing remove, or by its empty line in the file:
+    '' is returned."""
 
     def __init__(self, answers=None, yes=False):
         self.answers, self.yes = dict(answers or {}), yes
@@ -122,6 +126,8 @@ class Asker:
             hint = []
             if current:
                 hint.append(f'Enter keeps: {masked(current) if secret else (shown or current)}')
+                if optional:
+                    hint.append(f'type {REMOVE} to delete it')
             elif default:
                 hint.append(f'Enter = {default}')
             elif optional:
@@ -132,13 +138,18 @@ class Asker:
                 value = preset
                 say(f'  > {masked(value) if secret and value else (value or "(empty)")}   {paint("2", "(from the answers file)")}')
                 preset = None
+                removing = not value
             elif self.yes:
                 value = ''
                 say(f'  > {paint("2", "(kept)" if current else "(default)" if default else "(skipped)" if optional else "(no answer)")}')
+                removing = False
             else:
                 value = self._input('  > ', secret).strip()
+                removing = value.lower() == REMOVE
             if value == '?':
                 continue
+            if removing and optional and current:
+                return ''
             if not value:
                 value = current or default or ''
             if not value:
