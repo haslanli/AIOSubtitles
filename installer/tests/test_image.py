@@ -97,6 +97,63 @@ class Dockerfile(unittest.TestCase):
             self.assertIn(name, ignore)
 
 
+class Notice(unittest.TestCase):
+    """NOTICE.md names every third-party part the image ships, and the image carries it with the licences' texts.
+    Docker's two programs and public mode's three packages had no row, and the image carried neither NOTICE.md nor
+    LICENSE."""
+
+    def setUp(self):
+        self.notice = (REPO / 'NOTICE.md').read_text()
+        self.parts = [line.split(' | ', 1)[0].removeprefix('| ') for line in self.notice.splitlines()
+                      if line.startswith('| ') and not line.startswith('| Part ')]
+        self.text = DOCKERFILE.read_text()
+
+    def has_row(self, part):
+        return any(row.lower().startswith(part.lower()) for row in self.parts)
+
+    def test_every_pinned_package_has_its_row(self):
+        pins = re.findall(r'^([A-Za-z0-9_.-]+)==(\S+)', (REPO / 'subsync' / 'requirements.txt').read_text(), re.M)
+        self.assertTrue(pins)
+        for name, version in pins:
+            with self.subTest(package=name):
+                self.assertTrue(self.has_row(f"{name.replace('-', ' ')} {version}"), self.parts)
+
+    def test_every_program_copied_into_the_image_has_its_row(self):
+        # the stages a program is copied from: a new one needs its row (and its line here)
+        self.assertEqual(set(re.findall(r'^COPY --from=(\S+) ', self.text, re.M)), {'alass', 'dockercli'})
+        alass = re.search(r'cargo install alass-cli --version (\S+) ', self.text).group(1)
+        docker = re.search(r'^FROM docker:(\S+)-cli@', self.text, re.M).group(1)
+        compose = set(re.findall(r'/docker/compose/releases/download/v(\S+)/docker-compose-', self.text))
+        self.assertEqual(len(compose), 1)
+        for part in (f'alass-cli {alass}', f'Docker CLI {docker} (Docker, Inc.)', f'Docker Compose {compose.pop()} '
+                                                                                 '(Docker, Inc.)'):
+            with self.subTest(part=part):
+                self.assertTrue(self.has_row(part), self.parts)
+
+    def test_the_new_rows_are_the_approved_ones(self):
+        for row in ("| cryptography 50.0.2 | Apache-2.0 or BSD-3-Clause | public mode only: encrypts each person's "
+                    'record |',
+                    '| cffi 2.1.1 | MIT | needed by cryptography |',
+                    '| pycparser 3.12 | BSD-3-Clause | needed by cffi |',
+                    "| Docker CLI 29.9.3 (Docker, Inc.) | Apache-2.0 | from Docker's official image docker:29.9.3-cli, "
+                    'pinned by digest; used by setup only, never by the service |',
+                    "| Docker Compose 5.7.1 (Docker, Inc.) | Apache-2.0 | Docker's release, checked by SHA-256; used "
+                    'by setup only |',
+                    '| Python 3.13 base image, with its Debian packages | PSF; the Debian packages under their own '
+                    'licences | |'):
+            self.assertIn('\n' + row + '\n', self.notice)
+        self.assertNotIn('| Python 3.13 base image | PSF | |', self.notice)
+
+    def test_the_image_carries_the_notices_and_the_licences(self):
+        self.assertIn("|\n\nThe image carries this file and these licences' texts in /opt/aiosubtitles/licences/.\n\n",
+                      self.notice)                                          # under the table
+        final = self.text.split('\nFROM python@', 1)[1]
+        self.assertIn('\nCOPY NOTICE.md LICENSE /opt/aiosubtitles/licences/\n', final)
+        # the Apache-2.0 text Docker's programs come under: the base image's own copy (Debian's base-files)
+        self.assertIn('\nRUN cp /usr/share/common-licenses/Apache-2.0 /opt/aiosubtitles/licences/Apache-2.0.txt\n',
+                      final)
+
+
 class Entry(unittest.TestCase):
     """The entry script with stand-ins for id, setpriv and python on its PATH."""
 

@@ -159,6 +159,11 @@ class Scripts(unittest.TestCase):
         self.assertIn(socket_mount, where.NO_SOCKET)
         self.assertIn(f'-v "$PWD:{where.MOUNT}"', where.NO_FOLDER)
         self.assertIn(f'-p 127.0.0.1:{where.PAGE_PORT}:{where.PAGE_PORT}', where.NO_PAGE_PORT)
+        # the README's advice for a taken port, the first number only
+        self.assertEqual(where.NO_PAGE_PORT, 'The setup page needs a port on this machine: add -p 127.0.0.1:8789:8789 '
+                                             'to the docker run command (if 8789 is taken, change the first number '
+                                             'only, like -p 127.0.0.1:9000:8789; README, Install), or give every '
+                                             'answer with --answers FILE --yes.')
         self.assertEqual(where.PAGE_PORT_NOT_LOCAL, 'The setup page must be reachable on this machine only: use -p '
                                                     '127.0.0.1:8789:8789 in the docker run command (README, Install), '
                                                     'not -p 8789:8789.')

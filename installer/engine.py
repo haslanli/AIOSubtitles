@@ -530,7 +530,11 @@ class Engine:
         guard(self.install_id, unlabelled_own(self.prev))
         self.out.ok('Docker and Docker Compose work')
         free = dockerenv.free_gb(str(STATE.parent))
-        if free is not None:
+        if free is None:
+            return
+        if free < screens.DISK_GB:          # a warning only: setup goes on
+            self.out.warn(f'Only {free:.1f} GB of disk space free: AIOSubtitles needs about {screens.DISK_GB} GB.')
+        else:
             self.out.ok(f'{free:.0f} GB of disk space free')
 
     # 2 -------------------------------------------------------------------------------------------------------
@@ -873,9 +877,9 @@ class Engine:
         sections = [viewer]
         if self.has_sync:
             sections.append(("subsync's own config " + ('(update)' if self.sync_exists else '(new)'), [],
-                             'a copy of yours without Real-Debrid and subsync, and without Usenet unless you turn it '
-                             'on, with nothing running in the background, so subsync can find the file you are '
-                             'watching. It never appears in your apps.'))
+                             'a copy of yours without Real-Debrid, Usenet and subsync, with nothing running in the '
+                             'background, so subsync can find the file you are watching. It never appears in your '
+                             'apps.'))
         if self.usenet:
             sections.append(("subsync's Usenet config " + ('(update)' if self.usenet_exists else '(new)'), [],
                              'only your Usenet searches and services, with nothing running in the background, so subsync '

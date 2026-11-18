@@ -81,6 +81,14 @@ class Words(unittest.TestCase):
                       'Audio syncs per person a day', 'Of those, as soon as a file is opened', 'Audio syncs at a time'):
             self.assertIn(words, screens.INSTALLER_WORDS)
 
+    def test_the_first_screen_needs_docker_and_4_gb(self):
+        # it asked for Docker Compose, which is in the image, and 4 GB where the README said 3
+        self.assertEqual(screens.BEFORE[:2], ('Docker on this machine.', 'About 4 GB of free disk space.'))
+        texts = Tree(screens.start()).texts
+        self.assertIn('Docker on this machine.', texts)
+        self.assertIn('About 4 GB of free disk space.', texts)
+        self.assertEqual([text for text in texts if 'Compose' in text], [])
+
     def test_every_limit_label_is_an_approved_word(self):
         # the hosting route's audio-only limits too: the list once left them out
         for lim in limits.personal(audio=True, usenet=True) + limits.hosting(usenet=True, audio=True):

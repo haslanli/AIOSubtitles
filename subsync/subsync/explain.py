@@ -437,9 +437,9 @@ GROUPS = [
             "100",
             "The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until "
             "the next day and new files keep their original subtitles. 100 is far above normal use (about 1 MB per file, "
-            "a few MB when the track's lines are pictures; up to 1 GB per file with the audio route), so it only "
-            "catches something going wrong. Lower it if your "
-            "debrid service or server has a tight traffic limit."),
+            "a few MB when the track's lines are pictures; up to the audio limit per file with the audio route, 1 GB "
+            "by default), so it only catches something going wrong. Lower it if your debrid service or server has a "
+            "tight traffic limit."),
         "SUBSYNC_USENET_LISTINGS_PER_DAY": (
             "10",
             "How many times a day AIOSubtitles may look for a Usenet file through your indexers (10 by default). Each "
@@ -601,7 +601,7 @@ GROUPS = [
             "inside the re-timed blocks."),
         "SUBSYNC_SNAP_WITHIN": (
             "0.95",
-            "The share of lines that must start within 200 ms of the file's track for a copy whose lines were snapped "
+            "The share of a snapped copy's paired lines that must start within 200 ms of the file's track "
             "(0.95 = 95 %). Snapped lines look better to the check than they are, so they need more than the 90 % other "
             "copies need. Recommended: 0.95. Lower: more copies offered, a few slightly off."),
         "SUBSYNC_BETTER": (

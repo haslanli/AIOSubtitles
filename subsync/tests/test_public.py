@@ -1156,8 +1156,10 @@ class PublicTextsTest(unittest.TestCase):
         self.assertIn(f"subtitle track is {words.replace('; ', ' (', 1)}) and is synced in seconds",
                       notes["Public mode: a few files at once"])
         settings = {name: entry[-1] for name, entry in explain.SETTINGS.items()}
-        self.assertIn("(about 1 MB per file, a few MB when the track's lines are pictures; up to 1 GB per file with "
-                      "the audio route)", settings["SUBSYNC_DAILY_BUDGET_GB"])
+        # the audio part: the limit the person chooses, 1 GB its default
+        self.assertIn("(about 1 MB per file, a few MB when the track's lines are pictures; up to the audio limit per "
+                      "file with the audio route, 1 GB by default)", settings["SUBSYNC_DAILY_BUDGET_GB"])
+        self.assertEqual(explain.SETTINGS["SUBSYNC_AUDIO_BUDGET_GB"][0], "1")
         self.assertIn("Reading a file's subtitle track takes about 1 MB, a few MB when the track's lines are "
                       "pictures; 10,000 is 200 files", settings["SUBSYNC_USER_DAILY_MB"])
 

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from installer import docs, ui
+from installer import docs, screens, ui
 from subsync import explain
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -88,6 +88,19 @@ class Documents(unittest.TestCase):
         readme = (REPO / 'README.md').read_text()
         self.assertIn(docs.readme_section(), readme, 'run: python3 -I installer/docs.py')
         self.assertEqual(readme.count(docs.START), 1)
+
+    def test_the_settings_intro_says_what_setup_writes_and_how_a_change_is_applied(self):
+        # it said only the first group is rewritten, and that a change needs docker compose on the machine
+        section = ' '.join(docs.readme_section().split())
+        self.assertIn("### subsync's settings ./setup writes the first group into `state/subsync.env` from your "
+                      'answers, each line with its explanation above it, and the limits it asks; for a public '
+                      'instance, also the public mode settings it asks. A limit it stops asking (its Usenet or audio '
+                      'route turned off) goes back to its default. The others keep the defaults shown. To change one, '
+                      'add `NAME=value` to `state/subsync.env` and run ./setup again: Change your answers, then go '
+                      'through to the end, and subsync restarts with it (where Docker Compose is installed on this '
+                      'machine, `docker compose -f state/compose.yaml up -d` does the same). Running ./setup again '
+                      "keeps every line it doesn't write. ####", section)
+        self.assertIn('Change your answers', screens.INSTALLER_WORDS)       # the page after setup's button
 
     def test_the_answers_example_is_current(self):
         self.assertEqual((REPO / 'docs' / 'answers.example').read_text(), docs.answers_example(),

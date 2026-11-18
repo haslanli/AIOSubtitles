@@ -1,13 +1,15 @@
-"""The queue and the worker: one file at a time per worker (in public mode, every person's worker shares one Turn
-with SUBSYNC_SYNCS_AT_ONCE places, and never two of them work on the same file at once).
+"""The queue and the worker: one file at a time per worker, plus one audio sync beside it when the audio route is on
+(two lanes: the main lane reads indexes and text and image tracks, the audio lane runs audio syncs, and a file is never
+in both at once). In public mode every person's worker shares one Turn with SUBSYNC_SYNCS_AT_ONCE places, an audio sync
+also takes one of the audio Turn's SUBSYNC_AUDIO_AT_ONCE places, and never two workers work on the same file at once.
 
 A job is a file a viewer opened or played. A subtitle request that names the file (its name, size or hash, as Stremio
 and AIOStreams send them) queues it; the file is then found in subsync's own AIOStreams listing (cached debrid only),
 and, with Usenet on and only when that listing doesn't have it, in the Usenet config's listing (UsenetGate: a few a
 day, never twice a day for the same file, none after an error).
-Reads count toward a daily budget (default 100 GB, bytes received). Any HTTP 403/429 stops every read for a back-off
-(15 min, doubling to 6 h), since the refusal is most likely per account. Every connection is closed after its read
-(reader.py).
+Reads count toward a daily budget (SUBSYNC_DAILY_BUDGET_GB, bytes received). Any HTTP 403/429 stops every read for a
+back-off (SUBSYNC_403_BACKOFF_S, doubling up to BACKOFF_MAX_S), since the refusal is most likely per account. Every
+connection is closed after its read (reader.py).
 """
 import contextlib
 import hashlib

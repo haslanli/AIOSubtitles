@@ -27,7 +27,11 @@ INTRO = ('AIOSubtitles makes copies of your subtitles timed to the exact file yo
          'own sign-up page.',
          'Each step says what it does and what it changes. Nothing in your AIOStreams changes until you confirm, and a '
          'copy of your config is saved first.')
-BEFORE = ('Docker and Docker Compose on this machine.', 'About 4 GB of free disk space.',
+# the free disk space AIOSubtitles needs, in GB: its image (about 1), the one before it kept after an update (about 1)
+# and the stored copies (up to 2 by default). The README's "What you need" gives the same number; with less free, the
+# first step warns
+DISK_GB = 4
+BEFORE = ('Docker on this machine.', f'About {DISK_GB} GB of free disk space.',
           'For yourself: the ID and password of the AIOStreams config your apps use.',
           'For a public instance: a web address with https that reaches this machine.')
 WAYS = (('yourself', 'Install it for yourself', 'This adds it to the AIOStreams you already run.'),

@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, plan, where, wizard
+from installer import dockerenv, engine, plan, ui, where, wizard
 from subsync import aiosconfig, explain, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
@@ -434,6 +434,28 @@ class Flow(FlowFixture):
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
         self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_AUDIO_BUDGET_GB'], '2')   # remembered
+
+    def test_less_disk_space_than_needed_is_a_warning(self):
+        # setup only printed the free space; the page asked for 4 GB, the README for 3
+        with mock.patch.object(ui, 'COLOR', False):                         # the marks as plain text
+            with mock.patch.object(dockerenv, 'free_gb', lambda p='/': 3.2):
+                code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+            self.assertEqual(code, 0, out)                                  # it goes on
+            self.assertIn('!  Only 3.2 GB of disk space free: AIOSubtitles needs about 4 GB.', out)
+            self.assertNotIn('GB of disk space free\n', out)
+            code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # 100 GB free
+        self.assertEqual(code, 0, out)
+        self.assertIn('✓  100 GB of disk space free\n', out)
+        self.assertNotIn('needs about', out)
+
+    def test_the_review_says_subsyncs_config_has_no_usenet(self):
+        # it said "without Usenet unless you turn it on"; Usenet always gets its own config
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertIn('a copy of yours without Real-Debrid, Usenet and subsync, with nothing running in the '
+                      'background, so subsync can find the file you are watching. It never appears in your apps.',
+                      ' '.join(out.split()))
+        self.assertNotIn('without Usenet unless', ' '.join(out.split()))
 
     def test_the_audio_question_has_three_answers(self):
         # No, when I pick the file, as soon as a file is opened; SUBSYNC_AUDIO_WHEN written only when not the

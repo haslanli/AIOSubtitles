@@ -39,9 +39,12 @@ def readme_section():
     out += [f'- **`{key}`**: {text}' for key, (_, text) in explain.QUESTIONS.items()]
     out += ['', "### subsync's settings", '',
             './setup writes the first group into `state/subsync.env` from your answers, each line with its explanation '
-            'above it; the others keep the defaults shown. To change one, add `NAME=value` to `state/subsync.env` and '
-            'run `docker compose -f state/compose.yaml up -d`. Running ./setup again rewrites only the first group\'s '
-            'lines and keeps yours.']
+            'above it, and the limits it asks; for a public instance, also the public mode settings it asks. A limit '
+            'it stops asking (its Usenet or audio route turned off) goes back to its default. The others keep the '
+            'defaults shown. To change one, add `NAME=value` to `state/subsync.env` and run ./setup again: Change your '
+            'answers, then go through to the end, and subsync restarts with it (where Docker Compose is installed on '
+            'this machine, `docker compose -f state/compose.yaml up -d` does the same). Running ./setup again keeps '
+            "every line it doesn't write."]
     for title, group in explain.GROUPS:
         out += ['', f'#### {title}', '']
         out += [f'- **`{name}`** ({_default(default)}): {text}' for name, (default, text) in group.items()]

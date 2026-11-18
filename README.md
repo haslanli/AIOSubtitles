@@ -15,11 +15,14 @@ copy that doesn't fit is never offered: you get the originals as before.
 
 ## What you need
 
-- A machine running **AIOStreams** (v2.37 or newer), usually in Docker. AIOSubtitles goes on the same machine.
-- **Docker** (Docker Engine 23 or newer, Docker Desktop or Colima) and about **3 GB** of free disk space. Nothing else:
+- **AIOStreams** (v2.37 or newer), usually in Docker on the machine AIOSubtitles goes on; one elsewhere works too, at an
+  address this machine can reach. A public instance needs no AIOStreams of its own, but a web address with https that
+  reaches this machine.
+- **Docker** (Docker Engine 23 or newer, Docker Desktop or Colima) and about **4 GB** of free disk space. Nothing else:
   setup runs inside the AIOSubtitles image.
-- An AIOStreams config with a **debrid service other than Real-Debrid** (TorBox, AllDebrid, Premiumize, ...). subsync
-  reads debrid files only, and never uses Real-Debrid (see [Fixed rules](#fixed-rules)).
+- An AIOStreams config with a **debrid service other than Real-Debrid** (TorBox, AllDebrid, Premiumize, ...), or a
+  Usenet service subsync can read through (turned on in setup). subsync never uses Real-Debrid (see
+  [Fixed rules](#fixed-rules)).
 
 ## Install
 
@@ -41,14 +44,15 @@ What each part does:
   [Why setup needs Docker's socket](#why-setup-needs-dockers-socket)).
 - `-v "$PWD:/folder"`: setup keeps its files in this folder: `state/` (your settings, keys and config backups, readable
   only by you) and a `./setup` that runs this same command.
-- `-p 127.0.0.1:8789:8789`: the setup page, on this machine only. If 8789 is taken here, change both numbers.
+- `-p 127.0.0.1:8789:8789`: the setup page, on this machine only. If 8789 is taken here, change the first number only,
+  like `-p 127.0.0.1:9000:8789`.
 - `--rm`: the setup container is removed when the page stops; AIOSubtitles itself keeps running in its own container.
 
 After this first run the folder has a `./setup` that runs the same command: use it from then on.
 
-Setup runs in your browser. Setup prints the address to open on this machine. On a server you reach over ssh, it
-also prints one `ssh -L` line: run it on your own computer first, then open the same address there. The page stops
-when you finish, after 60 minutes without use, or with Ctrl-C.
+Setup runs in your browser: it prints the address to open on this machine, and an `ssh -L` line for opening it from
+another computer (run that line on the other computer first, then open the same address there). The page stops when
+you finish, after 60 minutes without use, or with Ctrl-C.
 
 The first screen asks how you want to use it. **Install it for yourself**: this adds it to the AIOStreams you already
 run. **Host a public instance**: runs here with its own sign-up page, so other people can use it with their own
@@ -76,10 +80,10 @@ It shows each change first and saves it only after you say yes.
 - **Your config gets one more subtitle source, subsync.** A copy of the config as it was is saved in `state/backups/`
   first, and `./setup --restore FILE` puts it back. If the config has no subtitle source at all, it offers to add
   OpenSubtitles too: Stremio's official addon, which needs no account. Nothing else in your config changes.
-- **A second config for subsync.** It is made from yours, without Real-Debrid and without subsync, without Usenet
-  unless you turn it on, and nothing runs in it in the background. subsync uses it to find the file you are watching.
-  It never appears in your apps. With Usenet on, a third one, subsync's Usenet config, holds only your Usenet
-  searches and services (see [Fixed rules](#fixed-rules)).
+- **A second config for subsync.** It is made from yours, without Real-Debrid, Usenet and subsync, and nothing runs in
+  it in the background. subsync uses it to find the file you are watching. It never appears in your apps. With Usenet
+  on, a third one, subsync's Usenet config, holds only your Usenet searches and services (see
+  [Fixed rules](#fixed-rules)); a config whose only debrid service is Real-Debrid gets only this one.
 - **One Docker container, `aiosubtitles-subsync`.** It restarts by itself after a reboot. It joins AIOStreams' Docker
   network so the two can talk to each other.
 
@@ -99,19 +103,19 @@ subsync reads only files your apps ask subtitles for:
   file's index (about 1 MB), and its audio only with the audio option's answer "as soon as a file is opened".
 - **Files without their own subtitle track:** only with the audio option on. With "when I pick the file" (recommended),
   only after you pick the "<Language> (Subsync)" entry for that file in your app: it plays the original subtitle at
-  once, and subsync then reads short parts of the file's audio (about 60–350 MB, at most 1 GB per file) through your
-  debrid service or Usenet, to make a synced copy for the next time you open it; files you only browse are never read
-  this way. With "as soon as a file is opened", the same starts when your app asks for the file's subtitles and no
-  synced copy exists yet, so files you only browse, or that your app prepares next, are read too (at most 5 a day).
-  Files whose bitrate is too high for the limit (most 4K remuxes) keep their original subtitles. With the option off,
-  these files keep their original subtitles. On a public instance whose host turned the audio route on, each person
-  chooses the same on their settings page; the reads go through their own debrid service or Usenet, within the
-  instance's audio limit and their daily data.
+  once, and subsync then reads short parts of the file's audio (about 60–350 MB, at most the audio limit you choose per
+  file, 1 GB recommended) through your debrid service or Usenet, to make a synced copy for the next time you open it;
+  files you only browse are never read this way. With "as soon as a file is opened", the same starts when your app
+  asks for the file's subtitles and no synced copy exists yet, so files you only browse, or that your app prepares
+  next, are read too (at most 5 a day). Files whose bitrate is too high for the limit (most 4K remuxes) keep their
+  original subtitles. With the option off, these files keep their original subtitles. On a public instance whose host
+  turned the audio route on, each person chooses the same on their settings page; the reads go through their own
+  debrid service or Usenet, within the instance's audio limit and their daily data.
 - **The original language of each film or series it syncs,** looked up once by the title's id (at TMDB with your key,
   and at Wikidata; AniList and Kitsu for anime) and kept with no time limit; nothing about you or the file is sent.
 - **Never Real-Debrid; Usenet only when you turn it on:** see [Fixed rules](#fixed-rules).
-- **Limits:** subsync reads one file at a time, stops for a while if a service refuses, and has a daily limit (100 GB
-  by default).
+- **Limits:** subsync reads one file at a time, plus one audio sync beside it when the audio route is on; it stops for a
+  while if a service refuses, and has a daily limit (100 GB by default).
 
 ## What you will see
 
@@ -166,9 +170,10 @@ cd AIOSubtitles
 
 Here `./setup` builds the image from this folder (its tests run in the build; a few minutes the first time, about 3 on
 a 4-core server), then runs the same setup inside it, with this folder's `state/`. It needs Docker and git, nothing
-else. On Linux, setup then runs on this machine's own network, so it also reaches an AIOStreams that listens on
-127.0.0.1 only. `./setup --update` fetches the newest commit with git, builds it while the old version keeps running,
-and puts the folder back if the build fails; then it updates as above.
+else. Off Linux the page uses port 8789 on this machine; if it is taken, run `AIOSUBTITLES_SETUP_PORT=9000 ./setup`. On
+Linux, setup then runs on this machine's own network, so it also reaches an AIOStreams that listens on 127.0.0.1 only.
+`./setup --update` fetches the newest commit with git, builds it while the old version keeps running, and puts the
+folder back if the build fails; then it updates as above.
 
 This folder wasn't downloaded with git? Then it can't fetch a new version: download the new version, copy this folder's
 state/ into it, and run ./setup there.
@@ -227,8 +232,9 @@ subsync's log. It contains no links and no keys.
 1. subsync reads the played file's index and its own subtitle track's timings.
 2. It tries the subtitles you would see, best match for this release first.
 3. Each one is re-timed with alass, then each line is snapped to the file's own line.
-4. A copy is kept only if at least 90 % of its lines land within 200 ms of the file's track, spread over the whole
-   film. Copies whose lines snapped need 95 %.
+4. A copy is kept only if at least 60 % of its lines pair with a line of the file's track (start within a second of
+   it), at least 90 % of those land within 200 ms of it, and the typical (median) error is 100 ms or less, spread over
+   the whole film. Copies whose lines snapped need 95 %.
    A copy that misses that is still kept when it is clearly better than the original: its typical error is 200 ms or
    less and at most half of the original's, at least 85 % of its lines pair with the file's lines, and no part of
    the film is left out. A subtitle made by someone else rarely matches the file's own line starts more closely.
@@ -237,9 +243,11 @@ subsync's log. It contains no links and no keys.
 Files with only image subtitles (PGS, VobSub) use those subtitles' timings instead of a text track. Files with no
 subtitle track use the audio route, if it is on (when you pick the file, or as soon as it is opened, as you chose):
 subsync detects speech in short audio parts of the file, fits the subtitle to it, and checks the result on other
-parts it did not use for the fit. A copy is kept when, on those parts, its typical error is 150 ms or less, at least
-55 % of its lines are within 200 ms of the speech, few lines are unmatched, and it moved the lines by at least a
-second.
+parts it did not use for the fit. A copy is kept when, on those parts, its typical error is 100 ms or less, at least
+90 % of its lines that match speech start within 200 ms of it (and at least 80 % of all its lines do), and at most
+30 % match no speech. A copy that misses that is still kept when it is clearly closer to the speech than the original
+(SUBSYNC_AUDIO_BETTER): its typical error is 150 ms or less, at least 55 % of its lines are within 200 ms of the
+speech, few lines are unmatched, and it moved the lines by at least a second.
 
 ## Settings
 
@@ -276,7 +284,7 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 
 ### subsync's settings
 
-./setup writes the first group into `state/subsync.env` from your answers, each line with its explanation above it; the others keep the defaults shown. To change one, add `NAME=value` to `state/subsync.env` and run `docker compose -f state/compose.yaml up -d`. Running ./setup again rewrites only the first group's lines and keeps yours.
+./setup writes the first group into `state/subsync.env` from your answers, each line with its explanation above it, and the limits it asks; for a public instance, also the public mode settings it asks. A limit it stops asking (its Usenet or audio route turned off) goes back to its default. The others keep the defaults shown. To change one, add `NAME=value` to `state/subsync.env` and run ./setup again: Change your answers, then go through to the end, and subsync restarts with it (where Docker Compose is installed on this machine, `docker compose -f state/compose.yaml up -d` does the same). Running ./setup again keeps every line it doesn't write.
 
 #### Written by ./setup
 
@@ -300,7 +308,7 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 
 #### Limits and safety
 
-- **`SUBSYNC_DAILY_BUDGET_GB`** (default `100`): The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until the next day and new files keep their original subtitles. 100 is far above normal use (about 1 MB per file, a few MB when the track's lines are pictures; up to 1 GB per file with the audio route), so it only catches something going wrong. Lower it if your debrid service or server has a tight traffic limit.
+- **`SUBSYNC_DAILY_BUDGET_GB`** (default `100`): The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until the next day and new files keep their original subtitles. 100 is far above normal use (about 1 MB per file, a few MB when the track's lines are pictures; up to the audio limit per file with the audio route, 1 GB by default), so it only catches something going wrong. Lower it if your debrid service or server has a tight traffic limit.
 - **`SUBSYNC_USENET_LISTINGS_PER_DAY`** (default `10`): How many times a day AIOSubtitles may look for a Usenet file through your indexers (10 by default). Each look is one search per indexer in your config, usually answered from AIOStreams' own cache at no cost. Lower it if your indexer's daily limit is tight; 0 turns Usenet off. On a public instance this is per person, through each person's own indexers.
 - **`SUBSYNC_INDEX_CAP_MB`** (default `32`): The most subsync reads of one file to find its subtitle tracks (the start, the index, and 64 KB at each end), in MB. Most files need about 1 MB; files with very many tracks need more. A file whose index is larger keeps its original subtitles and isn't read again until the cap is raised. Recommended: 32. Higher: a few more such files get copies, each costing that much more data.
 - **`SUBSYNC_FILE_CAP_GB`** (default `6`): The most subsync reads of one file in all when the audio route works on it, in GB: an outer safety limit, since the audio limit (SUBSYNC_AUDIO_BUDGET_GB, at most 4 GB from ./setup) normally stops first. Recommended: 6. 0 removes it, which is not recommended.
@@ -334,7 +342,7 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 - **`SUBSYNC_TEXT_PAIRING`** (default `on`): On: when your subtitle and the file's own subtitle track share a language and timing alone can't settle it, subsync reads the words of up to 120 of the track's lines, once per file and language (up to 240 KB of text; on an image track, with a reader installed for the language, each line's picture, up to 64 KB), and pairs your subtitle's lines with those that say the same thing, even where lines are split or joined differently. A copy whose words disagree with its timing isn't offered. Words are kept only while the file is worked on. Recommended: on. Off: lines are paired by timing alone, nothing extra is read, and a copy only words could refuse may be offered.
 - **`SUBSYNC_SECTIONS`** (default `on`): On: a subtitle made for a slightly different cut of the film (a few seconds added or cut here and there, other ads or recaps) is fitted in up to 8 sections, each moved by its own amount and each checked on its own; a copy is offered only when every section passes and the whole copy does too, and a subtitle that lacks a scene of your file is still never offered. Recommended: on. Off: the whole film is moved by one amount, then by the general re-timing. Nothing extra is read either way.
 - **`SUBSYNC_SNAP`** (default `on`): On: after re-timing, each line moves to start exactly where the file's own matching line starts, wherever that match is clear. Recommended: on: lines appear right on cue. Off: lines keep their author's timing inside the re-timed blocks.
-- **`SUBSYNC_SNAP_WITHIN`** (default `0.95`): The share of lines that must start within 200 ms of the file's track for a copy whose lines were snapped (0.95 = 95 %). Snapped lines look better to the check than they are, so they need more than the 90 % other copies need. Recommended: 0.95. Lower: more copies offered, a few slightly off.
+- **`SUBSYNC_SNAP_WITHIN`** (default `0.95`): The share of a snapped copy's paired lines that must start within 200 ms of the file's track (0.95 = 95 %). Snapped lines look better to the check than they are, so they need more than the 90 % other copies need. Recommended: 0.95. Lower: more copies offered, a few slightly off.
 - **`SUBSYNC_BETTER`** (default `on`): On: a copy that misses the 90 % bar is still offered when it is clearly better than the original: its typical error is 200 ms or less and at most half the original's, at least 85 % of its lines pair with the file's lines, and no part of the film is missing. Recommended: on: such a copy is a plain improvement. Off: only copies that meet the bar; the rest keep their originals.
 - **`SUBSYNC_BETTER_PAIRED`** (default `0.85`): For "clearly better": the share of the copy's lines that must pair with a line of the file's track (0.85 = 85 %). Recommended: 0.85. Higher or lower than recommended trades how many copies are offered against how closely they fit.
 - **`SUBSYNC_BETTER_MEDIAN_MS`** (default `200`): For "clearly better": the copy's typical error, the median distance of its line starts from the file's, must be at most this many ms. Recommended: 200. Higher or lower than recommended trades how many copies are offered against how closely they fit.
@@ -445,7 +453,10 @@ These are not settings: AIOSubtitles always works this way.
 |---|---|
 | `setup` | Builds the image from this folder, then runs setup inside it (`installer/wizard.py`). In a folder made for the image, setup writes its own `setup`, which runs the image's setup. |
 | `installer/` | The installer, written in plain Python with no packages to install. Its tests run with `python3 -m unittest discover -s installer/tests -t .`, and inside the image's build; `python3 -I installer/docs.py` rewrites the Settings section above and `docs/answers.example` from `subsync/subsync/explain.py`. |
-| `subsync/` | The service, and the image's `Dockerfile` (built from this folder: `docker build -f subsync/Dockerfile .`). The build runs both test suites and stops if any test fails. |
+| `subsync/` | The service, and the image's `Dockerfile` (built from this folder: `docker build -f subsync/Dockerfile .`). Its tests run with `python3 -m unittest discover -s subsync/tests -t subsync/tests`; the public-mode tests need the `cryptography` package and are skipped without it. The build runs both test suites and stops if any test fails. |
+| `docs/` | `answers.example`, a sample answers file for `./setup --answers FILE`, written by `installer/docs.py`. |
+| `.github/workflows/` | The image's build on GitHub: its tests on x86 and ARM, and publishing to ghcr.io only after they pass. |
+| `VERSION` | This release's version number, which the image carries and updates compare. |
 | `state/` | Your settings, keys and config backups, readable only by you. Never share or commit this folder. |
 
 ## Licence

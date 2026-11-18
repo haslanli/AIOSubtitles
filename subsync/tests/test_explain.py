@@ -115,6 +115,12 @@ class ExplainTest(unittest.TestCase):
         self.assertIn("Remote Traffic", rules["Real-Debrid is never used"])
         self.assertIn("Usenet: only parts of a file, only when you turn it on", rules)
 
+    def test_the_snapped_bar_counts_the_lines_that_pair(self):
+        # it said a share of all lines; the check counts the paired ones
+        self.assertTrue(explain.SETTINGS["SUBSYNC_SNAP_WITHIN"][1].startswith(
+            "The share of a snapped copy's paired lines that must start within 200 ms of the file's track "
+            "(0.95 = 95 %). "))
+
 
 # The limits' defaults and their texts as the owner approved them
 APPROVED = {

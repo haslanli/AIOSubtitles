@@ -53,6 +53,10 @@ WORKDIR /opt/aiosubtitles/subsync
 ENV ORT_DISABLE_TELEMETRY=1
 COPY subsync/subsync ./subsync
 COPY VERSION /opt/aiosubtitles/VERSION
+# The notices and licences that travel with the image (NOTICE.md): this project's licence, and the Apache-2.0 text
+# Docker's two programs above come under, copied from the base image (Debian's base-files)
+COPY NOTICE.md LICENSE /opt/aiosubtitles/licences/
+RUN cp /usr/share/common-licenses/Apache-2.0 /opt/aiosubtitles/licences/Apache-2.0.txt
 COPY installer/*.py /opt/aiosubtitles/installer/
 COPY --chmod=755 installer/image-entry.sh /opt/aiosubtitles/entry
 # The pages' two typefaces, Atkinson Hyperlegible Next and Mono (SIL Open Font Licence 1.1, its text beside them),

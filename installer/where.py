@@ -34,7 +34,8 @@ NO_SOCKET = (f'Setup needs Docker\'s socket to start and update AIOSubtitles: ad
 NO_FOLDER = (f'Setup needs a folder for its files: add -v "$PWD:{MOUNT}" to the docker run command, in the folder you '
              'made for it (README, Install).')
 NO_PAGE_PORT = (f'The setup page needs a port on this machine: add -p 127.0.0.1:{PAGE_PORT}:{PAGE_PORT} to the docker '
-                'run command (README, Install), or give every answer with --answers FILE --yes.')
+                f'run command (if {PAGE_PORT} is taken, change the first number only, like '
+                f'-p 127.0.0.1:9000:{PAGE_PORT}; README, Install), or give every answer with --answers FILE --yes.')
 # its port published beyond this machine (-p 8789:8789): one try from another computer sends the page's key in clear
 PAGE_PORT_NOT_LOCAL = ('The setup page must be reachable on this machine only: use '
                        f'-p 127.0.0.1:{PAGE_PORT}:{PAGE_PORT} in the docker run command (README, Install), '

@@ -95,10 +95,9 @@ def every_state():
     sections = [('Your config 1a2b3c4d…', [('+', 'adds 1 subtitle source: subsync (synced copies of the subtitles you '
                                                  'already get)')],
                  'Nothing else in it changes. A copy of it as it is now is saved first.'),
-                ("subsync's own config (new)", [], 'a copy of yours without Real-Debrid and subsync, and without Usenet '
-                                                   'unless you turn it on, with nothing running in the background, so '
-                                                   'subsync can find the file you are watching. It never appears in your '
-                                                   'apps.')]
+                ("subsync's own config (new)", [], 'a copy of yours without Real-Debrid, Usenet and subsync, with '
+                                                   'nothing running in the background, so subsync can find the file '
+                                                   'you are watching. It never appears in your apps.')]
     words = [w for heading, lines, after in sections for w in [heading, after] + [line for _, line in lines]] + ['+']
     add('review', screens.review(sections), *words)
     add('review-sign-in', screens.review(sections, cache=True, sign_in=True), *words)

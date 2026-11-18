@@ -143,8 +143,12 @@ class CommandLine(FlowFixture):
         script = where.setup_script(place)
         self.assertIn('-v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/folder" -p 127.0.0.1:8789:8789 '
                       'ghcr.io/haslanli/aiosubtitles:latest setup', script)        # the folder's ./setup: the same
-        self.assertIn('Setup runs in your browser.', install)
-        self.assertIn('ssh -L', install)
+        # it said the ssh -L line is printed only on a server; setup always prints it
+        self.assertIn('Setup runs in your browser: it prints the address to open on this machine, and an `ssh -L` line '
+                      'for opening it from another computer (run that line on the other computer first, then open the '
+                      'same address there).', ' '.join(install.split()))
+        self.assertTrue(any(line.startswith('  ssh -L 8789:127.0.0.1:8789 ')
+                            for line in web.terminal_lines(8789, 'http://127.0.0.1:8789/')))
         self.assertIn("### Why setup needs Docker's socket", install)
         updates = readme.split('## Update', 1)[1].split('\n## ', 1)[0]
         self.assertIn('./setup --update', updates)
@@ -160,6 +164,20 @@ class CommandLine(FlowFixture):
         self.assertIn('To set it up without the page, give the answers in a file in `state/`: '
                       '`./setup --answers state/FILE --yes` (see `docs/answers.example`).', install)
         self.assertNotIn('`./setup --answers FILE --yes`', install)
+
+    def test_the_readme_says_to_change_only_the_first_port_number(self):
+        # "change both numbers" (-p 127.0.0.1:9000:9000) left the page's port unpublished, and setup stopped
+        readme = (REPO / 'README.md').read_text()
+        install = ' '.join(readme.split('## Install', 1)[1].split('\n## ', 1)[0].split())
+        self.assertIn(f'- `-p 127.0.0.1:8789:{where.PAGE_PORT}`: the setup page, on this machine only. If 8789 is '
+                      f'taken here, change the first number only, like `-p 127.0.0.1:9000:{where.PAGE_PORT}`.', install)
+        self.assertNotIn('change both numbers', install)
+        source = ' '.join(readme.split('### Build it from source', 1)[1].split('\n## ', 1)[0].split())
+        self.assertIn('It needs Docker and git, nothing else. Off Linux the page uses port 8789 on this machine; if it '
+                      'is taken, run `AIOSUBTITLES_SETUP_PORT=9000 ./setup`.', source)
+        self.assertIn(f'net="-p 127.0.0.1:${{AIOSUBTITLES_SETUP_PORT:-8789}}:{where.PAGE_PORT}"',
+                      (REPO / 'setup').read_text())                     # the variable the source route's ./setup reads
+
 
 if __name__ == '__main__':
     unittest.main()
