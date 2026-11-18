@@ -175,6 +175,15 @@ def env_values(as_written=False):
     return plan.parse_env(path.read_text() if path.exists() else '', as_written=as_written)
 
 
+def env_settings():
+    """subsync's settings as state/subsync.env starts it, for the questions that state one (explain.setup_help); its
+    defaults while a line there is one subsync couldn't start with."""
+    try:
+        return Settings(env_values())
+    except (ValueError, OverflowError):
+        return Settings({})
+
+
 def load_settings():
     path = STATE / 'settings.json'
     return json.loads(path.read_text()) if path.exists() else {}
@@ -486,7 +495,8 @@ class Engine:
         self.answers = dict(answers or {})
         self.page = page
         self.out = out or (Rows() if page else Terminal())
-        self.ask = PageAsk(self.answers, self.out) if page else Asker(answers, yes=yes)
+        self.env_settings = env_settings()      # the questions that state a setting say this install's value
+        self.ask = PageAsk(self.answers, self.out) if page else Asker(answers, yes=yes, settings=self.env_settings)
         self.prev = load_settings()
         self.keys = read_kv(STATE / 'secrets.env')
         self.s = {}            # this run's settings (saved as state/settings.json)
@@ -721,7 +731,7 @@ class Engine:
         if self.usenet_services:
             self.usenet = self.ask.yesno('USENET', screens.LABELS['USENET'], self.prev.get('usenet', False))
         elif self.answers.get('USENET', '').strip().lower() in ('yes', 'y', 'on') and self.usenet_why:
-            self.out.note(explain.USENET_WHY[self.usenet_why])
+            self.out.note(explain.SETUP_USENET_WHY[self.usenet_why])
         if not self.has_sync and not self.usenet:
             if realdebrid.real_debrid_only(self.viewer):
                 raise Stop(realdebrid.REAL_DEBRID_ONLY, RD_WAY_OUT, page_fix=RD_WAY_OUT_PAGE)

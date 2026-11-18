@@ -117,7 +117,7 @@ def every_state():
     add('choices-usenet-stop', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', usenet=False, stop=no_usenet),
         f'{PUBLIC}/subsync', *no_usenet)
     # the step's own lines: why Usenet stays off (answered yes before, no service of the config reads it any more)
-    why = [('note', explain.USENET_WHY['proxy'], None)]
+    why = [('note', explain.SETUP_USENET_WHY['proxy'], None)]     # setup's own reason
     not_an_address = ('PUBLIC_ADDRESS', plan.check_public('ftp://x')[1])
     add('choices-usenet-why', screens.choices(['eng'], 'no', 'ftp://x', problem=not_an_address, rows=why),
         'ftp://x', not_an_address[1], why[0][1])

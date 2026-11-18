@@ -549,14 +549,14 @@ class Flow(FlowFixture):
         self.assertEqual(plan.audio_answer('1'), None)                     # never read as an answer either way
 
     def test_the_answers_examples_values_are_answers_setup_takes(self):
-        # docs/answers.example's own values, the audio question's "no" included, with only the config filled in. Its
-        # AIOS_URL line is left out: an address given turns off finding AIOStreams' container, which this run needs
+        # docs/answers.example's own values, the audio question's "no" and the empty AIOStreams address included (it
+        # finds AIOStreams' container, as with no line at all:), with only the config filled in
         from installer import docs
         example = plan.parse_env(docs.answers_example())
         self.assertEqual(plan.audio_answer(example['AUDIO']), 'no')
         self.assertEqual(example['SUBSYNC_AUDIO_ROUTE'], 'no')
+        self.assertEqual(example['AIOS_URL'], '')
         answers = dict(example, AIOS_CONFIG_ID=UUID, AIOS_CONFIG_PASSWORD=PASSWORD)
-        del answers['AIOS_URL']
         code, out = self.run_setup(answers)
         self.assertEqual(code, 0, out)
         env = engine.read_kv(self.state / 'subsync.env')
@@ -572,6 +572,30 @@ class Flow(FlowFixture):
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no', 'AUDIO': 'yes'})
         self.assertEqual(code, 0, out)
         self.assertEqual(engine.read_kv(env_path)['SUBSYNC_AUDIO_BUDGET_GB'], '3')
+
+    def test_the_questions_state_this_installs_own_numbers(self):
+        # The audio question's files opened a day and the audio limit's wait for a pick are this install's,
+        # from state/subsync.env; at the defaults the words are as written
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='yes'))
+        self.assertEqual(code, 0, out)
+        flat = ' '.join(out.split())
+        self.assertIn(' '.join(explain.QUESTIONS['AUDIO'][1].split()), flat)
+        self.assertIn(' '.join(explain.QUESTIONS['AUDIO_BUDGET'][1].split()), flat)
+        self.assertIn('next are read too (at most 5 a day).', flat)
+        self.assertIn('take longer than the 14 seconds an app waits,', flat)
+        env_path = self.state / 'subsync.env'
+        for lines, opened, wait in (('SUBSYNC_USER_OPENED_PER_DAY=2\nSUBSYNC_PICK_WAIT_MS=9500\n', '(at most 2 a day)',
+                                     'the 9.5 seconds an app waits'),
+                                    ('SUBSYNC_USER_OPENED_PER_DAY=0\n',
+                                     '(none on this install: such files wait for a pick)', 'the 9.5 seconds')):
+            with self.subTest(lines=lines):
+                env_path.write_text(env_path.read_text() + lines)
+                code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+                self.assertEqual(code, 0, out)
+                flat = ' '.join(out.split())
+                self.assertIn(f'next are read too {opened}. No: those files', flat)
+                self.assertIn(f'take longer than {wait}', flat)
+                self.assertNotIn('(at most 5 a day)', flat)
 
     def test_a_wrong_audio_limit_stops_an_answers_file_run(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AUDIO='yes', AUDIO_BUDGET='3'))

@@ -243,7 +243,9 @@ class Addresses(unittest.TestCase):
         self.assertEqual(plan.public_default('https://nas.local', '192.168.1.5'), ('port', 'http://nas.local:8790'))
 
     def test_aiostreams_default_address_is_the_one_its_explanation_gives(self):
-        self.assertEqual(explain.QUESTIONS['AIOS_URL'][0], plan.AIOS_DEFAULT_URL)
+        # the example leaves the address empty, as AIOS_CONTAINER: an answers file made from it finds AIOStreams in
+        # Docker first; the explanation still names setup's default address
+        self.assertEqual(explain.QUESTIONS['AIOS_URL'][0], '')
         self.assertIn(f'like {plan.AIOS_DEFAULT_URL} or', explain.QUESTIONS['AIOS_URL'][1])
 
     def test_checks_and_rules(self):

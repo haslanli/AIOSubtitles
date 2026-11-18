@@ -411,7 +411,7 @@ class TmdbLaterTest(Base):
         self.srv.find["tt1"] = {"movie_results": [{"id": 1, "original_language": "en"}]}
         got = self.again("tt1")
         self.assertEqual((got["wikidata"], origlang.choose(got)), (["fre", "eng"], ("eng", "tmdb")))
-        self.assertIsNone(self.until("tt1"))
+        self.assertEqual(self.until("tt1"), self.clock() + 180 * DAY)      # TMDB's value: its 6 months
 
     def test_a_tmdb_that_failed_is_not_asked_again_at_once(self):
         self.srv.status["tmdb"] = (500, ())
@@ -549,22 +549,57 @@ class KeepTest(Base):
         return self.store.db.execute("SELECT until FROM title_language WHERE title=?", (title,)).fetchone()[0]
 
     def test_how_long_answers_are_kept(self):
-        # a found answer is kept with no expiry, whatever its source, TMDB's included; not found
-        # and failed lookups keep their short times, so they are asked again
+        # a found answer is kept with no expiry, except one holding TMDB's value: TMDB's terms allow 6 months, so it is
+        # kept 180 days and then looked up again in the background, as one not found is, and that play is timed as if
+        # the language were unknown; Wikidata's and AniList's stay; not found and failed lookups keep their
+        # short times, so they are asked again
+        self.assertEqual(origlang.TMDB_KEEP_S, 180 * DAY)
         self.srv.find["tt1"] = {"movie_results": [{"id": 1, "original_language": "en"}]}
         self.srv.wikidata["tt2"] = [binding("Q1860", iso1="en")]
         self.srv.anilist[5] = "JP"
         self.ask("tt1")
         self.ask("tt2")
         self.ask("mal:5")
-        for title in ("tt1", "tt2", "mal:5"):
+        self.assertEqual(self.until("tt1"), self.clock() + 180 * DAY)
+        for title in ("tt2", "mal:5"):
             self.assertIsNone(self.until(title), title)
+        tmdb_calls = lambda: len([c for c in self.srv.of("tmdb") if c["path"].endswith("/tt1")])  # noqa: E731
+        self.clock.t += 180 * DAY - 1
+        self.assertEqual(origlang.choose(self.lookup.peek("tt1")), ("eng", "tmdb"))
+        self.assertIsNone(self.lookup.start("tt1", key=KEY))           # within its 6 months: not looked up again
+        self.clock.t += 1
+        self.assertIsNone(self.lookup.peek("tt1"))                     # expired: this play as if unknown
         self.clock.t += 20 * 365 * DAY
         self.store.expire()
-        for vid in ("tt1", "tt2", "mal:5"):
+        for vid in ("tt2", "mal:5"):
             self.assertIsNotNone(self.lookup.peek(vid), vid)
-        self.assertIsNone(self.lookup.start("tt1", key=KEY))           # never looked up again
-        self.assertEqual(len([c for c in self.srv.of("tmdb") if c["path"].endswith("/tt1")]), 1)
+        self.assertIsNone(self.lookup.start("tt2", key=""))            # never looked up again
+        self.assertEqual(tmdb_calls(), 1)
+        self.assertEqual(origlang.choose(self.ask("tt1")), ("eng", "tmdb"))     # looked up again, kept 6 months more
+        self.assertEqual(tmdb_calls(), 2)
+        self.assertEqual(self.until("tt1"), self.clock() + 180 * DAY)
+
+    def test_tmdbs_answers_kept_before_get_their_six_months(self):
+        # An answer holding TMDB's value that an earlier version kept with no expiry gets one, counted from
+        # when it was found, when the service starts; the others keep none
+        found = self.clock() - 10 * DAY
+        tmdb = {"tmdb": "eng", "tmdb_asked": True, "wikidata": ["eng"], "anime": None, "via": "tmdb", "failed": []}
+        wikidata = dict(tmdb, tmdb=None, tmdb_asked=False, via="wikidata")
+        none = dict(tmdb, tmdb="none", wikidata=[])
+        old = dict(tmdb)
+        for title, answer, at in (("tt1", tmdb, found), ("tt2", wikidata, found), ("tt3", none, found),
+                                  ("tt4", old, self.clock() - 200 * DAY)):
+            self.store.title_language_put(title, answer, at, None)
+        self.store.db.execute("INSERT INTO title_language VALUES ('tt5', 'not json', ?, NULL)", (found,))
+        self.make()
+        self.assertEqual((self.until("tt1"), self.until("tt3")), (found + 180 * DAY, found + 180 * DAY))
+        self.assertIsNone(self.until("tt2"))
+        self.assertIsNone(self.until("tt5"))                           # unreadable: left as it was
+        self.assertIsNotNone(self.lookup.peek("tt1"))
+        self.assertIsNone(self.lookup.peek("tt4"))                     # past its 6 months: looked up again
+        self.store.expire()
+        self.assertEqual(sorted(r[0] for r in self.store.db.execute("SELECT title FROM title_language")),
+                         ["tt1", "tt2", "tt3", "tt5"])
 
     def test_an_answer_is_shared_and_a_title_not_found_is_asked_again(self):
         self.srv.wikidata["tt2"] = [binding("Q1860", iso1="en")]

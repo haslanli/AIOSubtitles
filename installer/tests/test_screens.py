@@ -371,9 +371,9 @@ class StopsAndLines(unittest.TestCase):
     def test_your_choices_shows_its_own_lines_first(self):
         # why Usenet stays off, answered yes before, was dropped: the step's lines were shown on no page
         texts = Tree(samples.every_state()['choices-usenet-why'][0]).texts
-        self.assertLess(texts.index(explain.USENET_WHY['proxy']),
+        self.assertLess(texts.index(explain.SETUP_USENET_WHY['proxy']),
                         texts.index('Which subtitle languages should be synced?'))
-        self.assertNotIn(explain.USENET_WHY['proxy'], Tree(samples.every_state()['choices'][0]).texts)
+        self.assertNotIn(explain.SETUP_USENET_WHY['proxy'], Tree(samples.every_state()['choices'][0]).texts)
 
     def test_the_container_choice_shows_each_name_once_with_its_image_under_it(self):
         # each row read "aiostreams" and under it "aiostreams  (ghcr.io/viren070/aiostreams:latest)"

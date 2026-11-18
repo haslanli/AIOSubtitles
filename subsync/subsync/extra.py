@@ -65,6 +65,29 @@ def other_episode(release, season, episode):
     return bool(choose.episodes(release)) and choose.other_episode(release, (season, episode))
 
 
+def asked_sources(settings, type_):
+    """The sources an instance asks itself for this kind of title ("movie" or "series"), in srclimits.SOURCE_ORDER: the
+    keyless ones it lists (SUBSYNC_EXTRA_SOURCES), SubDL and SubSource with their key, Wyzie with its key on one's own
+    install; Gestdown for series only."""
+    on = set(settings.extra_sources)
+    if settings.subdl_key:
+        on.add("subdl")
+    if settings.subsource_key:
+        on.add("subsource")
+    if settings.wyzie_key and not settings.public:
+        on.add("wyzie")
+    if type_ != "series":
+        on.discard("gestdown")
+    return [s for s in srclimits.SOURCE_ORDER if s in on]
+
+
+def cleanable_presets(settings):
+    """The subtitle addons the sign-up's clean-up takes out of a config, in srclimits.CLEANABLE_PRESETS' order:
+    only those whose site the instance asks itself, so a person keeps every source it doesn't."""
+    asked = set(asked_sources(settings, "movie")) | set(asked_sources(settings, "series"))
+    return tuple(p for p in srclimits.CLEANABLE_PRESETS if srclimits.CONFIG_PRESETS[p] in asked)
+
+
 class NotFound(Exception):
     """The source has nothing for this title (404): an answer, not a failure."""
 
@@ -145,17 +168,8 @@ class ExtraSources:
         return {}
 
     def sources(self, type_):
-        """The sources asked for this kind of title, in srclimits.SOURCE_ORDER."""
-        on = set(self.s.extra_sources)
-        if self.s.subdl_key:
-            on.add("subdl")
-        if self.s.subsource_key:
-            on.add("subsource")
-        if self.s.wyzie_key and not self.s.public:
-            on.add("wyzie")
-        if type_ != "series":
-            on.discard("gestdown")
-        return [s for s in srclimits.SOURCE_ORDER if s in on]
+        """The sources asked for this kind of title, in srclimits.SOURCE_ORDER (asked_sources)."""
+        return asked_sources(self.s, type_)
 
     def search(self, type_, video_id, langs=None, hints=None, skip=()):
         """Candidates from every source asked, each a dict like sources.Aios.subtitles gives plus `source` and

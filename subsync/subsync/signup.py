@@ -28,6 +28,7 @@ from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, PUBLIC_RETRY_WAIT
                          AiosApi, AiosError, install_link, is_subsync_preset, new_key, parse_languages, sync_config,
                          sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins,
                          without_subsync)
+from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .settings import AUDIO_CHOICES
@@ -400,10 +401,11 @@ def _log_fault(e, doing):
         log.warning("%s failed: %s", doing, type(e).__name__)
 
 
-def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=False):
+def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=()):
     """(changes, added, manual): AIOSubtitles placed in the person's own config and read back; with `clean_up`
- the subtitle addons it asks itself are taken out of that config. Never raises: it runs once the record is
-    saved, and the page must still give the person their link (`manual`: they add it by hand)."""
+    (extra.cleanable_presets) the subtitle addons it asks itself are taken out of that config. Never raises: it
+    runs once the record is saved, and the page must still give the person their link (`manual`: they add it by
+    hand)."""
     try:
         new, changes = viewer_change(viewer, manifest_url, metadata, name=ADDON_NAME, clean_up=clean_up)
         if not changes:
@@ -597,13 +599,13 @@ def _signup(settings, users, form, api_factory, timeout):
     token = new_token()
     manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
     # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles' own config
-    # then lacks those addons too, so it asks their sites itself
-    clean_up = form.get("add_addon") == "on" and form.get("clean_up") == "on"
+    # then lacks those addons too, so it asks their sites itself: only the addons whose site it really asks
+    clean_up = cleanable_presets(settings) if form.get("add_addon") == "on" and form.get("clean_up") == "on" else ()
     want = wants_usenet(settings, form)
     record = {"instance": instance, "main_uuid": uuid, "languages": langs, "version": 1}
     if audio:
         record["audio"] = audio
-    base = without_builtin_twins(viewer)[0] if clean_up else viewer
+    base = without_builtin_twins(viewer, clean_up)[0] if clean_up else viewer
     # with Real-Debrid as the only debrid service and no Usenet config, stored copies only: no sync config,
     # nothing of theirs read; the clean-up is left out, since AIOSubtitles then asks no subtitle site for them
     has_sync, usenet, services, why, stored = _configs_for(settings, viewer, manifest_url, want, judged=base)
@@ -611,7 +613,7 @@ def _signup(settings, users, form, api_factory, timeout):
     # nothing left behind: a config made here is removed again when a later step, or saving the record, fails
     with _removed_on_failure(api, []) as made:
         if stored:
-            clean_up = False
+            clean_up = ()
             _to_store_only(record)
             all_clear(settings, record, users.clock())
         elif has_sync:

@@ -4,6 +4,7 @@ import re
 import unittest
 
 import helpers  # noqa: F401  (first: it puts the package on the import path)
+from helpers import HAVE_CRYPTOGRAPHY, NEEDS  # noqa: E402
 from subsync import explain  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 
@@ -317,6 +318,165 @@ class LimitsTest(unittest.TestCase):
         text = explain.SETTINGS["SUBSYNC_PUBLIC"][1]
         self.assertIn("Leave it off for your own install; setup turns it on when you host a public instance.", text)
         self.assertNotIn("./setup doesn't use it", text)
+
+
+class Group2Test(unittest.TestCase):
+    """The texts of cycle 1's vis3-explain-2, word for word."""
+
+    def test_aiosubtitles_own_config_never_has_usenet(self):
+        # it said "without Usenet unless you turn it on"; with Usenet on a second config is made
+        self.assertEqual(explain.PUBLIC_TEXTS["made_config"], "Made AIOSubtitles' own config on your AIOStreams, "
+                         "without Real-Debrid, Usenet or automatic fallback to other sources.")
+        self.assertIn(" to make a separate config for AIOSubtitles on your AIOStreams (without Real-Debrid, Usenet, "
+                      "AIOSubtitles itself or anything that starts work in the background, so opening a file opens "
+                      "only that file; with Usenet on, a second one for Usenet only) and, if you leave the box "
+                      "checked, to add AIOSubtitles to your own config. ",
+                      dict(explain.RULES)["Public mode: your AIOStreams password is used once, unless you choose to "
+                                          "keep it"])
+        self.assertEqual(explain.PUBLIC_PASSWORD_TEXT,
+                         "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams "
+                         "config (if you leave \"Add AIOSubtitles to my AIOStreams config\" ticked, on the last "
+                         "screen), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, "
+                         "Usenet or automatic fallback to other sources (with Usenet on, a second one for Usenet "
+                         "only), so opening a file opens only that file. It is not stored unless you tick \"Keep my "
+                         "password\" below. You'll be asked again only if you refresh.")
+        self.assertIs(explain.PUBLIC_FIELDS["password"], explain.PUBLIC_PASSWORD_TEXT)
+        for text in (explain.PUBLIC_TEXTS["made_config"], explain.PUBLIC_PASSWORD_TEXT,
+                     dict(explain.RULES)["Public mode: your AIOStreams password is used once, unless you choose to "
+                                         "keep it"]):
+            self.assertNotIn("without Usenet unless you turn it on", text)
+
+    def test_the_settings_page_is_the_link_ending_in_configure(self):
+        # "with /configure at the end" read as adding it, which gives "not found"
+        self.assertEqual(explain.PUBLIC_TEXTS["notice_where"], "Open your AIOSubtitles settings page: your personal "
+                         "link, ending in configure instead of manifest.json.")
+        self.assertEqual(explain.PUBLIC_TEXTS["settings_link"], "It is your personal link, ending in configure "
+                         "instead of manifest.json. Bookmark it to come back.")
+
+    def test_setup_gives_its_own_reason_for_usenet_staying_off(self):
+        # The public pages keep theirs
+        self.assertEqual(explain.SETUP_USENET_WHY["proxy"], "Usenet stays off: subsync reads NzbDAV and AltMount only "
+                         "through AIOStreams' own proxy. Turn on AIOStreams' proxy for it, or leave Usenet off.")
+        self.assertEqual(explain.USENET_WHY["proxy"], "Usenet stays off: your Usenet service gives addresses on your "
+                         "home network, which AIOSubtitles can't reach from the internet. Turn on AIOStreams' proxy "
+                         "for it, or leave Usenet off.")
+        self.assertEqual(set(explain.SETUP_USENET_WHY), set(explain.USENET_WHY))
+        for why in ("nntp", "none"):
+            self.assertEqual(explain.SETUP_USENET_WHY[why], explain.USENET_WHY[why])
+
+    def test_tmdbs_answers_are_kept_up_to_six_months(self):
+        # The "Risk" sentence goes; TMDB's answers expire (origlang.TMDB_KEEP_S, within its 6 months)
+        from subsync import origlang
+        self.assertLessEqual(origlang.TMDB_KEEP_S, 183 * 86400)
+        for text in (explain.QUESTIONS["TMDB_KEY"][1], explain.SETTINGS["SUBSYNC_TMDB_KEY"][1]):
+            self.assertIn(" Cost: one request per film or series every 6 months at most; it sends only the title's "
+                          "IMDb id. TMDB's answers are kept up to 6 months, as its terms allow. ", text)
+            self.assertNotIn("Risk:", text)
+        self.assertIn(" (the answer is kept with no time limit; one from TMDB up to 6 months), ",
+                      explain.SETTINGS["SUBSYNC_ORIGINAL_LANGUAGE"][1])
+        tmdb = " The answers are kept with no time limit (TMDB's up to 6 months) and shared by everyone."
+        for kind in ("tmdb", "personal"):
+            self.assertTrue(explain.PRIVACY_LOOKUP[kind].endswith(tmdb), kind)
+        self.assertTrue(explain.PRIVACY_LOOKUP["wikidata"].endswith(
+            " The answers are kept with no time limit and shared by everyone."))
+        self.assertNotIn("TMDB", explain.PRIVACY_LOOKUP["wikidata"])
+
+    def test_setups_questions_state_this_installs_numbers(self):
+        # The audio question's files opened a day, the audio limit's wait for a pick and Usenet's searches a
+        # day; at the defaults, the words as written (README and docs/answers.example)
+        for key in ("AUDIO", "AUDIO_BUDGET", "USENET", "LANGUAGES", "SUBSYNC_DAILY_BUDGET_GB"):
+            with self.subTest(key=key):
+                written = (explain.QUESTIONS.get(key) or explain.SETTINGS[key])[1]
+                self.assertEqual(explain.setup_help(key, Settings({})), written)
+                self.assertEqual(explain.setup_help(key), written)
+        self.assertIn(" next are read too (at most 5 a day). ", explain.QUESTIONS["AUDIO"][1])
+        self.assertIn(" take longer than the 14 seconds an app waits, ", explain.QUESTIONS["AUDIO_BUDGET"][1])
+        self.assertIn(" The cost: at most 10 extra searches a day ", explain.QUESTIONS["USENET"][1])
+        s = Settings({"SUBSYNC_USER_OPENED_PER_DAY": "2", "SUBSYNC_PICK_WAIT_MS": "9500",
+                      "SUBSYNC_USENET_LISTINGS_PER_DAY": "7"})
+        self.assertEqual(explain.setup_help("AUDIO", s), explain.QUESTIONS["AUDIO"][1].replace(
+            "(at most 5 a day)", "(at most 2 a day)"))
+        self.assertEqual(explain.setup_help("AUDIO_BUDGET", s), explain.QUESTIONS["AUDIO_BUDGET"][1].replace(
+            "the 14 seconds", "the 9.5 seconds"))
+        self.assertEqual(explain.setup_help("USENET", s), explain.QUESTIONS["USENET"][1].replace(
+            "at most 10 extra searches", "at most 7 extra searches"))
+        self.assertEqual(explain.setup_help("AUDIO", Settings({"SUBSYNC_USER_OPENED_PER_DAY": "0"})),
+                         explain.QUESTIONS["AUDIO"][1].replace(
+                             "(at most 5 a day)", "(none on this install: such files wait for a pick)"))
+
+
+WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+
+class NumbersTest(unittest.TestCase):
+    """Each number a text states that a code constant holds is that constant's (the texts keep their approved
+    words; a changed constant fails here until its text says the same)."""
+
+    def test_a_file_that_cant_be_reached(self):
+        from subsync.store import READ_FAILED_BACKOFF_S
+        from subsync.worker import READ_RETRY_S
+        first, *hours = READ_FAILED_BACKOFF_S
+        later = ", ".join(str(h // 3600) for h in hours[:-1]) + f" and {hours[-1] // 3600} hours"
+        self.assertIn(f"tried once more {READ_RETRY_S} seconds later; if it still fails, it waits {first // 60} "
+                      f"minutes, then {later}, and then isn't read again.",
+                      dict(explain.RULES)["A file that can't be reached is tried again later"])
+        self.assertIn(f"tried once more {READ_RETRY_S} seconds later, and a failed file is tried again {first // 60} "
+                      f"minutes, {later} later", explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
+
+    def test_a_refused_file(self):
+        from subsync.store import REFUSED_BACKOFF_S
+        hours = [h // 3600 for h in REFUSED_BACKOFF_S]
+        waits = ", ".join(str(h) for h in hours[:-1]) + f", then {hours[-1]} hours"
+        self.assertIn(f"the refused file itself waits {waits}.", explain.SETTINGS["SUBSYNC_403_BACKOFF_S"][1])
+
+    def test_a_failing_site_is_paused(self):
+        from subsync import srclimits as sl
+        longest = {3600: "an hour"}[sl.RETRY_AFTER_MAX_S]
+        self.assertIn(f"fails {WORDS[sl.PAUSE_FAILURES]} times within {WORDS[sl.PAUSE_WINDOW_S // 60]} minutes (no "
+                      f"answer, or an error) is skipped for {WORDS[sl.PAUSE_S // 60]} minutes, then tried with one "
+                      f"request: if it answers, it is used again; if not, it waits another {WORDS[sl.PAUSE_S // 60]} "
+                      f"minutes. A site that asks AIOSubtitles to slow down waits as long as it asks, at most "
+                      f"{longest}.",
+                      dict(explain.RULES)["A failing subtitle site is paused"])
+        self.assertIn(f"fails {WORDS[sl.PAUSE_FAILURES]} times in {WORDS[sl.PAUSE_WINDOW_S // 60]} minutes is paused "
+                      f"for {WORDS[sl.PAUSE_S // 60]} minutes", explain.SETTINGS["SUBSYNC_SOURCE_TIMEOUT_S"][1])
+
+    def test_the_sites_limits_and_the_subtitles_a_file_takes(self):
+        from subsync import srclimits as sl
+        per_file, limits = sl.PER_FILE_DOWNLOADS, sl.LIMITS
+        day = 86400
+
+        def per(key, window):
+            return f"{dict(limits[key])[window]:,}"
+        self.assertIn(f"SubDL {per(('subdl', 'download', False), day)} downloads a day for each internet address and "
+                      f"{per(('subdl', 'request', True), day)} searches a day for each key, SubSource "
+                      f"{per(('subsource', 'request', True), day)} requests a day, Wyzie "
+                      f"{per(('wyzie', 'request', True), day)}. AIOSubtitles counts them and takes at most "
+                      f"{WORDS[per_file['subdl']]} subtitles per file and language from SubDL, "
+                      f"{WORDS[per_file['subsource']]} from SubSource and {WORDS[per_file['wyzie']]} from Wyzie",
+                      dict(explain.RULES)["Sites with limits give each file only a few subtitles"])
+        self.assertIn(f"(at most {WORDS[per_file['subdl']]} per file and language)", explain.QUESTIONS["SUBDL_KEY"][1])
+        self.assertIn(f"(at most {WORDS[per_file['wyzie']]} per file and language)", explain.QUESTIONS["WYZIE_KEY"][1])
+        subsource = explain.SETTINGS["SUBSYNC_SUBSOURCE_KEY"][1]
+        subsource_key = ("subsource", "request", True)
+        self.assertIn(f"({per(subsource_key, 60)} a minute, {per(subsource_key, day)} a day for a free key); at most "
+                      f"{WORDS[per_file['subsource']]} subtitles per file and language", subsource)
+        self.assertIn(f"from {per(('tsdb', 'download', False), 3600)} an hour to "
+                      f"{per(('tsdb', 'download', True), day)} a day", explain.SETTINGS["SUBSYNC_TSDB_KEY"][1])
+
+    def test_the_language_check_and_the_shared_timing(self):
+        from subsync.langcheck import MIN_WORDS
+        from subsync.store import KEEP_SERVED_S
+        self.assertIn(f"once it has about {MIN_WORDS} words)", dict(explain.RULES)["Which subtitles are tried first"])
+        days = f"kept {KEEP_SERVED_S // 86400} days after last use"
+        self.assertIn(days, dict(explain.RULES)["Public mode: what is kept, and for how long"])
+        self.assertIn(days, dict(explain.PRIVACY_PARTS)["What is stored"])
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_the_unreachable_state(self):
+        from subsync.recheck import UNREACHABLE_CHECKS
+        self.assertTrue(explain.PUBLIC_STATES["unreachable"].text.startswith(
+            f"The last {WORDS[UNREACHABLE_CHECKS]} checks couldn't reach your AIOStreams"))
 
 
 if __name__ == "__main__":

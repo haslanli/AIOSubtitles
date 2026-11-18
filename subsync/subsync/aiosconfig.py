@@ -19,7 +19,6 @@ import urllib.parse
 import urllib.request
 
 from . import langs, net, realdebrid
-from .srclimits import CLEANABLE_PRESETS
 
 
 def _say_wait(seconds):
@@ -232,13 +231,14 @@ def _before_other_subtitles(presets, preset):
     return presets + [preset]
 
 
-def without_builtin_twins(config):
-    """(config, names): the config without the subtitle addons AIOSubtitles' public service asks itself
-    (srclimits.CLEANABLE_PRESETS: Stremio's OpenSubtitles, OpenSubtitles V3+, SubDL, SubSource), and their names."""
+def without_builtin_twins(config, presets):
+    """(config, names): the config without the subtitle addons of these preset types, those AIOSubtitles' public
+    service asks itself (extra.cleanable_presets, of srclimits.CLEANABLE_PRESETS: Stremio's OpenSubtitles,
+    OpenSubtitles V3+, SubDL, SubSource), and their names."""
     new = copy.deepcopy(config)
     kept, gone = [], []
     for p in new.get('presets') or []:
-        if isinstance(p, dict) and p.get('type') in CLEANABLE_PRESETS:
+        if isinstance(p, dict) and p.get('type') in presets:
             gone.append((p.get('options') or {}).get('name') or p['type'])
         else:
             kept.append(p)
@@ -247,13 +247,14 @@ def without_builtin_twins(config):
 
 
 def viewer_change(config, manifest_url, metadata=None, add_opensubtitles=False, name=SUBSYNC_PRESET_NAME,
-                  clean_up=False):
+                  clean_up=()):
     """The viewer's config with subsync's addon (an older subsync entry replaced) placed before the other subtitle
-    sources and, if asked, OpenSubtitles after it; with `clean_up` without the subtitle addons AIOSubtitles
-    asks itself. Returns (new config, [plain-language lines]); no lines means nothing to change."""
+    sources and, if asked, OpenSubtitles after it; with `clean_up` (the preset types of the subtitle addons
+    AIOSubtitles asks itself, extra.cleanable_presets) without those addons. Returns (new config, [plain-language
+    lines]); no lines means nothing to change."""
     removed = []
     if clean_up:
-        config, removed = without_builtin_twins(config)
+        config, removed = without_builtin_twins(config, clean_up)
     new = copy.deepcopy(config)
     presets = new.setdefault('presets', [])
     names = (name.lower(),)

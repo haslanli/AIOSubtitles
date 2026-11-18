@@ -68,17 +68,46 @@ class CeilingTest(unittest.TestCase):
         self.assertGreaterEqual(len(ui.ORDINALS), top)
 
 
+def limit(n, **env):
+    return Settings(dict({"SUBSYNC_MAX_LANGUAGES": str(n)}, **env))
+
+
 class ExplanationTest(unittest.TestCase):
     def test_four_is_todays_text(self):
-        self.assertEqual(explain.languages_help(4), TODAY)
+        self.assertEqual(explain.languages_help(Settings({})), TODAY)
+        self.assertEqual(explain.languages_help(limit(4)), TODAY)
         self.assertIn("up to four,", TODAY)
 
     def test_two_and_three_change_only_the_number(self):
-        self.assertEqual(explain.languages_help(3), TODAY.replace("up to four,", "up to three,"))
-        self.assertEqual(explain.languages_help(2), TODAY.replace("up to four,", "up to two,"))
+        self.assertEqual(explain.languages_help(limit(3)), TODAY.replace("up to four,", "up to three,"))
+        self.assertEqual(explain.languages_help(limit(2)), TODAY.replace("up to four,", "up to two,"))
 
     def test_one(self):
-        self.assertEqual(explain.languages_help(1), ONE)
+        self.assertEqual(explain.languages_help(limit(1)), ONE)
+
+    def test_the_synced_choices_are_the_instances(self):
+        # The first language gets SUBSYNC_MAIN_ALTERNATIVES copies with best fit on, one with it off, and the
+        # text says so (in words up to four); at the defaults the words are today's
+        several = "The first one gets up to three synced choices, the others one each."
+        one = "It gets up to three synced choices for every file you play."
+        self.assertIn(" " + several + " ", TODAY)
+        self.assertIn(" " + one + " ", ONE)
+        for env, first, only in (
+                ({"SUBSYNC_MAIN_ALTERNATIVES": "2"},
+                 "The first one gets up to two synced choices, the others one each.",
+                 "It gets up to two synced choices for every file you play."),
+                ({"SUBSYNC_MAIN_ALTERNATIVES": "5"},
+                 "The first one gets up to 5 synced choices, the others one each.",
+                 "It gets up to 5 synced choices for every file you play."),
+                ({"SUBSYNC_MAIN_ALTERNATIVES": "1"}, "Each gets one synced choice.",
+                 "It gets one synced choice for every file you play."),
+                ({"SUBSYNC_BEST_FIT": "off"}, "Each gets one synced choice.",
+                 "It gets one synced choice for every file you play.")):
+            with self.subTest(env=env):
+                self.assertEqual(explain.languages_help(limit(4, **env)), TODAY.replace(several, first))
+                self.assertEqual(explain.languages_help(limit(2, **env)),
+                                 TODAY.replace(several, first).replace("up to four,", "up to two,"))
+                self.assertEqual(explain.languages_help(limit(1, **env)), ONE.replace(one, only))
 
 
 class ParseTest(unittest.TestCase):

@@ -575,7 +575,7 @@ class Store:
 
     # -- titles' original languages (origlang.py): codes only, shared by everyone ------------------------------
     def title_language(self, title, now):
-        """A title's kept answer while it is current (a found one always: it has no expiry), else None."""
+        """A title's kept answer while it is current (a found one with no expiry always), else None."""
         with self.lock:
             row = self.db.execute("SELECT answer FROM title_language WHERE title=? AND (until IS NULL OR until>?)",
                                   (title, now)).fetchone()
@@ -588,6 +588,19 @@ class Store:
         with self.lock:
             self.db.execute("INSERT OR REPLACE INTO title_language VALUES (?,?,?,?)",
                             (title, json.dumps(answer, sort_keys=True), at, until))
+
+    def title_languages_expiring(self, keep_s, expires):
+        """Gives each answer kept with no expiry that `expires(answer)` picks an expiry `keep_s` after it was kept:
+        answers kept before their source had a time limit (origlang.TMDB_KEEP_S). One that has expired is then gone."""
+        with self._tx():
+            rows = self.db.execute("SELECT title, answer, at FROM title_language WHERE until IS NULL").fetchall()
+            for title, answer, at in rows:
+                try:
+                    picked = expires(json.loads(answer))
+                except ValueError:
+                    continue
+                if picked:
+                    self.db.execute("UPDATE title_language SET until=? WHERE title=?", (at + keep_s, title))
 
     def title_languages_clear(self):
         """Deletes every kept answer (the lookup switched off)."""

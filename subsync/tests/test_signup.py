@@ -371,6 +371,26 @@ class SignupTest(PublicParts, unittest.TestCase):
         record = self.users.open(result.token)
         self.assertEqual([p["type"] for p in self.sync_config(record)["presets"]], ["torrentio"])   # it asks them itself
 
+    def test_clean_up_takes_out_only_the_addons_whose_site_the_instance_asks(self):
+        # SubDL and SubSource are asked only with the service's key; without it a person's own SubDL and
+        # SubSource addons stay, in their config and in AIOSubtitles' own
+        from subsync.settings import Settings
+        subdl = {"type": "subdl", "instanceId": "sdl", "enabled": True,
+                 "options": {"name": "SubDL", "resources": ["subtitles"]}}
+        subsource = {"type": "subsource", "instanceId": "ssr", "enabled": True,
+                     "options": {"name": "SubSource", "resources": ["subtitles"]}}
+        config = viewer(presets=(TORRENTIO, OSV3, subdl, subsource))
+        uuid, result = self.run_signup(config, clean_up="on")
+        main = [p["type"] for p in self.fake.configs[uuid]["config"]["presets"]]
+        self.assertEqual(main, ["torrentio", "custom", "subdl", "subsource"])
+        self.assertTrue(any(c.startswith("removes 1 subtitle addon") for c in result.changes), result.changes)
+        sync = self.sync_config(self.users.open(result.token))
+        self.assertEqual([p["type"] for p in sync["presets"]], ["torrentio", "subdl", "subsource"])
+        self.s = Settings(dict(self.env, SUBSYNC_SUBDL_KEY="k1", SUBSYNC_SUBSOURCE_KEY="k2"))   # both asked: all go
+        uuid, result = self.run_signup(config, clean_up="on")
+        self.assertEqual([p["type"] for p in self.fake.configs[uuid]["config"]["presets"]], ["torrentio", "custom"])
+        self.assertTrue(any(c.startswith("removes 3 subtitle addons") for c in result.changes), result.changes)
+
     def test_clean_up_needs_aiosubtitles_added(self):
         uuid, result = self.run_signup(viewer(), add_addon="", clean_up="on")
         self.assertEqual(self.fake.configs[uuid]["config"], viewer())       # alone it would leave fewer subtitles

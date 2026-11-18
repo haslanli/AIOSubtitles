@@ -428,6 +428,21 @@ class Personal(BackgroundWork, FlowFixture):
         self.b.follow('machine', {'go': 'next'})
         self.b.follow('aios', {'go': 'next'})
 
+    def test_your_choices_state_this_installs_own_numbers(self):
+        # The audio question's files opened a day and Usenet's searches a day, from state/subsync.env
+        self.aios.users[UUID]['config'] = {'services': [TORBOX, ENGINE], 'presets': [ZILEAN, NEWZNAB, SUBS],
+                                           'failover': {'enabled': True}}
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'subsync.env').write_text('SUBSYNC_USER_OPENED_PER_DAY=3\nSUBSYNC_USENET_LISTINGS_PER_DAY=7\n')
+        self.walk_to_config()
+        self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        _, _, text = self.b.follow('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
+        self.assertIn('Sync files you play from Usenet too?', text)
+        self.assertIn('next are read too (at most 3 a day).', text)
+        self.assertIn('The cost: at most 7 extra searches a day through your indexers', text)
+        self.assertNotIn('(at most 5 a day)', text)
+        self.assertNotIn('at most 10 extra searches', text)
+
     def test_after_the_real_debrid_stop_continue_reads_the_config_again(self):
         # the stop's way out: once the config has another debrid service, Continue there goes on, with no retyping
         config = self.aios.users[UUID]['config']
@@ -761,12 +776,13 @@ class Personal(BackgroundWork, FlowFixture):
         form = {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': 'ftp://x', 'go': 'next'}
         _, _, text = self.b.post('choices', form)
         self.assertIn('Type a full address that starts with http:// or https://', text)
-        self.assertLess(text.index(explain.USENET_WHY['proxy']),
+        self.assertLess(text.index(explain.SETUP_USENET_WHY['proxy']),     # setup's own reason
                         text.index('Which subtitle languages should be synced?'))
+        self.assertNotIn(explain.USENET_WHY['proxy'], text)
         self.assertEqual(text.count(explain.TMDB_NOTICE), 1)                    # under its field only, not a line too
         self.b.follow('choices', dict(form, PUBLIC_ADDRESS=f'{PUBLIC}/subsync'))
         _, _, text = self.b.get('choices')                                       # Back from Limits
-        self.assertIn(explain.USENET_WHY['proxy'], text)
+        self.assertIn(explain.SETUP_USENET_WHY['proxy'], text)
 
     def test_an_address_with_a_space_is_asked_again_at_its_field(self):
         # it was taken, and the address's first check then ended in http.client's InvalidURL: the page's "unexpected

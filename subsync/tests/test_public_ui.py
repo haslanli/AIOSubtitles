@@ -161,8 +161,13 @@ def approved_texts():
     texts = list(explain.PUBLIC_FIELDS.values()) + list(explain.PUBLIC_BEFORE) + list(explain.PUBLIC_MANUAL_STEPS)
     texts += list(explain.PUBLIC_DELETE_LIST.values()) + list(explain.PUBLIC_STORE_ONLY) + list(explain.PUBLIC_HEADLINE)
     texts += list(explain.PUBLIC_REAL_DEBRID_WARNING)       # its title and text apart (the result page); joined below
-    texts += [explain.PUBLIC_REAL_DEBRID_NOTICE, explain.CONTACT] + [explain.languages_help(n) for n in (1, 2, 3, 4)]
+    texts += [explain.PUBLIC_REAL_DEBRID_NOTICE, explain.CONTACT]
+    texts += [explain.languages_help(settings(SUBSYNC_MAX_LANGUAGES=str(n))) for n in (1, 2, 3, 4)]
     texts.append(explain.PUBLIC_MANUAL_LEAD)
+    # the clean-up box's words with the addons each instance takes out: the OpenSubtitles ones, and all four
+    from subsync.extra import cleanable_presets
+    texts += [explain.clean_up_help(cleanable_presets(settings(**env)))
+              for env in ({}, {"SUBSYNC_SUBDL_KEY": "k", "SUBSYNC_SUBSOURCE_KEY": "k"})]
     texts += [h for h, _ in explain.PRIVACY_PARTS]
     texts += [(t[:1].upper() + t[1:]) for _, t in explain.PRIVACY_PARTS]
     audio = settings(SUBSYNC_AUDIO_ROUTE="on")            # the audio route's words, as an instance with it on shows them
@@ -449,6 +454,27 @@ class SignupPageTest(unittest.TestCase):
         self.assertNotIn("checked", tree.all("input", id="keep_password")[0])
         self.assertEqual(tree.all("input", id="link")[0]["class"], "input mono")
 
+    def test_the_clean_up_names_what_this_instance_takes_out_and_is_gone_when_nothing_is(self):
+        # The box removes only the addons whose site the instance asks itself, and says which
+        from subsync import explain, pages
+        lead = "Takes out of your AIOStreams config the subtitle addons AIOSubtitles now searches itself: "
+        for env, names in (({}, "OpenSubtitles and OpenSubtitles V3+"),
+                           ({"SUBSYNC_SUBDL_KEY": "k", "SUBSYNC_SUBSOURCE_KEY": "k"},
+                            "OpenSubtitles, OpenSubtitles V3+, SubDL and SubSource"),
+                           ({"SUBSYNC_EXTRA_SOURCES": "osv3plus,tsdb", "SUBSYNC_SUBDL_KEY": "k"},
+                            "OpenSubtitles V3+ and SubDL"),
+                           ({"SUBSYNC_EXTRA_SOURCES": "osv3", "SUBSYNC_SUBDL_KEY": ""}, "OpenSubtitles")):
+            with self.subTest(env=env):
+                tree = Tree(pages.signup_page(settings(**env)))
+                self.assertTrue(tree.all("input", id="clean_up"))
+                self.assertIn(lead + names + ". You then get their subtitles once, through AIOSubtitles", tree.text())
+        self.assertTrue(explain.clean_up_help(("opensubtitles", "opensubtitles-v3-plus", "subdl", "subsource"))
+                        .startswith(lead + "OpenSubtitles, OpenSubtitles V3+, SubDL and SubSource. "))
+        tree = Tree(pages.signup_page(settings(SUBSYNC_EXTRA_SOURCES="tsdb,gestdown")))
+        self.assertEqual(tree.all("input", id="clean_up"), [])
+        self.assertNotIn(lead, tree.text())
+        self.assertTrue(tree.all("input", id="add_addon"))
+
     def test_the_language_slots_follow_the_instance_limit(self):
         from subsync import explain, pages
         for limit in (1, 2, 3, 4):
@@ -458,9 +484,20 @@ class SignupPageTest(unittest.TestCase):
                 slots = tree.all("select", name="lang")
                 self.assertEqual(len(slots), limit)
                 self.assertEqual(tree.all("div", id="languages")[0]["data-max-languages"], str(limit))
-                self.assertIn(explain.languages_help(limit), tree.text())
+                self.assertIn(explain.languages_help(settings(SUBSYNC_MAX_LANGUAGES=str(limit))), tree.text())
                 labels = [a["for"] for a in tree.all("label") if a.get("for", "").startswith("lang-")]
                 self.assertEqual(labels, [f"lang-{i}" for i in range(1, limit + 1)])
+
+    def test_the_languages_help_states_the_instances_synced_choices(self):
+        # One synced choice with SUBSYNC_MAIN_ALTERNATIVES=1 or best fit off, on both pages that ask
+        from subsync import pages
+        for env in ({"SUBSYNC_MAIN_ALTERNATIVES": "1"}, {"SUBSYNC_BEST_FIT": "off"}):
+            with self.subTest(env=env):
+                s = settings(**env)
+                for page in (pages.signup_page(s), pages.settings_page(s, RECORD, USAGE, LINK, now=0)):
+                    text = Tree(page).text()
+                    self.assertIn("so fewer is faster. Each gets one synced choice. You can change them later", text)
+                    self.assertNotIn("up to three synced choices", text)
 
     def test_english_first_by_default_and_the_others_none(self):
         text = self.page()

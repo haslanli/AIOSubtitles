@@ -10,6 +10,7 @@ and UI_WORDS below; nothing else is shown.
 """
 from . import explain, ui
 from .aiosconfig import LANGUAGES, usenet_names
+from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .settings import MB
 from .ui import e
@@ -143,17 +144,20 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
         + f"<div class=\"choices\">{ui.choice('keep_password', 'Keep my password, so AIOSubtitles follows my config by itself', explain.PUBLIC_FIELDS['keep_password'])}</div>"))
     screens.append(_screen("languages", steps, 100,
                            "<h2 class=\"q\" id=\"languages-q\">Languages</h2>"
-                           + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(limit))}</p>"
+                           + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>"
                            + ui.language_slots(_CHOICES, order, limit, "languages-q", "languages-help",
                                                err("languages"))))
     usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day)),) \
         if usenet_allowed(settings) else ()
     # With the instance's audio route on, each person answers for files with no subtitles of their own
     asks_audio = bool(audio_answers(settings))
+    # the clean-up only where the instance asks one of those addons' sites itself
+    cleanable = cleanable_presets(settings)
+    clean_up = (ui.choice("clean_up", "Remove the subtitle addons AIOSubtitles now searches itself",
+                          explain.clean_up_help(cleanable), needs="add_addon"),) if cleanable else ()
     screens.append(_screen("config", steps, 100, "<h2 class=\"q\">Your AIOStreams config</h2>" + ui.choices(
         ui.choice("add_addon", "Add AIOSubtitles to my AIOStreams config", explain.PUBLIC_FIELDS["add_addon"], checked=True),
-        ui.choice("clean_up", "Remove the subtitle addons AIOSubtitles now searches itself",
-                  explain.PUBLIC_FIELDS["clean_up"], needs="add_addon"), *usenet)
+        *clean_up, *usenet)
         + (_audio_group(settings, audio, error_id=err("audio")) if asks_audio else ""), last=True))
     fields = ("link", "password", "languages") + (("invite",) if settings.invite else ()) \
         + (("audio",) if asks_audio else ())
@@ -209,7 +213,8 @@ def result_page(result, settings=None):
         done.append(texts["languages_chosen"].format(names=language_names(result.languages)))
     notes = []
     if stored:
-        notes.append(ui.note("warn", explain.PUBLIC_STORE_ONLY[1], explain.PUBLIC_STORE_ONLY[0], role="status"))
+        title, text = explain.store_only_note(settings is not None and usenet_allowed(settings))
+        notes.append(ui.note("warn", text, title, role="status"))
     if result.usenet_why in explain.USENET_WHY:
         notes.append(ui.note("warn", explain.USENET_WHY[result.usenet_why], role="status"))
     if result.warning:
@@ -390,9 +395,10 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
     usenet_on = usenet_allowed(settings) and bool(record.get("usenet_uuid"))
     files_limit, bytes_limit = settings.user_files_per_day, settings.user_daily_bytes
     full = usage["files"] >= files_limit or usage["bytes"] >= bytes_limit
+    store_title, store_text = explain.store_only_note(usenet_allowed(settings))
     notes = (ui.note("ok", message, role="status") if message else "") \
         + (ui.note("warn", notice, role="status") if notice else "") \
-        + (ui.note("warn", explain.PUBLIC_STORE_ONLY[1], explain.PUBLIC_STORE_ONLY[0]) if stored else "") \
+        + (ui.note("warn", store_text, store_title) if stored else "") \
         + _state_note(record, state) \
         + (ui.note("warn", texts["limit_reached"], "Today's limit is reached") if full and not stored else "") \
         + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages")
@@ -414,7 +420,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
     lang_error = error if field == "languages" else None
     languages = _row("languages-h", "Languages",
                      (f"<p class=\"field-error\" id=\"languages-error\">{e(lang_error)}</p>" if lang_error else "")
-                     + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(limit))}</p>",
+                     + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>",
                      _form("languages", ui.language_slots(_CHOICES, record["languages"], limit, "languages-h",
                                                           "languages-help", "languages-error" if lang_error else None)
                            + f"<div class=\"actions\">{ui.button('Save languages', 'primary', type='submit')}</div>"))

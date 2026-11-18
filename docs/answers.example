@@ -18,7 +18,7 @@ AIOS_CONTAINER=
 # Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams'
 # configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to
 # AIOStreams at this address, so it must work from this machine.
-AIOS_URL=http://127.0.0.1:3000
+AIOS_URL=
 
 # The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page
 # when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole install
@@ -94,9 +94,8 @@ WYZIE_KEY=
 # settings, API). With it, AIOSubtitles asks TMDB for each film's or series' original language, which TMDB knows for
 # nearly every title, so more subtitles are timed to the file's track in that language. Without it, only Wikidata is
 # asked, which knows about three films in four and half of all series; the rest are synced as if the language were
-# unknown. Cost: one request per film or series; it sends only the title's IMDb id. Risk: AIOSubtitles keeps each
-# answer with no time limit, though TMDB's terms allow 6 months, so TMDB could withdraw the key. Its logo and notice
-# are shown. Never shown or logged.
+# unknown. Cost: one request per film or series every 6 months at most; it sends only the title's IMDb id. TMDB's
+# answers are kept up to 6 months, as its terms allow. Its logo and notice are shown. Never shown or logged.
 TMDB_KEY=
 
 # Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds

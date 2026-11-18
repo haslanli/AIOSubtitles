@@ -97,9 +97,9 @@ RULES = [
      "When you sign up or refresh, AIOSubtitles uses your AIOStreams password in that request and then forgets it, "
      "unless you tick the box that lets it keep the password: then it is kept encrypted in your record, never in a "
      "log, until you untick it. It needs it to read your config, to make a separate config for AIOSubtitles on your "
-     "AIOStreams (without Real-Debrid, AIOSubtitles itself or anything that starts work in the background, so opening "
-     "a file opens only that file, and without Usenet unless you turn it on) and, if you leave the box checked, to add "
-     "AIOSubtitles to your own config. "
+     "AIOStreams (without Real-Debrid, Usenet, AIOSubtitles itself or anything that starts work in the background, so "
+     "opening a file opens only that file; with Usenet on, a second one for Usenet only) and, if you leave the box "
+     "checked, to add AIOSubtitles to your own config. "
      "Without that separate config, a file that failed to open could make your AIOStreams move on to another source, "
      "Real-Debrid or a Usenet download among them."),
     ("Public mode: your AIOStreams is checked while you use it",
@@ -191,7 +191,8 @@ RULES = [
 
 # ------------------------------------------------------------------------------------------- ./setup's questions
 # Usenet's explanation, with "{per_day}" for its searches a day: the ./setup question gives the default of
-# SUBSYNC_USENET_LISTINGS_PER_DAY, the public pages' Usenet box the instance's own number (usenet_help)
+# SUBSYNC_USENET_LISTINGS_PER_DAY, ./setup's screens and the public pages' Usenet box the install's own number
+# (setup_help, usenet_help)
 USENET_TEXT = (
     "Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a "
     "second config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it "
@@ -202,6 +203,26 @@ USENET_TEXT = (
     "(more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and "
     "everyone who plays the same release, because one sync serves all of them. Off: nothing on Usenet is searched "
     "or read.")
+# The audio question's explanation, with "{opened}" for the files that may start as soon as they are opened, a day
+# (SUBSYNC_USER_OPENED_PER_DAY, AUDIO_OPENED); the audio limit's, with "{wait}" for the seconds an app waits for a pick
+# (SUBSYNC_PICK_WAIT_MS). The questions below give the defaults, ./setup's screens this install's values (setup_help).
+AUDIO_TEXT = (
+    "Some files carry no subtitle track, so subsync can time a subtitle to them only by listening to their speech: "
+    "it reads short parts of the sound (about 60–350 MB a file, at most the audio limit you choose next) and keeps "
+    "one processor busy for one to three minutes. When I pick the file (recommended with two or more processors): "
+    "only after you choose the file's \"<Language> (Subsync)\" entry, so only files you watch are read. As soon as "
+    "a file is opened: when your app asks for the file's subtitles, so files you only browse or that it prepares "
+    "next are read too ({opened}). No: those files keep their original subtitles and subsync reads about 1 MB of "
+    "each.")
+AUDIO_OPENED = ("at most {n} a day", "none on this install: such files wait for a pick")     # (some, none)
+AUDIO_BUDGET_TEXT = (
+    "Asked only with the audio route on: the most it reads of one file, through your debrid service or Usenet: "
+    "0.5, 1, 2 or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, "
+    "re-encodes); remuxes usually carry image subtitles and need no audio. Higher: very high-quality files such "
+    "as 4K remuxes get synced too, but each can cost that much data and take longer than the {wait} seconds an app "
+    "waits, so the copy comes the next time you open the file. Lower: less data on a metered connection; more "
+    "high-bitrate files keep their originals. Smaller files are read only as far as needed. A change makes "
+    "subsync judge again the files it kept as originals.")
 
 # answers-file key -> (example value for docs/answers.example, explanation), in the order ./setup asks them
 QUESTIONS = {
@@ -216,7 +237,7 @@ QUESTIONS = {
         "that container's Docker network and finds files through it, so the wrong one means it finds none of the files "
         "you play. Pick the one whose address your apps use."),
     "AIOS_URL": (
-        "http://127.0.0.1:3000",
+        "",
         "Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' "
         "configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to "
         "AIOStreams at this address, so it must work from this machine."),
@@ -238,25 +259,9 @@ QUESTIONS = {
         "play, subsync downloads that language's subtitles from your subtitle sources and the ones it searches itself, "
         "and checks them against the file. Each extra language adds those downloads and a few seconds of work per "
         "file; the video file is still read only once."),
-    "AUDIO": (
-        "no",
-        "Some files carry no subtitle track, so subsync can time a subtitle to them only by listening to their speech: "
-        "it reads short parts of the sound (about 60–350 MB a file, at most the audio limit you choose next) and keeps "
-        "one processor busy for one to three minutes. When I pick the file (recommended with two or more processors): "
-        "only after you choose the file's \"<Language> (Subsync)\" entry, so only files you watch are read. As soon as "
-        "a file is opened: when your app asks for the file's subtitles, so files you only browse or that it prepares "
-        "next are read too (at most 5 a day). No: those files keep their original subtitles and subsync reads about 1 "
-        "MB of each."),
+    "AUDIO": ("no", AUDIO_TEXT.format(opened=AUDIO_OPENED[0].format(n=5))),
     "USENET": ("no", USENET_TEXT.format(per_day=10)),
-    "AUDIO_BUDGET": (
-        "1",
-        "Asked only with the audio route on: the most it reads of one file, through your debrid service or Usenet: "
-        "0.5, 1, 2 or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, "
-        "re-encodes); remuxes usually carry image subtitles and need no audio. Higher: very high-quality files such "
-        "as 4K remuxes get synced too, but each can cost that much data and take longer than the 14 seconds an app "
-        "waits, so the copy comes the next time you open the file. Lower: less data on a metered connection; more "
-        "high-bitrate files keep their originals. Smaller files are read only as far as needed. A change makes "
-        "subsync judge again the files it kept as originals."),
+    "AUDIO_BUDGET": ("1", AUDIO_BUDGET_TEXT.format(wait=14)),
     "SUBDL_KEY": (
         "",
         "Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, "
@@ -276,9 +281,9 @@ QUESTIONS = {
         "account's settings, API). With it, AIOSubtitles asks TMDB for each film's or series' original language, which "
         "TMDB knows for nearly every title, so more subtitles are timed to the file's track in that language. Without "
         "it, only Wikidata is asked, which knows about three films in four and half of all series; the rest are synced "
-        "as if the language were unknown. Cost: one request per film or series; it sends only the title's IMDb id. "
-        "Risk: AIOSubtitles keeps each answer with no time limit, though TMDB's terms allow 6 months, so TMDB could "
-        "withdraw the key. Its logo and notice are shown. Never shown or logged."),
+        "as if the language were unknown. Cost: one request per film or series every 6 months at most; it sends only "
+        "the title's IMDb id. TMDB's answers are kept up to 6 months, as its terms allow. Its logo and notice are "
+        "shown. Never shown or logged."),
     "ADD_OPENSUBTITLES": (
         "yes",
         "Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds "
@@ -648,9 +653,9 @@ GROUPS = [
             "on",
             "On (recommended): AIOSubtitles looks up each film's or series' original language, so subtitles are timed "
             "to the file's track in that language, which follows the original speech. The lookup sends only the "
-            "title's id, from this server, once per title (the answer is kept with no time limit), and never delays a "
-            "sync: a file read "
-            "before the answer comes is checked again on its next play. Off: nothing is looked up, every subtitle is "
+            "title's id, from this server, once per title (the answer is kept with no time limit; one from TMDB up to "
+            "6 months), and never delays a sync: a file read before the answer comes is checked again on its next "
+            "play. Off: nothing is looked up, every subtitle is "
             "checked against its own language's track (else SUBSYNC_FALLBACK_REFERENCE's) as before, and the answers "
             "already kept are deleted."),
         "SUBSYNC_ORIGINAL_LANGUAGES": (
@@ -945,6 +950,23 @@ GROUPS = [
 SETTINGS = {name: entry for _, group in GROUPS for name, entry in group.items()}
 WRITTEN_BY_SETUP = tuple(dict(GROUPS)[SETUP_GROUP])
 
+
+def setup_help(key, settings=None):
+    """A ./setup question's explanation (a limit's: its setting's) as ./setup shows it. The audio question's, the
+    audio limit's and Usenet's state a setting (the files opened a day, the seconds an app waits for a pick, the Usenet
+    searches a day): with `settings`, subsync's as state/subsync.env starts it, they state this install's value;
+    without, its default, as QUESTIONS has them for README and docs/answers.example."""
+    if settings is not None:
+        if key == "AUDIO":
+            opened = settings.user_opened_per_day
+            return AUDIO_TEXT.format(opened=AUDIO_OPENED[0].format(n=opened) if opened else AUDIO_OPENED[1])
+        if key == "AUDIO_BUDGET":
+            return AUDIO_BUDGET_TEXT.format(wait=f"{settings.pick_wait:g}")
+        if key == "USENET":
+            return usenet_help(settings.usenet_listings_per_day)
+    return (QUESTIONS.get(key) or SETTINGS[key])[1]
+
+
 # ------------------------------------------------------------------------------------------- public mode's page texts
 
 # (title, text), as PUBLIC_STORE_ONLY; the settings page's notice after a refresh gives it as one sentence
@@ -954,21 +976,30 @@ PUBLIC_REAL_DEBRID_WARNING = (
     "from Real-Debrid gets a synced copy only when another of your services has the same file ready.")
 PUBLIC_REAL_DEBRID_NOTICE = ": ".join(PUBLIC_REAL_DEBRID_WARNING)
 
-# A setup whose only debrid service is Real-Debrid: stored copies only.
+# A setup whose only debrid service is Real-Debrid: stored copies only; the note ends with
+# PUBLIC_STORE_ONLY_USENET where the instance lets people turn Usenet on (store_only_note).
 PUBLIC_STORE_ONLY = (
     "Stored copies only",
     f"Real-Debrid is the only debrid service in your AIOStreams config, and AIOSubtitles never uses it, because {REASON}. "
     "So it reads none of your files: for each file you play, it offers the synced copies already made for someone who "
     "played the same release, when there are any. To get your own synced copies, add another service, such as TorBox, "
-    "to your config, then press Refresh on your settings page. With Usenet on, AIOSubtitles reads the files you play "
-    "from Usenet for you, through your Usenet services; Real-Debrid stays out.")
+    "to your config, then press Refresh on your settings page.")
+PUBLIC_STORE_ONLY_USENET = ("With Usenet on, AIOSubtitles reads the files you play from Usenet for you, through your "
+                            "Usenet services; Real-Debrid stays out.")
+
+
+def store_only_note(usenet):
+    """The stored-copies note, (title, text): its Usenet sentence only where the instance offers Usenet (`usenet`)."""
+    title, text = PUBLIC_STORE_ONLY
+    return title, (text + " " + PUBLIC_STORE_ONLY_USENET if usenet else text)
+
 
 PUBLIC_PASSWORD_TEXT = (
-    "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams config (if you leave the "
-    "box below checked), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid or automatic "
-    "fallback to other sources, and without Usenet unless you turn it on, so opening a file opens only that file. It "
-    "is not stored unless you tick "
-    "\"Keep my password\" below. You'll be asked again only if you refresh.")
+    "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams config (if you leave "
+    "\"Add AIOSubtitles to my AIOStreams config\" ticked, on the last screen), and to make a separate AIOStreams "
+    "config for AIOSubtitles without Real-Debrid, Usenet or automatic fallback to other sources (with Usenet on, a "
+    "second one for Usenet only), so opening a file opens only that file. It is not stored unless you tick \"Keep my "
+    "password\" below. You'll be asked again only if you refresh.")
 
 CONTACT = "https://github.com/haslanli/AIOSubtitles/issues"
 
@@ -980,18 +1011,20 @@ PUBLIC_FIELDS = {
         "config next to it on your AIOStreams. Your AIOStreams must be reachable from the internet over https. Keep "
         "the link private: anyone with it can use your AIOStreams config."),
     "password": PUBLIC_PASSWORD_TEXT,
+    # "{limit}": the instance's language limit, "{choices}": LANGUAGES_CHOICES' words (languages_help)
     "languages": (
         "The languages you want synced subtitles in, up to {limit}, like English, Spanish. Each one is a separate sync "
-        "for every file you play, so fewer is faster. The first one gets up to three synced choices, the others one "
-        "each. You can change them later; a change applies from the next file you play."),
+        "for every file you play, so fewer is faster. {choices} You can change them later; a change applies from the "
+        "next file you play."),
     "add_addon": (
         "Adds AIOSubtitles to your AIOStreams config, before your other subtitle sources, so your apps show its "
         "synced subtitles first (many apps show only a few per language). Recommended. Unchecked, nothing in your own "
         "config changes and you add the link yourself as a custom addon."),
+    # "{names}": the addons this instance takes out (clean_up_help)
     "clean_up": (
-        "Takes out of your AIOStreams config the subtitle addons AIOSubtitles now searches itself: OpenSubtitles, "
-        "OpenSubtitles V3+, SubDL and SubSource. You then get their subtitles once, through AIOSubtitles: synced where "
-        "one fits, the original otherwise, instead of the same ones twice. Your other subtitle addons stay. The cost: "
+        "Takes out of your AIOStreams config the subtitle addons AIOSubtitles now searches itself: {names}. You then "
+        "get their subtitles once, through AIOSubtitles: synced where one fits, the original otherwise, instead of the "
+        "same ones twice. Your other subtitle addons stay. The cost: "
         "while AIOSubtitles is down, these subtitles are missing too, until it is back. Unchecked, your config keeps "
         "them and nothing is removed. It works only together with adding AIOSubtitles; to undo it, add the addons "
         "again on AIOStreams' configure page."),
@@ -1050,6 +1083,11 @@ USENET_WHY = {
     "nntp": USENET_NO_SERVICE,
     "none": USENET_NO_SERVICE,
 }
+# ./setup's own reasons: a self-hosted subsync usually shares the Usenet service's network, so for it the reason is that
+# without AIOStreams' proxy those links need the WebDAV password (aiosconfig.usenet_route)
+SETUP_USENET_WHY = dict(USENET_WHY, proxy=("Usenet stays off: subsync reads NzbDAV and AltMount only through "
+                                           "AIOStreams' own proxy. Turn on AIOStreams' proxy for it, or leave Usenet "
+                                           "off."))
 
 
 # What each answer for files with no subtitles of their own does, under the answer ("{opened}": the instance's
@@ -1076,6 +1114,18 @@ def audio_answer_help(answer, settings):
     return PUBLIC_AUDIO_ANSWERS[answer].format(opened=settings.user_opened_per_day)
 
 
+# The subtitle addons the sign-up's clean-up may take out, by AIOStreams preset (srclimits.CLEANABLE_PRESETS)
+CLEAN_UP_NAMES = {"opensubtitles": "OpenSubtitles", "opensubtitles-v3-plus": "OpenSubtitles V3+", "subdl": "SubDL",
+                  "subsource": "SubSource"}
+
+
+def clean_up_help(presets):
+    """The clean-up box's explanation, naming the addons this instance takes out (`presets`: extra.cleanable_presets),
+    "OpenSubtitles, OpenSubtitles V3+, SubDL and SubSource" where it asks all four."""
+    *first, last = [CLEAN_UP_NAMES[p] for p in presets]
+    return PUBLIC_FIELDS["clean_up"].format(names=f"{', '.join(first)} and {last}" if first else last)
+
+
 def usenet_help(per_day):
     """The Usenet box's explanation with the instance's searches a day (SUBSYNC_USENET_LISTINGS_PER_DAY)."""
     return PUBLIC_FIELDS["usenet"].format(per_day=per_day)
@@ -1088,16 +1138,33 @@ def usenet_status(on, names, used, per_day):
 
 NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four"}
 LANGUAGES_ONE = (
-    "The language you want synced subtitles in, like English. It gets up to three synced choices for every file you "
-    "play. You can change it later; a change applies from the next file you play.")
+    "The language you want synced subtitles in, like English. {choices} You can change it later; a change applies "
+    "from the next file you play.")
+# The synced choices the first language gets ("{choices}" above), by the languages allowed (several, or one): (up to
+# {n} of them, just one)
+LANGUAGES_CHOICES = {
+    "several": ("The first one gets up to {n} synced choices, the others one each.", "Each gets one synced choice."),
+    "one": ("It gets up to {n} synced choices for every file you play.",
+            "It gets one synced choice for every file you play."),
+}
 
 
-def languages_help(limit):
-    """The languages explanation for an instance's language limit (SUBSYNC_MAX_LANGUAGES, 1 to 4): today's text with
-    its number, and its own text for one language."""
+def synced_choices(settings):
+    """The synced copies listed for the first language: SUBSYNC_MAIN_ALTERNATIVES with best fit on, else one (as the
+    addon lists them)."""
+    return settings.alternatives if settings.best_fit else 1
+
+
+def languages_help(settings):
+    """The languages explanation with the instance's language limit (SUBSYNC_MAX_LANGUAGES, 1 to 4) and the synced
+    choices the first language gets (synced_choices), each number in words up to four; its own text for one
+    language."""
+    limit, choices = settings.max_languages, synced_choices(settings)
+    up_to, just_one = LANGUAGES_CHOICES["one" if limit == 1 else "several"]
+    words = up_to.format(n=NUMBER_WORDS.get(choices, choices)) if choices > 1 else just_one
     if limit == 1:
-        return LANGUAGES_ONE
-    return PUBLIC_FIELDS["languages"].format(limit=NUMBER_WORDS[limit])
+        return LANGUAGES_ONE.format(choices=words)
+    return PUBLIC_FIELDS["languages"].format(limit=NUMBER_WORDS[limit], choices=words)
 
 
 # the other texts of the public pages
@@ -1138,9 +1205,10 @@ PUBLIC_TEXTS = {
                     "password and follows changes to your config by itself, about once a day while you use it."),
     "forgot": ("Your kept password is deleted. AIOSubtitles no longer follows your config by itself: press Refresh after "
                "you change it."),
-    "notice_where": "Open your AIOSubtitles settings page: your personal link with /configure at the end.",
-    "made_config": ("Made AIOSubtitles' own config on your AIOStreams, without Real-Debrid or automatic fallback to "
-                    "other sources, and without Usenet unless you turn it on."),
+    "notice_where": ("Open your AIOSubtitles settings page: your personal link, ending in configure instead of "
+                     "manifest.json."),
+    "made_config": ("Made AIOSubtitles' own config on your AIOStreams, without Real-Debrid, Usenet or automatic "
+                    "fallback to other sources."),
     # Usenet
     "usenet_made": ("Usenet is on: AIOSubtitles made a second config on your AIOStreams with only your Usenet searches "
                     "and services."),
@@ -1150,7 +1218,8 @@ PUBLIC_TEXTS = {
     "next": ("Play something in your app. For each file, AIOSubtitles offers synced copies of your subtitles in your "
              "app's subtitle list. A file nobody has played before takes a few seconds; if your app has already picked "
              "a subtitle by then, the synced copy is there the next time you open the file."),
-    "settings_link": "It is your personal link with /configure at the end. Bookmark it to come back.",
+    "settings_link": ("It is your personal link, ending in configure instead of manifest.json. Bookmark it to come "
+                      "back."),
     "settings_lead": ("This page opens with your personal link. Keep the link private: anyone with it can change these "
                       "settings or delete your data."),
     "reset": "Resets at 00:00 UTC, {when}. Files that already have a synced copy don't count.",
@@ -1281,14 +1350,17 @@ def intro_parts(settings):
 # page's sentence on the original-language lookups, by what the instance uses: TMDB with its own key, TMDB with each
 # person's own key, Wikidata only, or no lookup at all (Cinemeta, asked for a series' TheTVDB number, in every one)
 TMDB_NOTICE = "AIOSubtitles uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB."
+# ("{kept}": how long TMDB's answers are kept, where the instance asks TMDB: origlang.TMDB_KEEP_S)
 _LOOKUP = ("To time subtitles to the original speech, AIOSubtitles also looks up each title's original language by its "
            "id alone (IMDb, or for anime MyAnimeList or Kitsu), from its own server: at {where}; for series it asks "
-           "Cinemeta for TheTVDB's number the same way. The answers are kept with no time limit and shared by "
+           "Cinemeta for TheTVDB's number the same way. The answers are kept with no time limit{kept} and shared by "
            "everyone.")
+_TMDB_KEPT = " (TMDB's up to 6 months)"
 PRIVACY_LOOKUP = {
-    "tmdb": _LOOKUP.format(where="TMDB, Wikidata, and for anime AniList and Kitsu"),
-    "personal": _LOOKUP.format(where="TMDB with your own key if you added one, Wikidata, and for anime AniList and Kitsu"),
-    "wikidata": _LOOKUP.format(where="Wikidata, and for anime AniList and Kitsu"),
+    "tmdb": _LOOKUP.format(where="TMDB, Wikidata, and for anime AniList and Kitsu", kept=_TMDB_KEPT),
+    "personal": _LOOKUP.format(
+        where="TMDB with your own key if you added one, Wikidata, and for anime AniList and Kitsu", kept=_TMDB_KEPT),
+    "wikidata": _LOOKUP.format(where="Wikidata, and for anime AniList and Kitsu", kept=""),
     "off": "For series, AIOSubtitles asks Cinemeta for TheTVDB's number by the title's id alone, from its own server.",
 }
 PRIVACY_TMDB_STORED = "your TMDB key if you added one, "      # in "What is stored", when each person may add one

@@ -8,12 +8,13 @@ Anime known only by a MyAnimeList or Kitsu number: Japanese, unless AniList name
 number is first turned into its MyAnimeList number on Kitsu). Only the id is sent, from this server; nothing about a
 person, a file or a link.
 
-Answers are kept per title in the store and shared by everyone: a found answer with no expiry, whatever its source,
-so a title is looked up once (longer than TMDB's terms allow, as SUBSYNC_TMDB_KEY's explanation says); not found 7 days and a
-failed service 10 minutes, so those are asked again. An answer found without TMDB is asked at TMDB once a key comes, and
-only TMDB's answer replaces it (a TMDB that didn't answer is asked again 10 minutes later). A lookup runs
-in the background and never holds a job: a file read before the answer comes uses the rules for an unknown language,
-and is judged again once it is known (worker). An operator's list (SUBSYNC_ORIGINAL_LANGUAGES) overrides any lookup.
+Answers are kept per title in the store and shared by everyone: a found answer with no expiry, so a title is looked up
+once, except one that holds TMDB's value, kept TMDB_KEEP_S (TMDB's terms allow 6 months) and then looked up again in
+the background like one not found; not found 7 days and a failed service 10 minutes, so those are asked again. An
+answer found without TMDB is asked at TMDB once a key comes, and only TMDB's answer replaces it (a TMDB that didn't
+answer is asked again 10 minutes later). A lookup runs in the background and never holds a job: a file read before the
+answer comes uses the rules for an unknown language, and is judged again once it is known (worker). An operator's list
+(SUBSYNC_ORIGINAL_LANGUAGES) overrides any lookup.
 """
 import hashlib
 import json
@@ -34,7 +35,8 @@ USER_AGENT = "AIOSubtitles/1.6 (https://github.com/haslanli/AIOSubtitles)"
 TIMEOUT_S = 5.0
 MAX_BYTES = 64 * 1024
 DAY = 86400
-NOT_FOUND_S = 7 * DAY        # a found answer is kept with no expiry
+NOT_FOUND_S = 7 * DAY        # a found answer is kept with no expiry, unless it holds TMDB's value:
+TMDB_KEEP_S = 180 * DAY      # TMDB's terms allow keeping its data 6 months
 FAILED_S = 600
 PAUSE_S = 60                 # a 429 or 503 without Retry-After
 PAUSE_MIN_S, PAUSE_MAX_S = 1.0, 3600.0   # the pause a Retry-After asks for is kept within these
@@ -100,6 +102,11 @@ def _plain(track):
 def _found(answer):
     """Whether an answer holds a found language (TMDB's "none", a language outside ISO 639-1, included)."""
     return bool(answer and (answer.get("tmdb") or answer.get("wikidata") or answer.get("anime")))
+
+
+def _from_tmdb(answer):
+    """Whether an answer holds TMDB's value (its "none" included), which is kept at most TMDB_KEEP_S."""
+    return bool(answer.get("tmdb"))
 
 
 def choose(answer, tracks=()):
@@ -202,10 +209,12 @@ def check_key(settings, key, timeout=10.0):
 
 def make_lookup(settings, store, clock=time.time):
     """The service's Lookup (one per process; in public mode shared by everyone). None with SUBSYNC_ORIGINAL_LANGUAGE
-    off, which also deletes the answers kept."""
+    off, which also deletes the answers kept. TMDB's answers kept with no expiry (by a version before TMDB_KEEP_S) get
+    theirs, counted from when they were found."""
     if not settings.original_language:
         store.title_languages_clear()
         return None
+    store.title_languages_expiring(TMDB_KEEP_S, _from_tmdb)
     return Lookup(settings, store, clock=clock)
 
 
@@ -277,7 +286,7 @@ class Lookup:
     def _lookup(self, title, key, kept=None):
         """`kept`: the title's found answer, when it is looked up again for TMDB's (start). Only TMDB's answer replaces
         it: while TMDB doesn't answer, it stays as it was, with no expiry, and when Wikidata doesn't, its Wikidata part
-        stays."""
+        stays. A found answer that holds TMDB's value is kept TMDB_KEEP_S."""
         answer = {"tmdb": None, "tmdb_asked": False, "wikidata": None, "anime": None, "via": None, "failed": []}
         try:
             if title.startswith(("mal:", "kitsu:")):
@@ -322,7 +331,7 @@ class Lookup:
         elif not found:
             until = now + NOT_FOUND_S
         else:
-            until = None                  # found: kept with no expiry
+            until = now + TMDB_KEEP_S if _from_tmdb(answer) else None    # found: TMDB's 6 months, else no expiry
         answer["wikidata"] = answer["wikidata"] or []
         self.store.title_language_put(title, answer, now, until)
         lang, how = choose(answer)

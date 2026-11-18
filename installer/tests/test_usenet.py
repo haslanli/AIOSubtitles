@@ -63,7 +63,10 @@ class Personal(FlowFixture):
         code, out = self.run_setup(dict(self.ANSWERS, USENET='yes'))
         self.assertEqual(code, 0, out)
         self.assertNotIn('USENET_UUID', self.keys())
-        self.assertIn(explain.USENET_WHY['proxy'].split(': ', 1)[1][:40], out)
+        # setup's own reason, not the public service's "can't reach from the internet"
+        self.assertIn("Usenet stays off: subsync reads NzbDAV and AltMount only through AIOStreams' own proxy. Turn on "
+                      "AIOStreams' proxy for it, or leave Usenet off.", out)
+        self.assertNotIn(explain.USENET_WHY['proxy'], out)
         self.assertEqual(self.env()['SUBSYNC_USENET'], 'off')
 
     def test_a_usenet_only_config(self):

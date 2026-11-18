@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 
 from helpers import closed_after, local_network_only, RangeServer, start_server, stop_server  # noqa: E402
+from subsync import srclimits  # noqa: E402
 from subsync.addon import App, file_id, serve  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -173,12 +174,33 @@ class SignupCleanUpTest(unittest.TestCase):
                    {"type": "subdl", "instanceId": "d", "enabled": False, "options": {"name": "SubDL"}},
                    {"type": "subsource", "instanceId": "s", "enabled": True, "options": {"name": "SubSource"}},
                    {"type": "subhero", "instanceId": "h", "enabled": True, "options": {"name": "SubHero"}}]
-        new, changes = viewer_change({"presets": presets}, "https://a.example/u/t/manifest.json", clean_up=True)
+        new, changes = viewer_change({"presets": presets}, "https://a.example/u/t/manifest.json",
+                                     clean_up=srclimits.CLEANABLE_PRESETS)
         types = [p["type"] for p in new["presets"]]
         self.assertEqual(types, ["torrentio", "custom", "subhero"])           # Wyzie isn't asked by the public service
         self.assertTrue(any("removes 4 subtitle addons" in c for c in changes), changes)
         new, _ = viewer_change({"presets": presets}, "https://a.example/u/t/manifest.json")
         self.assertEqual(len(new["presets"]), len(presets) + 1)               # not asked: nothing removed
+        # Only the presets given, those whose site the instance asks itself
+        new, changes = viewer_change({"presets": presets}, "https://a.example/u/t/manifest.json",
+                                     clean_up=("opensubtitles", "opensubtitles-v3-plus"))
+        self.assertEqual([p["type"] for p in new["presets"]], ["torrentio", "custom", "subdl", "subsource", "subhero"])
+        self.assertTrue(any("removes 2 subtitle addons" in c for c in changes), changes)
+
+    def test_the_clean_up_takes_only_the_addons_whose_site_the_instance_asks(self):
+        # SubDL and SubSource only with their key, the OpenSubtitles ones while SUBSYNC_EXTRA_SOURCES lists
+        # them, never Wyzie; the box is left out when none is left
+        from subsync.extra import cleanable_presets
+        public = {"SUBSYNC_PUBLIC": "on"}
+        cases = (({}, ("opensubtitles", "opensubtitles-v3-plus")),
+                 ({"SUBSYNC_SUBDL_KEY": "k"}, ("opensubtitles", "opensubtitles-v3-plus", "subdl")),
+                 ({"SUBSYNC_SUBDL_KEY": "k", "SUBSYNC_SUBSOURCE_KEY": "k"}, srclimits.CLEANABLE_PRESETS),
+                 ({"SUBSYNC_EXTRA_SOURCES": "osv3plus,tsdb"}, ("opensubtitles-v3-plus",)),
+                 ({"SUBSYNC_EXTRA_SOURCES": "tsdb,gestdown"}, ()),
+                 ({"SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_SUBSOURCE_KEY": "k"}, ("subsource",)))
+        for env, presets in cases:
+            with self.subTest(env=env):
+                self.assertEqual(cleanable_presets(Settings(dict(public, **env))), presets)
 
 
 if __name__ == "__main__":

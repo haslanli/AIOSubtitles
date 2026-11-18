@@ -234,14 +234,33 @@ class TextsTest(unittest.TestCase):
     def test_the_stored_copies_note(self):
         from subsync import explain
         from subsync.realdebrid import REASON
-        self.assertEqual(explain.PUBLIC_STORE_ONLY, (
-            "Stored copies only",
+        without = (
             f"Real-Debrid is the only debrid service in your AIOStreams config, and AIOSubtitles never uses it, because "
             f"{REASON}. So it reads none of your files: for each file you play, it offers the synced copies already made "
             "for someone who played the same release, when there are any. To get your own synced copies, add another "
-            "service, such as TorBox, to your config, then press Refresh on your settings page. With Usenet on, "
-            "AIOSubtitles reads the files you play from Usenet for you, through your Usenet services; Real-Debrid "
-            "stays out."))                                                     # the last sentence: the Usenet one
+            "service, such as TorBox, to your config, then press Refresh on your settings page.")
+        usenet = ("With Usenet on, AIOSubtitles reads the files you play from Usenet for you, through your Usenet "
+                  "services; Real-Debrid stays out.")
+        self.assertEqual(explain.PUBLIC_STORE_ONLY, ("Stored copies only", without))
+        # the Usenet sentence only where the instance offers Usenet
+        self.assertEqual(explain.store_only_note(True), ("Stored copies only", without + " " + usenet))
+        self.assertEqual(explain.store_only_note(False), ("Stored copies only", without))
+
+    def test_the_usenet_sentence_only_where_the_instance_offers_usenet(self):
+        # An instance without Usenet has no Usenet box, so the note doesn't offer it
+        from subsync import explain, pages
+        from test_public_ui import LINK, Tree, result, settings
+        sentence = explain.PUBLIC_STORE_ONLY_USENET
+        record = {"languages": ["eng"], "store_only": True}
+        usage = {"files": 0, "bytes": 0}
+        for usenet, shown in (("on", True), ("off", False)):
+            with self.subTest(usenet=usenet):
+                s = settings(SUBSYNC_USENET=usenet)
+                signed_up = Tree(pages.result_page(result(store_only=True), s)).text()
+                page = Tree(pages.settings_page(s, record, usage, LINK, now=0)).text()
+                for text in (signed_up, page):
+                    self.assertIn(explain.PUBLIC_STORE_ONLY[1], text)
+                    self.assertEqual(sentence in text, shown)
 
     def test_after_a_refresh_that_moved_them(self):
         from subsync import explain

@@ -146,9 +146,10 @@ def _page(content, refresh=None, kind='letter', heading=None):
                    kind, refresh=refresh)
 
 
-def _explanation(key):
-    entry = explain.QUESTIONS.get(key) or explain.SETTINGS.get(key)
-    return entry[1] if entry else None
+def _explanation(key, settings=None):
+    """A question's explanation (a limit's: its setting's); one that states a setting with `settings`' value, this
+    install's (explain.setup_help). None for a key without one."""
+    return explain.setup_help(key, settings) if key in explain.QUESTIONS or key in explain.SETTINGS else None
 
 
 def _error(problem, key):
@@ -161,8 +162,9 @@ def _input(key, label, value='', problem=None, kind='text', mono=False, reveal=F
                     mono=mono, error=_error(problem, key), attrs=a, reveal=reveal)
 
 
-def _choice(key, title, checked, needs=None):
-    return ui.choice(key.lower(), title, _explanation(key), name=key, checked=checked, value='yes', needs=needs)
+def _choice(key, title, checked, needs=None, settings=None):
+    return ui.choice(key.lower(), title, _explanation(key, settings), name=key, checked=checked, value='yes',
+                     needs=needs)
 
 
 def _continue(enabled=True, label='Continue', arrow=True):
@@ -291,23 +293,24 @@ def config(rows, config_id='', problem=None, stop=None):
 
 
 def choices(languages, audio, public_address, problem=None, offer_opensubtitles=False, add_opensubtitles=True,
-            limit=4, usenet=None, stop=None, saved=(), rows=()):
+            limit=4, usenet=None, stop=None, saved=(), rows=(), settings=None):
     """Your choices: what the step reported (`rows`: why Usenet stays off, a saved key removed), the languages (the
     site's slots), the audio route (`audio`: the answer picked, no, pick or open), Usenet when the config has a
     Usenet service subsync reads through (`usenet` not None), the optional keys (`saved`: those with a saved
     key), OpenSubtitles when the config has no subtitle source, and subsync's address for your apps. `stop`: a config
-    without a debrid service answered no to Usenet."""
+    without a debrid service answered no to Usenet. `settings`: subsync's on this install, whose values the audio and
+    Usenet explanations state."""
     error = _error(problem, 'LANGUAGES')
     langs = (f'<div class="field"><span class="label" id="languages-l">{e(LABELS["LANGUAGES"])}</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
              + ui.language_slots([(name, code) for name, _, code in LANGUAGES], languages, limit, 'languages-l',
                                  'languages-help', 'languages-error' if error else None, name='LANGUAGES')
              + f'<p class="help" id="languages-help">{e(_explanation("LANGUAGES"))}</p></div>')
-    usenet_box = (_choice('USENET', LABELS['USENET'], usenet),) if usenet is not None else ()
+    usenet_box = (_choice('USENET', LABELS['USENET'], usenet, settings=settings),) if usenet is not None else ()
     audio_rows = [ui.radio_row('AUDIO', value, answer, '', checked=value == audio)
                   for value, answer in plan.AUDIO_ANSWERS]
     body = (_rows(rows) + _stop(stop) + langs + ui.radio_group(LABELS['AUDIO'], audio_rows,
-                                                                help_text=_explanation('AUDIO'), id='audio')
+                                                                help_text=_explanation('AUDIO', settings), id='audio')
             + (ui.choices(*usenet_box) if usenet_box else '')
             + _key('SUBDL_KEY', LABELS['SUBDL_KEY'], problem, saved)
             + _key('WYZIE_KEY', LABELS['WYZIE_KEY'], problem, saved)

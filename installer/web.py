@@ -339,7 +339,8 @@ class App:
         return self.page(screens.choices(languages, audio, address, s.problems.get('choices'), offer_opensubtitles=offer,
                                          add_opensubtitles=e.answers.get('ADD_OPENSUBTITLES', 'yes') == 'yes',
                                          usenet=usenet, stop=s.stops.get('choices'),
-                                         saved=saved_keys(e, PERSONAL_KEYS), rows=s.rows.get('choices', [])))
+                                         saved=saved_keys(e, PERSONAL_KEYS), rows=s.rows.get('choices', []),
+                                         settings=e.env_settings))
 
     def step_limits(self, s, method, form, one):
         e = s.e

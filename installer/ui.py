@@ -108,9 +108,10 @@ class Asker:
     is asked. An optional question's current answer is removed by typing remove, or by its empty line in the file:
     '' is returned."""
 
-    def __init__(self, answers=None, yes=False):
-        """`answers`: the answers file's lines; None when no file was given."""
-        self.answers, self.yes = dict(answers or {}), yes
+    def __init__(self, answers=None, yes=False, settings=None):
+        """`answers`: the answers file's lines; None when no file was given. `settings`: subsync's on this install, for
+        the explanations that state one (explain.setup_help)."""
+        self.answers, self.yes, self.settings = dict(answers or {}), yes, settings
         self.file_keys = None if answers is None else set(answers)
 
     def _input(self, prompt, secret):
@@ -130,7 +131,7 @@ class Asker:
         how the current answer and one from the answers file are shown (a secret's: masked)."""
         def show(value):
             return masked(value) if secret else shown(value) if shown else value
-        explanation = (explain.QUESTIONS.get(key) or explain.SETTINGS[key])[1]   # a limit: its setting's text
+        explanation = explain.setup_help(key, self.settings)    # a limit: its setting's text
         preset = self.answers.pop(key, None)
         while True:
             say()

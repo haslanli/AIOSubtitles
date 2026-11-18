@@ -81,7 +81,8 @@ CONFIG_PRESETS = {"opensubtitles": "osv3", "opensubtitles-v3-plus": "osv3plus", 
 HOSTS = (("opensubtitles-v3.strem.io", "osv3"), ("strem.io", "osv3"), ("stremio.homes", "osv3plus"),
          ("thesubtitledb.org", "tsdb"), ("subdl.com", "subdl"), ("subsource.net", "subsource"),
          ("gestdown.info", "gestdown"), ("wyzie.io", "wyzie"))
-# The sign-up's clean-up may remove these presets: the public service asks each of them itself (no Wyzie there).
+# The sign-up's clean-up may remove these presets, each only where the public service asks its site itself (SubDL and
+# SubSource only with their key; never Wyzie there): extra.cleanable_presets.
 CLEANABLE_PRESETS = ("opensubtitles", "opensubtitles-v3-plus", "subdl", "subsource")
 
 
