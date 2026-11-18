@@ -4,11 +4,14 @@ import contextlib
 import io
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, engine, update, web, where, wizard
 from installer.tests.test_flow import FlowFixture
 from installer.ui import Stop
+
+REPO = Path(__file__).resolve().parent.parent.parent
 
 
 class CommandLine(FlowFixture):
@@ -111,7 +114,7 @@ class CommandLine(FlowFixture):
         return path
 
     def test_the_readme_says_how_setup_and_updates_work_now(self):
-        readme = (engine.REPO.__class__(__file__).resolve().parent.parent.parent / 'README.md').read_text()
+        readme = (REPO / 'README.md').read_text()
         install = readme.split('## Install', 1)[1].split('\n## ', 1)[0]
         self.assertIn('docker run --rm -it --pull always -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/folder" '
                       '-p 127.0.0.1:8789:8789 ghcr.io/haslanli/aiosubtitles:latest setup\n', install)

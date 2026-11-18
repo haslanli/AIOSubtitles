@@ -2,8 +2,11 @@
 network, the ownership check, the new version's start check, and putting a database copy back."""
 import ast
 import base64
+import contextlib
+import errno
 import io
 import json
+import os
 import socket
 import tarfile
 import unittest
@@ -27,6 +30,20 @@ class FakeDocker:
             if cmd[:len(prefix)] == prefix:
                 return answer(cmd) if callable(answer) else answer
         return 0, '', ''
+
+
+def publishes(arg):
+    """Whether one `docker run` argument publishes a port, in any spelling: -p, -p8790:8790, -P, short flags joined
+    (-dp, -dP), --publish, --publish=8790:8790, --publish-all."""
+    if arg.startswith('--'):
+        return arg.split('=', 1)[0] in ('--publish', '--publish-all')
+    if arg.startswith('-'):
+        for flag in arg[1:]:
+            if flag in 'pP':
+                return True
+            if flag not in 'dit':          # a flag that takes a value: the rest of the argument is that value
+                return False
+    return False
 
 
 def container(cid, name, image, env=(), host_network=False, networks=None, ports=None):
@@ -178,20 +195,32 @@ class Probe(unittest.TestCase):
         self.assertIn(IMAGE, cmd)
 
     def test_the_helpers_script_tells_a_taken_port_from_a_low_one(self):
+        refused = []
+
+        class Unprivileged(socket.socket):
+            """A port below 1024 is refused (EACCES), as for the helper's user, whoever runs the tests: as root (the
+            image build's test run) port 1 would bind, and the refusal would never be checked."""
+
+            def bind(self, address):
+                if address[1] < 1024:
+                    refused.append(address)
+                    raise OSError(errno.EACCES, os.strerror(errno.EACCES))
+                super().bind(address)
+
         out = io.StringIO()
-        import contextlib
-        import socket
         busy = socket.socket()
         busy.bind(('127.0.0.1', 0))
         busy.listen()
         port = busy.getsockname()[1]
         try:
-            with contextlib.redirect_stdout(out), mock.patch('sys.argv', ['-c', f'127.0.0.1:{port}', '127.0.0.1:1']):
+            with contextlib.redirect_stdout(out), mock.patch('sys.argv', ['-c', f'127.0.0.1:{port}', '127.0.0.1:1']), \
+                    mock.patch.object(socket, 'socket', Unprivileged):
                 exec(compile(dockerenv.PROBE, 'probe', 'exec'), {'__name__': '__main__'})
         finally:
             busy.close()
         found = json.loads(out.getvalue())
-        self.assertEqual(found['taken'], [f'127.0.0.1:{port}'])        # port 1 needs root here, but isn't taken
+        self.assertEqual(found['taken'], [f'127.0.0.1:{port}'])        # port 1 is refused, but isn't taken
+        self.assertEqual(refused, [('127.0.0.1', 1)])
 
     def test_no_answer_is_none(self):
         with mock.patch.object(dockerenv, 'run', FakeDocker([(['docker', 'run'], (125, '', 'no such image'))])):
@@ -282,7 +311,7 @@ class CheckImage(unittest.TestCase):
         self.assertTrue(name.startswith('aiosubtitles-check-'))
         self.assertIn('org.aiosubtitles.install=id-1', start)
         self.assertEqual(start[start.index('--user') + 1], '10001:10001')
-        self.assertNotIn('-p', start)
+        self.assertEqual([a for a in start if publishes(a)], [])
         self.assertNotIn('docker.sock', ' '.join(start))
         self.assertIn('SUBSYNC_PUBLIC=on', start)
         self.assertEqual(start[-1], IMAGE)
@@ -290,6 +319,16 @@ class CheckImage(unittest.TestCase):
         self.assertIn(['docker', 'volume', 'rm', name], cmds)
         secret = next(a for a in start if a.startswith('SUBSYNC_SECRET_KEY='))
         self.assertGreaterEqual(len(secret.split('=', 1)[1]), 43)
+
+    def test_any_spelling_of_a_published_port_is_seen(self):
+        # the check above once looked for a "-p" argument only
+        for args in (['-p', '8790:8790'], ['-p8790:8790'], ['-P'], ['-dp', '8790:8790'], ['-dP'],
+                     ['--publish', '8790:8790'], ['--publish=8790:8790'], ['--publish-all']):
+            with self.subTest(args=args):
+                self.assertTrue(any(publishes(a) for a in args))
+        for arg in ('-d', '-it', '--pull', '-v', '-eSUBSYNC_PUBLIC=on', 'SUBSYNC_PUBLIC=on', '--label', 'p'):
+            with self.subTest(arg=arg):
+                self.assertFalse(publishes(arg))
 
     def test_a_version_that_never_answers_fails_and_leaves_nothing(self):
         docker = FakeDocker([(['docker', 'exec'], (1, '', 'connection refused')),

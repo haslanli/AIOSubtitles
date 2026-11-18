@@ -3,8 +3,10 @@ escaped, no inline style, no way forward while installing or on a stop, and the 
 import re
 import unittest
 from html.parser import HTMLParser
+from unittest import mock
 
-from installer import limits, screens
+from installer import dockerenv, limits, plan, screens
+from installer.aios import Aios
 from installer.tests import samples
 import html as htmllib
 
@@ -87,6 +89,44 @@ class Words(unittest.TestCase):
                     'Let people sync files that carry no subtitles of their own, by listening to the audio, when they '
                     'pick them?'):
             self.assertNotIn(old, screens.INSTALLER_WORDS)
+
+
+class Samples(unittest.TestCase):
+    """The samples' stops and problems are setup's own words (hand-copied ones had drifted from them), and the values a
+    sample passes reach its screen."""
+
+    def texts(self, name):
+        return Tree(samples.every_state()[name][0]).texts
+
+    def test_no_docker_is_docker_problems_stop(self):
+        with mock.patch.object(dockerenv.shutil, 'which', lambda name: None):
+            problem, fix = dockerenv.docker_problem()
+        self.assertIn(problem, self.texts('machine-stop'))
+        self.assertIn(fix, self.texts('machine-stop'))
+
+    def test_an_unknown_language_is_the_language_checks_problem(self):
+        self.assertIn(plan.parse_languages('Klingon')[1], self.texts('choices-problem'))
+
+    def test_an_address_nothing_answers_at_is_the_clients_words_and_fix(self):
+        # engine.Engine._check_aios outside setup's container: the client's message, then its fix
+        refused = samples.aios_error('http://127.0.0.1:3001', Aios.status, samples.Offline())
+        self.assertIn(f'{refused.message} {refused.fix}', self.texts('aios-problem'))
+
+    def test_a_wrong_password_is_the_clients_words(self):
+        refusal = samples.Offline(401, {'error': {'code': 'USER_INVALID_PASSWORD'}})
+        wrong = samples.aios_error(samples.PUBLIC, lambda aios: aios.get_config(samples.CONFIG_ID, 'x'), refusal)
+        self.assertIn(wrong.message, self.texts('config-wrong-password'))
+
+    def test_a_limit_problem_is_the_limit_checks_words(self):
+        self.assertIn(limits.check(limits.DAILY, '0')[1], self.texts('limits-problem'))
+
+    def test_the_audio_limit_shows_the_samples_value(self):
+        # it once passed the answers file's key (AUDIO_BUDGET), which the screen doesn't read: the default showed
+        html, _ = samples.every_state()['limits-audio']
+        checked = [attrs['value'] for tag, attrs in Tree(html).tags
+                   if tag == 'input' and attrs.get('name') == limits.AUDIO.setting and 'checked' in attrs]
+        self.assertEqual(checked, ['2'])
+        self.assertNotEqual(limits.AUDIO.default, '2')
 
 
 class TmdbQuestion(unittest.TestCase):

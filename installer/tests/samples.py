@@ -1,11 +1,41 @@
 """Every screen and state of the setup page with made-up values, for the tests and the screen checks. The rows are the
 engine's own words with sample values. Returns {name: (html, the values put in)}: the values are the only words a
 screen may show besides the approved ones."""
-from installer import engine, hosting, limits, screens, update
+import io
+import json
+import urllib.error
+
+from installer import dockerenv, engine, hosting, limits, plan, screens, update
+from installer.aios import Aios, AiosError
 from subsync import realdebrid
 
 ADDRESS = 'https://subs.example.com'
 PUBLIC = 'https://aio.example.com'
+CONFIG_ID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
+
+
+class Offline:
+    """An opener that answers every request itself, so none is made: with `status` and AIOStreams' JSON `body`, or,
+    without a status, as an address nothing answers at (the connection refused, with Linux's errno)."""
+
+    def __init__(self, status=None, body=None):
+        self.status, self.body = status, body
+
+    def open(self, request, timeout=None):
+        if self.status is None:
+            raise urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused'))
+        raise urllib.error.HTTPError(request.full_url, self.status, 'answered offline', {},
+                                     io.BytesIO(json.dumps(self.body).encode()))
+
+
+def aios_error(address, call, answer):
+    """The AIOStreams client's own error for `call(client)` when its requests get `answer`: what setup's checks show."""
+    aios = Aios(address)
+    aios.opener = aios.keyed_opener = answer
+    try:
+        call(aios)
+    except AiosError as e:
+        return e
 
 
 def every_state():
@@ -18,7 +48,7 @@ def every_state():
     add('start', screens.start())
     add('start-host', screens.start('host'))
     add('machine', screens.machine('yourself', found), *[r[1] for r in found])
-    no_docker = ('Docker is not installed here.', 'Install Docker and Docker Compose, then run ./setup again.')
+    no_docker = dockerenv.NO_DOCKER
     add('machine-stop', screens.machine('yourself', [], stop=no_docker), *no_docker)
     aios_rows = [('ok', 'Found AIOStreams 2.37.0 in the container "aiostreams"', None),
                  ('ok', f'Viewers reach it at {PUBLIC}', 'subsync will join its Docker network: aiostreams_default')]
@@ -26,7 +56,9 @@ def every_state():
     missing = [('warn', 'The container "aiostreams" looks like AIOStreams, but I can\'t reach it from here.', None)]
     add('aios-missing', screens.aios(missing, ask='AIOS_URL', value='http://127.0.0.1:3000'), missing[0][1],
         'http://127.0.0.1:3000')
-    problem = ('AIOS_URL', 'Nothing answers at http://127.0.0.1:3001. Check the address and that AIOStreams runs.')
+    # the address check's problem outside setup's container (engine.Engine._check_aios): the client's words and fix
+    refused = aios_error('http://127.0.0.1:3001', Aios.status, Offline())
+    problem = ('AIOS_URL', f'{refused.message} {refused.fix}')
     add('aios-problem', screens.aios(missing, ask='AIOS_URL', value='http://127.0.0.1:3001', problem=problem),
         missing[0][1], problem[1], 'http://127.0.0.1:3001')
     add('aios-several', screens.aios([], ask='AIOS_CONTAINER', value='aiostreams',
@@ -34,15 +66,15 @@ def every_state():
                                                  ('aiostreams-test', 'aiostreams-test  (ghcr.io/viren070/aiostreams:2.37)')]),
         'aiostreams', 'aiostreams-test', 'aiostreams  (ghcr.io/viren070/aiostreams:latest)',
         'aiostreams-test  (ghcr.io/viren070/aiostreams:2.37)')
-    add('config', screens.config([], '1a2b3c4d-1234-4abc-8def-0123456789ab'), '1a2b3c4d-1234-4abc-8def-0123456789ab')
+    add('config', screens.config([], CONFIG_ID), CONFIG_ID)
     config_rows = [('ok', 'Config found', None), ('ok', 'Debrid services: TorBox, Real-Debrid', None),
                    ('ok', 'Subtitle sources: OpenSubtitles V3+', None),
                    ('ok', 'Real-Debrid is never used: subsync reads through TorBox only', None)]
-    add('config-found', screens.config(config_rows, '1a2b3c4d-1234-4abc-8def-0123456789ab'),
-        '1a2b3c4d-1234-4abc-8def-0123456789ab', *[r[1] for r in config_rows])
-    wrong = ('AIOS_CONFIG_PASSWORD', "The config ID and password don't match.")
-    add('config-wrong-password', screens.config([], '1a2b3c4d-1234-4abc-8def-0123456789ab', problem=wrong),
-        '1a2b3c4d-1234-4abc-8def-0123456789ab', wrong[1])
+    add('config-found', screens.config(config_rows, CONFIG_ID), CONFIG_ID, *[r[1] for r in config_rows])
+    # the password check's problem (engine.Engine.read_viewer): the client's words for AIOStreams' refusal
+    refusal = Offline(401, {'error': {'code': 'USER_INVALID_PASSWORD'}})
+    wrong = ('AIOS_CONFIG_PASSWORD', aios_error(PUBLIC, lambda aios: aios.get_config(CONFIG_ID, 'x'), refusal).message)
+    add('config-wrong-password', screens.config([], CONFIG_ID, problem=wrong), CONFIG_ID, wrong[1])
     rd = [('ok', 'Config found', None), ('ok', 'Debrid services: Real-Debrid', None)]
     add('config-rd-only', screens.config(rd, 'x', stop=(realdebrid.REAL_DEBRID_ONLY, engine.RD_WAY_OUT_PAGE)),
         'x', *[r[1] for r in rd], realdebrid.REAL_DEBRID_ONLY, engine.RD_WAY_OUT_PAGE)
@@ -50,14 +82,14 @@ def every_state():
     add('choices-audio-open', screens.choices(['eng'], 'open', f'{PUBLIC}/subsync'), f'{PUBLIC}/subsync')
     add('choices-four', screens.choices(['eng', 'spa', 'rus', 'fre'], 'pick', f'{PUBLIC}/subsync',
                                         offer_opensubtitles=True), f'{PUBLIC}/subsync')
-    lang_problem = ('LANGUAGES', '"Klingon" is not a language AIOSubtitles knows.')
+    lang_problem = ('LANGUAGES', plan.parse_languages('Klingon')[1])
     add('choices-problem', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', problem=lang_problem),
         f'{PUBLIC}/subsync', lang_problem[1])
     add('limits', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50'}))
-    add('limits-audio', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'AUDIO_BUDGET': '1'}, audio=True))
-    add('limits-problem', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '0'},
-                                         problem=('SUBSYNC_DAILY_BUDGET_GB', 'A number above 0, like 50.')),
-        'A number above 0, like 50.')
+    add('limits-audio', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.AUDIO.setting: '2'},
+                                       audio=True))
+    daily = ('SUBSYNC_DAILY_BUDGET_GB', limits.check(limits.DAILY, '0')[1])
+    add('limits-problem', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '0'}, problem=daily), daily[1])
     sections = [('Your config 1a2b3c4d…', [('+', 'adds 1 subtitle source: subsync (synced copies of the subtitles you '
                                                  'already get)')],
                  'Nothing else in it changes. A copy of it as it is now is saved first.'),
@@ -128,12 +160,13 @@ def every_state():
     add('host-limits', screens.limits('host', {}))
     add('host-limits-usenet', screens.limits('host', {}, usenet=True))
     add('host-limits-audio', screens.limits('host', {}, usenet=True, audio=True))
-    places = ('SUBSYNC_AUDIO_AT_ONCE', 'A whole number from 1 to 4 (the files synced at a time), or auto.')
+    places = ('SUBSYNC_AUDIO_AT_ONCE', limits.check(limits.AUDIO_AT_ONCE, '5', places=4)[1])   # 4 files at a time
     add('host-limits-audio-problem', screens.limits('host', {'SUBSYNC_AUDIO_AT_ONCE': '5'}, problem=places, audio=True),
         '5', places[1])
-    add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'},
-                                              problem=('SUBSYNC_SYNCS_AT_ONCE', 'A whole number from 1, or auto.')),
-        'A whole number from 1, or auto.')
+    syncs = next(lim for lim in limits.hosting() if lim.setting == 'SUBSYNC_SYNCS_AT_ONCE')
+    at_once = ('SUBSYNC_SYNCS_AT_ONCE', limits.check(syncs, 'many')[1])
+    add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'}, problem=at_once),
+        at_once[1])
     host_progress = [('done', 'Made the secret key and kept it in state/subsync.env, readable only by your user.', None),
                      ('ok', 'AIOSubtitles is running (it restarts by itself after a reboot)', None)]
     add('host-install', screens.installing('host', host_progress, running=False, rule=rule, rule_intro=intro),

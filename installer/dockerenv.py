@@ -13,6 +13,9 @@ import time
 
 from installer.plan import DATA, INSTALL_LABEL, SERVICE_USER, VOLUME
 
+# docker_problem's (problem, fix) when there is no docker command
+NO_DOCKER = ('Docker is not installed.', 'Install Docker (docs.docker.com/engine/install), then run ./setup again.')
+
 
 def run(cmd, timeout=60, stdin=None):
     try:
@@ -25,7 +28,7 @@ def run(cmd, timeout=60, stdin=None):
 def docker_problem():
     """None when Docker and Compose v2 work, else (problem, fix)."""
     if not shutil.which('docker'):
-        return 'Docker is not installed.', 'Install Docker (docs.docker.com/engine/install), then run ./setup again.'
+        return NO_DOCKER
     code, _, err = run(['docker', 'info', '--format', '{{.ServerVersion}}'], timeout=30)
     if code != 0:
         if 'permission denied' in err.lower():
