@@ -24,6 +24,8 @@ import hashlib
 import re
 import statistics
 
+from .relgate import within
+
 MIN_WORDS = 3
 SAME = 0.6
 RUN = 3
@@ -207,7 +209,7 @@ def confirm(anchors, errs, limit_ms, timing_weak=()):
     for b in range(10):
         a, z = lo + (hi - lo) * b / 10, lo + (hi - lo) * (b + 1) / 10
         e = [abs(x) * 1000 for c, x, _ in errs if a <= c < z or (b == 9 and c == hi)]
-        if len(e) >= TENTH_ANCHORS and statistics.median(e) > TENTH_MS:
+        if len(e) >= TENTH_ANCHORS and not within(statistics.median(e), TENTH_MS):
             if len(errs) < FEW_ANCHORS and len(e) < FEW_TENTH_ANCHORS and \
                     not any(ta < z and a < tz for ta, tz in timing_weak):
                 spared.append(b)

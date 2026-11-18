@@ -316,6 +316,16 @@ class AddonTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(m["resources"], ["subtitles"])
 
+    def test_a_head_is_answered_with_the_headers_only(self):
+        # HEAD goes to the GET route, and the answer leaves out the body it announces
+        _, body, _ = http(self.base + "/manifest.json")
+        got = exchange(self.server.server_address[1],
+                       b"HEAD /manifest.json HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        head, _, rest = got.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.1 200 "), head)
+        self.assertIn(f"Content-Length: {len(body)}".encode(), head)
+        self.assertEqual(rest, b"")
+
     def test_known_file_lists_labelled_entries_and_serves_them(self):
         ass = ("[Script Info]\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
                "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hi\n")

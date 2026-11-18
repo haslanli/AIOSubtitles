@@ -347,6 +347,15 @@ class SignalLengthTest(unittest.TestCase):
             self.assertEqual(out[key], plain[key], key)
 
 
+class GateBoundaryTest(unittest.TestCase):
+    def test_an_error_of_exactly_the_bar_counts_as_within_it(self):
+        # Onsets and starts on a millisecond grid exactly 200 ms (100 ms) apart, a hair either side as floats
+        ms = [600_000 + 3_217 * i for i in range(200)]
+        g = AudioFit.gate([(t + 200) / 1000 - t / 1000 for t in ms])
+        self.assertEqual((g["within200"], g["within200_misses_as_fail"]), (1.0, 1.0))
+        self.assertTrue(AudioFit.gate([(t + 100) / 1000 - t / 1000 for t in ms])["pass"])   # the median bar: 100 ms
+
+
 class BetterDefaultTest(unittest.TestCase):
     """The second way to pass has one set of defaults: settings' and the close call's when the rule is off."""
 

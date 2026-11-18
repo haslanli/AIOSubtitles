@@ -8,6 +8,7 @@ import threading
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -198,6 +199,34 @@ class GateTest(unittest.TestCase):
             with self.assertRaises(realdebrid.Blocked):
                 realdebrid.urlopen(self.redirector.url, timeout=5)
         self.assertEqual(self.redirector.hits, 1)
+
+    def test_a_real_debrid_host_spelled_otherwise_is_refused(self):
+        # Urllib undoes percent escapes in the host, and the resolver IDNA-encodes it (a soft hyphen goes)
+        for url in ('https://42.download.real%2Ddebrid.com/d/X', 'https://42.download.real-debrid%2Ecom/d/X',
+                    'https://42.download.re­al-debrid.com/d/X', 'https://42.download.RE%C2%ADAL-debrid.com/d/X',
+                    'https://42.download.real-debrid。com/d/X', 'https://42.download.ｒeal-debrid.com/d/X'):
+            with self.assertLogs('subsync.realdebrid', 'WARNING') as logs:
+                with self.assertRaises(realdebrid.Blocked, msg=url):
+                    realdebrid.urlopen(url, timeout=5)
+            self.assertIn('blocked a request to Real-Debrid (42.download.real-debrid.com)', logs.output[0])
+        self.redirector.close()
+        self.redirector = Redirector('https://42.download.real%2Ddebrid.com/d/ABC/file.mkv')
+        with self.assertLogs('subsync.realdebrid', 'WARNING'):
+            with self.assertRaises(realdebrid.Blocked):
+                realdebrid.urlopen(self.redirector.url, timeout=5)
+        self.assertEqual(self.redirector.hits, 1)
+
+    def test_an_escaped_host_is_refused_before_urllib_connects_to_it(self):
+        # end to end on this machine: "localhost" stands in for Real-Debrid's domain
+        server = Redirector('http://127.0.0.1:9/never')
+        self.addCleanup(server.close)
+        port = server.server.server_address[1]
+        with mock.patch.object(realdebrid, 'DOMAINS', ('localhost',)):
+            for host in ('local%68ost', 'LOCAL%48OST', 'local­host'):
+                with self.assertLogs('subsync.realdebrid', 'WARNING'):
+                    with self.assertRaises(realdebrid.Blocked, msg=host):
+                        realdebrid.urlopen(f'http://{host}:{port}/file.mkv', timeout=5)
+        self.assertEqual(server.hits, 0)
 
     def test_the_reader_never_follows_a_redirect_to_real_debrid(self):
         with self.assertLogs('subsync.realdebrid', 'WARNING'):

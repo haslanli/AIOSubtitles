@@ -22,9 +22,10 @@ from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, S
                      public_api, rebuild, store_only)
 
 KINDS = ("sync", "usenet")   # AIOSubtitles' configs on a person's AIOStreams: the sync config and the Usenet config
-# the record fields a rebuild may change (signup.rebuild), copied from its working copy into the record
-REBUILT = ("sync_uuid", "sync_link", "sync_password", "sync_fp", "usenet_uuid", "usenet_link", "usenet_password",
-           "usenet_fp", "usenet_subtitles", "usenet", "usenet_why", "usenet_services", "store_only")
+# the record fields a rebuild may change (signup.rebuild), copied from its working copy into the record (_apply sets
+# synced_at itself)
+REBUILT = tuple(f for f in SYNC_FIELDS if f != "synced_at") + USENET_FIELDS + \
+    ("usenet", "usenet_why", "usenet_services", "store_only")
 
 log = logging.getLogger("subsync.recheck")
 HOUR = 3600
@@ -100,15 +101,13 @@ class Checker:
         if record is None:
             return None
         found = self._look(token, record)
-        changed = False
+        changed, drop = False, []
         with self.users.locked(token):
             current = self.users.open(token)
-            if current is None:
-                return None
-            drop = []
-            if any(current.get(k) != record.get(k) for k in ("instance", "main_uuid", "sync_uuid", "usenet_uuid",
-                                                               "store_only")):
-                state = current.get("state")   # a refresh came in meanwhile: what this check saw is about the old configs
+            if current is None or any(current.get(k) != record.get(k) for k in (
+                    "instance", "main_uuid", "sync_uuid", "usenet_uuid", "store_only")):
+                # deleted, or a refresh came in meanwhile: what this check saw is about the old configs
+                state = (current or {}).get("state")
                 fields = found.get("fields") or {}
                 for kind in KINDS:             # made by this check, not used: removed
                     made = fields.get(f"{kind}_uuid")
@@ -123,10 +122,13 @@ class Checker:
                 drop = list(found.get("drop") or [])
                 if store_only(current):   # the configs of a config that became Real-Debrid-only, once the record says so
                     drop += [d for d in found.get("dropped") or [] if d]
-            for fields in drop:
-                drop_sync(self.api_factory(record["instance"], self.timeout), fields)
-            with self.lock:
-                self.next[self.users.user_id(token)] = current.get("next_check") or 0
+            if current is not None:
+                with self.lock:
+                    self.next[self.users.user_id(token)] = current.get("next_check") or 0
+        for fields in drop:   # nothing refers to them any more: removed without holding up the person's own actions
+            drop_sync(self.api_factory(record["instance"], self.timeout), fields)
+        if current is None:
+            return None
         log.info("checked a person's AIOStreams: %s", state or "all well")
         if changed and self.on_change is not None:
             self.on_change(token)   # their worker starts again with the new record

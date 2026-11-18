@@ -40,7 +40,28 @@ END_MS = 300       # recorded: the share of line ends within this of the release
 MISSING_LINES = 20
 MISSING_S = 150.0
 ONE_SHIFT_PAIRED = 0.90   # across languages, under one shift: a missing scene doesn't refuse a candidate pairing this share
+# the defaults of the second way to pass (clearly_better) and of the cross-language rule (aligned); Settings reads them
 BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5, "cross_median_ms": 300.0, "cross_paired": 0.75}
+EPS_S = 1e-6       # float noise on times: a microsecond, far below any timing a subtitle or an index holds
+
+
+def within(ms, limit_ms):
+    """An error (ms) of at most `limit_ms`, float noise aside: two times on a millisecond grid exactly 200 ms apart
+    come out a hair either side of 200 (199.99999999993, 200.00000000005)."""
+    return ms <= limit_ms + EPS_S * 1000
+
+
+def _tenths(cand):
+    """Each tenth of the candidate's span, first to last start (the last tenth closed): (tenth, the indexes of its
+    lines). cand sorted."""
+    lo, hi = cand[0], cand[-1]
+    for b in range(TENTHS):
+        a, z = lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS
+        first, stop = bisect.bisect_left(cand, a), bisect.bisect_left(cand, z)
+        idx = list(range(first, stop))
+        if b == TENTHS - 1:   # and the last start, which z can round to just below
+            idx += range(max(stop, bisect.bisect_left(cand, hi)), len(cand))
+        yield b, idx
 
 
 def _pair(ref, cand):
@@ -95,7 +116,7 @@ def end_errors(err_pairs, ref, dur, cend):
     a = sorted(abs(x) * 1000 for x in e)
     return {"end_n": len(e), "end_median_ms": round(statistics.median(a), 1),
             "end_signed_median_ms": round(statistics.median(e) * 1000, 1),
-            "end_within300": round(sum(x <= END_MS for x in a) / len(a), 3)}
+            "end_within300": round(sum(within(x, END_MS) for x in a) / len(a), 3)}
 
 
 def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHARE, min_span=None, ref_recall=1.0,
@@ -121,13 +142,14 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
     m = _pair(ref, cand)
     split = set()
     if dur is not None:
+        good = {i for i, k in m.items() if within(abs(cand[i] - ref[k]) * 1000, WITHIN_MS)}
         for i in range(1, n):
-            if i in m and abs(cand[i] - ref[m[i]]) <= WITHIN_MS / 1000:
+            if i in good:
                 continue
             p = i - 1
             while p >= 0 and p in split:
                 p -= 1
-            if p >= 0 and p in m and abs(cand[p] - ref[m[p]]) <= WITHIN_MS / 1000:
+            if p >= 0 and p in good:
                 rs, rd = ref[m[p]], dur[m[p]]
                 if rs + SPLIT_INTO_S < cand[i] < rs + rd:
                     split.add(i)
@@ -135,36 +157,30 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
             keep = [i for i in range(n) if i not in split]
             m = {keep[a]: k for a, k in _pair(ref, [cand[i] for i in keep]).items()}
     err = {i: cand[i] - ref[k] for i, k in m.items()}
-    e = [abs(x) * 1000 for x in err.values()]
+    err_ms = {i: abs(x) * 1000 for i, x in err.items()}
+    e = list(err_ms.values())
     if not e:
         return {"n": n, "paired": 0.0, "pass": False, "why": "nothing paired"}
     med = statistics.median(e)
-    share = sum(x <= WITHIN_MS for x in e) / len(e)
+    share = sum(within(x, WITHIN_MS) for x in e) / len(e)
     paired = (len(e) + len(split)) / n
-    lo, hi = cand[0], cand[-1]
-    weak = []
-    for b in range(TENTHS):
-        a, z = lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS
-        idx = [i for i, c in enumerate(cand) if (a <= c < z or (b == TENTHS - 1 and c == hi)) and i not in split]
-        if len(idx) >= TENTH_MIN_LINES:
-            good = sum(i in err and abs(err[i]) <= WITHIN_MS / 1000 for i in idx)
-            if good / len(idx) < TENTH_MIN_SHARE * recall:
-                weak.append(b)
-    loose = []      # the same tenths at 500 ms, for the "clearly better" rule
+    weak = []       # tenths where under half of the lines are within 200 ms
+    loose = []      # the same at 500 ms, for the "clearly better" rule
     unpaired = []   # tenths where under half of the lines pair at all (within 1 s), for relgate.aligned
-    for b in range(TENTHS):
-        a, z = lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS
-        idx = [i for i, c in enumerate(cand) if (a <= c < z or (b == TENTHS - 1 and c == hi)) and i not in split]
-        if len(idx) >= TENTH_MIN_LINES:
-            good = sum(i in err and abs(err[i]) <= LOOSE_MS / 1000 for i in idx)
-            if good / len(idx) < TENTH_MIN_SHARE * recall:
-                loose.append(b)
-            if sum(i in err for i in idx) / len(idx) < TENTH_MIN_SHARE * recall:
-                unpaired.append(b)
+    for b, lines in _tenths(cand):
+        idx = [i for i in lines if i not in split]
+        if len(idx) < TENTH_MIN_LINES:
+            continue
+        if sum(i in err_ms and within(err_ms[i], WITHIN_MS) for i in idx) / len(idx) < TENTH_MIN_SHARE * recall:
+            weak.append(b)
+        if sum(i in err_ms and within(err_ms[i], LOOSE_MS) for i in idx) / len(idx) < TENTH_MIN_SHARE * recall:
+            loose.append(b)
+        if sum(i in err_ms for i in idx) / len(idx) < TENTH_MIN_SHARE * recall:
+            unpaired.append(b)
     span = span_share(ref, cand)
     missing_lines, missing_s = missing_scene(ref, cand)
     cut = missing_lines >= MISSING_LINES and missing_s >= MISSING_S
-    ok = paired >= MIN_PAIRED * recall and med <= MEDIAN_MS and share >= within_share and not weak and not cut
+    ok = paired >= MIN_PAIRED * recall and within(med, MEDIAN_MS) and share >= within_share and not weak and not cut
     if min_span is not None and span < min_span:
         ok = False
     out = {"n": n, "paired": round(paired, 3), "median_ms": round(med, 1), "within200": round(share, 3),

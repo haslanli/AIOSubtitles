@@ -44,6 +44,7 @@ from .langs import lang3, same_language
 from .mkv import NotMatroska
 from .mp4 import NoAudioThere
 from .reader import ReadFailed, Refused, Stopped
+from .relgate import within
 from .vad import SR, SileroVad
 
 DT = 0.05           # the correlation's frame (s): a window's 10 ms speech frames are taken every fifth
@@ -350,12 +351,13 @@ class AudioFit:
         if len(matched) < need:
             return {"n": total, "matched": len(matched), "pass": False, "why": "too few sampled lines"}
         med = float(np.median(matched))
-        share = sum(x <= WITHIN_MS for x in matched) / len(matched)
+        close = sum(within(x, WITHIN_MS) for x in matched)
+        share = close / len(matched)
         miss = 1 - len(matched) / total
-        strict = sum(x <= WITHIN_MS for x in matched) / total
+        strict = close / total
         return {"n": total, "matched": len(matched), "miss": round(miss, 3), "median_ms": round(med, 1),
                 "within200": round(share, 3), "within200_misses_as_fail": round(strict, 3),
-                "pass": med <= GATE_MEDIAN_MS and share >= GATE_WITHIN and miss <= GATE_MISS
+                "pass": within(med, GATE_MEDIAN_MS) and share >= GATE_WITHIN and miss <= GATE_MISS
                 and strict >= (GATE_STRICT_ORIGINAL if strict_mode else GATE_STRICT)}
 
     def meets_better(self, g):

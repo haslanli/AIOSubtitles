@@ -4,13 +4,18 @@ alass moves blocks of lines; each line still carries its author's own timing. He
 the start of the release-track line it corresponds to, where that correspondence is clear:
   1. a monotone one-to-one pairing of line starts within `window` (no crossings, each release line used once);
   2. kept only where the line's shift agrees with its neighbours' shifts (`tol`), or, within `end_tol`, where its end
-     also lands on that release line's end (the same utterance, started earlier or later by its author);
-  3. a second pass pairs lines left over with an unused release line within `tol` of where the local shift puts them;
-  4. a split continuation (a line starting inside the release line its predecessor snapped to) keeps its place
-     relative to the predecessor.
-Other lines (extra lines, signs, songs) move by the shift interpolated between the snapped lines around them.
-Durations are kept, order is kept, and no line is shown for less than `min_display` (or its original duration, if
-shorter); a line that didn't overlap the next one before doesn't overlap it after.
+     also lands on that release line's end, within END_MATCH_S (the same utterance, started earlier or later by its
+     author; not where the release line's duration is unknown);
+  3. a second pass pairs lines left over with an unused release line within `tol` of where the local shift puts them
+     (the nearest leftover line gets a release line two of them want), kept only where it crosses no other pair;
+  4. a split continuation (a line starting more than SPLIT_INTO_S into the release line its predecessor snapped to,
+     relgate's rule) keeps its place relative to the predecessor.
+Other lines (extra lines, signs, songs, and the lines a sectioned fit left out: drop) move by the shift interpolated
+between the snapped lines around them; the lines left out count in no stat.
+Order is kept, and each line keeps its duration except where it is cut or held: a line that didn't overlap the next one
+before is cut where the next one now starts, but no line is shown for less than `min_display` (or its original
+duration, if shorter); that minimum wins, so a line whose next one now starts sooner after it than that still
+overlaps it.
 
 Snapped lines start exactly where the release's lines start, so the gate reads a snapped copy as better than it
 is (lines it can't pair are invisible to it); the pipeline therefore asks a snapped copy for >= 95 % within 200 ms
@@ -19,9 +24,13 @@ is (lines it can't pair are invisible to it); the pipeline therefore asks a snap
 import bisect
 import statistics
 
+from .relgate import EPS_S, SPLIT_INTO_S
+
 WINDOW = 0.5
 TOL = 0.3
 END_TOL = 0.6
+END_MATCH_S = 0.25        # an end this close to its release line's end lands on it
+AGREEMENT_PASSES = 2      # the neighbour agreement, run again over the pairs the first run kept
 NEIGHBOURS = 8
 MIN_DISPLAY = 0.5
 
@@ -117,12 +126,13 @@ def snap(lines, ref_cues, window=WINDOW, tol=TOL, end_tol=END_TOL, k=NEIGHBOURS,
     Returns (new lines in the same order, stats)."""
     rc = sorted(ref_cues)
     ref = [s for s, _ in rc]
-    order = sorted((i for i, l in enumerate(lines) if l["kind"] == "dialogue"), key=lambda i: lines[i]["s"])
+    order = sorted((i for i, l in enumerate(lines) if l["kind"] == "dialogue" and not l.get("drop")),
+                   key=lambda i: lines[i]["s"])
     cand = [lines[i]["s"] for i in order]
     cend = [lines[i]["e"] for i in order]
     pairs = pair_monotone(cand, ref, window)
     delta = {a: ref[j] - cand[a] for a, j in pairs.items()}
-    for _ in range(2):              # neighbour agreement
+    for _ in range(AGREEMENT_PASSES):   # neighbour agreement
         keys = sorted(delta)
         vals = [delta[a] for a in keys]
         keep = {}
@@ -132,13 +142,14 @@ def snap(lines, ref_cues, window=WINDOW, tol=TOL, end_tol=END_TOL, k=NEIGHBOURS,
             if off <= tol:
                 keep[a] = delta[a]
             elif end_tol is not None and off <= end_tol:
-                j = pairs[a]
-                if abs(cend[a] + delta[a] - (ref[j] + rc[j][1])) <= 0.25:
+                rs, rd = rc[pairs[a]]
+                if rd > 0 and abs(cend[a] + delta[a] - (rs + rd)) <= END_MATCH_S:
                     keep[a] = delta[a]
         delta = keep
-    used = {pairs[a] for a in delta}
+    snapped_to = {a: pairs[a] for a in delta}   # line -> the release line it snapped to
+    used = set(snapped_to.values())
     curve = _Curve(delta, cand)     # second pass: leftovers near where the local shift puts them
-    extra = {}
+    claims = {}                     # release line -> (distance, line): the nearest leftover line that wants it
     for a in range(len(cand)):
         if a in delta:
             continue
@@ -149,25 +160,25 @@ def snap(lines, ref_cues, window=WINDOW, tol=TOL, end_tol=END_TOL, k=NEIGHBOURS,
             if j not in used and (best is None or abs(ref[j] - p) < abs(ref[best] - p)):
                 best = j
             j += 1
-        if best is not None:
-            extra[a] = best
-    merged = {a: pairs[a] for a in delta}
-    merged.update(extra)
-    ks = sorted(merged)
-    for x, y in zip(ks, ks[1:]):    # an extra pair that would cross its neighbour is dropped
-        if merged[y] <= merged[x] and y in extra:
-            extra.pop(y, None)
-    for a, j in extra.items():
-        if j not in used:
-            used.add(j)
-            delta[a] = ref[j] - cand[a]
+        if best is not None and (best not in claims or abs(ref[best] - p) < claims[best][0]):
+            claims[best] = (abs(ref[best] - p), a)
+    extra = {a: j for j, (_, a) in claims.items()}
+    kept, last = sorted(delta), -1
+    for a in range(len(cand)):      # an extra pair is kept only between its neighbours' release lines: no crossing
+        if a in snapped_to:
+            last = snapped_to[a]
+        elif a in extra:
+            after = bisect.bisect_right(kept, a)
+            if last < extra[a] < (snapped_to[kept[after]] if after < len(kept) else len(ref)):
+                last = snapped_to[a] = extra[a]
+                delta[a] = ref[last] - cand[a]
     curve = _Curve(delta, cand)
     cont = {}
     for a in range(1, len(cand)):   # split continuations follow their predecessor
         if a in delta or (a - 1) not in delta:
             continue
-        j = bisect.bisect_left(ref, cand[a - 1] + delta[a - 1] - 1e-6)
-        if j < len(rc) and rc[j][0] + 0.2 < cand[a] + delta[a - 1] < rc[j][0] + rc[j][1]:
+        rs, rd = rc[snapped_to[a - 1]]
+        if rs + SPLIT_INTO_S < cand[a] + delta[a - 1] < rs + rd:
             cont[a] = delta[a - 1]
     new = [dict(l) for l in lines]
     snapped = set()
@@ -179,8 +190,8 @@ def snap(lines, ref_cues, window=WINDOW, tol=TOL, end_tol=END_TOL, k=NEIGHBOURS,
             d = cont.get(a, curve.at(cand[a]))
         new[i]["s"] = lines[i]["s"] + d
         new[i]["e"] = lines[i]["e"] + d
-    for i, l in enumerate(lines):   # signs and songs: the interpolated shift, never snapped
-        if l["kind"] != "dialogue":
+    for i, l in enumerate(lines):   # signs, songs and lines left out: the interpolated shift, never snapped
+        if l["kind"] != "dialogue" or l.get("drop"):
             d = curve.at(l["s"])
             new[i]["s"], new[i]["e"] = l["s"] + d, l["e"] + d
     for x, y in zip(order, order[1:]):
@@ -193,7 +204,7 @@ def snap(lines, ref_cues, window=WINDOW, tol=TOL, end_tol=END_TOL, k=NEIGHBOURS,
         dur0 = lines[x]["e"] - lines[x]["s"]
         need = min(min_display, dur0) if dur0 > 0 else 0.0
         e = new[x]["e"]
-        if y is not None and lines[x]["e"] <= lines[y]["s"] + 1e-6 and e > new[y]["s"]:
+        if y is not None and lines[x]["e"] <= lines[y]["s"] + EPS_S and e > new[y]["s"]:
             e = new[y]["s"]
         new[x]["e"] = max(e, new[x]["s"] + need)
     moves = [abs(new[i]["s"] - lines[i]["s"]) for i in order]

@@ -49,14 +49,27 @@ class Blocked(OSError):
 
 # ------------------------------------------------------------------------------------------- 3. every request
 
+def _lookup_name(host):
+    """`host` as the resolver looks it up: lower case, IDNA-encoded (which drops a soft hyphen and reads a full-width
+    letter as its plain one), with no trailing dot; as written when it can't be encoded (its lookup fails then)."""
+    host = (host or "").lower()
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        pass
+    return host.rstrip(".")
+
+
 def is_real_debrid_host(host):
-    host = (host or "").lower().rstrip(".")
+    host = _lookup_name(host)
     return bool(host) and any(host == d or host.endswith("." + d) for d in DOMAINS)
 
 
 def check(url):
-    """Raises Blocked (and logs the host, never the link) when `url` is on a Real-Debrid domain."""
-    host = urllib.parse.urlsplit(url).hostname
+    """Raises Blocked (and logs the host, never the link) when `url` is on a Real-Debrid domain, however its host is
+    spelled: the host urllib connects to has its percent escapes undone (Request does that), then is looked up as
+    _lookup_name gives it."""
+    host = _lookup_name(urllib.parse.unquote(urllib.parse.urlsplit(url).hostname or ""))
     if is_real_debrid_host(host):
         log.warning("blocked a request to Real-Debrid (%s)", host)
         raise Blocked(f"a request to Real-Debrid ({host})")

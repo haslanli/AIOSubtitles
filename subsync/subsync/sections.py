@@ -39,8 +39,9 @@ def _lands(ref, t):
 
 
 def offsets(starts, ref, max_offset=MAX_OFFSET_S):
-    """The shifts worth trying: up to MAX_OFFSETS peaks of the start-difference histogram, PEAK_APART apart."""
-    got = shift._window(sorted(starts), ref, max_offset)
+    """The shifts worth trying: up to MAX_OFFSETS peaks of the start-difference histogram, PEAK_APART apart. starts in
+    any order; ref sorted."""
+    got = shift._window(starts, ref, max_offset)
     if got is None:
         return []
     window, n = got
@@ -51,7 +52,7 @@ def offsets(starts, ref, max_offset=MAX_OFFSET_S):
             break
         if all(abs(i - p) >= shift.PEAK_APART for p in peaks):
             peaks.append(i)
-    return [shift._refine(sorted(starts), ref, p - n) for p in peaks]
+    return [shift._refine(starts, ref, p - n) for p in peaks]
 
 
 def _assign(s, e, ref, ref_e, offs, anchors):
@@ -76,8 +77,7 @@ def _assign(s, e, ref, ref_e, offs, anchors):
     best = [[neg] * m for _ in range(S + 1)]
     for j in range(m):
         best[1][j] = v[0][j]
-    back = [None] * n            # back[i][sec][j]: (previous sections, previous shift) at line i
-    back[0] = [[None] * m for _ in range(S + 1)]
+    back = [None] * n            # back[i][sec][j]: (previous sections, previous shift) at line i (from i = 1)
     for i in range(1, n):
         gap = s[i] - e[i - 1] >= GAP_S
         cur = [[neg] * m for _ in range(S + 1)]
@@ -140,8 +140,7 @@ def fit(lines, ref_cues, anchors=None):
         a2, g2 = _assign(s, e, ref, ref_e, offs, anchors)
         if g2 is not None:
             assign, groups = a2, g2
-    if len(groups) < 2 or len(groups) > MAX_SECTIONS:
-        return None
+    # groups: from 2 to MAX_SECTIONS sections, one per change of shift (_assign)
     summary = []
     shifts = []
     for g in groups:
@@ -161,13 +160,12 @@ def fit(lines, ref_cues, anchors=None):
         for i in g:
             of_line[dial[i]] = o
     new = [dict(l) for l in lines]
-    times = [(lines[dial[g[0]]]["s"], o) for g, o in zip(groups, shifts)]
+    firsts = [lines[dial[g[0]]]["s"] for g in groups]
     for i, l in enumerate(lines):
         if i in of_line:
             o = of_line[i]
         else:                    # signs and songs: the shift of the section they fall in
-            k = bisect.bisect_right([t for t, _ in times], l["s"]) - 1
-            o = times[max(0, k)][1]
+            o = shifts[max(0, bisect.bisect_right(firsts, l["s"]) - 1)]
         new[i]["s"], new[i]["e"] = l["s"] + o, l["e"] + o
     dropped, last_end = 0, float("-inf")
     for i in dial:

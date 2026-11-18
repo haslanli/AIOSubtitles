@@ -147,10 +147,10 @@ def main_public(s):
     server = serve_public(PublicService(s, env, store, users, pool), s.port)
 
     def housekeeping():
-        last_expire = 0.0
+        last_expire = float("-inf")   # the first round expires; a step of the system clock moves no expiry
         while True:
             time.sleep(HOUSEKEEPING_EVERY_S)
-            last_expire = housekeeping_round(pool, store, last_expire, time.time())
+            last_expire = housekeeping_round(pool, store, last_expire, time.monotonic())
     threading.Thread(target=housekeeping, daemon=True, name="subsync-housekeeping").start()
 
     def stop(*_):

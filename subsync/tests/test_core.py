@@ -113,6 +113,17 @@ class RelgateTest(unittest.TestCase):
         self.assertFalse(relgate([], [1.0])["pass"])
         self.assertFalse(relgate([1.0], [])["pass"])
 
+    def test_an_error_of_exactly_the_bar_counts_as_within_it(self):
+        # Millisecond times exactly 200 ms (100 ms) apart come out a hair either side of it as floats
+        ms = [600_000 + 3_217 * i for i in range(200)]
+        ref = [t / 1000 for t in ms]
+        for off in (200, -200):
+            r = relgate(ref, [(t + off) / 1000 for t in ms])
+            self.assertEqual((r["within200"], r["weak_tenths"], r["weak_tenths_500"]), (1.0, [], []), off)
+        self.assertTrue(relgate(ref, [(t + 100) / 1000 for t in ms])["pass"])          # the median bar: 100 ms
+        ends = relgate(ref, ref, [1.0] * len(ref), cand_ends=[(t + 1300) / 1000 for t in ms])
+        self.assertEqual(ends["end_within300"], 1.0)
+
 
 class RelgateSplitTest(unittest.TestCase):
     def setUp(self):
@@ -216,6 +227,90 @@ class RefineTest(unittest.TestCase):
         got = refine.pair_monotone([1.35, 1.38, 1.9, 5.1], ref, 0.5)
         js = [got[i] for i in sorted(got)]
         self.assertEqual(js, sorted(set(js)))
+
+    @staticmethod
+    def line(s, e, text="n", **kw):
+        return dict({"s": s, "e": e, "text": text, "kind": "dialogue"}, **kw)
+
+    def test_what_the_snap_guarantees(self):
+        # Order kept, the minimum display kept, and a line that didn't overlap the next one doesn't after,
+        # unless the minimum display is what makes it (it wins), over dense random dialogue
+        for seed in range(300):
+            r = random.Random(seed)
+            ref, t = [], 10.0
+            for _ in range(r.randint(50, 150)):
+                d = r.uniform(0.3, 2.0)
+                ref.append((t, d))
+                t += r.uniform(0.1, 0.8) if r.random() < 0.5 else r.uniform(0.8, 3.0)
+            cand = []
+            for s, d in ref:
+                if r.random() < 0.7:
+                    s2 = s + 0.2 + r.gauss(0, 0.2)
+                    cand.append(self.line(s2, s2 + d))
+            out, _ = refine.snap(cand, ref)
+            idx = sorted(range(len(cand)), key=lambda i: cand[i]["s"])
+            self.assertEqual([out[i]["s"] for i in idx], sorted(out[i]["s"] for i in idx), seed)
+            for i in idx:
+                need = min(refine.MIN_DISPLAY, cand[i]["e"] - cand[i]["s"])
+                self.assertGreaterEqual(round(out[i]["e"] - out[i]["s"], 9), round(need, 9), seed)
+            for x, y in zip(idx, idx[1:]):
+                if cand[x]["e"] <= cand[y]["s"] and out[x]["e"] > out[y]["s"] + 1e-9:
+                    need = min(refine.MIN_DISPLAY, cand[x]["e"] - cand[x]["s"])
+                    self.assertAlmostEqual(out[x]["e"], out[x]["s"] + need, places=9, msg=seed)
+
+    def test_lines_a_sectioned_fit_left_out_take_no_part(self):
+        # A dropped line (a scene the release cut) takes no release line and counts in no stat
+        ref = [(10.0 + 3 * i, 2.0) for i in range(10)]
+        lines = [self.line(s + 0.1, s + 1.5) for s, _ in ref]
+        lines[4] = self.line(22.2, 23.5, "kept")
+        lines.insert(4, self.line(22.0, 23.0, "cut", drop=True))
+        out, st = refine.snap(lines, ref)
+        self.assertAlmostEqual(out[5]["s"], 22.0, places=9)         # the kept line gets its release line
+        self.assertAlmostEqual(out[4]["s"], 21.806, places=3)       # the dropped one moves by the shift around it
+        self.assertEqual((st["dialogue"], st["snapped"], st["continuations"]), (10, 10, 0))
+
+    def test_an_end_lands_only_on_a_release_line_of_known_duration(self):
+        # 400 ms off its neighbours, the line is kept only when its end lands on its release line's end;
+        # a duration unknown in the index (0) gives no end to land on
+        around = (10.0, 13.0, 16.0, 19.0, 25.0, 28.0, 31.0, 34.0)
+        lines = [self.line(t, t + 2.0) for t in around] + [self.line(21.6, 21.8, "x")]
+        known = [(t, 2.0) for t in around] + [(22.0, 0.2)]
+        out, st = refine.snap(lines, known)
+        self.assertEqual((round(out[-1]["s"], 9), st["snapped"]), (22.0, 9))
+        out, st = refine.snap(lines, known[:-1] + [(22.0, 0.0)])
+        self.assertEqual((round(out[-1]["s"], 9), st["snapped"]), (21.6, 8))
+
+    def test_a_leftover_line_never_crosses_a_snapped_one(self):
+        # X's second pass took 78.399, past y's own 78.295, and the
+        # order fix then moved y onto x's start
+        ref = [(77.59, 1.736), (77.742, 0.502), (78.295, 1.266), (78.399, 0.452), (80.013, 0.809), (80.779, 0.702)]
+        lines = [self.line(78.06, 79.796, "x"), self.line(78.186, 78.688, "y"), self.line(80.742, 81.551, "z")]
+        out, st = refine.snap(lines, ref)
+        self.assertAlmostEqual(out[1]["s"], 78.295, places=9)
+        self.assertLess(out[0]["s"], out[1]["s"])
+        self.assertEqual(st["snapped"], 2)
+
+    def test_two_leftover_lines_wanting_one_release_line_the_nearer_gets_it(self):
+        # The local shift (+0.45) puts a at 24.45 and b at 24.6, both near the unused 24.7; b is nearer
+        around = (10.0, 13.0, 16.0, 19.0, 30.0, 33.0, 36.0, 39.0)
+        ref = [(t + 0.45, 1.0) for t in around] + [(24.7, 1.0)]
+        lines = [self.line(t, t + 1.0) for t in around] + [self.line(24.0, 25.0, "a"), self.line(24.15, 25.15, "b")]
+        out, st = refine.snap(lines, ref)
+        self.assertAlmostEqual(out[-1]["s"], 24.7, places=9)
+        self.assertLess(out[-2]["s"], 24.7)
+        self.assertEqual(st["continuations"], 0)
+
+    def test_a_continuation_follows_the_release_line_its_predecessor_snapped_to(self):
+        # Two release lines start at 40.0 (0.5 s and 3.0 s); p snaps to the long one, z to the short one,
+        # and c, 1 s into the long one, follows p
+        around = [(t, 2.0) for t in (28.0, 31.0, 34.0, 37.0)]
+        ref = around + [(40.0, 0.5), (40.0, 3.0)] + [(t + 0.2, 2.0) for t in (45.8, 48.8, 51.8, 54.8)]
+        lines = [self.line(t, t + 2.0) for t, _ in around]
+        lines += [self.line(39.9, 39.95, "z"), self.line(40.0, 40.9, "p"), self.line(41.0, 42.5, "c")]
+        lines += [self.line(t, t + 2.0) for t in (45.8, 48.8, 51.8, 54.8)]
+        out, st = refine.snap(lines, ref)
+        self.assertEqual(st["continuations"], 1)
+        self.assertAlmostEqual(out[6]["s"], 41.0, places=9)
 
 
 SA_FILE = "[RedDeadProject] Spirited Away.mkv"
@@ -539,6 +634,12 @@ class ClearlyBetterTest(unittest.TestCase):
 
     def gates(self, original, copy):
         return (relgate(self.ref, original, self.dur, min_span=0.7), relgate(self.ref, copy, self.dur, min_span=0.7))
+
+    def test_the_settings_defaults_are_the_gates(self):
+        # The defaults of this rule and of the cross-language one are kept in one place
+        from subsync.settings import Settings
+        self.assertEqual(Settings({}).better, relgate_mod.BETTER)
+        self.assertIsNone(Settings({"SUBSYNC_BETTER": "off"}).better)
 
     def test_a_shifted_subtitle_in_another_timing_style_passes_only_the_second_way(self):
         before, after = self.gates(styled(self.cues, 1, shift=9.0), styled(self.cues, 1))

@@ -36,18 +36,18 @@ def run(url, cap_bytes=None, settings=None, size=None):
     guard = CapGuard(cap_bytes)
     reader = RangeReader(rewrite(url, settings.url_rewrite), "selftest", guard, timeout=settings.read_timeout,
                          size=size, size_slack=settings.size_slack)
-    t0 = time.time()
+    t0 = time.monotonic()
     out = {"ok": False}
     try:
         index = open_index(reader)
         index.read_hash()
         text = index.text_tracks()
         container = "mp4" if isinstance(index, Mp4Index) else "mkv"
-        out.update(ok=True, container=container, matroska=container == "mkv", size=index.size,
+        out.update(ok=True, container=container, size=index.size,
                    text_tracks=[{"language": t["language"], "lines": len(t["cues"]), "forced": t["forced"]} for t in text],
                    image_tracks=len(index.image_tracks()))
     except NotMatroska:
-        out.update(ok=True, container=None, matroska=False,
+        out.update(ok=True, container=None,
                    note="neither Matroska nor MP4: subsync keeps the original subtitles for it")
     except Refused as e:
         out.update(error="refused", detail=str(e))
@@ -56,7 +56,7 @@ def run(url, cap_bytes=None, settings=None, size=None):
                                        "keeps the original subtitles for this file")
     except ReadFailed as e:
         out.update(error="read", detail=str(e))
-    out.update(bytes=reader.bytes, requests=reader.requests, ms=int((time.time() - t0) * 1000))
+    out.update(bytes=reader.bytes, requests=reader.requests, ms=int((time.monotonic() - t0) * 1000))
     return out
 
 

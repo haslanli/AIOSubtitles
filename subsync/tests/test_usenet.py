@@ -216,6 +216,26 @@ class MemoryTest(TempDirTest):
         self.assertNotEqual(key, worker_mod.UsenetGate.key_of("who2", "name:Some.Film.2024.mkv|123"))
 
 
+class StoreCountsTest(TempDirTest):
+    """A self-hosted service's Usenet listings and the day's stop, in the store's day counters."""
+
+    def test_counted_per_day_and_stopped_until_the_next_one(self):
+        now = [1_000_000.0]
+        store = Store(self.dir, clock=lambda: now[0])
+        counts = worker_mod.StoreUsenetCounts(store)
+        self.assertEqual((counts.listings(), counts.stopped()), (0, False))
+        counts.add_listing()
+        counts.add_listing()
+        counts.stop()
+        counts.stop()                                                    # one stop a day
+        self.assertEqual((counts.listings(), counts.stopped()), (2, True))
+        self.assertEqual((store.bytes_today("usenet"), store.bytes_today("usenet_stop")), (2, 1))
+        again = worker_mod.StoreUsenetCounts(Store(self.dir, clock=lambda: now[0]))   # after a restart
+        self.assertEqual((again.listings(), again.stopped()), (2, True))
+        now[0] += 86400
+        self.assertEqual((counts.listings(), counts.stopped()), (0, False))
+
+
 class GateTest(TempDirTest):
     """A listing is checked and counted in one step, so the day's last one is taken once, also when both lanes
     of a worker (a first pass and an audio job) ask for it at the same moment."""

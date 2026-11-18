@@ -395,6 +395,13 @@ class TextConfirmFewAnchorsTest(unittest.TestCase):
         self.assertTrue(self.confirm(25, 3, timing_weak=[(700.0, 800.0)])[0])
         self.assertFalse(self.confirm(25, 3, timing_weak=[(390.0, 480.0)])[0])     # overlaps the tenth
 
+    def test_a_tenth_exactly_on_the_bar_is_not_weak(self):
+        # Anchors exactly 500 ms off (millisecond times), 500.0000000000001 ms as floats
+        exactly = 1074 / 1000 - 574 / 1000
+        ok, why, s = textpair.confirm([{"kind": "line"}] * 45, self.errs(45, 5, off_s=exactly), 200.0)
+        self.assertTrue(ok, why)
+        self.assertEqual(s["weak_tenths"], [])
+
 
 class PipelineFewAnchorsTest(unittest.TestCase):
     """through judge_copy: the timing being confirmed hands its gate's weak tenths to the word check."""

@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -236,6 +237,50 @@ class RecheckTest(Base):
         checker.check(token)
         sync_configs = [k for k, v in self.fake.configs.items() if k != uuid]
         self.assertEqual(sync_configs, [self.record(token)["sync_uuid"]])   # only the refresh's config is left
+
+    def test_a_config_the_check_made_is_removed_when_the_record_was_deleted_meanwhile(self):
+        # They delete their data while their check's kept password makes a new config for the gone one
+        uuid, token = self.sign_up(keep=True)
+        checker = self.checker()
+        real_look = checker._look
+        made = []
+
+        def look_then_delete(tok, record):
+            found = real_look(tok, record)
+            made.append(found["fields"]["sync_uuid"])
+            self.signup.delete(self.s, self.users, token, {"password": ""}, api_factory=self.api, timeout=5)
+            return found
+        del self.fake.configs[self.record(token)["sync_uuid"]]
+        checker._look = look_then_delete
+        self.assertIsNone(checker.check(token))
+        self.assertIsNone(self.record(token))
+        self.assertTrue(made[0])
+        self.assertEqual([k for k in self.fake.configs if k != uuid], [])   # nothing of AIOSubtitles' is left
+
+    def test_configs_are_removed_once_the_record_is_let_go(self):
+        # A delete on a slow AIOStreams takes up to its timeout; the person's own actions don't wait for it
+        from subsync import recheck
+        uuid, token = self.sign_up(keep=True)
+        checker = self.checker()
+        real_look = checker._look
+
+        def look_then_refresh(tok, record):
+            found = real_look(tok, record)
+            self.signup.refresh(self.s, self.users, token, {"password": PASSWORD, "keep_password": "on"},
+                                api_factory=self.api, timeout=5)
+            return found
+        del self.fake.configs[self.record(token)["sync_uuid"]]
+        checker._look = look_then_refresh
+        held = []
+
+        def drop_sync(api, fields):
+            held.append(self.users.locked(token).locked())
+            real_drop(api, fields)
+        real_drop = recheck.drop_sync
+        with mock.patch.object(recheck, "drop_sync", drop_sync):
+            checker.check(token)
+        self.assertEqual(held, [False])
+        self.assertEqual([k for k in self.fake.configs if k != uuid], [self.record(token)["sync_uuid"]])
 
     def test_both_configs_gone_says_sync_gone_at_once(self):
         uuid, token = self.sign_up()

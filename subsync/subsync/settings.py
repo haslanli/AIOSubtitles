@@ -11,6 +11,7 @@ import struct
 from . import ALGO_VERSION, RULE_REVISION
 from .aiosconfig import MAX_LANGUAGES
 from .audiofit import BETTER as AUDIO_BETTER
+from .relgate import BETTER
 from .worker import lang_list
 
 # The units of the size settings, each chosen once and kept (changing one would change every limit set in it): a *_MB
@@ -197,12 +198,12 @@ class Settings:
         self.snap = _on(g("SUBSYNC_SNAP", "on"))                              # per-line snap after alass
         self.snap_within = float(g("SUBSYNC_SNAP_WITHIN", "0.95"))           # a snapped copy's bar for "within 200 ms"
         # the second way to pass: a re-timed copy clearly closer to the release's track than the original
-        self.better = {"paired": float(g("SUBSYNC_BETTER_PAIRED", "0.85")),
-                       "median_ms": float(g("SUBSYNC_BETTER_MEDIAN_MS", "200")),
-                       "ratio": float(g("SUBSYNC_BETTER_RATIO", "0.5")),
+        self.better = {"paired": float(g("SUBSYNC_BETTER_PAIRED", BETTER["paired"])),
+                       "median_ms": float(g("SUBSYNC_BETTER_MEDIAN_MS", BETTER["median_ms"])),
+                       "ratio": float(g("SUBSYNC_BETTER_RATIO", BETTER["ratio"])),
                        # against another language's track: the alignment's median error (relgate.aligned)
-                       "cross_median_ms": float(g("SUBSYNC_BETTER_CROSS_MEDIAN_MS", "300")),
-                       "cross_paired": float(g("SUBSYNC_BETTER_CROSS_PAIRED", "0.75"))} \
+                       "cross_median_ms": float(g("SUBSYNC_BETTER_CROSS_MEDIAN_MS", BETTER["cross_median_ms"])),
+                       "cross_paired": float(g("SUBSYNC_BETTER_CROSS_PAIRED", BETTER["cross_paired"]))} \
             if _on(g("SUBSYNC_BETTER", "on")) else None
         # with no track in a subtitle's language, a track in one of these languages is its reference first
         self.fallback_reference = tuple(lang_list(g("SUBSYNC_FALLBACK_REFERENCE", "eng")))

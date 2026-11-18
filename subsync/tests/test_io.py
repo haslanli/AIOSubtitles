@@ -1,8 +1,11 @@
 """Range reads and the Matroska index against a local range server; the pipeline on the tiny fixture."""
+import io
 import json
 import os
 import sys
+import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1572,7 +1575,9 @@ class SelfTestTest(unittest.TestCase):
         from subsync.selftest import run
         from subsync.settings import Settings
         out = run(self.srv.url("tiny.mkv"), 4 * 1024 * 1024, Settings({}))
-        self.assertTrue(out["ok"] and out["matroska"], out)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["container"], "mkv")
+        self.assertNotIn("matroska", out)                  # the container says it
         self.assertEqual(out["size"], os.path.getsize(os.path.join(FIXTURES, "tiny.mkv")))
         self.assertTrue(out["text_tracks"])
         self.assertLessEqual(out["bytes"], 4 * 1024 * 1024)
@@ -1607,7 +1612,8 @@ class SelfTestTest(unittest.TestCase):
         from subsync.settings import Settings
         self.assertEqual(run(self.srv.url("tiny.mkv"), None, Settings({}))["container"], "mkv")
         out = run(self.srv.url("tiny.mp4"), None, Settings({}))
-        self.assertEqual((out["container"], out["matroska"]), ("mp4", False))
+        self.assertEqual(out["container"], "mp4")
+        self.assertNotIn("matroska", out)
         self.assertTrue(out["text_tracks"])
 
     def test_rewrite_applies(self):
@@ -1615,6 +1621,48 @@ class SelfTestTest(unittest.TestCase):
         from subsync.settings import Settings
         s = Settings({"SUBSYNC_URL_REWRITE": f"https://public.example=http://127.0.0.1:{self.srv.port}"})
         self.assertTrue(run("https://public.example/tiny.mkv", 4 * 1024 * 1024, s)["ok"])
+
+    def test_the_time_taken_is_measured_on_a_steady_clock(self):
+        # The system clock stepped back a day during the read doesn't make its time negative
+        from subsync import selftest
+        from subsync.settings import Settings
+        wall, steady = iter([2_000_000_000.0, 1_999_913_600.0]), iter([100.0, 100.25])
+        clock = types.SimpleNamespace(time=lambda: next(wall), monotonic=lambda: next(steady))
+        with mock.patch.object(selftest, "time", clock):
+            out = selftest.run(self.srv.url("tiny.mkv"), None, Settings({}))
+        self.assertEqual(out["ms"], 250)
+
+    def main(self, stdin, *argv):
+        """python -m subsync.selftest with `stdin`: (exit code, what it printed)."""
+        from subsync import selftest
+        from subsync.settings import Settings
+        printed = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(stdin)), mock.patch.object(sys, "stdout", printed), \
+                mock.patch.object(sys, "argv", ["selftest", *argv]), \
+                mock.patch.object(selftest, "Settings", lambda: Settings({})):
+            code = selftest.main()
+        return code, printed.getvalue()
+
+    def test_main_reads_the_link_from_standard_input_and_prints_one_json_line(self):
+        # The installer's only check of a real read; the link goes in on standard input, never out
+        link = self.srv.url("tiny.mkv")
+        code, printed = self.main(link + "\n", "--size", str(os.path.getsize(os.path.join(FIXTURES, "tiny.mkv"))))
+        self.assertEqual(code, 0)
+        self.assertEqual(printed.count("\n"), 1)
+        out = json.loads(printed)
+        self.assertEqual((out["ok"], out["container"]), (True, "mkv"))
+        self.assertNotIn(link, printed)
+        self.assertNotIn("127.0.0.1", printed)
+        self.srv.fault = "403"
+        code, printed = self.main(link + "\n")
+        self.assertEqual((code, json.loads(printed)["error"]), (1, "refused"))
+        self.assertNotIn("127.0.0.1", printed)
+
+    def test_main_without_a_link_says_so_and_never_echoes_what_it_got(self):
+        for stdin in ("", "\n", "not a link: ftp://somewhere/file.mkv\n"):
+            code, printed = self.main(stdin)
+            self.assertEqual(code, 2, stdin)
+            self.assertEqual(json.loads(printed), {"ok": False, "error": "no link on standard input"})
 
 
 import http.client  # noqa: E402
