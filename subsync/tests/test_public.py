@@ -1131,7 +1131,8 @@ class PublicTextsTest(unittest.TestCase):
     def test_public_rules_are_listed(self):
         from subsync import explain
         names = [name for name, _ in explain.RULES]
-        for rule in ("Public mode: your AIOStreams password is used once", "Public mode: Real-Debrid is left out",
+        for rule in ("Public mode: your AIOStreams password is used once, unless you choose to keep it",
+                     "Public mode: Real-Debrid is left out",
                      "Public mode: a few files at once", "Public mode: limits per person",
                      "Public mode: what is kept, and for how long"):
             with self.subTest(rule=rule):

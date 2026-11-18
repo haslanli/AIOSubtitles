@@ -93,7 +93,7 @@ RULES = [
      "answer only under a private key in their address, and each entry in its lists carries a code made from that key, "
      "so nobody who finds subsync's address can make it read files; only the synced files, those entries and a health "
      "check are open."),
-    ("Public mode: your AIOStreams password is used once",
+    ("Public mode: your AIOStreams password is used once, unless you choose to keep it",
      "When you sign up or refresh, AIOSubtitles uses your AIOStreams password in that request and then forgets it, "
      "unless you tick the box that lets it keep the password: then it is kept encrypted in your record, never in a "
      "log, until you untick it. It needs it to read your config, to make a separate config for AIOSubtitles on your "
@@ -102,13 +102,14 @@ RULES = [
      "AIOSubtitles to your own config. "
      "Without that separate config, a file that failed to open could make your AIOStreams move on to another source, "
      "Real-Debrid or a Usenet download among them."),
-    ("Public mode: your AIOStreams is checked about once a day",
-     "While you use AIOSubtitles, it checks your AIOStreams at most once a day, in the background: whether your config "
-     "still exists (a question that needs no password) and whether its own config there still opens. It repairs a "
-     "changed link by itself and tells you what only you can fix, on your settings page and with one \"AIOSubtitles: "
-     "action needed\" entry in your subtitle lists. Without a kept password it can't see services or addons you add "
-     "or remove, so press Refresh after such a change; with one, it rebuilds its own config from yours by itself, "
-     "leaving Real-Debrid out, and Usenet unless you turn it on, and never changes your config."),
+    ("Public mode: your AIOStreams is checked while you use it",
+     "While you use AIOSubtitles, it checks your AIOStreams in the background, at most once a day by default "
+     "(SUBSYNC_RECHECK_HOURS; 0 turns the check off): whether your config still exists (a question that needs no "
+     "password) and whether its own config there still opens. It repairs a changed link by itself and tells you what "
+     "only you can fix, on your settings page and with one \"AIOSubtitles: action needed\" entry in your subtitle "
+     "lists. Without a kept password it can't see services or addons you add or remove, so press Refresh after such a "
+     "change; with one, it rebuilds its own config from yours by itself, leaving Real-Debrid out, and Usenet unless "
+     "you turn it on, and never changes your config."),
     ("Public mode: Real-Debrid is left out",
      f"If your AIOStreams uses Real-Debrid, AIOSubtitles leaves it out of its own config and never reads a Real-Debrid "
      f"file, because {REASON}. It syncs only files from your other services: a file you play from Real-Debrid gets a "
@@ -143,12 +144,15 @@ RULES = [
      "stops half-way, the file waits for another pick. The service runs a set number of these at once "
      "(SUBSYNC_AUDIO_AT_ONCE), so other files aren't held up."),
     ("Public mode: what is kept, and for how long",
-     "AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: "
-     "the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password, and "
-     "their languages, plus how much was read for them each day. Your AIOStreams password is never kept. For each "
-     "synced subtitle only its new timing (never its text), with the names and sizes of the files it fits, is shared "
-     "and kept 180 days after last use, without who played them; logs name the titles synced, never who asked. Your record is deleted when you delete it on your "
-     "settings page, or 180 days after your last request."),
+     "AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: the "
+     "address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password (with "
+     "Usenet on, its Usenet config's too), their languages and their answer for files with no subtitles of their own, "
+     "their own TMDB key if they added one, and when their AIOStreams was last checked, plus how much was read for "
+     "them each day. Your AIOStreams password is kept only if you tick \"Keep my password\", in the same encrypted "
+     "record, until you untick it. For each synced subtitle only its new timing (never its text), with the names and "
+     "sizes of the files it fits, is shared and kept 180 days after last use, without who played them; logs name the "
+     "titles synced, never who asked. Your record is deleted when you delete it on your settings page, or 180 days "
+     "after your last request."),
     ("Public mode: the timing is shared, not the subtitles",
      "When someone already synced a subtitle for the file you play, AIOSubtitles reuses that work: it keeps only how "
      "the subtitle was re-timed, never its text. Your copy is made from the original subtitle, downloaded again for you "
@@ -346,16 +350,17 @@ GROUPS = [
     (SETUP_GROUP, {
         "SUBSYNC_SOURCE_MANIFEST": (
             None,
-            "The link of subsync's own AIOStreams config, which subsync finds files and subtitles through. ./setup makes "
-            "that config from yours, without Usenet, Real-Debrid, subsync itself or anything that works in the "
-            "background, and writes this. Required: subsync doesn't start without it. Keep it private: anyone with it "
-            "can list through that config."),
+            "The link of subsync's own AIOStreams config, which subsync finds files and subtitles through. ./setup "
+            "makes that config from yours, without Usenet, Real-Debrid, subsync itself or anything that works in the "
+            "background, and writes this. Required on your own install, except where Real-Debrid is your only debrid "
+            "service and Usenet is on: then ./setup makes no such config and leaves this empty. Keep it private: "
+            "anyone with it can list through that config."),
         "SUBSYNC_SOURCE_PASSWORD": (
             None,
             "The password of subsync's own config: random, made by ./setup, never yours. Before every request through "
             "that config, subsync reads it with this password and checks that it holds no way to Real-Debrid; when the "
-            "check fails or the password is wrong, nothing is listed and the log says why. Required: subsync doesn't "
-            "start without it. Keep it private."),
+            "check fails or the password is wrong, nothing is listed and the log says why. Required whenever "
+            "SUBSYNC_SOURCE_MANIFEST is. Keep it private."),
         "SUBSYNC_PUBLIC_BASE": (
             None,
             "The address your apps download synced files from: your answer to ./setup's address question, like "
@@ -405,7 +410,8 @@ GROUPS = [
             "",
             "The link of subsync's Usenet config, a second config ./setup makes from yours when you turn Usenet on, "
             "with only your Usenet searches and services and nothing that works in the background. subsync lists "
-            "through it only when your debrid service doesn't have the file you play. Keep it private."),
+            "through it only when your debrid service doesn't have the file you play, and for every file when "
+            "Real-Debrid is your only debrid service. Keep it private."),
         "SUBSYNC_USENET_PASSWORD": (
             "",
             "The password of that config: random, made by ./setup, never yours, used as SUBSYNC_SOURCE_PASSWORD is. "
@@ -426,7 +432,7 @@ GROUPS = [
             "./setup sets it when both run here and leaves it empty when they don't. A wrong rule makes every read fail, "
             "and files keep their original subtitles."),
         "SUBSYNC_SUBDL_KEY": ("", QUESTIONS["SUBDL_KEY"][1]),
-        "SUBSYNC_WYZIE_KEY": ("", QUESTIONS["WYZIE_KEY"][1]),
+        "SUBSYNC_WYZIE_KEY": ("", QUESTIONS["WYZIE_KEY"][1] + " A public instance doesn't start with it set."),
         "SUBSYNC_TMDB_KEY": ("", QUESTIONS["TMDB_KEY"][1]),
         "SUBSYNC_PORT": (
             "8790",
@@ -817,19 +823,19 @@ GROUPS = [
             "For a public instance with no TMDB key of its own. On: each person may add their own free TMDB key on "
             "their settings page; it is used to look up the original language of the films and series they play, and "
             "the answers are shared with everyone. Without one, their titles are looked up on Wikidata only, unless "
-            "someone else's key found them already. Off (recommended if you set a key): the service's own key, if any, "
-            "is used for everyone. Each person's key is stored encrypted in their record, opens only with their "
-            "personal link, and is never shown or logged."),
+            "someone else's key found them already. Off: the service's own key, if any, is used for everyone; with "
+            "SUBSYNC_TMDB_KEY set it must stay off, or the service doesn't start. Each person's key is stored "
+            "encrypted in their record, opens only with their personal link, and is never shown or logged."),
         "SUBSYNC_PUBLIC": (
             "off",
-            "Public mode: one AIOSubtitles service for many people, like aiosubtitles.com. Each person signs up on its "
-            "web page with their AIOStreams link and password and gets a personal addon link; subsync then works "
-            "through a separate sync config it makes on their AIOStreams. Leave it off for your own install; setup "
-            "turns it on when you host a public instance. On, the service needs SUBSYNC_SECRET_KEY and "
+            "Public mode: one AIOSubtitles service for many people, like public.aiosubtitles.com. Each person signs up "
+            "on its web page with their AIOStreams link and password and gets a personal addon link; subsync then "
+            "works through a separate sync config it makes on their AIOStreams. Leave it off for your own install; "
+            "setup turns it on when you host a public instance. On, the service needs SUBSYNC_SECRET_KEY and "
             "SUBSYNC_PUBLIC_BASE, lets each person choose their audio syncs, and shares how each copy was synced (its "
             "timing, never its text) between everyone playing the same file, so the more people use it, the more files "
-            "are ready when someone presses play. It holds other people's links, so it needs a server you keep up to date and "
-            "backed up."),
+            "are ready when someone presses play. It holds other people's links, so it needs a server you keep up to "
+            "date and backed up."),
         "SUBSYNC_SECRET_KEY": (
             "",
             "The service's secret, at least 32 random bytes written as base64url; setup makes one and keeps it in "
@@ -929,9 +935,10 @@ GROUPS = [
         "SUBSYNC_AUDIO_AT_ONCE": (
             "auto",
             "Audio syncs running at the same time, for everyone together. auto (the default, recommended) is half of "
-            "SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them. A higher number finishes "
-            "picked files sooner when many come together but makes every other file wait longer; it can't be more than "
-            "SUBSYNC_SYNCS_AT_ONCE. A self-hosted install syncs one at a time whatever it says."),
+            "SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them; with one file at a time "
+            "(SUBSYNC_SYNCS_AT_ONCE 1, or auto on one processor), they wait while an audio sync runs. A higher number "
+            "finishes picked files sooner when many come together but makes every other file wait longer; it can't be "
+            "more than SUBSYNC_SYNCS_AT_ONCE. A self-hosted install syncs one at a time whatever it says."),
     }),
 ]
 

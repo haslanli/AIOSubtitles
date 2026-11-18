@@ -170,9 +170,9 @@ SUBSYNC_SUBSOURCE_KEY=
 # For a public instance with no TMDB key of its own. On: each person may add their own free TMDB key on their
 # settings page; it is used to look up the original language of the films and series they play, and the answers are
 # shared with everyone. Without one, their titles are looked up on Wikidata only, unless someone else's key found
-# them already. Off (recommended if you set a key): the service's own key, if any, is used for everyone. Each
-# person's key is stored encrypted in their record, opens only with their personal link, and is never shown or
-# logged.
+# them already. Off: the service's own key, if any, is used for everyone; with SUBSYNC_TMDB_KEY set it must stay
+# off, or the service doesn't start. Each person's key is stored encrypted in their record, opens only with their
+# personal link, and is never shown or logged.
 SUBSYNC_TMDB_PERSONAL=off
 
 # Off by default. On your own install: on, subsync also syncs files you play from Usenet, through a second config
@@ -264,8 +264,9 @@ SUBSYNC_SIGNUPS_PER_HOUR=5
 SUBSYNC_SYNCS_AT_ONCE=auto
 
 # Audio syncs running at the same time, for everyone together. auto (the default, recommended) is half of
-# SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them. A higher number finishes picked
-# files sooner when many come together but makes every other file wait longer; it can't be more than
+# SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them; with one file at a time
+# (SUBSYNC_SYNCS_AT_ONCE 1, or auto on one processor), they wait while an audio sync runs. A higher number finishes
+# picked files sooner when many come together but makes every other file wait longer; it can't be more than
 # SUBSYNC_SYNCS_AT_ONCE. A self-hosted install syncs one at a time whatever it says.
 SUBSYNC_AUDIO_AT_ONCE=auto
 

@@ -37,10 +37,12 @@ OPENED_PER_DAY_TEXT = (
     "Of those, how many may start as soon as a file is opened, for people who chose that (UTC day). 5 by default; "
     "recommended: keep it low, since apps also ask for files people only browse or that they prepare next. 0 "
     "removes that answer from the pages; people who had chosen it then sync when they pick.")
+# with one place, an audio sync holds it and other files wait (audio_places(1) is 1)
 AUDIO_AT_ONCE_TEXT = (
     "Audio syncs running at the same time, for everyone together. auto (the default, recommended) is half of "
-    "SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them. A higher number finishes picked "
-    "files sooner when many come together but makes every other file wait longer; it can't be more than "
+    "SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them; with one file at a time "
+    "(SUBSYNC_SYNCS_AT_ONCE 1, or auto on one processor), they wait while an audio sync runs. A higher number finishes "
+    "picked files sooner when many come together but makes every other file wait longer; it can't be more than "
     "SUBSYNC_SYNCS_AT_ONCE. A self-hosted install syncs one at a time whatever it says.")
 
 

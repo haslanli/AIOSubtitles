@@ -123,8 +123,21 @@ class Documents(unittest.TestCase):
                       'AIOSubtitles/blob/main/docs/answers.example). Also asked, under their setting names explained '
                       'below: for your own install SUBSYNC_DAILY_BUDGET_GB and, with Usenet on, '
                       'SUBSYNC_USENET_LISTINGS_PER_DAY; for a public instance SUBSYNC_TRUSTED_PROXY, '
-                      'SUBSYNC_PUBLIC_INVITE, SUBSYNC_SUBSOURCE_KEY, SUBSYNC_TMDB_PERSONAL, SUBSYNC_USENET and its '
-                      'limits.', section)
+                      'SUBSYNC_PUBLIC_INVITE, SUBSYNC_SUBSOURCE_KEY, SUBSYNC_TMDB_PERSONAL, SUBSYNC_USENET, '
+                      'SUBSYNC_AUDIO_ROUTE and its limits.', section)
+
+    def test_the_readme_explains_each_key_once(self):
+        # SUBSYNC_AUDIO_ROUTE was explained twice, as a question and as a setting, in other words; the host's
+        # question keeps its own words on setup's screen and in the example, and no other key is in both lists
+        self.assertEqual(set(explain.QUESTIONS) & set(explain.SETTINGS), {'SUBSYNC_AUDIO_ROUTE'})
+        section = docs.readme_section()
+        questions = section.split('### The questions ./setup asks', 1)[1].split("### subsync's settings", 1)[0]
+        self.assertEqual([key for key in explain.SETTINGS if f'- **`{key}`**' in questions], [])
+        self.assertEqual(section.count('- **`SUBSYNC_AUDIO_ROUTE`** '), 1)
+        self.assertIn('- **`SUBSYNC_AUDIO_ROUTE`** (default `off`): ' + explain.SETTINGS['SUBSYNC_AUDIO_ROUTE'][1],
+                      section)
+        self.assertIn('\n'.join(docs.comment(explain.QUESTIONS['SUBSYNC_AUDIO_ROUTE'][1]))
+                      + '\nSUBSYNC_AUDIO_ROUTE=no\n', docs.answers_example())
 
     @staticmethod
     def example_parts():

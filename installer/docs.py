@@ -21,11 +21,12 @@ WIDTH = 116
 # their setting names after the audio limit's question.
 YOURSELF_LIMITS = limits.names(limits.personal(audio=False, usenet=True))
 # A public instance: its address, the settings it asks under their own names (its trusted proxy, its invite code, its
-# choices), its audio question, then every limit; SUBDL_KEY and TMDB_KEY are asked as for your own install.
+# choices, its audio question), then every limit; SUBDL_KEY and TMDB_KEY are asked as for your own install. The audio
+# question keeps its own words on setup's screen and in the example (explain.QUESTIONS); README explains it once,
+# under the settings, as it does the others.
 HOSTING_SETTINGS = ('SUBSYNC_TRUSTED_PROXY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_TMDB_PERSONAL',
-                    'SUBSYNC_USENET')
-HOSTING = (('HOST_ADDRESS', *HOSTING_SETTINGS, 'SUBSYNC_AUDIO_ROUTE')
-           + limits.names(limits.hosting(usenet=True, audio=True)))
+                    'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE')
+HOSTING = ('HOST_ADDRESS', *HOSTING_SETTINGS) + limits.names(limits.hosting(usenet=True, audio=True))
 REMOVING = ('REMOVE_OPENSUBTITLES',)
 PARTS = ('Install it for yourself (ROUTE=yourself)',
          'Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.',
@@ -65,7 +66,7 @@ def readme_section():
            f'is a line `KEY=value`; see [docs/answers.example]({EXAMPLE_ON_GITHUB}). Also asked, under their setting '
            f'names explained below: for your own install {limits.DAILY.setting} and, with Usenet on, '
            f'{limits.USENET.setting}; for a public instance {", ".join(HOSTING_SETTINGS)} and its limits.', '']
-    out += [f'- **`{key}`**: {text}' for key, (_, text) in explain.QUESTIONS.items()]
+    out += [f'- **`{key}`**: {text}' for key, (_, text) in explain.QUESTIONS.items() if key not in explain.SETTINGS]
     out += ['', "### subsync's settings", '',
             './setup writes the first group into `state/subsync.env` from your answers, each line with its explanation '
             'above it, and the limits it asks; for a public instance, also the public mode settings it asks. A limit '

@@ -121,6 +121,89 @@ class ExplainTest(unittest.TestCase):
             "The share of a snapped copy's paired lines that must start within 200 ms of the file's track "
             "(0.95 = 95 %). "))
 
+    def test_the_sync_configs_texts_name_the_usenet_only_install(self):
+        # "Required: subsync doesn't start without it", yet with Real-Debrid as the only debrid service and Usenet on,
+        # ./setup leaves the sync config out and subsync lists every file through the Usenet config
+        self.assertIn(" Required on your own install, except where Real-Debrid is your only debrid service and Usenet "
+                      "is on: then ./setup makes no such config and leaves this empty. ",
+                      explain.SETTINGS["SUBSYNC_SOURCE_MANIFEST"][1])
+        self.assertTrue(explain.SETTINGS["SUBSYNC_SOURCE_PASSWORD"][1].endswith(
+            " Required whenever SUBSYNC_SOURCE_MANIFEST is. Keep it private."))
+        self.assertIn(" subsync lists through it only when your debrid service doesn't have the file you play, and for "
+                      "every file when Real-Debrid is your only debrid service. ",
+                      explain.SETTINGS["SUBSYNC_USENET_MANIFEST"][1])
+        for name in ("SUBSYNC_SOURCE_MANIFEST", "SUBSYNC_SOURCE_PASSWORD"):
+            with self.subTest(name=name):
+                self.assertNotIn("doesn't start without it", explain.SETTINGS[name][1])
+        usenet_only = {"SUBSYNC_USENET": "on", "SUBSYNC_USENET_MANIFEST": "u", "SUBSYNC_USENET_PASSWORD": "p",
+                       "SUBSYNC_PUBLIC_BASE": "https://x.test"}
+        self.assertEqual(Settings(usenet_only).missing(), [])
+        self.assertEqual(Settings(dict(usenet_only, SUBSYNC_USENET="off")).missing(),
+                         ["SUBSYNC_SOURCE_MANIFEST", "SUBSYNC_SOURCE_PASSWORD"])
+
+    def test_the_check_rule_names_its_setting(self):
+        # a fixed rule stated SUBSYNC_RECHECK_HOURS' default as fixed: "checked about once a day"
+        rules = dict(explain.RULES)
+        self.assertNotIn("Public mode: your AIOStreams is checked about once a day", rules)
+        self.assertTrue(rules["Public mode: your AIOStreams is checked while you use it"].startswith(
+            "While you use AIOSubtitles, it checks your AIOStreams in the background, at most once a day by default "
+            "(SUBSYNC_RECHECK_HOURS; 0 turns the check off): whether your config still exists "))
+        self.assertEqual(explain.SETTINGS["SUBSYNC_RECHECK_HOURS"][0], "24")
+        self.assertEqual(Settings({"SUBSYNC_RECHECK_HOURS": "0"}).recheck_hours, 0)
+
+    def test_the_kept_password_and_the_records_contents(self):
+        # the rule said "Your AIOStreams password is never kept", though "Keep my password" keeps it in the record, and
+        # it left out what else the record holds
+        rules = dict(explain.RULES)
+        self.assertNotIn("Public mode: your AIOStreams password is used once", rules)
+        self.assertIn("Public mode: your AIOStreams password is used once, unless you choose to keep it", rules)
+        self.assertIn(": the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and "
+                      "its password (with Usenet on, its Usenet config's too), their languages and their answer for "
+                      "files with no subtitles of their own, their own TMDB key if they added one, and when their "
+                      "AIOStreams was last checked, plus how much was read for them each day. Your AIOStreams password "
+                      "is kept only if you tick \"Keep my password\", in the same encrypted record, until you untick "
+                      "it. ", rules["Public mode: what is kept, and for how long"])
+
+    def test_no_text_says_the_password_is_never_kept(self):
+        # Every text of this module, the README's rules and the public pages' texts alike
+        never = re.compile(r"password (?:is|was) never (?:kept|stored|saved)|never (?:keeps|stores|saves) (?:your|the|"
+                           r"their) (?:AIOStreams )?password", re.IGNORECASE)
+
+        def strings(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for item in value.values():
+                    yield from strings(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    yield from strings(item)
+
+        texts = [text for name, value in vars(explain).items() if name.isupper() for text in strings(value)]
+        self.assertIn("Keep my password", " ".join(texts))
+        for text in texts:
+            with self.subTest(text=text[:60]):
+                self.assertIsNone(never.search(text))
+
+    def test_the_public_settings_that_stop_the_service_say_so(self):
+        # Settings.conflicts refuses these in public mode; the texts called the TMDB pair only "not recommended" and
+        # said nothing of Wyzie. The setup question keeps its own words.
+        self.assertIn(" Off: the service's own key, if any, is used for everyone; with SUBSYNC_TMDB_KEY set it must "
+                      "stay off, or the service doesn't start. ", explain.SETTINGS["SUBSYNC_TMDB_PERSONAL"][1])
+        self.assertNotIn("recommended if you set a key", explain.SETTINGS["SUBSYNC_TMDB_PERSONAL"][1])
+        self.assertEqual(explain.SETTINGS["SUBSYNC_WYZIE_KEY"][1],
+                         explain.QUESTIONS["WYZIE_KEY"][1] + " A public instance doesn't start with it set.")
+        self.assertTrue(explain.QUESTIONS["WYZIE_KEY"][1].endswith(
+            " Kept only on this machine, in state/, readable only by your user."))
+        public = {"SUBSYNC_PUBLIC": "on"}
+        self.assertTrue(Settings(dict(public, SUBSYNC_WYZIE_KEY="k")).conflicts())
+        self.assertTrue(Settings(dict(public, SUBSYNC_TMDB_KEY="k", SUBSYNC_TMDB_PERSONAL="on")).conflicts())
+
+    def test_public_mode_names_the_public_service(self):
+        # aiosubtitles.com isn't the service; it runs at public.aiosubtitles.com
+        self.assertTrue(explain.SETTINGS["SUBSYNC_PUBLIC"][1].startswith(
+            "Public mode: one AIOSubtitles service for many people, like public.aiosubtitles.com. "))
+
 
 # The limits' defaults and their texts as the owner approved them
 APPROVED = {
