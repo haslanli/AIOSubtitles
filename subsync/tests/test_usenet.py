@@ -724,6 +724,51 @@ class PublicUsenetTest(TempDirTest):
             "not in your config, and your own config wasn't changed. AIOStreams' reason: \"the Usenet config's reason\""))
         self.assertEqual(len(self.fake.configs), 1)               # the sync config made a moment ago is gone again
 
+    # -- nothing left behind when a later step meets a fault of AIOSubtitles' own -------------------------
+    def faulty_creates(self, after):
+        """The stand-in's client: `after` configs are made, then making one raises an error the client never gives."""
+        made = [0]
+
+        def factory(base, timeout):
+            api = self.api(base, timeout)
+            create = api.create_config
+
+            def create_or_fail(config, password):
+                if made[0] >= after:
+                    raise RuntimeError("a fault")
+                made[0] += 1
+                return create(config, password)
+            api.create_config = create_or_fail
+            return api
+        return factory
+
+    def test_a_fault_making_the_usenet_config_removes_the_sync_config(self):
+        uuid = self.fake.add(setup_of([TORBOX, NZBDAV], [TORRENTIO, PROWLARR, NEWZNAB, SUBS]), PASSWORD)
+        with self.assertRaises(RuntimeError):
+            self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.faulty_creates(1), timeout=10)
+        self.assertEqual(list(self.fake.configs), [uuid])
+        self.assertEqual(self.users.count(), 0)
+
+    def test_a_fault_at_a_refresh_removes_what_it_made(self):
+        uuid, result = self.run_signup(setup_of([TORBOX, NZBDAV], [TORRENTIO, PROWLARR, NEWZNAB, SUBS]), usenet="")
+        before = self.users.open(result.token)
+        del self.fake.configs[before["sync_uuid"]]                # gone: made again, then the Usenet config fails
+        with self.assertRaises(RuntimeError):
+            self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD, "usenet": "on"},
+                                api_factory=self.faulty_creates(1), timeout=10)
+        self.assertEqual(list(self.fake.configs), [uuid])
+        self.assertEqual(self.users.open(result.token), before)
+
+    def test_a_fault_in_the_daily_rebuild_removes_the_usenet_config_it_made(self):
+        uuid, result = self.run_signup(setup_of([TORBOX, NZBDAV], [TORRENTIO, PROWLARR, NEWZNAB, SUBS]), usenet="")
+        record = self.users.open(result.token)
+        record["usenet"] = True                                   # the box ticked since: the Usenet config is made
+        del self.fake.configs[record["sync_uuid"]]                # first, then the sync config, which fails
+        with self.assertRaises(RuntimeError):
+            self.signup.rebuild(self.s, record, result.token, self.faulty_creates(1)(INSTANCE, 10), PASSWORD,
+                                force=True)
+        self.assertEqual(list(self.fake.configs), [uuid])
+
     def test_usenet_stays_off_unless_ticked_and_allowed(self):
         v = setup_of([TORBOX, NZBDAV], [TORRENTIO, NEWZNAB, SUBS])
         for settings, extra in [(self.s, {"usenet": ""}), (self.settings(SUBSYNC_USENET="off"), {})]:

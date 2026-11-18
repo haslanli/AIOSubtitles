@@ -357,6 +357,13 @@ class RecheckTest(Base):
         self.assertNotIn(PASSWORD.encode(), data)
         self.assertFalse([line for line in self.logs.lines if PASSWORD in line])
 
+    def test_one_check_at_a_time_per_aiostreams_however_it_is_spelled(self):
+        checker = self.checker()
+        self.assertIs(checker._instance("https://AIOS.test:443"), checker._instance(INSTANCE))
+        self.assertIs(checker._instance("https://aios.test./"), checker._instance(INSTANCE))
+        self.assertIsNot(checker._instance("https://aios.test:8443"), checker._instance(INSTANCE))
+        self.assertIsNot(checker._instance(OTHER), checker._instance(INSTANCE))
+
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
 class RefreshTest(Base):

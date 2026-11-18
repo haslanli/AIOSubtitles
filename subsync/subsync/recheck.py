@@ -19,7 +19,7 @@ import time
 
 from .aiosconfig import AiosError, install_link
 from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, drop_sync,
-                     public_api, rebuild, store_only)
+                     instance_key, public_api, rebuild, store_only)
 
 KINDS = ("sync", "usenet")   # AIOSubtitles' configs on a person's AIOStreams: the sync config and the Usenet config
 # the record fields a rebuild may change (signup.rebuild), copied from its working copy into the record (_apply sets
@@ -135,8 +135,8 @@ class Checker:
         return state
 
     def _instance(self, instance):
-        with self.lock:
-            return self.instances.setdefault(instance, threading.Lock())
+        with self.lock:   # one lock per AIOStreams, however a record spells its address
+            return self.instances.setdefault(instance_key(instance), threading.Lock())
 
     def _look(self, token, record):
         """What the person's AIOStreams says now; nothing is written to the record here."""

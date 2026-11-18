@@ -540,6 +540,158 @@ class SignupTest(unittest.TestCase):
         self.assertNotIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
         self.assertEqual(self.users.count(), 0)
 
+    # -- one AIOStreams, however its link is spelled ------------------------------------------------------
+    def test_one_aiostreams_however_its_link_is_spelled(self):
+        uuid = "1a2b3c4d-1111-2222-3333-444455556666"
+        for host, address in (("AIO.Example.com", "https://aio.example.com"),
+                              ("aio.example.com.", "https://aio.example.com"),
+                              ("aio.example.com:443", "https://aio.example.com"),
+                              ("AIO.example.com:8443", "https://aio.example.com:8443"),
+                              ("[2001:DB8::1]:443", "https://[2001:db8::1]"), ("[::1]:8443", "https://[::1]:8443"),
+                              ("aio.example.com:abc", "https://aio.example.com:abc")):   # not a port: kept as typed
+            with self.subTest(host=host):
+                self.assertEqual(self.signup.parse_link(f"https://{host}/Aio/stremio/{uuid}/abc/manifest.json"),
+                                 (f"{address}/Aio", uuid, None))
+                self.assertEqual(self.signup.instance_key(f"https://{host}/Aio"), f"{address}/Aio")
+
+    def test_a_refresh_on_the_same_aiostreams_spelled_otherwise_is_not_a_move(self):
+        import urllib.parse
+        from subsync.aiosconfig import AiosApi
+
+        def api(base, timeout):      # every spelling of the AIOStreams reaches the stand-in
+            return AiosApi(self.fake.url + urllib.parse.urlsplit(base).path, timeout=timeout, max_timeout=timeout,
+                           retry_wait_cap=5)
+        uuid, result = self.run_signup(viewer())
+        before = self.users.open(result.token)
+        self.fake.requests.clear()
+        spelled = f"https://AIOS.test:443/stremio/{uuid}/ENCRYPTED/manifest.json"
+        self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD, "link": spelled}, api_factory=api)
+        after = self.users.open(result.token)
+        self.assertEqual((after["instance"], after["sync_uuid"]), (before["instance"], before["sync_uuid"]))
+        self.assertNotIn(("POST", "/api/v1/user"), self.fake.requests)      # nothing made again, nothing removed
+        self.assertNotIn(("DELETE", "/api/v1/user"), self.fake.requests)
+        # a record from before kept the address as it was typed: still the same AIOStreams, and kept as it is
+        after["instance"] = "https://AIOS.test:443"
+        self.users.update(result.token, after)
+        self.signup.refresh(self.s, self.users, result.token,
+                            {"password": PASSWORD, "link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json"},
+                            api_factory=api)
+        again = self.users.open(result.token)
+        self.assertEqual((again["instance"], again["sync_uuid"]), ("https://AIOS.test:443", before["sync_uuid"]))
+        self.assertNotIn(("POST", "/api/v1/user"), self.fake.requests)
+
+    # -- nothing left behind, whatever fails ---------------------------------------------
+    def faulty(self, method):
+        """The stand-in's client with `method` raising an error the client never gives: a fault of AIOSubtitles' own."""
+        from unittest import mock
+
+        def factory(base, timeout):
+            api = self.api(base, timeout)
+            setattr(api, method, mock.Mock(side_effect=RuntimeError("a fault")))
+            return api
+        return factory
+
+    def test_a_fault_while_checking_a_new_config_removes_it(self):
+        uuid = self.fake.add(viewer(), PASSWORD)
+        with self.assertRaises(RuntimeError):
+            self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.faulty("addon_get"))
+        self.assertEqual(list(self.fake.configs), [uuid])        # the sync config made for it is removed again
+        self.assertEqual(self.users.count(), 0)
+
+    def test_a_fault_in_a_clean_up_never_hides_the_first_error(self):
+        from unittest import mock
+        uuid = self.fake.add(viewer(), PASSWORD)
+        with mock.patch.object(self.users, "create", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.faulty("delete_config"))
+        self.assertIn("removing a config failed: RuntimeError", self.logs.lines)   # by its kind only
+
+    def test_a_fault_after_the_record_was_saved_still_gives_the_link(self):
+        from unittest import mock
+        with mock.patch.object(self.signup, "viewer_change", side_effect=RuntimeError("a fault")):
+            uuid, result = self.run_signup(viewer())
+        self.assertEqual((result.added, result.manual, result.changes), (False, True, []))   # added by hand
+        self.assertIsNotNone(self.users.open(result.token))
+        self.assertNotIn(("PUT", "/api/v1/user"), self.fake.requests)
+
+    def test_an_aiostreams_listing_preset_options_of_another_shape(self):
+        options = [None, "timeout", {"default": 1}, {"id": ["x"], "default": 1}, {"id": "maxSubs", "default": 9}]
+        for shape in (None, "x", {"id": "timeout"}, options):
+            with self.subTest(shape=shape):
+                self.fake.STATUS = {"success": True, "data": {"version": "2.37.0", "settings": {"presets": [
+                    {"ID": "custom", "OPTIONS": shape}]}}}
+                uuid, result = self.run_signup(viewer())
+                self.assertTrue(result.added)
+                added = [p for p in self.fake.configs[uuid]["config"]["presets"] if p["type"] == "custom"]
+                self.assertEqual(added[0]["options"].get("maxSubs"), 9 if shape is options else None)
+
+    def test_a_fault_removing_old_configs_after_a_refresh(self):
+        uuid, result = self.run_signup(viewer())
+        main = self.fake.configs[uuid]["config"]
+        main["services"] = [dict(REALDEBRID)]          # stored copies only now: the sync config is removed
+        again = self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD},
+                                    api_factory=self.faulty("delete_config"))
+        self.assertTrue(again.store_only)
+        self.assertTrue(self.users.open(result.token)["store_only"])
+        self.assertIn("removing a config failed: RuntimeError", self.logs.lines)
+
+    def test_a_fault_while_deleting_still_deletes_the_record(self):
+        for method, form, outcome in (("delete_config", {}, {"sync_removed": False, "addon_removed": False}),
+                                      ("save_config", {"password": PASSWORD},
+                                       {"sync_removed": True, "addon_removed": False})):
+            with self.subTest(method=method):
+                uuid, result = self.run_signup(viewer())
+                self.assertEqual(self.signup.delete(self.s, self.users, result.token, form,
+                                                    api_factory=self.faulty(method)), outcome)
+                self.assertIsNone(self.users.open(result.token))
+
+    def test_delete_waits_for_the_record_lock(self):
+        import threading
+        uuid, result = self.run_signup(viewer())
+        done = []
+
+        def delete():
+            done.append(self.signup.delete(self.s, self.users, result.token, {}, api_factory=self.api, timeout=10))
+        with self.users.locked(result.token):          # a refresh or the daily check working on the record
+            thread = threading.Thread(target=delete, daemon=True)
+            thread.start()
+            thread.join(0.5)
+            self.assertEqual(done, [])
+            self.assertIsNotNone(self.users.open(result.token))
+        thread.join(10)
+        self.assertEqual(done, [{"sync_removed": True, "addon_removed": False}])
+        self.assertIsNone(self.users.open(result.token))
+
+    def test_a_refresh_whose_record_went_meanwhile_leaves_nothing_behind(self):
+        uuid, result = self.run_signup(viewer())
+        del self.fake.configs[self.users.open(result.token)["sync_uuid"]]   # gone: the refresh makes it again
+
+        def api(base, timeout):
+            client = self.api(base, timeout)
+            create = client.create_config
+
+            def made_then_expired(config, password):
+                made = create(config, password)
+                self.users.delete(result.token)        # the record expires meanwhile (no lock keeps that out)
+                return made
+            client.create_config = made_then_expired
+            return client
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD}, api_factory=api)
+        self.assertEqual(e.exception.message, "This link isn't signed up (any more). Sign up again on the start page.")
+        self.assertEqual(list(self.fake.configs), [uuid])        # the config made by the refresh is removed again
+
+    def test_a_deletion_is_logged_only_when_something_was_kept(self):
+        _, result = self.run_signup(viewer(), keep_password="on")
+        self.signup.forget_password(self.users, result.token)
+        self.signup.forget_password(self.users, result.token)          # pressed again: nothing left to delete
+        self.assertEqual(self.logs.lines.count("a kept password was deleted"), 1)
+        self.signup.remove_tmdb_key(self.users, result.token)          # no key kept
+        self.assertNotIn("a person's TMDB key was deleted", self.logs.lines)
+        self.signup.set_tmdb_key(self.users, result.token, "a" * 32, self.s, check=lambda s, key: True)
+        self.signup.remove_tmdb_key(self.users, result.token)
+        self.assertEqual(self.logs.lines.count("a person's TMDB key was deleted"), 1)
+
 
 class UsenetServicesInAddonsTest(unittest.TestCase):
     """An addon's own Services choice can name a Usenet service that the sync config leaves out, and AIOStreams

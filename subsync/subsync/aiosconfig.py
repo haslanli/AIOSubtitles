@@ -194,9 +194,12 @@ def free_instance_id(config, wanted):
 
 
 def with_defaults(preset, metadata):
-    """Unset options take the preset's own defaults, as AIOStreams' configure page would fill them in."""
-    for option in (metadata or {}).get(preset['type'], {}).get('OPTIONS', []):
-        if option.get('default') is not None:
+    """Unset options take the preset's own defaults, as AIOStreams' configure page would fill them in. The list comes
+    from AIOStreams' status answer: options of another shape (not a list, an option without a text id) are passed
+    over."""
+    options = ((metadata or {}).get(preset['type']) or {}).get('OPTIONS')
+    for option in options if isinstance(options, list) else []:
+        if isinstance(option, dict) and isinstance(option.get('id'), str) and option.get('default') is not None:
             preset['options'].setdefault(option['id'], option['default'])
     return preset
 

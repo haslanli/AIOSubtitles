@@ -374,7 +374,7 @@ FONT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, m
                 "Referrer-Policy": "no-referrer"}
 FONT_PATH = re.compile(r"^/static/fonts/([A-Za-z0-9-]+\.ttf)$")
 MAX_FORM = 8192
-MAX_FIELDS = 50          # the sign-up form with every language chip ticked fits
+MAX_FIELDS = 50          # the sign-up form (its language slots and every other field) fits with room to spare
 USER_PATH = re.compile(f"^/u/({TOKEN})(/.*)?$")
 PUBLIC_MANIFEST = {
     "id": "org.aiosubtitles.public",
@@ -521,7 +521,7 @@ class PublicHandler(Handler):
             raise FormError("The form couldn't be read. Send it again from the page.") from None
         form = {k: v[0] for k, v in fields.items()}
         if "lang" in fields:
-            form["lang"] = fields["lang"]           # every ticked language chip, in the page's order
+            form["lang"] = fields["lang"]           # every language slot's choice, in the page's order
         return form
 
     def _route(self, method):
