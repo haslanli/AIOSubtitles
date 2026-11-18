@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import unittest
+from array import array
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -477,7 +478,8 @@ class TrackWordsReadTest(unittest.TestCase):
         r = Bytes(os.path.join(FIXTURES, "tiny.mkv"))
         index = mkv.MkvIndex(r).read_head().read_cues()
         t = index.text_tracks()[0]
-        index.track_places[t["number"]] = [(s, c, None) for s, c, _ in index.track_places[t["number"]]]
+        places = index.track_places[t["number"]][1]       # where each line's block is looked for: no cue says
+        places[:] = array("q", [-1] * len(places))
         before = len(r.reads)
         self.assertEqual(index.line_words(t["number"], [s for s, _ in t["cues"]]), {})
         self.assertEqual(len(r.reads), before)

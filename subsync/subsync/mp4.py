@@ -11,10 +11,8 @@ Fragmented files (`moof`) are not supported.
 import struct
 import subprocess
 
-import bisect
-
 from .mkv import (HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, WORD_READ, LineReads, NotMatroska, add_audio_bytes,
-                  add_words_bytes, decoder_cmd, oshash, read_lines)
+                  add_words_bytes, decoder_cmd, index_hash, read_lines, sane_duration, starts_at)
 
 MAX_MOOV = 64 * 1024 * 1024
 TEXT_SAMPLE_ENTRIES = {b"tx3g": 2, b"text": 2, b"wvtt": 8}   # codec -> largest size of an empty sample
@@ -62,7 +60,7 @@ class Mp4Index:
         self.duration_s = None
         self.movie_scale = 1000
         self.tracks = []
-        self.first64 = b""
+        self.first64 = self.last64 = b""   # the file's first and last 64 KiB, when a read holds them (index_hash)
         self.moov_at = self.moov_size = None
         self._head = b""
         self._offsets = {}
@@ -98,10 +96,21 @@ class Mp4Index:
         raise NotMp4("no moov")
 
     def read_cues(self):
+        """The movie box: what the head read holds of it, and the rest read once; a movie box that ends the file is read
+        with the file's last 64 KiB, which the hash needs too (kept as `last64`)."""
         if self.moov_size > MAX_MOOV:
             raise NotMp4("moov too large")
-        end = self.moov_at + self.moov_size
-        moov = self._head[self.moov_at:end] if end <= len(self._head) else self.r.get(self.moov_at, self.moov_size)
+        end = min(self.moov_at + self.moov_size, self.size)
+        moov = self._head[self.moov_at:end]           # what the head read holds of it: all of it in a fast-start file
+        start = self.moov_at + len(moov)              # its first byte not held
+        if start < end and end == self.size:          # it ends the file: one read gives the rest and the hash's tail
+            n = min(HASH_CHUNK, self.size)
+            at = min(start, self.size - n)
+            tail = self.r.get(at, self.size - at)
+            moov += tail[start - at:]
+            self.last64 = tail[len(tail) - n:]
+        elif start < end:
+            moov += self.r.get(start, end - start)
         self._head = b""
         for kind, p, e in boxes(moov, 0, len(moov)):
             if kind == b"moov":
@@ -111,9 +120,7 @@ class Mp4Index:
         return self
 
     def read_hash(self):
-        last = self.r.get(max(0, self.size - HASH_CHUNK), min(HASH_CHUNK, self.size))
-        first = self.first64 if len(self.first64) >= min(HASH_CHUNK, self.size) else self.r.get(0, HASH_CHUNK)
-        return oshash(self.size, first, last)
+        return index_hash(self)
 
     # -- moov --------------------------------------------------------------------------------------------------
     def _moov(self, b, p, e):
@@ -195,7 +202,7 @@ class Mp4Index:
                     n = struct.unpack_from(">I", b, q + 4)[0]
                     t["chunks"] = [x for (x,) in struct.iter_unpack(">Q", b[q + 8:q + 8 + 8 * n])]
         walk(p, e)
-        return t if t["id"] is not None else None
+        return t if t["id"] is not None and t["scale"] else None   # a timescale of 0 can't time anything: left out
 
     def _shift(self, t):
         """Seconds to add to a media time to get the presented time (edit list)."""
@@ -227,13 +234,11 @@ class Mp4Index:
         if t is None:
             return {}
         lines = self._lines(t, samples=True)
-        times = [x[0] for x in lines]
         offsets = self._sample_offsets(t)
         want = []
-        for s in starts:
-            k = bisect.bisect_left(times, s - 0.0015)
-            if k < len(lines) and abs(lines[k][0] - s) <= 0.0015 and lines[k][2] < len(offsets):
-                i = lines[k][2]
+        for s, k in starts_at([x[0] for x in lines], starts):
+            i = lines[k][2]
+            if i < len(offsets):
                 want.append((s, offsets[i], min(self._size(t, i), WORD_READ)))
 
         reads = LineReads(self.r)
@@ -245,7 +250,7 @@ class Mp4Index:
                 return s, None
             add_words_bytes(self, len(data))
             return s, sample_text(t["codec"], data)
-        return read_lines(want, one)
+        return read_lines(want, one, reads)
 
     # -- what the pipeline asks ---------------------------------------------------------------------------------
     def text_tracks(self):
@@ -274,7 +279,7 @@ class Mp4Index:
         return None if t is None else [x for x in self.tracks if x["handler"] == b"soun"].index(t)
 
     def duration(self):
-        return self.duration_s
+        return sane_duration(self.duration_s)
 
     def _sample_offsets(self, t):
         if t["id"] not in self._offsets:
@@ -424,15 +429,19 @@ def _adts(asc, frame_len):
 
 
 def open_index(reader):
-    """The index for a file, chosen by its first bytes: Matroska, else MP4. Raises NotMatroska for anything else."""
-    from .mkv import EBML, MkvIndex, vint
+    """The index for a file, chosen by its first bytes: Matroska, else MP4. Raises NotMatroska for anything else, and for
+    a file whose index is damaged (mkv.DAMAGED)."""
+    from .mkv import DAMAGED, EBML, MkvIndex, vint
     head = reader.get(0, HEAD_BYTES)
     try:
         is_mkv = vint(head, 0, strip=False)[0] == EBML
-    except NotMatroska:
+    except (NotMatroska, IndexError):   # no EBML id there, or not even its bytes
         is_mkv = False
-    if is_mkv:
-        return MkvIndex(reader).read_head(head).read_cues()
-    if looks_like_mp4(head):
-        return Mp4Index(reader).read_head(head).read_cues()
+    try:
+        if is_mkv:
+            return MkvIndex(reader).read_head(head).read_cues()
+        if looks_like_mp4(head):
+            return Mp4Index(reader).read_head(head).read_cues()
+    except DAMAGED as e:
+        raise NotMatroska(f"damaged index ({str(e) or type(e).__name__})") from None
     raise NotMatroska("neither Matroska nor MP4")

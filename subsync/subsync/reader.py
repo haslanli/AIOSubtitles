@@ -14,6 +14,7 @@ timeout) raises ReadFailed with `connection` set, so the worker can try a file's
 Before each read the guard (budget, pause) may stop the job; after each, one that failed too, it is told the bytes
 received and the length the read asked for (guard.after_read).
 """
+import http.client
 import logging
 import threading
 import time
@@ -244,7 +245,7 @@ class RangeReader:
             if not opened and self.guard:   # nothing read: the length it asked for is no longer reserved (JobGuard)
                 self.guard.after_read(0, length)
         self._count(requests=1)
-        got, status = 0, getattr(r, "status", 200)
+        got, status, error = 0, getattr(r, "status", 200), None
         try:
             if status == 200 and start != 0:
                 raise ReadFailed("range ignored")
@@ -259,7 +260,11 @@ class RangeReader:
                     self.size = total
             left = length
             while left > 0:
-                data = r.read(min(chunk, left))
+                try:
+                    data = r.read(min(chunk, left))
+                except (OSError, ValueError, http.client.HTTPException) as e:   # a reset or a timeout in the body
+                    error = type(e).__name__
+                    raise ReadFailed(error, connection=connection_fault(e)) from None
                 if not data:
                     raise ReadFailed("short reply")
                 got += len(data)
@@ -270,7 +275,7 @@ class RangeReader:
             self._count(got=got)
             if self.guard:
                 self.guard.after_read(got, length)
-            self._log(start, length, got, status, t0, None)
+            self._log(start, length, got, status, t0, error)
 
     def _count(self, got=0, requests=0):
         with self._lock:

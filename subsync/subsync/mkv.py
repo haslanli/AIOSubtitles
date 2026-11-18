@@ -7,12 +7,14 @@ attachments), and decoded from a pipe.
 """
 import bisect
 import logging
+import math
 import struct
 import subprocess
 import sys
 import threading
 import zlib
-from concurrent.futures import ThreadPoolExecutor
+from array import array
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 AUDIO_BYTES_LOCK = threading.Lock()
 # ffmpeg decodes bytes of files anyone can publish; on Linux each decoder gets its own limits
@@ -50,6 +52,10 @@ HEAD_BYTES = 256 * 1024
 HASH_CHUNK = 64 * 1024
 MAX_ELEMENT = 8 * 1024 * 1024      # Info/Tracks larger than this are not read
 MAX_CUES = 32 * 1024 * 1024        # 7.27 MB on a file with 75 PGS tracks
+# cue track positions kept of one file (the 7.27 MB above hold a few hundred thousand); each is a few Python objects,
+# so a Cues of tiny made-up entries could otherwise hold a gigabyte: a file with more is not read (NotMatroska)
+MAX_CUE_POINTS = 1_000_000
+MAX_DURATION_S = 7 * 24 * 3600     # the longest runtime taken from a file; past it (or NaN, infinite, 0) it is unknown
 
 EBML, SEGMENT, SEEKHEAD, INFO, TRACKS, CUES, CLUSTER = (0x1A45DFA3, 0x18538067, 0x114D9B74, 0x1549A966,
                                                         0x1654AE6B, 0x1C53BB6B, 0x1F43B675)
@@ -59,6 +65,10 @@ NOT_DIALOGUE = ("forced", "sign", "song", "karaoke", "commentary")
 
 WORD_READ = 2048                   # bytes read for one line's words (D1)
 IMAGE_READ = 64 * 1024             # an image line's block, at most: 2 KB first, the rest only when needed
+# what one line's zlib-compressed block may inflate to (deflate inflates up to about 1,000 times): a text line's words,
+# and an image line's display set (an object as large as imagetext decodes, 4096 x 1024, is 4 MiB at a byte a pixel)
+TEXT_INFLATE = 64 * 1024
+IMAGE_INFLATE = 4 * 1024 * 1024
 WORD_READS_AT_ONCE = 4
 MAX_FAILED_IN_A_ROW = 3            # a track's line reads stop after this many failed reads in a row
 
@@ -67,6 +77,36 @@ log = logging.getLogger("subsync.read")
 
 class NotMatroska(Exception):
     pass
+
+
+# what a damaged (or made-up) field makes the parsers raise; open_index turns it into NotMatroska, so such a file is
+# not readable as any other (the worker backs off) instead of being read again on every request
+DAMAGED = (IndexError, struct.error, OverflowError, ZeroDivisionError, ValueError, RecursionError)
+
+
+def sane_duration(d):
+    """`d` when it can be a file's runtime in seconds (finite, over 0, at most MAX_DURATION_S), else None."""
+    return d if d is not None and math.isfinite(d) and 0 < d <= MAX_DURATION_S else None
+
+
+def index_hash(index):
+    """The OpenSubtitles hash of an index's file. Its first and last 64 KiB are read only when the index doesn't hold
+    them already: the head read holds the first, and the read of an index at the end of the file (Cues, moov) the
+    last, as `last64`."""
+    n = min(HASH_CHUNK, index.size)
+    first = index.first64 if len(index.first64) >= n else index.r.get(0, HASH_CHUNK)
+    last = index.last64 if len(index.last64) >= n else index.r.get(index.size - n, n)
+    return oshash(index.size, first, last)
+
+
+def starts_at(times, starts, within=0.0015):
+    """[(start, k)] for each of `starts` that `times` (sorted) holds within `within` seconds, k its place in `times`."""
+    found = []
+    for s in starts:
+        k = bisect.bisect_left(times, s - within)
+        if k < len(times) and abs(times[k] - s) <= within:
+            found.append((s, k))
+    return found
 
 
 def block_payload(buf, track):
@@ -111,48 +151,58 @@ def _block_at(buf, o, track):
     return None if ext is None else bytes(buf[ext[0]:ext[1]])
 
 
-def uncompressed(payload, comp):
-    """A block payload with the track's ContentCompression undone (zlib, or header stripping); None when it can't be."""
+def uncompressed(payload, comp, limit):
+    """A block payload with the track's ContentCompression undone (zlib, or header stripping); None when it can't be,
+    or when it would inflate past `limit` bytes. A zlib payload cut short (a text line's block past WORD_READ) gives
+    what its start inflates to."""
     if payload is None or not comp:
         return payload
     if comp["algo"] == 3:
         return comp["settings"] + payload
     if comp["algo"] == 0:
+        d = zlib.decompressobj()
         try:
-            return zlib.decompressobj().decompress(payload)
+            out = d.decompress(payload, limit)
         except zlib.error:
             return None
+        return None if d.unconsumed_tail else out
     return None
 
 
-def read_lines(want, one):
+def read_lines(want, one, reads):
     """D1: `one(item)` -> (start, a line's text or block payload, or None) for each item, WORD_READS_AT_ONCE
-    at once; {start: value}. A refused read or a stopped job ends every read not started yet and is raised (`one`
-    raises it and sets `stop` itself)."""
-    from .reader import Refused, Stopped
+    at once, each through `reads` (LineReads); {start: value}. A refused read or a stopped job ends every read not
+    started yet and is raised. Once `reads` has stopped, the lines read so far are returned without waiting for reads
+    still running: one the host never answers ends by itself at its timeout, and holds nothing up."""
     out = {}
-    with ThreadPoolExecutor(max_workers=WORD_READS_AT_ONCE, thread_name_prefix="subsync-words") as pool:
-        futures = [pool.submit(one, item) for item in want]
-        for fut in futures:
-            try:
-                s, value = fut.result()
-            except (Refused, Stopped):   # the host refused, or the guard stopped the job: no further read
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise
-            if value:
-                out[s] = value
+    pool = ThreadPoolExecutor(max_workers=WORD_READS_AT_ONCE, thread_name_prefix="subsync-words")
+    try:
+        pending = {pool.submit(one, item) for item in want}
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in done:
+                s, value = fut.result()      # a refusal or a stopped job is raised as it is
+                if value:
+                    out[s] = value
+            if reads.stop.is_set():
+                if reads.error is not None:  # raised by a read whose own result isn't in yet
+                    raise reads.error
+                break
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return out
 
 
 class LineReads:
     """One track's line reads through `reader`, which stop for good once a read is refused or the job stops
-    (both raised) or once MAX_FAILED_IN_A_ROW reads in a row have failed: a host that doesn't answer isn't asked for
-    every line (a dead download address made 50 reads, each a call to the AIOStreams link). A read that works
-    starts the count again, so a failure now and then stops nothing."""
+    (both raised, and kept in `error`) or once MAX_FAILED_IN_A_ROW reads in a row have failed: a host that doesn't
+    answer isn't asked for every line (a dead download address made 50 reads, each a call to the AIOStreams
+    link). A read that works starts the count again, so a failure now and then stops nothing."""
 
     def __init__(self, reader):
         self.r = reader
         self.stop = threading.Event()
+        self.error = None
         self._lock = threading.Lock()
         self._failed = 0
 
@@ -163,7 +213,8 @@ class LineReads:
             return None
         try:
             buf = self.r.get(at, n)
-        except (Refused, Stopped):
+        except (Refused, Stopped) as e:
+            self.error = e
             self.stop.set()
             raise
         except ReadFailed:
@@ -178,9 +229,19 @@ class LineReads:
         return buf
 
 
+def _fed(pipe, data):
+    """Writes data to the decoder's input; False once the decoder has closed it (it ended, or stopped reading)."""
+    try:
+        pipe.write(data)
+        return True
+    except OSError:    # BrokenPipeError and the like: the decoder's doing, not the read's
+        return False
+
+
 def pipe_until(cmd, head, chunks, need, timeout=300):
     """Run a decoder on head + chunks (an iterator, e.g. RangeReader.stream) and stop feeding it once its output holds
-    `need` bytes, or once it ends by itself; the iterator is then closed, which ends its read. Returns the output."""
+    `need` bytes, or once it ends by itself; the iterator is then closed, which ends its read. Returns the output. An
+    error of the iterator (the read failed, or was refused or stopped) is raised, once the decoder is stopped."""
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     out, enough = bytearray(), threading.Event()
 
@@ -196,30 +257,36 @@ def pipe_until(cmd, head, chunks, need, timeout=300):
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
     try:
-        p.stdin.write(head)
-        for c in chunks:
-            if enough.is_set():
-                break
-            p.stdin.write(c)
-    except (BrokenPipeError, OSError):
-        pass
-    finally:
-        if hasattr(chunks, "close"):
-            chunks.close()
         try:
-            p.stdin.close()
-        except OSError:
-            pass
-    try:
-        p.wait(timeout)
-    except subprocess.TimeoutExpired:
+            if _fed(p.stdin, head):
+                for c in chunks:
+                    if enough.is_set() or not _fed(p.stdin, c):
+                        break
+        finally:
+            if hasattr(chunks, "close"):
+                chunks.close()
+            try:
+                p.stdin.close()
+            except OSError:
+                pass
+        try:
+            p.wait(timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+    except BaseException:   # the read failed: the decoder is stopped and waited for, not left decoding on its own
         p.kill()
         p.wait()
-    reader.join(timeout)
+        raise
+    finally:
+        reader.join(timeout)
+        p.stdout.close()
     return bytes(out)
 
 
 def vint(buf, pos, strip=True):
+    """(value, length) of the EBML variable-size integer at buf[pos] (an element id with strip=False). IndexError when
+    it isn't wholly in buf: a field cut off at the buffer's end is never read as a shorter one."""
     if pos >= len(buf):
         raise IndexError("vint past the buffer")
     first = buf[pos]
@@ -228,6 +295,8 @@ def vint(buf, pos, strip=True):
         n += 1
     if n > 8:
         raise NotMatroska("bad vint")
+    if pos + n > len(buf):
+        raise IndexError("vint cut off at the buffer's end")
     val = first & ((0xFF >> n) if strip else 0xFF)
     for b in buf[pos + 1: pos + n]:
         val = (val << 8) | b
@@ -272,13 +341,15 @@ class MkvIndex:
         self.duration_s = None
         self.tracks = []
         self.positions = {}
-        self.cue_points = []     # (time s, absolute cluster position), any track
-        self.track_cues = {}     # track number -> [(start s, duration s)]
-        self.track_places = {}   # track number -> [(start s, cluster position, place in the cluster or None)]
+        self.cue_points = []     # (time s, absolute cluster position), any track, in file order
+        self.track_cues = {}     # subtitle track number -> [(start s, duration s)]
+        # subtitle track number -> (start times s, the byte where the line's block is looked for, -1 when the cue
+        # doesn't say), in time order: compact arrays, as a file can have hundreds of thousands
+        self.track_places = {}
         self.cues_at = None
         self.first_cluster = None
         self.ebml = self.info = self.tracks_raw = b""
-        self.first64 = b""
+        self.first64 = self.last64 = b""   # the file's first and last 64 KiB, when a read holds them (index_hash)
 
     # -- reads -------------------------------------------------------------------------------------------------
     def read_head(self, head=None):
@@ -305,7 +376,7 @@ class MkvIndex:
             if p + sz > len(head):
                 if eid not in (SEEKHEAD, INFO, TRACKS) or p + sz - raw > MAX_ELEMENT:
                     break
-                head = head[:raw] + self.r.get(raw, p + sz - raw)
+                head = head + self.r.get(len(head), p + sz - len(head))   # only the part not held yet
             self._element(head, eid, raw, p, sz)
         for eid in (INFO, TRACKS):  # not in the first read: follow the SeekHead
             if eid in self.positions and not (self.info if eid == INFO else self.tracks_raw):
@@ -339,9 +410,8 @@ class MkvIndex:
             for cid, _, cp, csz in elements(buf, p, p + sz):
                 if cid == 0x2AD7B1:
                     self.scale = uint(buf[cp:cp + csz])
-                elif cid == 0x4489:
-                    v = buf[cp:cp + csz]
-                    self.duration_s = struct.unpack(">f", v)[0] if csz == 4 else struct.unpack(">d", v)[0]
+                elif cid == 0x4489 and csz in (0, 4, 8) and cp + csz <= len(buf):   # an EBML float; else damaged
+                    self.duration_s = struct.unpack(">f" if csz == 4 else ">d", buf[cp:cp + csz])[0] if csz else 0.0
             if self.duration_s is not None:
                 self.duration_s = self.duration_s * self.scale / 1e9
         elif eid == TRACKS:
@@ -386,25 +456,53 @@ class MkvIndex:
                     self.tracks.append(t)
 
     def read_cues(self):
+        """The seek index (Cues): each cue cluster's place and first cue time, and each subtitle track's cue times and
+        block places. Cues at the end of the file, where mkvmerge and ffmpeg write them, are read together with the
+        file's last 64 KiB, which the hash needs too (kept as `last64`): one or two requests instead of three."""
         at = self.positions.get(CUES)
         if not at:
             return self
-        hdr = self.r.get(at, 16)
-        eid, n = vint(hdr, 0, strip=False)
-        if eid != CUES:
+        n_hash = min(HASH_CHUNK, self.size)
+        tail_at = self.size - n_hash
+        tail = tail_at <= at < self.size   # the Cues start in the file's last 64 KiB: one read for them and the hash
+        if tail:
+            self.last64 = self.r.get(tail_at, n_hash)
+            hdr = self.last64[at - tail_at:at - tail_at + 16]
+        else:
+            hdr = self.r.get(at, 16)
+        try:
+            eid, n = vint(hdr, 0, strip=False)
+            csize, m = vint(hdr, n)
+        except IndexError:                 # the header is cut off at the file's end: no Cues
             return self
-        csize, m = vint(hdr, n)
-        if csize > MAX_CUES:
+        if eid != CUES or csize > MAX_CUES:
             return self
-        body = self.r.get(at + n + m, csize)
+        body_at = at + n + m
+        if tail:
+            body = self.last64[body_at - tail_at:body_at - tail_at + csize]
+        elif body_at + csize >= tail_at:   # they end in the last 64 KiB: read on to the end, for the hash too
+            rest = self.r.get(body_at, self.size - body_at)
+            body = rest[:csize]
+            if len(rest) >= n_hash:
+                self.last64 = rest[len(rest) - n_hash:]
+        else:
+            body = self.r.get(body_at, csize)
         self.cues_at = at
-        seen = set()
+        self._cue_points(body)
+        return self
+
+    def _cue_points(self, body):
+        subtitle = {t["number"] for t in self.tracks if t.get("type") == 0x11 and t.get("number")}
+        seen, kept = set(), 0
         for _, _, pp, psz in elements(body, 0, len(body)):
             t = None
             for cid, _, cp, csz in elements(body, pp, pp + psz):
                 if cid == 0xB3:
                     t = uint(body[cp:cp + csz]) * self.scale / 1e9
                 elif cid == 0xB7 and t is not None:
+                    kept += 1
+                    if kept > MAX_CUE_POINTS:
+                        raise NotMatroska(f"more than {MAX_CUE_POINTS} cue points")
                     trk = dur = cpos = rel = None
                     for gid, _, gp, gsz in elements(body, cp, cp + csz):
                         if gid == 0xF1:
@@ -418,27 +516,31 @@ class MkvIndex:
                             dur = uint(body[gp:gp + gsz]) * self.scale / 1e9
                         elif gid == 0xF0:
                             rel = uint(body[gp:gp + gsz])
-                    if trk is not None:
+                    if trk in subtitle:   # only subtitle tracks' cues are asked for (text_tracks, image_tracks)
                         self.track_cues.setdefault(trk, []).append((t, dur or 0.0))
-                        self.track_places.setdefault(trk, []).append((t, cpos, rel))
+                        # the Cluster's data starts 5 to 12 bytes after its position (block_extent looks at all eight)
+                        place = -1 if cpos is None or rel is None else cpos + 5 + rel
+                        times, places = self.track_places.setdefault(trk, (array("d"), array("q")))
+                        times.append(t)
+                        places.append(place if place < self.size else -1)
         self.cue_points.sort(key=lambda x: x[1])
         for lst in self.track_cues.values():
             lst.sort()
-        for lst in self.track_places.values():
-            lst.sort(key=lambda x: x[0])
-        return self
+        for times, places in self.track_places.values():
+            if any(times[i] > times[i + 1] for i in range(len(times) - 1)):   # Cues are written in time order
+                order = sorted(range(len(times)), key=times.__getitem__)
+                times[:] = array("d", [times[i] for i in order])
+                places[:] = array("q", [places[i] for i in order])
 
     def read_hash(self):
-        last = self.r.get(max(0, self.size - HASH_CHUNK), min(HASH_CHUNK, self.size))
-        first = self.first64 if len(self.first64) >= min(HASH_CHUNK, self.size) else self.r.get(0, HASH_CHUNK)
-        return oshash(self.size, first, last)
+        return index_hash(self)
 
     # -- what the pipeline asks ---------------------------------------------------------------------------------
-    def text_tracks(self):
-        """Text subtitle tracks with their cue timings; forced/sign/song tracks marked."""
+    def _subtitle_tracks(self, codecs):
+        """The subtitle tracks with a codec in `codecs`, with their cue timings; forced/sign/song tracks marked."""
         out = []
         for t in self.tracks:
-            if t.get("type") != 0x11 or not t.get("codec", "").startswith(TEXT_CODECS):
+            if t.get("type") != 0x11 or not t.get("codec", "").startswith(codecs):
                 continue
             name = t.get("name", "").lower()
             out.append({"number": t["number"], "language": t.get("bcp47") or t.get("language", "und"),
@@ -446,6 +548,10 @@ class MkvIndex:
                         "forced": bool(t.get("forced")) or any(w in name for w in NOT_DIALOGUE),
                         "cues": self.track_cues.get(t["number"], [])})
         return out
+
+    def text_tracks(self):
+        """Text subtitle tracks with their cue timings; forced/sign/song tracks marked."""
+        return self._subtitle_tracks(TEXT_CODECS)
 
     def line_words(self, track, starts):
         """D1: the text of the lines of text track `track` that start at `starts` (seconds), each read from its
@@ -466,7 +572,7 @@ class MkvIndex:
             if buf is None:
                 return s, None
             add_words_bytes(self, len(buf))
-            payload = uncompressed(block_payload(buf, track), comp)
+            payload = uncompressed(block_payload(buf, track), comp, TEXT_INFLATE)
             if payload is None:
                 return s, None
             text = payload.decode("utf-8", "replace")
@@ -476,20 +582,12 @@ class MkvIndex:
                 from .textpair import ass_text
                 text = ass_text(text)
             return s, text
-        return read_lines(want, one)
+        return read_lines(want, one, reads)
 
     def _places(self, track, starts):
-        """[(start, the byte where its block's search begins)] for the starts whose cue has a place in its cluster: the
-        Cluster's data start is 5 to 12 bytes after its position (block_extent looks at all eight)."""
-        places = self.track_places.get(track, [])
-        times = [p[0] for p in places]
-        want = []
-        for s in starts:
-            k = bisect.bisect_left(times, s - 0.0015)
-            if k < len(places) and abs(places[k][0] - s) <= 0.0015 and places[k][1] is not None \
-                    and places[k][2] is not None:
-                want.append((s, places[k][1] + 5 + places[k][2]))
-        return want
+        """[(start, the byte where its block's search begins)] for the starts whose cue has a place in its cluster."""
+        times, places = self.track_places.get(track, ((), ()))
+        return [(s, places[k]) for s, k in starts_at(times, starts) if places[k] >= 0]
 
     def codec_private(self, track):
         """A track's CodecPrivate (VobSub: the .idx header with its palette), b"" when it has none."""
@@ -524,22 +622,13 @@ class MkvIndex:
                 if more is None or len(more) < ext[1] - len(buf):
                     return s, None
                 buf = buf + more
-            return s, uncompressed(bytes(buf[ext[0]:ext[1]]), comp)
-        return read_lines(want, one)
+            return s, uncompressed(bytes(buf[ext[0]:ext[1]]), comp, IMAGE_INFLATE)
+        return read_lines(want, one, reads)
 
     def image_tracks(self):
         """Image subtitle tracks (PGS, VobSub) with their cue timings; forced/sign tracks marked."""
         from .imageref import IMAGE_CODECS
-        out = []
-        for t in self.tracks:
-            if t.get("type") != 0x11 or not t.get("codec", "").startswith(IMAGE_CODECS):
-                continue
-            name = t.get("name", "").lower()
-            out.append({"number": t["number"], "language": t.get("bcp47") or t.get("language", "und"),
-                        "codec": t["codec"], "name": t.get("name", ""),
-                        "forced": bool(t.get("forced")) or any(w in name for w in NOT_DIALOGUE),
-                        "cues": self.track_cues.get(t["number"], [])})
-        return out
+        return self._subtitle_tracks(IMAGE_CODECS)
 
     def audio_track_index(self):
         """Index among audio tracks (ffmpeg -map 0:a:N) of the default audio track, else the first."""
@@ -550,19 +639,23 @@ class MkvIndex:
         return 0 if audio else None
 
     def duration(self):
-        if self.duration_s:
-            return self.duration_s
-        if self.cue_points:
-            return max(t for t, _ in self.cue_points)
-        return None
+        """The runtime in seconds: Info's Duration, else the last cue's time; None when neither is plausible."""
+        return sane_duration(self.duration_s) or sane_duration(max((t for t, _ in self.cue_points), default=None))
 
     def byte_range(self, start, length):
+        """The bytes that hold [start, start + length): from the last cue cluster at or before the start to the cue
+        cluster after the first one cued past the end (else to the Cues or the file's end). A cluster's time here is
+        its first cue's, which can be later than the cluster's own start (mkvmerge cues every subtitle block, video
+        only at keyframes), so that first one may still begin inside the window; the one after it can't, since the
+        first one holds a block past the end."""
         end_t = start + length
         a = max((p for t, p in self.cue_points if t <= start), default=self.first_cluster)
         if a is None:
             raise NotMatroska("no cluster position")
-        later = [p for t, p in self.cue_points if t >= end_t + 0.001 and p > a]
-        b = min(later) if later else (self.cues_at if self.cues_at and self.cues_at > a else self.size)
+        past = min((p for t, p in self.cue_points if t >= end_t + 0.001 and p > a), default=None)
+        b = None if past is None else next((p for _, p in self.cue_points if p > past), None)   # in file order
+        if b is None:
+            b = self.cues_at if self.cues_at and self.cues_at > a else self.size
         return a, b
 
     def audio_tracks(self):

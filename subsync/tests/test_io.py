@@ -1538,6 +1538,11 @@ class FirstReadRetryTest(unittest.TestCase):
         self.assertEqual(self.backed_off_for(), 600)
 
     def test_the_link_is_asked_at_most_one_plus_max_re_resolve_times_in_all(self):
+        # a file whose index takes four reads (its head, its Cues' header and body, the hash's last 64 KiB): tiny.mkv
+        # with 300 KiB after it, as its Cues in the last 64 KiB would come in one read with that tail
+        with open(os.path.join(self.dir, "tiny.mkv"), "ab") as f:
+            f.write(bytes(300 * 1024))
+        self.job = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": self.size + 300 * 1024})
         flaky = Flaky(self.link, faults=1, moved=True)       # then every address it points to drops the connection
         self.run_with(flaky)
         self.sleep.assert_called_once()
