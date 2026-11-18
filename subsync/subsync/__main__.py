@@ -19,13 +19,15 @@ log = logging.getLogger("subsync")
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     s = Settings()
+    # settings written wrong first: what must be set depends on them (a misspelt SUBSYNC_PUBLIC reads as off)
+    conflicts = s.conflicts()
+    for conflict in conflicts:
+        log.error("not started: %s", conflict)
+    if conflicts:
+        sys.exit(2)
     missing = s.missing()
     if missing:
         log.error("not started: set %s%s", ", ".join(missing), "" if s.public else " (./setup writes them)")
-        sys.exit(2)
-    for conflict in s.conflicts():
-        log.error("not started: %s", conflict)
-    if s.conflicts():
         sys.exit(2)
     if s.public:
         return main_public(s)

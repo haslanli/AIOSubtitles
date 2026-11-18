@@ -1,8 +1,9 @@
 // AIOSubtitles' pages: the few moments that move. Every page works without this script: the sign-up then opens by its
 // link and shows its questions one under another. With it, the sign-up is a layer that slides in, one question per
-// screen, Back or Escape reversing it; the language slots show one place and "Add language" up to the instance's
-// limit; passwords can be shown; the personal link can be copied; a setup page whose work runs shows its progress
-// without loading itself again. It loads nothing but that page's own address, sends nothing and stores nothing.
+// screen, Back (its arrow, or the phone's) or Escape reversing it; the language slots show one place and
+// "Add language" up to the instance's limit; passwords can be shown; the personal link can be copied; a setup page
+// whose work runs shows its progress without loading itself again. It loads nothing but that page's own address, sends
+// nothing and stores nothing.
 (function () {
   "use strict";
   var root = document.documentElement;
@@ -23,6 +24,16 @@
     var segments = Array.prototype.slice.call(form.querySelectorAll(".steps li"));
     var behind = [document.querySelector(".wrap"), document.querySelector(".dock")].filter(Boolean);
     var at = 0, opener = null;
+    // Back goes where the arrow goes: each screen the layer moves to is an entry in the page's history (its depth: how
+    // many the layer added), so the phone's Back button or gesture shows the screen before, and from the first one
+    // closes the layer, the answers still in it. A page loaded again starts closed, whatever its entry held
+    var depth = function () { return (history.state && history.state.depth) || 0; };
+    var enter = function (to) {
+      history.pushState({ screen: to, depth: depth() + 1 }, "");
+      at = to;
+    };
+    var earlier = depth();
+    if (earlier) history.replaceState(null, "");
 
     var paint = function (back, focusProblem) {
       screens.forEach(function (s, i) { s.hidden = i !== at; });
@@ -49,7 +60,7 @@
     var open = function (from, name, focusProblem) {
       opener = from || opener;
       var found = screens.map(function (s) { return s.getAttribute("data-screen"); }).indexOf(name);
-      at = found < 0 ? 0 : found;
+      enter(found < 0 ? 0 : found);
       body.classList.add("open");
       layer.setAttribute("aria-hidden", "false");
       behind.forEach(function (el) { el.inert = true; });
@@ -70,20 +81,30 @@
       var t = e.target.closest("[data-open], [data-back], [data-next]");
       if (!t) return;
       if (t.hasAttribute("data-open")) { e.preventDefault(); open(t); }
-      else if (t.hasAttribute("data-back") && layer.contains(t)) {
-        e.preventDefault();
-        if (at === 0) close(); else { at -= 1; paint(true); }
-      } else if (t.hasAttribute("data-next")) { at = Math.min(at + 1, screens.length - 1); paint(false); }
+      else if (t.hasAttribute("data-back") && layer.contains(t)) { e.preventDefault(); history.back(); }
+      else if (t.hasAttribute("data-next")) { enter(Math.min(at + 1, screens.length - 1)); paint(false); }
+    });
+    window.addEventListener("popstate", function (e) {
+      if (!body.classList.contains("open")) return;
+      var to = e.state && e.state.screen;
+      if (typeof to !== "number") { close(); return; }
+      var back = to < at;
+      at = to;
+      paint(back);
     });
     // Enter (or a phone keyboard's Go) in any field submits the form: before the last screen that is Continue
     form.addEventListener("submit", function (e) {
       if (at === screens.length - 1) return;
       e.preventDefault();
-      at += 1;
+      enter(at + 1);
       paint(false);
     });
+    // Escape closes the layer at once, then takes the page back past the entries it added
     document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape" && body.classList.contains("open")) close();
+      if (e.key !== "Escape" || !body.classList.contains("open")) return;
+      var added = depth();
+      close();
+      if (added) history.go(-added);
     });
     // after a problem the page comes back with the layer open at the screen it names (the first one it emptied) and the
     // summary focused; a link to #signup opens it
@@ -95,6 +116,7 @@
     } else {
       layer.setAttribute("aria-hidden", "true");
       screens.forEach(function (s, i) { s.hidden = i !== 0; });
+      if (earlier) history.go(-earlier);      // back past the entries an earlier sign-up on this page added
     }
     // a link in the problem summary goes to the screen with its field
     each("#problem a[href^='#']", function (a) {
@@ -103,7 +125,7 @@
         var screen = field && field.closest("[data-screen]");
         if (!screen) return;
         e.preventDefault();
-        at = screens.indexOf(screen);
+        enter(screens.indexOf(screen));
         paint(false);
       });
     });
@@ -193,6 +215,7 @@
       var showing = box.type === "text";
       box.type = showing ? "password" : "text";
       button.textContent = button.getAttribute(showing ? "data-show" : "data-hide");
+      button.setAttribute("aria-label", button.getAttribute(showing ? "data-show-label" : "data-hide-label"));
     });
   });
 

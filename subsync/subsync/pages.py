@@ -43,6 +43,8 @@ UI_WORDS = (
     "On, as soon as a file is opened (not recommended)", "Save answer",
     # a person's own TMDB key (when the instance asks each person for one), and TMDB's logo's name
     "Original languages", "Your TMDB key", "Save key", "Remove key", "TMDB",
+    # the Show/Hide buttons' spoken names, each before its box's label
+    "Show: ", "Hide: ",
 )
 LINK_PLACEHOLDER = "https://…/stremio/…/manifest.json"
 

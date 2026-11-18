@@ -55,11 +55,15 @@ class Words(unittest.TestCase):
     def test_every_text_is_an_approved_text(self):
         corpus = approved()
         slots = {f'Remove: {name}' for name, _, _ in LANGUAGES} | {f'Remove: {o}' for o in ui.ORDINALS}
+        # a Show button's spoken name: its words before its box's label, an approved text or a value
+        named = {words + text for words in (ui.SHOW, ui.HIDE) for text in corpus}
         for name, (html, values) in samples.every_state().items():
             values = {' '.join(v.split()) for v in values}
+            reveals = named | {words + value for words in (ui.SHOW, ui.HIDE) for value in values}
             with self.subTest(screen=name):
                 for text in Tree(html).texts:
-                    self.assertTrue(text in corpus or text in values or text in slots, f'{name}: "{text}"')
+                    self.assertTrue(text in corpus or text in values or text in slots or text in reveals,
+                                    f'{name}: "{text}"')
 
     def test_the_installer_words_are_the_approved_ones(self):
         # the start screen and the labels, word for word
@@ -219,6 +223,39 @@ class Structure(unittest.TestCase):
                          '<section class="grid12 row" aria-labelledby="a-h"><div class="about"><h2 id="a-h">A &lt;b&gt;'
                          '</h2><p class="help">x</p></div><div class="controls">y</div></section>')
 
+    def test_each_choice_is_named_by_its_title_alone(self):
+        # A tick box or a way was named by its whole row, title and explanation, then described by the
+        # explanation again, so a screen reader read it twice; the whole row is still its label
+        for name, (html, _) in samples.every_state().items():
+            for row in re.findall(r'<label class="(?:choice|way)"[^>]*><input [^>]*>', html):
+                with self.subTest(screen=name, row=row):
+                    box = re.search(r' id="([^"]+)"', row).group(1)
+                    self.assertIn(f' aria-labelledby="{box}-title"', row)
+                    self.assertRegex(html, rf'<(b|span class="head") id="{re.escape(box)}-title">')
+        html, _ = samples.every_state()['aios-several']
+        self.assertIn('<span class="head" id="AIOS_CONTAINER-aiostreams-title"><b>aiostreams</b></span><span '
+                      'id="AIOS_CONTAINER-aiostreams-help">', html)
+
+    def test_the_show_buttons_name_their_box(self):
+        # The keys step had three buttons named "Show", alike in a list of its controls or to voice control
+        html, _ = samples.every_state()['choices']
+        buttons = re.findall(r'<button class="reveal"[^>]*>', html)
+        named = [(re.search(r'aria-label="([^"]*)"', b).group(1), re.search(r'data-hide-label="([^"]*)"', b).group(1))
+                 for b in buttons]
+        self.assertEqual(named, [('Show: SubDL API key (optional)', 'Hide: SubDL API key (optional)'),
+                                 ('Show: Wyzie Subs API key (optional)', 'Hide: Wyzie Subs API key (optional)'),
+                                 ('Show: TMDB API key (optional)', 'Hide: TMDB API key (optional)')])
+
+    def test_the_reviews_config_headings_are_one_level_under_the_steps(self):
+        # Each config's heading was an h3 right under the step's h1, skipping level 2 in a heading list
+        for name in ('review', 'review-usenet'):
+            with self.subTest(screen=name):
+                html, _ = samples.every_state()[name]
+                headings = [tag for tag, _ in Tree(html).tags if re.fullmatch(r'h\d', tag)]
+                self.assertEqual(headings[0], 'h1')
+                self.assertEqual(set(headings[1:]), {'h2'})
+                self.assertIn('<div class="changes"><section><h2>', html)
+
     def test_a_wrong_password_keeps_the_id_and_never_shows_a_password(self):
         # test_flow's "an empty password goes back to the ID", as the page does it
         html, _ = samples.every_state()['config-wrong-password']
@@ -274,9 +311,10 @@ class Rules(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(names[names.index(key) + 1], f'REMOVE_{key}')     # right under its field
         self.assertNotIn('name="REMOVE_WYZIE_KEY"', html)                  # none saved: no box
-        self.assertEqual(html.count('<b>Remove the saved key</b>'), 2)
+        saved = r'<b id="remove-[a-z_]+-title">Remove the saved key</b>'     # the box's title, its name
+        self.assertEqual(len(re.findall(saved, html)), 2)
         html, _ = states['host-choices-saved-keys']
-        self.assertEqual(html.count('<b>Remove the saved key</b>'), 3)
+        self.assertEqual(len(re.findall(saved, html)), 3)
         self.assertNotIn('Remove the saved key', states['choices'][0])
         self.assertNotIn('Remove the saved key', states['host-choices'][0])
 

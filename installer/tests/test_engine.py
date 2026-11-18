@@ -89,7 +89,7 @@ class StateFiles(TmpState):
         (self.state / 'subsync.env').write_text('SUBSYNC_MAX_TRIES=6.0\nSUBSYNC_USER_FILES_PER_DAY=150\n')
         s = engine.env_settings()
         self.assertEqual((s.max_tries, s.user_files_per_day), (6, 150))
-        self.assertEqual(s.wrong_numbers, ['SUBSYNC_MAX_TRIES must be a whole number from 1, like 6.'])
+        self.assertEqual(s.written_wrong, ['SUBSYNC_MAX_TRIES must be a whole number from 1, like 6.'])
 
 
 class Terminal(TmpState):

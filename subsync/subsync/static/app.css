@@ -81,7 +81,9 @@ h2[tabindex="-1"]:focus{outline:none}
 pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);border:1px solid #2A2A2A;font:400 15px/1.5 var(--mono);color:var(--text);overflow-x:auto;white-space:pre}
 .input::placeholder{color:#8A8A8A;opacity:1}
 .input:hover{border-color:var(--text-3)}
-.input:focus{outline:none;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
+/* a focused box (this one, a select, a number box) shows it by its border; its outline stays, unseen, for
+   high-contrast mode to paint */
+.input:focus{outline:2px solid transparent;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
 .input[aria-invalid=true]{border-color:var(--danger)}
 .with-btn{position:relative;margin-top:10px}
 .with-btn .input{margin-top:0;padding-right:84px}
@@ -146,7 +148,7 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
   border:1px solid var(--edge);border-radius:10px;color:var(--text);font:400 17px/1 var(--sans);cursor:pointer;
   transition:border-color var(--t-quick) var(--ease),box-shadow var(--t-quick) var(--ease)}
 .sel select:hover{border-color:var(--text-3)}
-.sel select:focus{outline:none;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
+.sel select:focus{outline:2px solid transparent;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
 .sel select.empty{color:var(--text-3)}
 .sel select:not(.empty){border-color:var(--accent-link);background:var(--accent-bg);color:var(--text)}
 .sel option{background:var(--surface);color:var(--text)}
@@ -338,7 +340,8 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .num{position:relative;display:inline-flex;align-items:center;margin-top:10px;height:56px;min-width:180px;background:var(--field);
   border:1px solid var(--edge);border-radius:10px;transition:border-color var(--t-quick) var(--ease),box-shadow var(--t-quick) var(--ease)}
 .num:hover{border-color:var(--text-3)}
-.num:focus-within{border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
+.num:focus-within{outline:2px solid transparent;outline-offset:3px;border-color:var(--accent-link);
+  box-shadow:0 0 0 1px var(--accent-link)}
 .num input{width:7.5ch;height:100%;padding:0 0 0 16px;border:0;background:transparent;color:var(--text);
   font:700 19px/1 var(--sans);font-variant-numeric:tabular-nums;outline:none}
 .num .unit{padding:0 16px 0 6px;color:var(--text-3);font-size:17px}
@@ -390,7 +393,7 @@ body.open .sheet,.layer:target .sheet{transform:none}
 /* the list of changes to a config */
 .changes{display:grid;gap:12px;max-width:44em}
 .changes section{padding:18px 20px;border-radius:12px;background:var(--surface)}
-.changes h3{font-weight:700;font-size:17px}
+.changes h2{font-weight:700;font-size:17px;line-height:inherit;letter-spacing:inherit}
 .changes ul{list-style:none;padding:0;margin-top:10px;display:grid;gap:6px}
 .changes li{display:grid;grid-template-columns:20px minmax(0,1fr);column-gap:8px;color:var(--text)}
 .changes .sign{font-weight:800;color:var(--accent-link)}
@@ -416,7 +419,8 @@ html:not(.js) .layer:not(:target){display:none}
 html:not(.js) body.open .layer{display:block}
 html:not(.js) .layer::before{display:none}
 html:not(.js) .sheet{position:static;transform:none;width:auto;max-width:600px;min-height:100vh;margin:0 auto;overflow:visible}
-html:not(.js) [data-next],html:not(.js) [data-add],html:not(.js) .steps{visibility:hidden}
+html:not(.js) .screen:not(:last-child)>.actions{display:none}
+html:not(.js) .steps{visibility:hidden}
 html:not(.js) .screens{margin-top:24px}
 
 @media (prefers-reduced-motion:reduce){
@@ -425,6 +429,7 @@ html:not(.js) .screens{margin-top:24px}
 @media (forced-colors:active){
   .choice input,.way input{appearance:auto;-webkit-appearance:auto}
   .choice input::after,.way input::after{display:none}
+  .seg input:checked+span{background:Highlight;border-color:Highlight;color:HighlightText}
 }
 
 /* ---------- phone: designed for the thumb: below 1024 px wide or 600 px tall ---------- */
@@ -459,6 +464,8 @@ html:not(.js) .screens{margin-top:24px}
   .input.code{max-width:none}
   .choice{padding:16px 16px 18px}
   .actions .btn{width:100%;height:56px}
+  /* a label longer than the narrowest phones' column takes two lines, not the page's margin */
+  .btn{white-space:normal;text-align:center}
   .js .sheet .actions{position:sticky;bottom:0;margin:auto calc(var(--page) * -1) 0;padding:20px var(--page) max(16px,env(safe-area-inset-bottom));
     background:var(--ground);flex-direction:column;align-items:stretch}
   .after{margin-top:12px}
@@ -494,7 +501,8 @@ html:not(.js) .screens{margin-top:24px}
   .steparea .actions a.secondary{display:none}
   .steparea .actions .primary{width:100%;height:56px}
   .num{display:flex;width:100%}
-  .num input{flex:1;width:auto}
+  /* the box takes the room its unit leaves, from no width of its own: its typed width ran past the margin */
+  .num input{flex:1;width:0}
   .seg{display:flex;flex:1}
   .seg label{flex:1}
   .seg span{min-width:0}

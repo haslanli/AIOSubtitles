@@ -163,6 +163,11 @@ def described(*ids):
     return " ".join(i for i in ids if i)
 
 
+# a Show/Hide button is named this and its box's label, so a list of the page's controls tells them apart; it
+# shows only Show or Hide, and has no pressed state, as its label changes
+SHOW, HIDE = "Show: ", "Hide: "
+
+
 def field(id, label, help_text, name=None, kind="text", mono=False, error=None, attrs="", reveal=False, question=False,
           code=False, error_ref=None):
     """A label, the box, an error under the label when there is one, the explanation. `question`: the label is the
@@ -176,8 +181,10 @@ def field(id, label, help_text, name=None, kind="text", mono=False, error=None, 
            f"aria-describedby=\"{described(error_id, help_id)}\"" + (" aria-invalid=\"true\"" if error or error_ref else "")
            + (f" {attrs}" if attrs else "") + ">")
     if reveal:
+        show, hide = e(SHOW + label), e(HIDE + label)
         box = (f"<div class=\"with-btn\">{box}<button class=\"reveal\" type=\"button\" data-reveal=\"{e(id)}\" "
-               f"aria-controls=\"{e(id)}\" data-show=\"Show\" data-hide=\"Hide\" hidden>Show</button></div>")
+               f"aria-controls=\"{e(id)}\" aria-label=\"{show}\" data-show=\"Show\" data-hide=\"Hide\" "
+               f"data-show-label=\"{show}\" data-hide-label=\"{hide}\" hidden>Show</button></div>")
     label_html = (f"<label class=\"q\" for=\"{e(id)}\">{e(label)}</label>" if question
                   else f"<label for=\"{e(id)}\">{e(label)}</label>")
     error_html = f"<p class=\"field-error\" id=\"{e(error_id)}\">{e(error)}</p>" if error and not error_ref else ""
@@ -191,12 +198,15 @@ def choice(id, title, help_text, name=None, checked=False, needs=None, value="on
     """A choice row: the whole row is a checkbox; a ticked row takes the chosen blue. `needs`: the id of the choice it
     works only with (the script greys it out while that one is unticked). `error_id`: the id of the problem's message
     shown with it: the box is marked and described by it, read first. Inside the label only phrasing content: its
-    words are spans the stylesheet lays out as blocks."""
+    words are spans the stylesheet lays out as blocks. The box is named by its title alone, so its explanation is read
+    once, as its description; the whole row still ticks it."""
     refs = described(error_id, f"{id}-help")
     return (f"<label class=\"choice\"{f' data-needs=\"{e(needs)}\"' if needs else ''}><input type=\"checkbox\" "
             f"id=\"{e(id)}\" name=\"{e(name or id)}\" value=\"{e(value)}\"{' checked' if checked else ''} "
-            f"aria-describedby=\"{e(refs)}\"" + (" aria-invalid=\"true\"" if error_id else "")
-            + f"><span><b>{e(title)}</b><span id=\"{e(id)}-help\">{e(help_text)}</span></span></label>")
+            f"aria-labelledby=\"{e(id)}-title\" aria-describedby=\"{e(refs)}\""
+            + (" aria-invalid=\"true\"" if error_id else "")
+            + f"><span><b id=\"{e(id)}-title\">{e(title)}</b><span id=\"{e(id)}-help\">{e(help_text)}</span></span>"
+            "</label>")
 
 
 def choices(*rows):
@@ -292,13 +302,14 @@ def radio_row(name, value, title, text, checked=False, tag=None, note=None, inva
     its words under the title (none when empty). `note`: words shown under them only while this row is the one
     picked; the stylesheet hides them otherwise, so it works without the script, and a browser that can't tell shows
     them. `invalid`: the answer has a problem (its group is described by the problem's message, radio_group). Inside
-    the label only phrasing content, as in choice."""
+    the label only phrasing content, as in choice; the button is named by its title and tag alone, as there."""
     rid = f"{name}-{value}"
     refs = described(f"{rid}-help" if text else None, f"{rid}-note" if note else None)
     return (f"<label class=\"way\"><input type=\"radio\" name=\"{e(name)}\" id=\"{e(rid)}\" value=\"{e(value)}\""
-            f"{' checked' if checked else ''}" + (f" aria-describedby=\"{e(refs)}\"" if refs else "")
-            + (" aria-invalid=\"true\"" if invalid else "")
-            + f"><span><span class=\"head\"><b>{e(title)}</b>" + (f"<i>{e(tag)}</i>" if tag else "") + "</span>"
+            f"{' checked' if checked else ''} aria-labelledby=\"{e(rid)}-title\""
+            + (f" aria-describedby=\"{e(refs)}\"" if refs else "") + (" aria-invalid=\"true\"" if invalid else "")
+            + f"><span><span class=\"head\" id=\"{e(rid)}-title\"><b>{e(title)}</b>"
+            + (f"<i>{e(tag)}</i>" if tag else "") + "</span>"
             + (f"<span id=\"{e(rid)}-help\">{e(text)}</span>" if text else "")
             + (f"<span class=\"if-chosen\" id=\"{e(rid)}-note\">{e(note)}</span>" if note else "") + "</span></label>")
 
@@ -403,11 +414,12 @@ def progress_list(rows):
 
 
 def config_changes(sections):
-    """The list of changes to configs: (heading, [(sign, line)], note) per config; sign "+" or "−"."""
+    """The list of changes to configs: (heading, [(sign, line)], note) per config; sign "+" or "−". Each heading is
+    one level under the step's own."""
     out = []
     for heading, lines, after in sections:
         items = "".join(f"<li><span class=\"sign\" aria-hidden=\"true\">{e(sign)}</span>{e(line)}</li>" for sign, line in lines)
-        out.append(f"<section><h3>{e(heading)}</h3><ul>{items}</ul>" + (f"<p>{e(after)}</p>" if after else "")
+        out.append(f"<section><h2>{e(heading)}</h2><ul>{items}</ul>" + (f"<p>{e(after)}</p>" if after else "")
                    + "</section>")
     return "<div class=\"changes\">" + "".join(out) + "</div>"
 

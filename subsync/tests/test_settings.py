@@ -1,8 +1,11 @@
 """A self-hosted install's settings written by hand (state/subsync.env): every number read one way, with the range its
-explanation implies, the languages and the addon key. A value that can't work
-is one plain line at the start, which then stops, never a traceback or a service that fails far from the cause."""
+explanation implies, every on/off setting on or off, the languages and the addon
+key. A value that can't work is one plain line at the start, which then stops, never a traceback or a service
+that fails far from the cause."""
+import os
 import re
 import unittest
+from unittest import mock
 
 import helpers  # noqa: F401  (first: it puts the package on the import path)
 from subsync import explain, settings as settings_module  # noqa: E402
@@ -11,11 +14,14 @@ from subsync.settings import GB, MB, Settings  # noqa: E402
 PUBLIC = {"SUBSYNC_PUBLIC": "on"}
 
 
+def settings_source():
+    with open(settings_module.__file__, encoding="utf-8") as f:
+        return f.read()
+
+
 def number_settings():
     """{name: "whole" or "number"} of every setting Settings reads as a number through its one reader."""
-    with open(settings_module.__file__, encoding="utf-8") as f:
-        source = f.read()
-    return {name: kind for kind, name in re.findall(r'read\.(whole|number)\("(SUBSYNC_[A-Z0-9_]+)"', source)}
+    return {name: kind for kind, name in re.findall(r'read\.(whole|number)\("(SUBSYNC_[A-Z0-9_]+)"', settings_source())}
 
 
 class NumbersTest(unittest.TestCase):
@@ -36,7 +42,7 @@ class NumbersTest(unittest.TestCase):
             with self.subTest(name=name, value=value):
                 s = Settings({name: value})
                 self.assertEqual(s.conflicts(), [line])
-                self.assertEqual(s.wrong_numbers, [line])
+                self.assertEqual(s.written_wrong, [line])
 
     def test_a_value_its_explanation_rules_out_is_refused(self):
         # An impossible value started the service and failed far from the cause (every read failed with a
@@ -72,17 +78,16 @@ class NumbersTest(unittest.TestCase):
     def test_every_number_setting_is_read_by_the_one_reader_with_a_default_it_accepts(self):
         names = number_settings()
         self.assertGreaterEqual(len(names), 40)
-        self.assertEqual(Settings({}).wrong_numbers, [])
-        with open(settings_module.__file__, encoding="utf-8") as f:
-            self.assertNotRegex(f.read(), r"(int|float)\(g\(")        # no number parsed beside it
+        self.assertEqual(Settings({}).written_wrong, [])
+        self.assertNotRegex(settings_source(), r"(int|float)\(g\(")        # no number parsed beside it
         for name in names:
             with self.subTest(name=name):
                 wrong = Settings({name: "x"})
-                self.assertEqual(len(wrong.wrong_numbers), 1)
-                self.assertTrue(wrong.wrong_numbers[0].startswith(f"{name} must be a "))
+                self.assertEqual(len(wrong.written_wrong), 1)
+                self.assertTrue(wrong.written_wrong[0].startswith(f"{name} must be a "))
                 # read as its default: the same settings as an install without the line
-                self.assertEqual({k: v for k, v in vars(wrong).items() if k != "wrong_numbers"},
-                                 {k: v for k, v in vars(Settings({})).items() if k != "wrong_numbers"})
+                self.assertEqual({k: v for k, v in vars(wrong).items() if k != "written_wrong"},
+                                 {k: v for k, v in vars(Settings({})).items() if k != "written_wrong"})
 
     def test_values_that_work_today_still_do(self):
         s = Settings({"SUBSYNC_PORT": " 8791 ", "SUBSYNC_STORE_CAP_MB": "2.5", "SUBSYNC_DAILY_BUDGET_GB": "0.5",
@@ -99,6 +104,60 @@ class NumbersTest(unittest.TestCase):
                 self.assertEqual(Settings({name: default}).conflicts(), [], default)
                 if kind == "whole" and default:          # SUBSYNC_BACKUP_DAYS has none: empty is "not said"
                     self.assertTrue(default.isdecimal(), default)
+
+
+class SwitchesTest(unittest.TestCase):
+    # Any word but on, 1, true or yes was read as off without a word, so SUBSYNC_SKIP_AI=enabled turned that
+    # protection off; on or off in any of their words, empty off as before, any other word one line (the owner's)
+    def test_an_on_off_setting_written_wrong_is_one_plain_line_naming_it(self):
+        for name, value, attribute, default in (("SUBSYNC_SKIP_AI", "enabled", "skip_ai", True),
+                                                ("SUBSYNC_FAST_PATH", "y", "fast_path", True),
+                                                ("SUBSYNC_SNAP", "ture", "snap", True),
+                                                ("SUBSYNC_PENDING_ENTRY", "enabled", "pending_entry", False),
+                                                ("SUBSYNC_PUBLIC", "enabled", "public", False)):
+            with self.subTest(name=name, value=value):
+                s = Settings({name: value})
+                self.assertEqual(s.conflicts(), [f"{name} must be on or off."])
+                self.assertEqual(s.written_wrong, [f"{name} must be on or off."])
+                self.assertIs(getattr(s, attribute), default)      # read as its default, the start refused
+
+    def test_on_and_off_in_each_of_their_words_and_empty_still_work(self):
+        for value, on in (("on", True), (" ON ", True), ("1", True), ("true", True), ("Yes", True), ("off", False),
+                          ("Off", False), ("0", False), ("false", False), ("NO", False), ("", False), (" ", False)):
+            with self.subTest(value=value):
+                s = Settings({"SUBSYNC_SKIP_AI": value, "SUBSYNC_AUDIO_ROUTE": value})
+                self.assertEqual((s.skip_ai, s.audio_route, s.conflicts()), (on, on, []))
+
+    def test_every_on_off_setting_is_read_by_the_one_reader(self):
+        switches = re.findall(r'read\.switch\("(SUBSYNC_[A-Z0-9_]+)"\)', settings_source())
+        # every setting documented as on or off, but SUBSYNC_AUDIO_ON_PICK: the old setting's reading stays (below)
+        documented = {name for name, (default, _) in explain.SETTINGS.items() if default in ("on", "off")}
+        self.assertEqual(set(switches), documented - {"SUBSYNC_AUDIO_ON_PICK"})
+        self.assertEqual(len(switches), len(set(switches)))
+        self.assertNotRegex(settings_source(), r"_on\(g\(")             # no switch read beside it
+        for name in switches:
+            with self.subTest(name=name):
+                wrong = Settings({name: "x"})
+                self.assertEqual(wrong.written_wrong, [f"{name} must be on or off."])
+                self.assertEqual({k: v for k, v in vars(wrong).items() if k != "written_wrong"},
+                                 {k: v for k, v in vars(Settings({})).items() if k != "written_wrong"})
+
+    def test_the_old_audio_on_pick_setting_is_read_as_before(self):
+        # documented and kept: anything but on means open
+        for value, when in (("on", "pick"), ("pick", "open"), ("", "open")):
+            with self.subTest(value=value):
+                s = Settings({"SUBSYNC_AUDIO_ON_PICK": value})
+                self.assertEqual((s.audio_when, s.conflicts()), (when, []))
+
+    def test_the_start_says_a_misspelt_switch_before_what_must_be_set(self):
+        # read as off, a misspelt SUBSYNC_PUBLIC made a public instance ask for a self-hosted install's settings
+        from subsync import __main__ as entry
+        with mock.patch.dict(os.environ, {"SUBSYNC_PUBLIC": "enabled"}, clear=True), \
+                mock.patch.object(entry.logging, "basicConfig"), self.assertLogs("subsync", "INFO") as logs, \
+                self.assertRaises(SystemExit) as stopped:
+            entry.main()
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertEqual(logs.output, ["ERROR:subsync:not started: SUBSYNC_PUBLIC must be on or off."])
 
 
 class LanguagesTest(unittest.TestCase):

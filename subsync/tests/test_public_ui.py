@@ -62,6 +62,23 @@ class Tree(html.parser.HTMLParser):
         return re.sub(r"\s+", " ", " ".join(self.words))
 
 
+def css_rule(selector):
+    """The declarations of the stylesheet's rule for `selector`, written at the start of its own line."""
+    from subsync.ui import APP_CSS
+    return re.search(r"(?m)^" + re.escape(selector) + r"\{([^}]*)\}", APP_CSS).group(1)
+
+
+def css_media(query):
+    """The rules inside the stylesheet's @media block for `query`."""
+    from subsync.ui import APP_CSS
+    start = APP_CSS.index(f"@media {query}{{") + len(f"@media {query}{{")
+    depth, end = 1, start
+    while depth:
+        depth += {"{": 1, "}": -1}.get(APP_CSS[end], 0)
+        end += 1
+    return APP_CSS[start:end - 1]
+
+
 # The signed-up page's lines for the changes to a person's config, as the owner approved them
 CHANGES = ("Adds 1 subtitle source: AIOSubtitles (synced copies of the subtitles you already get)",
            "Removes 2 subtitle addons AIOSubtitles now searches itself: SubDL, OpenSubtitles",
@@ -328,7 +345,8 @@ class Visible(html.parser.HTMLParser):
         a = dict(attrs)
         if tag in ("script", "style"):
             self.skip += 1
-        for name in ("aria-label", "placeholder", "data-show", "data-hide", "data-done", "data-remove-label"):
+        for name in ("aria-label", "placeholder", "data-show", "data-hide", "data-show-label", "data-hide-label",
+                     "data-done", "data-remove-label"):
             if a.get(name):
                 self.found.append(a[name])
 
@@ -455,8 +473,11 @@ class LookTest(unittest.TestCase):
 
     def test_every_text_is_an_approved_text(self):
         # each piece a whole approved text, not a part of one (any fragment passed, even a single word), a
-        # value, or one of the few pieces inline markup cuts an approved text into
+        # value, or one of the few pieces inline markup cuts an approved text into; a Show/Hide button's spoken name
+        # is its words before its box's label, itself an approved text
+        from subsync import ui
         approved = set(approved_texts()) | split_pieces()
+        approved |= {words + text for words in (ui.SHOW, ui.HIDE) for text in approved}
         for name, text in every_page().items():
             for piece in Visible(text).found:
                 with self.subTest(page=name, text=piece[:60]):
@@ -467,6 +488,64 @@ class LookTest(unittest.TestCase):
         for piece in split_pieces():
             with self.subTest(piece=piece):
                 self.assertTrue(any(piece in text and piece != text for text in texts), piece)
+
+    def test_each_choice_is_named_by_its_title_alone(self):
+        # A tick box or an answer was named by its whole row, title and explanation, then described by the
+        # explanation again, so a screen reader read it twice ("Keep my password…" is about 700 characters)
+        from subsync import explain
+        for name, text in every_page().items():
+            tree = Tree(text)
+            for a in tree.all("input", type="checkbox") + tree.all("input", type="radio"):
+                with self.subTest(page=name, box=a["id"]):
+                    title = tree.text_of[a["aria-labelledby"]]
+                    self.assertTrue(title)
+                    for described in a.get("aria-describedby", "").split():
+                        self.assertNotIn(tree.text_of[described], title)
+        tree = Tree(every_page()["signup"])
+        box = tree.all("input", id="keep_password")[0]
+        self.assertEqual(tree.text_of[box["aria-labelledby"]],
+                         "Keep my password, so AIOSubtitles follows my config by itself")
+        self.assertEqual(tree.text_of[box["aria-describedby"]], explain.field_help("keep_password", settings()))
+
+    def test_on_phones_a_long_label_wraps_and_a_number_box_shrinks(self):
+        # At 320 px wide "Stop keeping my password" couldn't wrap, so every settings row ran 15 px into the
+        # side margin; setup's number boxes kept their typed width and did the same on its Limits pages (10-18 px)
+        self.assertIn("white-space:nowrap", css_rule(".btn"))          # wider, a label stays on one line
+        phone = css_media("(max-width:1023px),(max-height:599px)")
+        self.assertIn("\n  .btn{white-space:normal;text-align:center}\n", phone)
+        self.assertIn("\n  .num input{flex:1;width:0}\n", phone)
+
+    def test_a_focused_box_keeps_an_outline_high_contrast_mode_paints(self):
+        # These boxes dropped their outline and showed focus by a border colour and a shadow, which
+        # high-contrast mode replaces and removes: setup's number boxes looked the same focused or not
+        for selector in (".input:focus", ".sel select:focus", ".num:focus-within"):
+            with self.subTest(selector=selector):
+                self.assertTrue(css_rule(selector).startswith("outline:2px solid transparent;"), css_rule(selector))
+                self.assertIn("border-color:var(--accent-link);", css_rule(selector))   # the look without it the same
+
+    def test_in_high_contrast_mode_the_picked_value_takes_the_highlight(self):
+        # The picked segment of "Audio per file" kept only a background and a border colour, both replaced
+        # in high-contrast mode, so 0.5, 1, 2 and 4 GB looked alike (the step list's current step stays bold)
+        forced = css_media("(forced-colors:active)")
+        self.assertIn("\n  .seg input:checked+span{background:Highlight;border-color:Highlight;color:HighlightText}\n",
+                      forced)
+
+    def test_without_the_script_the_hidden_continue_bars_take_no_space(self):
+        # Each Continue was only made invisible, its bar keeping 86-112 px between the questions; the rule's
+        # [data-add] part never applied (that button is hidden until the script shows it)
+        from subsync.ui import APP_CSS
+        self.assertIn("\nhtml:not(.js) .screen:not(:last-child)>.actions{display:none}\n"
+                      "html:not(.js) .steps{visibility:hidden}\n", APP_CSS)
+        self.assertNotRegex(APP_CSS, r"html:not\(\.js\) \[data-")
+        # those bars hold Continue alone; the last screen's, Sign up and the note under it, stays
+        for name in ("signup", "signup-no-invite", "signup-audio"):
+            with self.subTest(page=name):
+                screens = re.findall(r'<section class="screen".*?</section>', every_page()[name], re.S)
+                for screen in screens[:-1]:
+                    self.assertRegex(screen, r'<div class="actions"><button class="btn primary" type="button" '
+                                             r'data-next>Continue<svg[^>]*><path[^>]*/></svg></button></div>'
+                                             r'</section>$')
+                self.assertIn("Sign up", re.search(r'<div class="actions">.*', screens[-1], re.S).group(0))
 
     def test_personal_pages_ask_not_to_be_indexed(self):
         pages = every_page()
@@ -1213,7 +1292,44 @@ class ScriptTest(unittest.TestCase):
         guard = re.search(r'form\.addEventListener\("submit", function \(e\) \{(?P<body>.*?)\}\);', APP_JS, re.S)
         self.assertIsNotNone(guard, "the sign-up form has no submit guard")
         self.assertRegex(guard["body"], r"^\s*if \(at === screens\.length - 1\) return;\s*e\.preventDefault\(\);\s*"
-                                        r"at \+= 1;\s*paint\(false\);\s*$")
+                                        r"enter\(at \+ 1\);\s*paint\(false\);\s*$")
+
+    def test_the_phones_back_goes_where_the_arrow_goes(self):
+        # The layer added no entry to the page's history, so the phone's Back button or gesture left the site
+        # and what was typed with it; each move to a screen is an entry now, and the arrow goes back through them too
+        from subsync.ui import APP_JS
+        self.assertRegex(APP_JS, r'var enter = function \(to\) \{\s*history\.pushState\(\{ screen: to, '
+                                 r'depth: depth\(\) \+ 1 \}, ""\);\s*at = to;\s*\};')
+        self.assertEqual(APP_JS.count("history.pushState("), 1)            # enter() is the one way forward
+        for move in ("enter(found < 0 ? 0 : found);",                      # opening
+                     "enter(Math.min(at + 1, screens.length - 1)); paint(false);",   # Continue
+                     "enter(at + 1);",                                     # Enter in a field
+                     "enter(screens.indexOf(screen));"):                   # a problem's link
+            with self.subTest(move=move):
+                self.assertEqual(APP_JS.count(move), 1)
+        self.assertNotRegex(APP_JS, r"\bat [-+]= 1")                         # no step around the history
+        self.assertIn('else if (t.hasAttribute("data-back") && layer.contains(t)) { e.preventDefault(); '
+                      'history.back(); }', APP_JS)
+        back = re.search(r'window\.addEventListener\("popstate", function \(e\) \{(?P<body>.*?)\n    \}\);', APP_JS,
+                         re.S)
+        self.assertIsNotNone(back, "nothing answers the phone's Back")
+        self.assertRegex(back["body"], r'^\s*if \(!body\.classList\.contains\("open"\)\) return;\s*'
+                                       r'var to = e\.state && e\.state\.screen;\s*'
+                                       r'if \(typeof to !== "number"\) \{ close\(\); return; \}\s*'
+                                       r'var back = to < at;\s*at = to;\s*paint\(back\);\s*$')
+        # Escape closes at once and goes back past the layer's entries; a page loaded again starts closed
+        self.assertRegex(APP_JS, r"var added = depth\(\);\s*close\(\);\s*if \(added\) history\.go\(-added\);")
+        self.assertRegex(APP_JS, r"var earlier = depth\(\);\s*if \(earlier\) history\.replaceState\(null, \"\"\);")
+        self.assertIn("if (earlier) history.go(-earlier);", APP_JS)
+
+    def test_a_show_button_says_what_it_does_next(self):
+        # The script switched the visible word only; the spoken name follows it, both from the page's words
+        from subsync.ui import APP_JS
+        reveal = re.search(r'each\("button\[data-reveal\]", function \(button\) \{.*?\n  \}\);', APP_JS, re.S).group(0)
+        self.assertIn('button.textContent = button.getAttribute(showing ? "data-show" : "data-hide");\n      '
+                      'button.setAttribute("aria-label", button.getAttribute(showing ? "data-show-label" : '
+                      '"data-hide-label"));', reveal)
+        self.assertNotIn("aria-pressed", APP_JS)                          # no pressed state: the label changes
 
     def test_the_script_writes_no_words_of_its_own(self):
         # The script wrote the remove button's "Remove: " itself, a copy of an approved word that could drift
@@ -1314,6 +1430,53 @@ class PartsTest(unittest.TestCase):
         changes = Tree(ui.config_changes([("Your config", [("+", "adds subsync")], "Nothing else.")]))
         self.assertIn("adds subsync", changes.text())
         self.assertEqual(changes.all("span", **{"class": "sign"})[0]["aria-hidden"], "true")
+
+    def test_the_config_changes_headings_are_one_level_under_the_steps(self):
+        # Each config's heading was an h3 right under setup's step heading (an h1); level 2 now, the same look:
+        # the setup page's own h2 size (.p-letter h2) comes before and is overridden, line height and spacing included
+        from subsync import ui
+        changes = ui.config_changes([("Your config", [("+", "x")], None), ("Its own", [("−", "y")], "z")])
+        self.assertEqual(re.findall(r"<(h\d)>", changes), ["h2", "h2"])
+        self.assertEqual(css_rule(".changes h2"),
+                         "font-weight:700;font-size:17px;line-height:inherit;letter-spacing:inherit")
+        self.assertNotIn(".changes h3", ui.APP_CSS)
+        self.assertLess(ui.APP_CSS.index("\n.p-settings h2,.p-letter h2{"), ui.APP_CSS.index("\n.changes h2{"))
+
+    def test_a_row_is_named_by_its_title_and_described_by_its_explanation(self):
+        # The row is still the label (a click anywhere on it ticks it); its control is named by the title (and
+        # tag) alone and described by the explanation, so a screen reader reads that once
+        from subsync import ui
+        text = ui.choice("c", "Title", "Help.", error_id="e")
+        tree = Tree(text)
+        box = tree.all("input", id="c")[0]
+        self.assertTrue(text.startswith('<label class="choice"><input type="checkbox" id="c" '))
+        self.assertEqual((box["aria-labelledby"], box["aria-describedby"]), ("c-title", "e c-help"))
+        self.assertEqual((tree.all("b", id="c-title"), tree.text_of["c-title"], tree.text_of["c-help"]),
+                         ([{"id": "c-title"}], "Title", "Help."))
+        text = ui.radio_row("r", "v", "Title", "Help.", tag="(tag)", note="Note.")
+        tree = Tree(text)
+        button = tree.all("input", id="r-v")[0]
+        self.assertTrue(text.startswith('<label class="way"><input type="radio" name="r" id="r-v" '))
+        self.assertEqual((button["aria-labelledby"], button["aria-describedby"]), ("r-v-title", "r-v-help r-v-note"))
+        self.assertEqual((tree.all("span", id="r-v-title")[0]["class"], tree.text_of["r-v-title"]),
+                         ("head", "Title(tag)"))
+
+    def test_a_show_button_is_named_by_its_box(self):
+        # Every such button was named "Show", two or three alike on one page in a list of its controls or to
+        # voice control; it names its box now, the visible word still Show (then Hide), no pressed state
+        from subsync import pages, ui
+        text = ui.field("pw", "Your AIOStreams password", "", kind="password", reveal=True)
+        button = Tree(text).all("button")[0]
+        self.assertEqual({k: v for k, v in button.items() if k.startswith(("aria-", "data-show", "data-hide"))},
+                         {"aria-controls": "pw", "aria-label": "Show: Your AIOStreams password", "data-show": "Show",
+                          "data-hide": "Hide", "data-show-label": "Show: Your AIOStreams password",
+                          "data-hide-label": "Hide: Your AIOStreams password"})
+        self.assertIn(">Show</button>", text)
+        named = lambda page: [a["aria-label"] for a in Tree(page).all("button") if "data-reveal" in a]  # noqa: E731
+        self.assertEqual(named(pages.signup_page(settings())), ["Show: Your AIOStreams password"])
+        self.assertEqual(named(every_page()["settings-tmdb-personal"]),
+                         ["Show: Your TMDB key", "Show: Your AIOStreams password"])
+        self.assertEqual(named(pages.delete_confirm_page()), ["Show: Your AIOStreams password (optional)"])
 
     def test_the_update_panel(self):
         from subsync import ui

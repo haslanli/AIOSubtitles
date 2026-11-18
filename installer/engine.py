@@ -177,7 +177,7 @@ def env_values(as_written=False):
 
 def env_settings():
     """subsync's settings as state/subsync.env starts it, for the questions that state one (explain.setup_help); a
-    number written wrong there reads as its default (Settings.wrong_numbers)."""
+    number or an on/off setting written wrong there reads as its default (Settings.written_wrong)."""
     return Settings(env_values())
 
 
