@@ -85,7 +85,8 @@
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && body.classList.contains("open")) close();
     });
-    // after a problem the page comes back with the layer open at the screen it is about; a link to #signup opens it
+    // after a problem the page comes back with the layer open at the screen it names (the first one it emptied) and the
+    // summary focused; a link to #signup opens it
     var openAt = body.getAttribute("data-open-at");
     if (openAt) open(null, openAt, true);
     else if (location.hash === "#signup") {

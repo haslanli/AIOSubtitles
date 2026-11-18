@@ -1187,12 +1187,13 @@ class PublicTextsTest(unittest.TestCase):
         from subsync import pages
         s = Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY, "SUBSYNC_PUBLIC_BASE": "https://x.test"})
         record = {"languages": ["eng"]}
-        for nbytes, shown in ((0, " 0 MB of 10000 MB read"), (20 * 1024, " 0.1 MB of"), (351 * 1024, " 0.3 MB of"),
+        # the limit with its thousands separator, as setup writes it
+        for nbytes, shown in ((0, " 0 MB of 10,000 MB read"), (20 * 1024, " 0.1 MB of"), (351 * 1024, " 0.3 MB of"),
                               (5 * 1024 * 1024, " 5.0 MB of"), (12 * 1024 * 1024, " 12 MB of")):
             with self.subTest(nbytes=nbytes):
                 html = pages.settings_page(s, record, {"files": 1, "bytes": nbytes}, "https://x.test/u/t/manifest.json")
                 text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))      # the value and its unit are two spans
-                self.assertRegex(text, r"(?<![\d.])" + re.escape(shown.strip()))   # the number whole, not a tail
+                self.assertRegex(text, r"(?<![\d.,])" + re.escape(shown.strip()))   # the number whole, not a tail
 
     def test_the_privacy_text_names_cloudflare_and_the_backups_before_how_long(self):
         # An instance with the owner's settings (SUBSYNC_FRONT_PROXY, SUBSYNC_BACKUP_DAYS) reads as before;

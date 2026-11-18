@@ -620,7 +620,8 @@ class AudioChoiceHttpTest(Base):
         self.assertEqual(code, 400)
         self.assertIsNone(token)
         self.assertIn("Choose one of the answers for files with no subtitles of their own.", text)
-        self.assertIn('data-open-at="config"', text)
+        self.assertIn('data-open-at="link"', text)       # the first emptied screen, its summary links on
+        self.assertIn('href="#audio"', text)
         self.assertEqual(self.fake.writes(), [])
         self.assertEqual(self.users.count(), 0)
 

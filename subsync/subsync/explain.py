@@ -1098,6 +1098,12 @@ PUBLIC_FIELDS = {
         "personal link stops working at once. Optional: with your AIOStreams password it also takes itself out of "
         "your AIOStreams config; without it, remove the AIOSubtitles addon there yourself. The password is used once "
         "and not stored. How subtitles were synced stays in the shared store: it belongs to files, not to you."),
+    # the same for a person with stored copies only, who has no config of AIOSubtitles' own to remove
+    "delete_stored": (
+        "Deletes everything AIOSubtitles keeps about you; your personal link stops working at once. Optional: with "
+        "your AIOStreams password it also takes itself out of your AIOStreams config; without it, remove the "
+        "AIOSubtitles addon there yourself. The password is used once and not stored. How subtitles were synced stays "
+        "in the shared store: it belongs to files, not to you."),
 }
 
 # Usenet on the public pages: why a ticked box made no Usenet config, the settings
@@ -1306,6 +1312,7 @@ PUBLIC_TEXTS = {
     "undone": "This can't be undone.",
     "not_found": ("If this was your personal link, its data may have been deleted, or the link was cut short: copy the "
                   "whole link again."),
+    "went_wrong": "AIOSubtitles ran into a problem on its side. Try again in a few minutes.",   # an unexpected failure
 }
 
 

@@ -478,12 +478,24 @@ class PublicHandler(Handler):
             return self._send(404, b"")
         return self._send(200, ui.font_bytes(found), "font/ttf", FONT_HEADERS)
 
+    def _browser(self):
+        """Whether a browser asked (it accepts a page): an error then gets a short page, where an app gets nothing."""
+        return "text/html" in (self.headers.get("Accept") or "")
+
     def _not_found(self):
         """404: a short page for a browser, nothing for an app. The same for any unknown address, a personal link
         nobody signed up with included, so the answer tells nothing about which links exist."""
-        if "text/html" in (self.headers.get("Accept") or ""):
+        if self._browser():
             return self._html(404, pages.not_found_page(self.service.s))
         return self._send(404, b"")
+
+    def _failed(self, path):
+        """500 after an unexpected failure: the "Something went wrong" page for a browser, a personal page
+        under a personal link; nothing for an app, as before."""
+        if not self._browser():
+            return self._send(500, b"")
+        personal = USER_PATH.match(path) is not None
+        return self._html(500, pages.error_page(settings=self.service.s, personal=personal), personal=personal)
 
     def _see(self, done):
         """After a save: the settings page again by its address, so reloading it sends nothing a second time."""
@@ -562,7 +574,7 @@ class PublicHandler(Handler):
             return None
         except Exception as e:
             log.warning("request failed: %s", type(e).__name__)
-            return self._send(500, b"")
+            return self._failed(path)
 
     def _signup(self):
         svc = self.service
@@ -575,9 +587,11 @@ class PublicHandler(Handler):
             svc.gate.check(svc.client_ip(self), form.get("invite"))
             result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout)
         except SignupError as e:
+            # too many attempts (429) or a full instance (503): entering the cleared boxes again only costs a try
             return self._html(e.code, pages.signup_page(svc.s, error=e.message, field=e.field,
                                                         order=_chosen(form, svc.s.max_languages),
-                                                        audio=form.get("audio")))
+                                                        audio=form.get("audio"), ticked=_ticked(form),
+                                                        retry=e.code not in (429, 503)))
         return self._html(200, pages.result_page(result, svc.s), personal=True)
 
     def _configure(self, token, method):
@@ -675,6 +689,12 @@ def _chosen(form, limit=MAX_LANGUAGES):
         return []                 # none chosen: show none ticked, as sent
     langs, problem = parse_languages(text or "", limit)
     return None if problem else [three for _, _, three in langs]
+
+
+def _ticked(form):
+    """The sign-up's boxes as a form left them, to show them so again after a problem: ticked is "on", as the
+    sign-up reads them."""
+    return {name: form.get(name) == "on" for name in pages.SIGNUP_BOXES}
 
 
 class _CappedServer(Server):

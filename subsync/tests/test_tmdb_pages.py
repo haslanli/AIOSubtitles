@@ -89,7 +89,11 @@ class PrivacyTest(unittest.TestCase):
 class SettingsRowTest(unittest.TestCase):
     def test_only_when_each_person_may_add_one(self):
         on = pages.settings_page(settings(SUBSYNC_TMDB_PERSONAL="on"), RECORD, USAGE, LINK, now=0)
-        self.assertIn("Your TMDB key (optional)", on)
+        # The box is required (the form only saves a key), so its label no longer says "(optional)"; the
+        # row's explanation says a key is
+        self.assertIn('<label for="tmdb_key">Your TMDB key</label>', on)
+        self.assertNotIn("Your TMDB key (optional)", on)
+        self.assertRegex(on, r'<input class="input mono" id="tmdb_key" name="tmdb_key" type="password" [^>]* required>')
         self.assertIn('name="tmdb_key"', on)
         self.assertIn('type="password"', on)
         self.assertIn('value="tmdb-key"', on)                          # the action

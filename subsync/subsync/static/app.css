@@ -231,8 +231,9 @@ body.open .layer::before,.layer:target::before{opacity:.62}
 body.open .sheet,.layer:target .sheet{transform:none}
 .sheet-top{position:sticky;top:-28px;z-index:2;display:flex;align-items:center;gap:16px;min-height:48px;margin:-28px -48px 0;
   padding:28px 48px 12px;background:var(--surface)}
-/* four segments: done ones soft blue, the current one blue and filling as its screens go by */
-.steps{flex:1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;list-style:none;padding:0}
+/* a segment per step (three without an invite code), the bar filled by them: done ones soft blue, the current one blue
+   and filling as its screens go by */
+.steps{flex:1;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:6px;list-style:none;padding:0}
 .steps li{font-size:13px;line-height:18px;color:var(--text-3);padding-top:10px;position:relative;white-space:nowrap}
 .steps li::before,.steps li i{content:"";position:absolute;left:0;top:0;height:3px;border-radius:2px}
 .steps li::before{right:0;background:var(--track)}
@@ -297,7 +298,8 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .row .about{grid-column:1/5}
 .row .about .help{margin-top:12px}
 .row .controls{grid-column:6/12;min-width:0}
-.row .controls>.actions:first-child{margin-top:0}
+/* a row's buttons with nothing above them line up with its heading; a settings form starts with its hidden action */
+.row .controls>.actions:first-child,.row .controls>input[type=hidden]:first-child+.actions{margin-top:0}
 .row .slots+.add{margin-top:14px;height:54px;padding:0 26px;font-size:19px}
 .forget .after{margin-top:12px}
 /* the small pages: one column of text */

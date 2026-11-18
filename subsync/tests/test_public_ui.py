@@ -109,6 +109,10 @@ def privacy_parts(s):
     return explain.privacy_parts(s, asked_sources(s, "series"))
 USAGE = {"files": 3, "bytes": 351 * 1024}
 HOSTILE = "<b onclick=\"x\">&'\""
+BOXES = ("add_addon", "clean_up", "usenet", "keep_password")         # the sign-up's boxes (pages.SIGNUP_BOXES)
+# a host allowing thousands: its settings, a record with Usenet on, and a day's use
+THOUSANDS = (settings(SUBSYNC_USER_FILES_PER_DAY="2000", SUBSYNC_USENET="on", SUBSYNC_USENET_LISTINGS_PER_DAY="1500"),
+             dict(RECORD, usenet_uuid="u"), {"files": 1200, "bytes": 9500 * 1024 * 1024})
 
 
 def every_page():
@@ -126,6 +130,10 @@ def every_page():
         "signup-error-password": pages.signup_page(s, error="Wrong.", field="password", order=["spa", "eng"]),
         "signup-error-languages": pages.signup_page(s, error="Wrong.", field="languages"),
         "signup-error-none": pages.signup_page(s, error="Wrong."),
+        # Every box as the person left it; a problem where trying again only costs a try
+        "signup-error-ticked": pages.signup_page(s, error="Wrong.", field="password",
+                                                 ticked=dict.fromkeys(BOXES, True)),
+        "signup-error-full": pages.signup_page(s, error="Wrong.", retry=False),
         "result": pages.result_page(result()),
         "result-manual": pages.result_page(result(added=False, manual=True, changes=[])),
         "result-unticked": pages.result_page(result(added=False, manual=False, changes=[])),
@@ -143,6 +151,8 @@ def every_page():
         "settings-stored": pages.settings_page(s, dict(RECORD, store_only=True), USAGE, LINK, now=0),
         "settings-five": pages.settings_page(settings(SUBSYNC_MAX_LANGUAGES="2"),
                                              dict(RECORD, languages=["eng", "spa", "fre"]), USAGE, LINK, now=0),
+        "settings-thousands": pages.settings_page(settings(SUBSYNC_USER_FILES_PER_DAY="2000"), RECORD, THOUSANDS[2],
+                                                  LINK, now=0),
         "delete": pages.delete_confirm_page(),
         "delete-error": pages.delete_confirm_page(error="Wrong.", field="delete"),
         "delete-stored": pages.delete_confirm_page(stored=True),
@@ -198,6 +208,9 @@ def every_page():
         "not-found-host": pages.not_found_page(settings(**HOST)),
         "not-found": pages.not_found_page(),
         "error": pages.error_page("Wrong."),
+        # The page a browser gets after an unexpected failure, and under a personal link
+        "error-unexpected": pages.error_page(settings=s),
+        "error-personal": pages.error_page(settings=s, personal=True),
     }
     for code in pages.DONE:
         out[f"settings-done-{code}"] = pages.settings_page(s, RECORD, USAGE, LINK, now=0,
@@ -276,8 +289,9 @@ def split_pieces():
     return {word, rest, "."}
 
 
-DYNAMIC = re.compile(r"^(\d+ of \d+|[\d.]+ MB of \d+ MB|English, Spanish(, French)?|Wrong\.|Detail\.|https://subs\.test/\S*"
-                     r"|Remove: \w+)$")
+COUNT = r"\d{1,3}(?:,\d{3})*"      # a figure with thousands separators, as the settings page writes it
+DYNAMIC = re.compile(rf"^({COUNT} of {COUNT}|(?:\d\.\d|{COUNT}) MB of {COUNT} MB|English, Spanish(, French)?|Wrong\."
+                     r"|Detail\.|https://subs\.test/\S*|Remove: \w+)$")
 
 
 class InLabels(html.parser.HTMLParser):
@@ -456,10 +470,22 @@ class LookTest(unittest.TestCase):
 
     def test_personal_pages_ask_not_to_be_indexed(self):
         pages = every_page()
-        for name in ("result", "settings", "delete", "deleted"):
+        for name in ("result", "settings", "delete", "deleted", "error-personal"):
             self.assertIn('<meta name="robots" content="noindex">', pages[name])
-        for name in ("signup", "privacy", "not-found"):
+        for name in ("signup", "privacy", "not-found", "error-unexpected"):
             self.assertNotIn("noindex", pages[name])
+
+    def test_the_step_bar_has_a_segment_per_step(self):
+        # Four fixed columns; without an invite code the three steps left the last quarter empty
+        from subsync import ui
+        steps = re.search(r"(?m)^\.steps\{([^}]*)\}", ui.APP_CSS).group(1)
+        self.assertIn("display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);", steps)
+        self.assertNotIn("grid-template-columns", steps)
+        pages = every_page()
+        for name, count in (("signup", 4), ("signup-no-invite", 3)):
+            with self.subTest(page=name):
+                bar = re.search(r'<ol class="steps" id="steps">(.*?)</ol>', pages[name]).group(1)
+                self.assertEqual(bar.count("<li>"), count)
 
     def test_every_value_is_escaped(self):
         from subsync import pages
@@ -596,6 +622,64 @@ class SignupPageTest(unittest.TestCase):
         self.assertIn("Wrong.", tree.text_of["problem"])
         self.assertFalse([a for a in tree.all("input") if a.get("aria-invalid")])
 
+    def test_after_a_problem_the_layer_opens_at_the_first_emptied_screen(self):
+        # It opened at the screen with the problem, past the emptied invite code and link, so going on sent
+        # them empty and the retry failed too, using another of the hour's attempts
+        from subsync import pages
+        for s, first in ((settings(SUBSYNC_PUBLIC_INVITE="code"), "invite"), (settings(), "link"),
+                         (settings(SUBSYNC_AUDIO_ROUTE="on"), "link")):
+            for field in ("invite", "link", "password", "languages", "audio", None):
+                if field == "invite" and first != "invite" or field == "audio" and not s.audio_route:
+                    continue
+                with self.subTest(first=first, field=field):
+                    tree = Tree(pages.signup_page(s, error="Wrong.", field=field))
+                    self.assertEqual(tree.all("body")[0]["data-open-at"], first)
+                    self.assertIn("open", tree.all("body")[0]["class"])
+                    # the summary on top, its link to the field with the problem
+                    self.assertEqual([a["href"] for a in tree.all("a") if a.get("href", "").startswith("#")
+                                      and a["href"] != "#signup"], [f"#{field}"] if field else [])
+        self.assertNotIn("data-open-at", self.page())                             # a fresh page: the layer closed
+
+    def test_the_enter_them_again_note_only_where_trying_again_makes_sense(self):
+        # It also asked for them again after too many attempts or on a full instance
+        from subsync import explain
+        note = explain.PUBLIC_TEXTS["kept_note"]
+        self.assertIn(note, Tree(self.page(error="Wrong.", field="password")).text_of["problem"])
+        self.assertIn(note, Tree(self.page(error="Wrong.")).text_of["problem"])
+        problem = Tree(self.page(error="Wrong.", retry=False)).text_of["problem"]
+        self.assertIn("Wrong.", problem)
+        self.assertNotIn(note, problem)
+
+    def test_after_a_problem_the_boxes_come_back_as_they_were_left(self):
+        # "Add AIOSubtitles…" came back ticked and the other three unticked, whatever the person had chosen
+        from subsync import pages
+        s = settings(SUBSYNC_USENET="on", SUBSYNC_USENET_LISTINGS_PER_DAY="5")
+
+        def ticked(text):
+            tree = Tree(text)
+            return {name: "checked" in tree.all("input", type="checkbox", id=name)[0] for name in BOXES}
+        self.assertEqual(pages.SIGNUP_BOXES, {"add_addon": True, "clean_up": False, "usenet": False,
+                                              "keep_password": False})
+        self.assertEqual(tuple(pages.SIGNUP_BOXES), BOXES)
+        self.assertEqual(ticked(pages.signup_page(s)), pages.SIGNUP_BOXES)                      # a fresh page
+        self.assertEqual(ticked(pages.signup_page(s, error="Wrong.")), pages.SIGNUP_BOXES)      # nothing sent back
+        for left in ({name: not on for name, on in pages.SIGNUP_BOXES.items()}, dict.fromkeys(BOXES, True),
+                     dict.fromkeys(BOXES, False)):
+            with self.subTest(left=left):
+                self.assertEqual(ticked(pages.signup_page(s, error="Wrong.", field="password", ticked=left)), left)
+
+    def test_the_privacy_link_above_sign_up_opens_in_a_new_tab(self):
+        # It opened in the same tab, and coming back the sign-up was closed and empty
+        tree = Tree(self.page())
+        links = [a for a in tree.all("a") if a.get("href") == "/privacy"]
+        header, above = links
+        self.assertEqual(header, {"href": "/privacy"})                            # the header's link is unchanged
+        self.assertEqual(above, {"href": "/privacy", "target": "_blank", "rel": "noopener",
+                                 "aria-label": "Privacy (opens in a new tab)"})
+        last = re.search(r'<section class="screen" data-screen="config".*?</section>', self.page(), re.S).group(0)
+        self.assertIn('<a href="/privacy" target="_blank" rel="noopener" aria-label="Privacy (opens in a new tab)">'
+                      'Privacy</a>.</p>', last)
+
     def test_before_you_start_names_the_attempt_limit_from_the_setting(self):
         from subsync import pages
         self.assertIn("Each try counts: 9 sign-up attempts per address in an hour.",
@@ -667,8 +751,28 @@ class SettingsPageTest(unittest.TestCase):
     def test_usage_and_the_reset_time(self):
         text = Tree(self.page(now=86400 * 5 + 3600)).text()
         self.assertIn("3 of 200", text)
-        self.assertIn("0.3 MB of 10000 MB", text)
+        self.assertIn("0.3 MB of 10,000 MB", text)
         self.assertIn("Resets at 00:00 UTC, in 23 h.", text)
+
+    def test_the_figures_have_thousands_separators_as_setup_writes_them(self):
+        # "0.3 MB of 10000 MB" here, "10,000" on setup's limits page and in the explanations
+        from subsync import pages
+        s, record, usage = THOUSANDS
+        page = pages.settings_page(s, record, usage, LINK, now=0, usenet_usage={"listings": 1200, "stopped": False})
+        values = re.findall(r'<div class="gauge[^"]*"><p><b>([^<]*)</b>', page)
+        self.assertEqual(values, ["1,200 of 2,000", "9,500 MB of 10,000 MB", "1,200 of 1,500"])
+        self.assertEqual(pages._megabytes(9500 * 1024 * 1024), "9,500")
+        self.assertEqual(pages._megabytes(5 * 1024 * 1024), "5.0")              # under 10 MB: one decimal, as before
+
+    def test_the_delete_button_lines_up_with_its_heading(self):
+        # The rule that lines a row's buttons up with its heading never matched a settings form, which starts
+        # with its hidden action: "Delete my data…" sat 28 px lower
+        from subsync import ui
+        self.assertIn("\n.row .controls>.actions:first-child,.row .controls>input[type=hidden]:first-child+.actions"
+                      "{margin-top:0}\n", ui.APP_CSS)
+        row = re.search(r'<section class="grid12 row" aria-labelledby="delete-h">.*?</section>', self.page(), re.S)
+        self.assertRegex(row.group(0), r'</div><form class="controls" method="post" action="configure"><input '
+                                       r'type="hidden" name="action" value="delete-confirm"><div class="actions">')
 
     def test_the_reset_time_reads_plainly(self):
         from subsync.pages import reset_in
@@ -833,12 +937,13 @@ class AudioChoiceTest(unittest.TestCase):
         signup = Tree(self.config_screen(pages.signup_page(self.on())))
         self.assertEqual(signup.text_of["audio-open-note"], explain.PUBLIC_AUDIO["opened_note"])
 
-    def test_after_a_problem_the_answer_is_kept_and_the_layer_opens_at_its_screen(self):
+    def test_after_a_problem_the_answer_is_kept_and_the_summary_links_to_its_screen(self):
         from subsync import pages
         text = pages.signup_page(self.on(), error="Wrong.", field="audio", audio="open")
         self.assertEqual([v for v, chosen in self.radios(text) if chosen], ["open"])
         tree = Tree(text)
-        self.assertEqual(tree.all("body")[0]["data-open-at"], "config")
+        # The layer opens at the first emptied screen (the link: no invite code here), not the config screen
+        self.assertEqual(tree.all("body")[0]["data-open-at"], "link")
         self.assertEqual([a["href"] for a in tree.all("a") if a.get("href") == "#audio"], ["#audio"])
         for audio in ("loud", None, "open"):
             with self.subTest(audio=audio):
@@ -897,6 +1002,46 @@ class OtherPagesTest(unittest.TestCase):
         self.assertEqual(tree.all("input", type="hidden", name="action")[0]["value"], "delete")
         stored = Tree(pages.delete_confirm_page(stored=True)).text()
         self.assertNotIn(explain.PUBLIC_DELETE_LIST["config"], stored)       # no config of its own to remove
+
+    def test_for_stored_copies_only_delete_doesnt_say_it_removes_a_config(self):
+        # The delete step's list left the config out, but the explanation under it, and the settings page's
+        # Delete row, still said Delete "removes its own config from your AIOStreams"
+        from subsync import explain, pages
+        stored = ("Deletes everything AIOSubtitles keeps about you; your personal link stops working at once. "
+                  "Optional: with your AIOStreams password it also takes itself out of your AIOStreams config; without "
+                  "it, remove the AIOSubtitles addon there yourself. The password is used once and not stored. How "
+                  "subtitles were synced stays in the shared store: it belongs to files, not to you.")
+        others = ("Deletes everything AIOSubtitles keeps about you and removes its own config from your AIOStreams; "
+                  "your personal link stops working at once. Optional: with your AIOStreams password it also takes "
+                  "itself out of your AIOStreams config; without it, remove the AIOSubtitles addon there yourself. The "
+                  "password is used once and not stored. How subtitles were synced stays in the shared store: it "
+                  "belongs to files, not to you.")
+        self.assertEqual(explain.PUBLIC_FIELDS["delete_stored"], stored)
+        self.assertEqual(explain.PUBLIC_FIELDS["delete"], others)
+        s = settings()
+        for is_stored, help_text in ((True, stored), (False, others)):
+            with self.subTest(stored=is_stored):
+                step = Tree(pages.delete_confirm_page(stored=is_stored, settings=s))
+                row = Tree(pages.settings_page(s, dict(RECORD, store_only=is_stored), USAGE, LINK, now=0))
+                self.assertEqual(step.text_of["delete-help"], help_text)
+                self.assertEqual(row.text_of["delete-help"], help_text)
+                said = step.text() + row.text()
+                self.assertEqual("removes its own config" in said, not is_stored)
+
+    def test_an_unexpected_failure_has_its_page(self):
+        # The page existed but was never shown; a browser got a blank page
+        from subsync import explain, pages
+        self.assertEqual(explain.PUBLIC_TEXTS["went_wrong"],
+                         "AIOSubtitles ran into a problem on its side. Try again in a few minutes.")
+        for personal in (False, True):
+            with self.subTest(personal=personal):
+                tree = Tree(pages.error_page(settings=settings(SUBSYNC_CONTACT=CONTACT), personal=personal))
+                text = tree.text()
+                self.assertIn("Something went wrong " + explain.PUBLIC_TEXTS["went_wrong"] + " Back to the start page",
+                              text)
+                self.assertEqual([a["href"] for a in tree.all("a")], ["/", "/privacy", CONTACT, "/"])
+                self.assertEqual(bool(tree.all("meta", name="robots", content="noindex")), personal)
+        self.assertIn("Wrong.", Tree(pages.error_page("Wrong.")).text())          # a page given its own line
 
     def test_deleted_page_says_what_is_left_to_do(self):
         from subsync import explain, pages
@@ -1448,6 +1593,85 @@ class RoutesTest(unittest.TestCase):
         code, body, _ = http(self.b.base + "/signup", form(link="", password="x"))
         self.assertEqual(code, 429)
         self.assertIn(b"Try again in an hour.", body)
+
+    def test_after_a_problem_the_boxes_are_as_sent_and_the_note_only_where_a_retry_helps(self):
+        # The boxes came back as on a fresh page;: the layer opened past the emptied link, and "enter
+        # them again" followed too many attempts too
+        import json
+        from subsync import explain
+        from test_public_http import INSTANCE, VIEWER, Base, form, http
+        note = explain.PUBLIC_TEXTS["kept_note"]
+        b = Base()               # an instance that shows all four boxes, with eight attempts an hour
+        b.start(SUBSYNC_EXTRA_SOURCES="osv3", SUBSYNC_RECHECK_HOURS="24", SUBSYNC_USENET="on",
+                SUBSYNC_USENET_LISTINGS_PER_DAY="5", SUBSYNC_SIGNUPS_PER_HOUR="8")
+        self.addCleanup(b.tearDown)
+        uuid = b.fake.add(json.loads(json.dumps(VIEWER)), "the-password")
+        link, wrong = f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "not-the-password-0435"
+        for sent in ({}, {"add_addon": "on"}, {"add_addon": "on", "clean_up": "on", "usenet": "on"},
+                     {"keep_password": "on", "usenet": "on"}, {"add_addon": "yes", "keep_password": ""}):
+            with self.subTest(sent=sent):
+                code, body, _ = http(b.base + "/signup", form(link=link, password=wrong, languages="English", **sent))
+                self.assertEqual(code, 400)
+                tree = Tree(body.decode())
+                self.assertIn("didn't accept this password", tree.text_of["problem-message"])
+                self.assertEqual({name: "checked" in tree.all("input", id=name)[0] for name in BOXES},
+                                 {name: sent.get(name) == "on" for name in BOXES})     # ticked is "on", as signup reads
+                self.assertEqual(tree.all("body")[0]["data-open-at"], "link")
+                self.assertIn(note, tree.text_of["problem"])
+                self.assertNotIn(wrong.encode(), body)                          # the password isn't sent back
+        while True:                       # the hour's attempts used up: trying again only costs a try
+            code, body, _ = http(b.base + "/signup", form(link=link, password=wrong, languages="English"))
+            if code == 429:
+                break
+            self.assertEqual(code, 400)
+        problem = Tree(body.decode()).text_of["problem"]
+        self.assertIn("Too many sign-up attempts", problem)
+        self.assertNotIn(note, problem)
+
+    def test_a_full_instance_asks_for_nothing_again(self):
+        # "enter them again" followed "AIOSubtitles is full…", where a retry only costs a try
+        from subsync import explain
+        from test_public_http import Base, form, http
+        full = Base()
+        full.start(SUBSYNC_MAX_USERS="0")
+        try:
+            code, body, _ = http(full.base + "/signup", form(link="x", password="x", languages="English"))
+        finally:
+            full.tearDown()
+        self.assertEqual(code, 503)
+        problem = Tree(body.decode()).text_of["problem"]
+        self.assertIn("AIOSubtitles is full for now.", problem)
+        self.assertNotIn(explain.PUBLIC_TEXTS["kept_note"], problem)
+
+    def test_an_unexpected_failure_gives_a_browser_the_error_page_and_an_app_nothing(self):
+        # A browser got an empty 500, a blank page with no way back; the "Something went wrong" page was never
+        # shown
+        import sqlite3
+        from unittest import mock
+        from subsync import explain, pages
+        from test_public_http import form, http
+        browser = {"Accept": "text/html,application/xhtml+xml"}
+        line = explain.PUBLIC_TEXTS["went_wrong"]
+        _, _, _, _, token = self.b.sign_up()
+        broken = mock.Mock(side_effect=sqlite3.OperationalError("database is locked"))
+        cases = (("/privacy", None, mock.patch.object(pages, "privacy_page", broken), False),
+                 (f"/u/{token}/configure", None, mock.patch.object(pages, "settings_page", broken), True),
+                 (f"/u/{token}/configure", form(action="languages", languages="English"),
+                  mock.patch("subsync.public.set_languages", broken), True),
+                 ("/signup", form(link="x", password="x", languages="English"),
+                  mock.patch("subsync.public.signup", broken), False))
+        for path, data, patch, personal in cases:
+            with self.subTest(path=path, posted=bool(data)), patch:
+                code, body, headers = http(self.b.base + path, data, headers=browser)
+                self.assertEqual(code, 500)
+                text = Tree(body.decode()).text()
+                self.assertIn("Something went wrong " + line + " Back to the start page", text)
+                self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+                self.assertEqual(headers["Cache-Control"], "no-store, no-transform")
+                self.assertEqual(headers.get("X-Robots-Tag"), "noindex" if personal else None)
+                self.assertEqual(b'<meta name="robots" content="noindex">' in body, personal)
+                self.assertEqual(http(self.b.base + path, data)[:2], (500, b""))         # an app: nothing, as before
+        self.assertEqual(self.b.logs.lines.count("request failed: OperationalError"), 8)
 
 
 if __name__ == "__main__":

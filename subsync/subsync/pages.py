@@ -35,14 +35,14 @@ UI_WORDS = (
     "Sign up again", "to use AIOSubtitles again.", "What AIOSubtitles reads and keeps", "This page doesn't exist",
     "to start over.", "Something went wrong", "Back to the start page", "https://…/stremio/…/manifest.json",
     "Signed up · AIOSubtitles", "Settings · AIOSubtitles", "Delete · AIOSubtitles", "Deleted · AIOSubtitles",
-    "Privacy · AIOSubtitles", "Not found · AIOSubtitles",
+    "Privacy · AIOSubtitles", "Not found · AIOSubtitles", "Privacy (opens in a new tab)",
     # Usenet
     "Sync Usenet files too", "Usenet", "searches used today", "search used today",
     # files with no subtitles of their own: the question, its answers, the settings row's button
     "Files with no subtitles of their own", "Off", "On, when I pick the file (recommended)",
     "On, as soon as a file is opened (not recommended)", "Save answer",
     # a person's own TMDB key (when the instance asks each person for one), and TMDB's logo's name
-    "Original languages", "Your TMDB key (optional)", "Save key", "Remove key", "TMDB",
+    "Original languages", "Your TMDB key", "Save key", "Remove key", "TMDB",
 )
 LINK_PLACEHOLDER = "https://…/stremio/…/manifest.json"
 
@@ -111,6 +111,9 @@ def _problem(error, field, title, fields=(), extra=""):
 
 STEPS = ("Invite", "AIOStreams", "Languages", "Config")
 STEP_OF = {"invite": "Invite", "link": "AIOStreams", "password": "AIOStreams", "languages": "Languages", "config": "Config"}
+# The sign-up's boxes and whether each is ticked on a fresh page; after a problem each comes back as the person left it
+# (none is secret)
+SIGNUP_BOXES = {"add_addon": True, "clean_up": False, "usenet": False, "keep_password": False}
 
 
 def _headline():
@@ -131,19 +134,24 @@ def _screen(name, steps, fill, content, last=False):
     """One screen of the sign-up: its question, field or choices, Continue (Sign up on the last). `fill`: how much of
     its step's segment is filled once it shows (50 or 100)."""
     step = steps.index(STEP_OF[name])
+    # the Privacy link right above Sign up opens in a new tab, so the sign-up keeps what was typed
     action = (ui.button("Sign up", "primary", type="submit", arrow=True)
               + f"<p class=\"after\">{e(explain.PUBLIC_TEXTS['password_once'])} What AIOSubtitles reads and keeps: "
-              "<a href=\"/privacy\">Privacy</a>.</p>") if last else ui.button("Continue", "primary", attrs="data-next",
-                                                                              arrow=True)
+              "<a href=\"/privacy\" target=\"_blank\" rel=\"noopener\" aria-label=\"Privacy (opens in a new tab)\">"
+              "Privacy</a>.</p>") if last else ui.button("Continue", "primary", attrs="data-next", arrow=True)
     return (f"<section class=\"screen\" data-screen=\"{name}\" data-step=\"{step}\" data-fill=\"{fill}\">{content}"
             f"<div class=\"actions\">{action}</div></section>")
 
 
-def signup_page(settings, error=None, field=None, order=None, audio=None):
+def signup_page(settings, error=None, field=None, order=None, audio=None, ticked=None, retry=True):
     """The start page and the sign-up layer. After a problem the layer is open with the summary first and the field
-    marked; the languages keep their order, and the answer for files with no subtitles of their own (`audio`)
-    stays picked; the link, the password and the invite code are never sent back."""
+    marked; the languages keep their order, the answer for files with no subtitles of their own (`audio`) stays
+    picked and the boxes stay as they were ticked (`ticked`: SIGNUP_BOXES' names, each True or False; their defaults
+    when None); the link, the password and the invite code are never sent back, so the layer opens at the first of
+    them. `retry`: whether entering them again makes sense, as the note under the problem then asks (not
+    after too many attempts or on a full instance)."""
     order = [DEFAULT_LANGUAGE] if order is None else order
+    ticked = SIGNUP_BOXES if ticked is None else ticked
     limit = settings.max_languages      # 1 to aiosconfig.MAX_LANGUAGES: the service doesn't start with another value
     steps = STEPS if settings.invite else STEPS[1:]
     # the summary sits right above every screen: a field with the problem is marked and described by it
@@ -160,28 +168,30 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
     screens.append(_screen("password", steps, 100, ui.field(
         "password", "Your AIOStreams password", explain.PUBLIC_FIELDS["password"], kind="password", mono=True,
         question=True, reveal=True, error_ref=err("password"), attrs="required autocomplete=\"off\"")
-        + _choices(*_keep_password(settings))))
+        + _choices(*_keep_password(settings, ticked["keep_password"]))))
     screens.append(_screen("languages", steps, 100,
                            "<h2 class=\"q\" id=\"languages-q\">Languages</h2>"
                            + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>"
                            + ui.language_slots(_CHOICES, order, limit, "languages-q", "languages-help",
                                                err("languages"))))
-    usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day)),) \
-        if usenet_allowed(settings) else ()
+    usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day),
+                        checked=ticked["usenet"]),) if usenet_allowed(settings) else ()
     # With the instance's audio route on, each person answers for files with no subtitles of their own
     asks_audio = bool(audio_answers(settings))
     # the clean-up only where the instance asks one of those addons' sites itself
     cleanable = cleanable_presets(settings)
     clean_up = (ui.choice("clean_up", "Remove the subtitle addons AIOSubtitles now searches itself",
-                          explain.clean_up_help(cleanable), needs="add_addon"),) if cleanable else ()
+                          explain.clean_up_help(cleanable), checked=ticked["clean_up"], needs="add_addon"),) \
+        if cleanable else ()
     screens.append(_screen("config", steps, 100, "<h2 class=\"q\">Your AIOStreams config</h2>" + ui.choices(
-        ui.choice("add_addon", "Add AIOSubtitles to my AIOStreams config", explain.PUBLIC_FIELDS["add_addon"], checked=True),
+        ui.choice("add_addon", "Add AIOSubtitles to my AIOStreams config", explain.PUBLIC_FIELDS["add_addon"],
+                  checked=ticked["add_addon"]),
         *clean_up, *usenet)
         + (_audio_group(settings, audio, error_id=err("audio")) if asks_audio else ""), last=True))
     fields = ("link", "password", "languages") + (("invite",) if settings.invite else ()) \
         + (("audio",) if asks_audio else ())
     problem = _problem(error, field, "Sign-up didn't go through", fields,
-                       extra=f"<p>{e(explain.PUBLIC_TEXTS['kept_note'])}</p>")
+                       extra=f"<p>{e(explain.PUBLIC_TEXTS['kept_note'])}</p>" if retry else "")
     # without the script the arrow is a plain link back to the start page
     arrow_back = (f"<a class=\"icon-btn\" href=\"/\" data-back aria-label=\"Back\">{ui.BACK}</a>")
     # the layer is the dialog; the form inside keeps its own role (ARIA in HTML allows a form no dialog role)
@@ -202,10 +212,11 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
             f"<div class=\"dock\">{opener}</div>{layer}")
     if not error:
         return ui.page("AIOSubtitles", body, "start")
-    # the layer comes back open, at the screen with the problem; the script takes it from there
-    at = field if field in fields else ("invite" if settings.invite else "link")
-    at = "config" if at == "audio" else at
-    return ui.page("AIOSubtitles", body, "start", body_attrs=f" data-open-at=\"{e(at)}\"", opened=True)
+    # the layer comes back open at the first screen whose box comes back empty (the invite code where one is asked, else
+    # the link), so going on from there fills them all again; the summary on top links to the field with the
+    # problem. The script takes it from there.
+    at = "invite" if settings.invite else "link"
+    return ui.page("AIOSubtitles", body, "start", body_attrs=f" data-open-at=\"{at}\"", opened=True)
 
 
 # ------------------------------------------------------------------------------------------- signed up
@@ -264,11 +275,11 @@ def result_page(result, settings=None):
 
 def _megabytes(nbytes):
     """A read amount in the unit of SUBSYNC_USER_DAILY_MB (settings.MB): one decimal under 10 MB (at least 0.1 when
-    anything was read), whole MB from 10 MB."""
+    anything was read), whole MB from 10 MB, with thousands separators as setup writes them ("9,500")."""
     mb = nbytes / MB
     if nbytes <= 0:
         return "0"
-    return f"{max(mb, 0.1):.1f}" if mb < 10 else f"{mb:.0f}"
+    return f"{max(mb, 0.1):.1f}" if mb < 10 else f"{mb:,.0f}"
 
 
 def reset_in(now):
@@ -384,8 +395,9 @@ def _tmdb_row(settings, record, error=None):
         return ""
     remove = _form("tmdb-key-remove", "<div class=\"actions\">" + ui.button("Remove key", "secondary", type="submit")
                    + "</div>", cls="forget") if kept else ""
-    # the explanation on the left, as the other rows have it; the box is described by it
-    save = _form("tmdb-key", ui.field("tmdb_key", "Your TMDB key (optional)", "", kind="password", mono=True,
+    # the explanation on the left, as the other rows have it; the box is described by it. The box is required (the form
+    # only saves a key), so its label doesn't call it optional; the explanation says a key is
+    save = _form("tmdb-key", ui.field("tmdb_key", "Your TMDB key", "", kind="password", mono=True,
                                       reveal=True, error=error, attrs="autocomplete=\"off\" spellcheck=\"false\" required")
                  + f"<div class=\"actions\">{ui.button('Save key', 'primary', type='submit')}</div>", cls="") if asks else ""
     return _row("tmdb-h", "Original languages",
@@ -424,13 +436,14 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
         + (ui.note("warn", texts["limit_reached"], "Today's limit is reached") if full and not stored else "") \
         + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages")
                    + (("audio",) if audio_answers(settings) else ()) + (("tmdb_key",) if personal_tmdb(settings) else ()))
+    # the figures with thousands separators, as setup writes them
     today = "" if stored else (
         "<section class=\"today\" aria-labelledby=\"today-h\"><h2 id=\"today-h\">Today</h2>"
-        + ui.gauge(f"{usage['files']} of {files_limit}", "new files", _share(usage["files"], files_limit),
+        + ui.gauge(f"{usage['files']:,} of {files_limit:,}", "new files", _share(usage["files"], files_limit),
                    usage["files"] >= files_limit)
-        + ui.gauge(f"{_megabytes(usage['bytes'])} MB of {bytes_limit / MB:.0f} MB", "read",
+        + ui.gauge(f"{_megabytes(usage['bytes'])} MB of {bytes_limit / MB:,.0f} MB", "read",
                    _share(usage["bytes"], bytes_limit), usage["bytes"] >= bytes_limit)
-        + (ui.gauge(f"{usenet_usage['listings']} of {settings.usenet_listings_per_day}",
+        + (ui.gauge(f"{usenet_usage['listings']:,} of {settings.usenet_listings_per_day:,}",
                     f"{explain.plural(settings.usenet_listings_per_day, 'search', 'searches')} used today",
                     _share(usenet_usage["listings"], settings.usenet_listings_per_day),
                     usenet_usage["listings"] >= settings.usenet_listings_per_day)
@@ -470,8 +483,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                                            checked=bool(record.get("usenet"))),) if usenet_allowed(settings) else ()))
                    + f"<div class=\"actions\">{ui.button('Refresh', 'primary', type='submit')}</div>", cls="")
                    + forget + "</div>")
-    delete = _row("delete-h", "Delete my data",
-                  f"<p class=\"help\" id=\"delete-help\">{e(explain.PUBLIC_FIELDS['delete'])}</p>",
+    delete = _row("delete-h", "Delete my data", f"<p class=\"help\" id=\"delete-help\">{e(_delete_help(stored))}</p>",
                   _form("delete-confirm", "<div class=\"actions\">" + ui.button(
                       "Delete my data…", "danger", type="submit", attrs="aria-describedby=\"delete-help\"") + "</div>"))
     body = (f"<div class=\"wrap\">{_top(settings)}<main><h1>Your AIOSubtitles</h1>"
@@ -499,12 +511,18 @@ def _letter(title, heading, content, personal=False, start="/", settings=None, c
     return ui.page(title, body, "letter", personal=personal)
 
 
+def _delete_help(stored):
+    """What Delete does, as the delete step and the settings page's Delete row say it: without removing a config of
+    AIOSubtitles' own for a person with stored copies only (`stored`), who has none."""
+    return explain.PUBLIC_FIELDS["delete_stored" if stored else "delete"]
+
+
 def delete_confirm_page(error=None, field=None, stored=False, settings=None):
     """The delete step. `stored`: a person with stored copies only has no config of AIOSubtitles' own to remove."""
     gone = [line for key, line in explain.PUBLIC_DELETE_LIST.items() if not (stored and key == "config")]
     content = (_problem(error, field, "Nothing was deleted", ("delete",))
                + f"<div class=\"body\"><div><p class=\"lead\">{e(explain.PUBLIC_TEXTS['undone'])}</p>{ui.dots(gone)}</div></div>"
-               + _form("delete", ui.field("delete", "Your AIOStreams password (optional)", explain.PUBLIC_FIELDS["delete"], name="password",
+               + _form("delete", ui.field("delete", "Your AIOStreams password (optional)", _delete_help(stored), name="password",
                           kind="password", mono=True, reveal=True,
                           error_ref="problem-message" if error and field == "delete" else None,
                           attrs="autocomplete=\"off\"")
@@ -548,7 +566,9 @@ def not_found_page(settings=None):
     return _letter("Not found · AIOSubtitles", "This page doesn't exist", content, settings=settings)
 
 
-def error_page(message, settings=None):
-    content = (f"<div class=\"notes\">{ui.note('problem', message, role='alert')}</div>"
-               "<div class=\"body\"><p><a href=\"/\">Back to the start page</a></p></div>")
-    return _letter("AIOSubtitles", "Something went wrong", content, settings=settings)
+def error_page(message=None, settings=None, personal=False):
+    """The page a browser gets when something fails unexpectedly: `message`, by default the line that says
+    the problem is on AIOSubtitles' side; `personal`: under a personal link, so it asks not to be indexed."""
+    content = (f"<div class=\"notes\">{ui.note('problem', message or explain.PUBLIC_TEXTS['went_wrong'], role='alert')}"
+               "</div><div class=\"body\"><p><a href=\"/\">Back to the start page</a></p></div>")
+    return _letter("AIOSubtitles", "Something went wrong", content, personal=personal, settings=settings)
