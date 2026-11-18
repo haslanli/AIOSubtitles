@@ -209,6 +209,28 @@ DYNAMIC = re.compile(r"^(\d+ of \d+|[\d.]+ MB of \d+ MB|English, Spanish(, Frenc
                      r"|Changed in your AIOStreams config: adds 1 subtitle source: AIOSubtitles|Remove: \w+)$")
 
 
+class InLabels(html.parser.HTMLParser):
+    """The elements inside a label that aren't phrasing content (HTML: a label holds phrasing content only)."""
+    FLOW = {"address", "article", "aside", "blockquote", "details", "dialog", "div", "dl", "fieldset", "figure",
+            "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p",
+            "pre", "section", "table", "ul"}
+
+    def __init__(self, text):
+        super().__init__(convert_charrefs=True)
+        self.depth, self.flow = 0, []
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        if self.depth and tag in self.FLOW:
+            self.flow.append(tag)
+        if tag == "label":
+            self.depth += 1
+
+    def handle_endtag(self, tag):
+        if tag == "label":
+            self.depth -= 1
+
+
 class Visible(html.parser.HTMLParser):
     """The text people see or hear: text outside script and style, button and link names, aria-labels, titles."""
 
@@ -325,6 +347,17 @@ class LookTest(unittest.TestCase):
                     self.assertTrue(a.get("aria-describedby"))
                     self.assertIn(a["aria-describedby"], tree.text_of)
 
+    def test_labels_hold_phrasing_content_and_forms_keep_their_role(self):
+        # An HTML label holds phrasing content only (the choice and radio rows' words are spans), and ARIA in
+        # HTML gives a form no dialog role (the sign-up's layer is the dialog)
+        from subsync import ui
+        rows = {"choice": ui.choice("c", "Title", "Help."),
+                "radio-row": ui.radio_row("r", "v", "Title", "Help.", tag="(tag)", note="Note.")}
+        for name, text in dict(every_page(), **rows).items():
+            with self.subTest(page=name):
+                self.assertEqual(InLabels(text).flow, [])
+                self.assertEqual([a["role"] for a in Tree(text).all("form") if "role" in a], [])
+
     def test_every_text_is_an_approved_text(self):
         corpus = approved_corpus()
         for name, text in every_page().items():
@@ -362,10 +395,14 @@ class SignupPageTest(unittest.TestCase):
         self.assertIn("Subtitles, in sync with the file you play.", tree.text())
         opener = [a for a in tree.all("a") if a.get("href") == "#signup"]
         self.assertEqual(len(opener), 2)                    # the page's Sign up and the phone's bar, plain links
-        self.assertEqual(tree.all("div", id="signup")[0]["class"], "layer")
+        layer = tree.all("div", id="signup")[0]
+        self.assertEqual(layer["class"], "layer")
+        # the layer is the dialog; the form inside keeps its own role (ARIA in HTML allows no dialog on a form)
+        self.assertEqual((layer.get("role"), layer.get("aria-modal"), layer.get("aria-label")),
+                         ("dialog", "true", "Sign up"))
         form = tree.all("form")[0]
         self.assertEqual((form["method"], form["action"]), ("post", "/signup"))
-        self.assertEqual(form.get("role"), "dialog")
+        self.assertNotIn("role", form)
         self.assertEqual([a["data-screen"] for a in tree.all("section") if "data-screen" in a],
                          ["invite", "link", "password", "languages", "config"])
         self.assertEqual([a.get("hidden") for a in tree.all("section") if "data-screen" in a], [None] * 5)
@@ -540,6 +577,24 @@ class SettingsPageTest(unittest.TestCase):
         self.assertNotIn("Today", text)
         self.assertNotIn("was copied from yours", text)
         self.assertIn("Refresh", text)
+
+    def test_done_holds_every_code_a_save_sends(self):
+        # DONE is done_message's own table, so every_page renders the settings page after each code public.py
+        # sends back (configure?done=<code>), the TMDB key's two included
+        from subsync import pages
+        with open(os.path.join(os.path.dirname(os.path.abspath(pages.__file__)), "public.py"), encoding="utf-8") as f:
+            sent = set(re.findall(r'_see\("([a-z-]+)"\)', f.read()))               # the codes sent as they are
+        self.assertLessEqual({"languages", "audio", "forgot", "tmdb-key", "tmdb-key-removed"}, sent)
+        sent |= {"refreshed", "refreshed-rd", "refreshed-manual"}                    # a refresh's, by its result
+        sent |= {kind + manual for kind in ("to-stored", "stored") for manual in ("", "-manual")}   # stored copies only
+        self.assertEqual(set(pages.DONE), sent)
+
+    def test_the_refresh_form_sends_only_what_the_server_reads(self):
+        # The server adds AIOSubtitles on every refresh by itself, so the form sends no add_addon of its own
+        text = self.page(s=settings(SUBSYNC_USENET="on", SUBSYNC_USENET_LISTINGS_PER_DAY="5"))
+        form = re.search(r'<form method="post" action="configure"><input type="hidden" name="action" value="refresh">'
+                         r'(.*?)</form>', text, re.S).group(1)
+        self.assertEqual(set(re.findall(r'name="([^"]+)"', form)), {"password", "link", "keep_password", "usenet"})
 
     def test_done_messages_are_fixed_texts(self):
         from subsync import explain, pages

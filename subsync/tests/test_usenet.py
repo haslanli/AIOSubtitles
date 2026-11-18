@@ -898,9 +898,11 @@ class PagesTest(unittest.TestCase):
         import types
         from subsync import explain, pages
 
-        def SignupResult(token, manifest_url, languages=(), **kw):
-            return types.SimpleNamespace(token=token, manifest_url=manifest_url, languages=list(languages), changes=[],
-                                         warning=None, added=True, manual=False, **kw)
+        def SignupResult(token, manifest_url, languages=(), **kw):   # every field of signup.SignupResult
+            fields = dict(token=token, manifest_url=manifest_url, languages=list(languages), changes=[], warning=None,
+                          added=True, manual=False, store_only=False, to_store_only=False, usenet=False,
+                          usenet_why=None, sync_made=True)
+            return types.SimpleNamespace(**dict(fields, **kw))
         made = pages.result_page(SignupResult("T", "https://subs.test/u/T/manifest.json", languages=["eng"], usenet=True))
         self.assertIn("Usenet is on: AIOSubtitles made a second config", made)
         self.assertIn("Made AIOSubtitles&#x27; own config", made)

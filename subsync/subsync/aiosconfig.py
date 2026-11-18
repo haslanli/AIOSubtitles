@@ -83,12 +83,15 @@ _BY['farsi'] = _BY['per']
 UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)
 
 
+# The most languages a person may choose: the ceiling of SUBSYNC_MAX_LANGUAGES and what the setup
+# keeps. The pages name a place for each (ui.ORDINALS); the texts say it in words (LIMIT_WORDS, explain.NUMBER_WORDS)
+MAX_LANGUAGES = 4
 LIMIT_WORDS = {1: 'One', 2: 'Two', 3: 'Three', 4: 'Four'}
 
 
-def parse_languages(text, limit=4):
+def parse_languages(text, limit=MAX_LANGUAGES):
     """'English, ru' -> ([('English','en','eng'), ('Russian','ru','rus')], None) or ([], 'what is wrong'). At most
-    `limit` languages (1 to 4: the public instance's SUBSYNC_MAX_LANGUAGES; the setup keeps 4)."""
+    `limit` languages (1 to MAX_LANGUAGES: the public instance's SUBSYNC_MAX_LANGUAGES; the setup keeps the most)."""
     found, unknown = [], []
     for part in re.split(r'[,;/\s]+', text or ''):
         if not part:

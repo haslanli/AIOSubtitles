@@ -1933,7 +1933,7 @@ class Worker(threading.Thread):
             """The shift path for one download whose original was judged and not in sync: one steady offset, in
             milliseconds. A pass by the main rule against its own language (no alass needed)?"""
             t0 = time.time()
-            r = pipeline.shift_sync(index, e["text"], e["ext"], lang, snap=self.s.snap, snap_within=self.s.snap_within,
+            r = pipeline.shift_sync(index, e["text"], lang, snap=self.s.snap, snap_within=self.s.snap_within,
                                     splits=self.s.gate_splits, image_ref=self.s.image_ref, better=self.s.better,
                                     prefer_plain=self.s.prefer_plain, fallback=self.s.fallback_reference,
                                     text_pairing=self.s.text_pairing)
@@ -1950,7 +1950,7 @@ class Worker(threading.Thread):
             t0 = time.time()
             e.setdefault("text", decode(e["raw"], lang))
             e.setdefault("ext", "ass" if is_ass(e["text"]) else "srt")
-            return pipeline.sync_subtitle(index, e["text"], e["ext"], lang, alass=self.s.alass, audio=audio,
+            return pipeline.sync_subtitle(index, e["text"], lang, alass=self.s.alass, audio=audio,
                                           audio_lead=self.s.audio_lead, vad=self.vad() if audio else None,
                                           ffmpeg=self.s.ffmpeg, snap=self.s.snap, snap_within=self.s.snap_within,
                                           splits=self.s.gate_splits, image_ref=self.s.image_ref,

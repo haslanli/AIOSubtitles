@@ -9,8 +9,14 @@ import socket
 import struct
 
 from . import ALGO_VERSION, RULE_REVISION
+from .aiosconfig import MAX_LANGUAGES
 from .audiofit import BETTER as AUDIO_BETTER
 from .worker import lang_list
+
+# The units of the size settings, each chosen once and kept (changing one would change every limit set in it): a *_MB
+# setting counts MiB, a *_GB setting 10^9 bytes. A figure shown for a setting is shown in that setting's unit.
+MB = 1024 * 1024
+GB = 10 ** 9
 
 
 def _on(value):
@@ -94,9 +100,10 @@ AUDIO_CHOICES = ("off", "pick", "open")
 
 
 def _language_limit(value):
-    """SUBSYNC_MAX_LANGUAGES: a whole number from 1 to 4 (the pages name four places at most); None otherwise."""
+    """SUBSYNC_MAX_LANGUAGES: a whole number from 1 to MAX_LANGUAGES (the pages name four places at most); None
+    otherwise."""
     value = str(value).strip()
-    return int(value) if value.isdigit() and 1 <= int(value) <= 4 else None
+    return int(value) if value.isdigit() and 1 <= int(value) <= MAX_LANGUAGES else None
 
 
 def _overrides(value):
@@ -117,16 +124,16 @@ class Settings:
         self.source_password = g("SUBSYNC_SOURCE_PASSWORD", "")    # subsync reads its config with it: the Real-Debrid check
         self.languages = lang_list(g("SUBSYNC_LANGUAGES", "eng"))
         self.max_tries = int(g("SUBSYNC_MAX_TRIES", "6"))                      # subtitles tried per language and file
-        self.cap_bytes = int(float(g("SUBSYNC_STORE_CAP_MB", "2048")) * 1024 * 1024)
-        self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB", "100")) * 1e9)
+        self.cap_bytes = int(float(g("SUBSYNC_STORE_CAP_MB", "2048")) * MB)
+        self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB", "100")) * GB)
         self.backoff_s = int(g("SUBSYNC_403_BACKOFF_S", "900"))
         self.retry_stopped_s = int(g("SUBSYNC_RETRY_STOPPED_S", "600"))
         # the audio route: a file with no text or image subtitle track is timed from its speech, reading audio windows
         # within SUBSYNC_AUDIO_BUDGET_GB per file (shorter windows on high-bitrate files, none when they would be
         # too short); off, every file is read index only (SUBSYNC_INDEX_CAP_MB)
         self.audio_route = _on(g("SUBSYNC_AUDIO_ROUTE", "off"))
-        self.audio_budget = int(float(g("SUBSYNC_AUDIO_BUDGET_GB", "1")) * 1e9) or None
-        self.file_cap = int(float(g("SUBSYNC_FILE_CAP_GB", "6")) * 1e9) or None
+        self.audio_budget = int(float(g("SUBSYNC_AUDIO_BUDGET_GB", "1")) * GB) or None
+        self.file_cap = int(float(g("SUBSYNC_FILE_CAP_GB", "6")) * GB) or None
         # when a file with no usable track starts its audio sync: pick, only when the viewer downloads subsync's
         # own entry for the file (proof of play: a plain subtitle request also comes for files nobody played, as
         # AIOMetadata asks for the first listed version); open, as soon as it is opened, within the checks of
@@ -177,14 +184,14 @@ class Settings:
         self.anilist_url = g("SUBSYNC_ANILIST_URL", "https://graphql.anilist.co")
         # best fit: originals checked (no alass) for up to this many candidates; alass only on SUBSYNC_MAX_TRIES of them
         self.gate_tries = max(1, int(g("SUBSYNC_GATE_TRIES", "20")))
-        self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB", "32")) * 1024 * 1024)
+        self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB", "32")) * MB)
         self.audio_lead = float(g("SUBSYNC_AUDIO_LEAD_MS", "190")) / 1000
         # a "(synced)" entry for a file still being worked on, served as the original until the copy is ready
         self.pending_entry = _on(g("SUBSYNC_PENDING_ENTRY", "off"))
         self.pending_wait = float(g("SUBSYNC_PENDING_WAIT_MS", "1000")) / 1000
         self.url_rewrite = g("SUBSYNC_URL_REWRITE", "")
         self.read_timeout = float(g("SUBSYNC_READ_TIMEOUT_S", "60"))
-        self.size_slack = int(float(g("SUBSYNC_SIZE_SLACK_MB", "5.5")) * 1024 * 1024)   # listed sizes are rounded to 0.01 GiB
+        self.size_slack = int(float(g("SUBSYNC_SIZE_SLACK_MB", "5.5")) * MB)   # listed sizes are rounded to 0.01 GiB
         self.alass = g("SUBSYNC_ALASS", "alass")
         self.ffmpeg = g("SUBSYNC_FFMPEG", "ffmpeg")
         self.snap = _on(g("SUBSYNC_SNAP", "on"))                              # per-line snap after alass
@@ -233,7 +240,7 @@ class Settings:
         self.max_users = int(g("SUBSYNC_MAX_USERS", "200"))
         self.signups_per_hour = int(g("SUBSYNC_SIGNUPS_PER_HOUR", "5"))      # per address
         self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY", "200"))
-        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "10000")) * 1024 * 1024)
+        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB", "10000")) * MB)
         self.user_queue = int(g("SUBSYNC_USER_QUEUE", "3"))
         # the most languages a person may choose on the sign-up and settings pages
         self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES", "4"))
@@ -335,7 +342,7 @@ class Settings:
         if self.syncs_at_once is None:
             out.append("SUBSYNC_SYNCS_AT_ONCE must be a whole number from 1, or auto.")
         if self.max_languages is None:
-            out.append("SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.")
+            out.append(f"SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to {MAX_LANGUAGES}.")
         if self.public and self.gateway_missing:
             out.append("SUBSYNC_TRUSTED_PROXY says gateway, but this machine has no default gateway to trust: give your "
                        "web server's address instead.")

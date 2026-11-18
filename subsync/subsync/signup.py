@@ -24,8 +24,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, PUBLIC_RETRY_WAIT_CAP, UUID_RE, WRONG_PASSWORD_CODES, AiosApi,
-                         AiosError, install_link, is_subsync_preset, new_key, parse_languages, sync_config,
+from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, PUBLIC_RETRY_WAIT_CAP, UUID_RE, WRONG_PASSWORD_CODES,
+                         AiosApi, AiosError, install_link, is_subsync_preset, new_key, parse_languages, sync_config,
                          sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins,
                          without_subsync)
 from .settings import AUDIO_CHOICES
@@ -171,11 +171,11 @@ def _password(form):
     return password
 
 
-def _languages(text, limit=4):
+def _languages(text, limit=MAX_LANGUAGES):
     """The chosen languages as codes, at most `limit` (the instance's SUBSYNC_MAX_LANGUAGES); English when none."""
     if not (text or "").strip():
         text = "English"
-    langs, problem = parse_languages(text, limit or 4)
+    langs, problem = parse_languages(text, limit or MAX_LANGUAGES)
     if problem:
         raise SignupError(problem, field="languages")
     return [three for _, _, three in langs]
@@ -760,7 +760,7 @@ def remove_tmdb_key(users, token):
     log.info("a person's TMDB key was deleted")
 
 
-def set_languages(users, token, text, limit=4):
+def set_languages(users, token, text, limit=MAX_LANGUAGES):
     """Saves a person's languages, at most `limit` (the instance's SUBSYNC_MAX_LANGUAGES). A record holding more from
     before a lowered limit keeps them until this save."""
     with users.locked(token):

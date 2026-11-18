@@ -590,8 +590,10 @@ class TextsTest(unittest.TestCase):
     def test_the_signed_up_page_says_what_a_file_without_a_track_takes(self):
         from types import SimpleNamespace
         from subsync import pages
+        # every field of signup.SignupResult
         result = SimpleNamespace(added=True, manual=False, changes=[], warning=None, languages=["eng"],
-                                 manifest_url="https://x.test/u/" + "t" * 43 + "/manifest.json")
+                                 manifest_url="https://x.test/u/" + "t" * 43 + "/manifest.json", token="t" * 43,
+                                 store_only=False, to_store_only=False, usenet=False, usenet_why=None, sync_made=True)
         import html
         self.assertIn(T_A11, html.unescape(pages.result_page(result, self.pages_settings())))
         self.assertNotIn("one to three minutes", pages.result_page(result, self.pages_settings(SUBSYNC_AUDIO_ROUTE="off")))

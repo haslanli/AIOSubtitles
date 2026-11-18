@@ -163,6 +163,17 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(s.daily_budget, int(100e9))                 # 100 GB a day
         self.assertEqual(s.max_users, 200)
 
+    def test_each_size_setting_counts_in_its_named_unit(self):
+        # A *_MB setting counts MiB, a *_GB setting 10^9 bytes (settings.MB, settings.GB), each kept as it was
+        from subsync.settings import GB, MB
+        self.assertEqual((MB, GB), (1024 * 1024, 10 ** 9))
+        s = Settings({"SUBSYNC_STORE_CAP_MB": "3", "SUBSYNC_INDEX_CAP_MB": "1.5", "SUBSYNC_SIZE_SLACK_MB": "5.5",
+                      "SUBSYNC_USER_DAILY_MB": "7", "SUBSYNC_DAILY_BUDGET_GB": "2", "SUBSYNC_AUDIO_BUDGET_GB": "0.5",
+                      "SUBSYNC_FILE_CAP_GB": "6"})
+        self.assertEqual((s.cap_bytes, s.index_cap, s.size_slack, s.user_daily_bytes),
+                         (3 * 1048576, 1572864, 5767168, 7 * 1048576))
+        self.assertEqual((s.daily_budget, s.audio_budget, s.file_cap), (2 * 10 ** 9, 500_000_000, 6 * 10 ** 9))
+
     def test_the_documented_defaults_are_the_ad446_ones(self):
         documented = {name: explain.SETTINGS[name][0] for name in (
             "SUBSYNC_SYNCS_AT_ONCE", "SUBSYNC_ACTIVE_WORKERS", "SUBSYNC_MAX_CONNECTIONS", "SUBSYNC_USER_FILES_PER_DAY",

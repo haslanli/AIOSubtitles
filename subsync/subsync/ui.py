@@ -169,11 +169,12 @@ def field(id, label, help_text, name=None, kind="text", mono=False, error=None, 
 
 def choice(id, title, help_text, name=None, checked=False, needs=None, value="on"):
     """A choice row: the whole row is a checkbox; a ticked row takes the chosen blue. `needs`: the id of the choice it
-    works only with (the script greys it out while that one is unticked)."""
+    works only with (the script greys it out while that one is unticked). Inside the label only phrasing content: its
+    words are spans the stylesheet lays out as blocks."""
     return (f"<label class=\"choice\"{f' data-needs=\"{e(needs)}\"' if needs else ''}><input type=\"checkbox\" "
             f"id=\"{e(id)}\" name=\"{e(name or id)}\" value=\"{e(value)}\"{' checked' if checked else ''} "
-            f"aria-describedby=\"{e(id)}-help\"><div><b>{e(title)}</b><span id=\"{e(id)}-help\">{e(help_text)}</span>"
-            "</div></label>")
+            f"aria-describedby=\"{e(id)}-help\"><span><b>{e(title)}</b><span id=\"{e(id)}-help\">{e(help_text)}</span>"
+            "</span></label>")
 
 
 def choices(*rows):
@@ -251,15 +252,16 @@ def radio_row(name, value, title, text, checked=False, tag=None, note=None, inva
     """A way to choose, one of a few: the whole row is a radio button; the picked one takes the chosen blue. `text`:
     its words under the title (none when empty). `note`: words shown under them only while this row is the one
     picked; the stylesheet hides them otherwise, so it works without the script, and a browser that can't tell shows
-    them. `invalid`: the answer has a problem (its group is described by the problem's message, radio_group)."""
+    them. `invalid`: the answer has a problem (its group is described by the problem's message, radio_group). Inside
+    the label only phrasing content, as in choice."""
     rid = f"{name}-{value}"
     refs = described(f"{rid}-help" if text else None, f"{rid}-note" if note else None)
     return (f"<label class=\"way\"><input type=\"radio\" name=\"{e(name)}\" id=\"{e(rid)}\" value=\"{e(value)}\""
             f"{' checked' if checked else ''}" + (f" aria-describedby=\"{e(refs)}\"" if refs else "")
             + (" aria-invalid=\"true\"" if invalid else "")
-            + f"><div><div class=\"head\"><b>{e(title)}</b>" + (f"<i>{e(tag)}</i>" if tag else "") + "</div>"
+            + f"><span><span class=\"head\"><b>{e(title)}</b>" + (f"<i>{e(tag)}</i>" if tag else "") + "</span>"
             + (f"<span id=\"{e(rid)}-help\">{e(text)}</span>" if text else "")
-            + (f"<span class=\"if-chosen\" id=\"{e(rid)}-note\">{e(note)}</span>" if note else "") + "</div></label>")
+            + (f"<span class=\"if-chosen\" id=\"{e(rid)}-note\">{e(note)}</span>" if note else "") + "</span></label>")
 
 
 def radio_group(legend, rows, help_text=None, id=None, labelled_by=None, described_by=None, error_id=None):

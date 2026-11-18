@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 
 from . import pages, ui
 from .addon import App, Handler
-from .aiosconfig import parse_languages
+from .aiosconfig import MAX_LANGUAGES, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
 from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh,
@@ -537,7 +537,7 @@ class PublicHandler(Handler):
         return page(400, error="Choose one of the buttons on this page.")
 
 
-def _chosen(form, limit=4):
+def _chosen(form, limit=MAX_LANGUAGES):
     """The languages a form chose, as codes in order, to show them again after a problem (never anything else); None
     when they can't be shown (more than the instance's limit, or a name it doesn't know)."""
     try:

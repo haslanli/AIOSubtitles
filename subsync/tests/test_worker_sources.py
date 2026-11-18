@@ -274,7 +274,7 @@ class LanguageCheckWorkerTest(unittest.TestCase):
         by the text's first line (None: not measured). Returns the texts it was given."""
         seen = []
 
-        def sync_subtitle(index, text, ext, lang, **kw):
+        def sync_subtitle(index, text, lang, **kw):
             seen.append(text)
             first = text.split("\n")[2]
             within = (measures or {}).get(first)
@@ -445,7 +445,7 @@ class PickedLanguageTest(unittest.TestCase):
             return {"in_sync": False, "route": "cues",
                     "gate_original": {"within200": (measures or {}).get(c, 0.3), "median_ms": 400}}
 
-        def sync_subtitle(index, text, ext, lang, **kw):
+        def sync_subtitle(index, text, lang, **kw):
             c = cid(text, lang)
             with self.lock:
                 self.events.append(("alass", c))

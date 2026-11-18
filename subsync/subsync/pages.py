@@ -10,6 +10,7 @@ and UI_WORDS below; nothing else is shown.
 """
 from . import explain, ui
 from .aiosconfig import LANGUAGES, usenet_names
+from .settings import MB
 from .ui import e
 
 _NAMES = {three: name for name, _, three in LANGUAGES}
@@ -126,7 +127,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
     marked; the languages keep their order, and the answer for files with no subtitles of their own (`audio`)
     stays picked; the link, the password and the invite code are never sent back."""
     order = ["eng"] if order is None else order
-    limit = settings.max_languages or 4
+    limit = settings.max_languages      # 1 to aiosconfig.MAX_LANGUAGES: the service doesn't start with another value
     steps = STEPS if settings.invite else STEPS[1:]
     # the summary sits right above every screen: a field with the problem is marked and described by it
     err = lambda name: "problem-message" if error and field == name else None  # noqa: E731
@@ -163,8 +164,9 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
                        extra=f"<p>{e(explain.PUBLIC_TEXTS['kept_note'])}</p>")
     # without the script the arrow is a plain link back to the start page
     arrow_back = (f"<a class=\"icon-btn\" href=\"/\" data-back aria-label=\"Back\">{ui.BACK}</a>")
-    layer = (f"<div class=\"layer\" id=\"signup\"><form class=\"sheet\" method=\"post\" action=\"/signup\" role=\"dialog\" "
-             f"aria-modal=\"true\" aria-label=\"Sign up\" novalidate data-signup>"
+    # the layer is the dialog; the form inside keeps its own role (ARIA in HTML allows a form no dialog role)
+    layer = (f"<div class=\"layer\" id=\"signup\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Sign up\">"
+             f"<form class=\"sheet\" method=\"post\" action=\"/signup\" novalidate data-signup>"
              f"<div class=\"sheet-top\">{arrow_back}<ol class=\"steps\" id=\"steps\">"
              + "".join(f"<li><i></i>{e(s)}</li>" for s in steps) + "</ol></div>"
              f"<div class=\"screens\">" + (f"<div class=\"notes\">{problem}</div>" if problem else "")
@@ -199,9 +201,9 @@ def usenet_allowed(settings):
 
 def result_page(result, settings=None):
     texts = explain.PUBLIC_TEXTS
-    stored = getattr(result, "store_only", False)
-    done = [texts["made_config"]] if getattr(result, "sync_made", not stored) and not stored else []
-    if getattr(result, "usenet", False):
+    stored = result.store_only
+    done = [texts["made_config"]] if result.sync_made and not stored else []
+    if result.usenet:
         done.append(texts["usenet_made"])
     if result.added:
         done += [f"Changed in your AIOStreams config: {c}" for c in result.changes] or \
@@ -211,9 +213,8 @@ def result_page(result, settings=None):
     notes = []
     if stored:
         notes.append(ui.note("warn", explain.PUBLIC_STORE_ONLY[1], explain.PUBLIC_STORE_ONLY[0], role="status"))
-    why = getattr(result, "usenet_why", None)
-    if why in explain.USENET_WHY:
-        notes.append(ui.note("warn", explain.USENET_WHY[why], role="status"))
+    if result.usenet_why in explain.USENET_WHY:
+        notes.append(ui.note("warn", explain.USENET_WHY[result.usenet_why], role="status"))
     if result.warning:
         title, text = result.warning
         notes.append(ui.note("warn", text, title, role="status"))
@@ -239,8 +240,9 @@ def result_page(result, settings=None):
 # ------------------------------------------------------------------------------------------- settings
 
 def _megabytes(nbytes):
-    """A read amount: one decimal under 10 MB (at least 0.1 when anything was read), whole MB from 10 MB."""
-    mb = nbytes / (1024 * 1024)
+    """A read amount in the unit of SUBSYNC_USER_DAILY_MB (settings.MB): one decimal under 10 MB (at least 0.1 when
+    anything was read), whole MB from 10 MB."""
+    mb = nbytes / MB
     if nbytes <= 0:
         return "0"
     return f"{max(mb, 0.1):.1f}" if mb < 10 else f"{mb:.0f}"
@@ -262,37 +264,45 @@ def _share(used, limit):
     return max(0.015, min(1.0, used / limit))
 
 
-DONE = ("languages", "audio", "refreshed", "refreshed-rd", "refreshed-manual", "forgot", "to-stored",
-        "to-stored-manual", "stored", "stored-manual")
+def _text(key):
+    return explain.PUBLIC_TEXTS[key]
+
+
+def _with_steps(key):
+    """A fixed text followed by the steps to add AIOSubtitles to an AIOStreams config by hand."""
+    return " ".join((_text(key),) + explain.PUBLIC_MANUAL_STEPS)
+
+
+def _audio_saved(record):
+    """The answer just saved, named without its tag."""
+    answers = {value: answer for value, answer, _ in AUDIO_ANSWERS}
+    return _text("audio_saved").format(answer=answers.get(record.get("audio"), answers["pick"]))
+
+
+# Every code a save sends the settings page back with (configure?done=<code>, public.py), and what the page then shows:
+# record -> (message, notice), fixed texts only. "stored" and "to-stored": stored copies only, still there or
+# moved there by this refresh (the page's note says the rest).
+DONE = {
+    "languages": lambda record: (_text("languages_saved").format(names=language_names(record["languages"])), None),
+    "audio": lambda record: (_audio_saved(record), None),
+    "refreshed": lambda record: (_text("refreshed"), None),
+    "refreshed-rd": lambda record: (_text("refreshed"), explain.PUBLIC_REAL_DEBRID_NOTICE),
+    "refreshed-manual": lambda record: (None, _with_steps("refresh_manual")),
+    "forgot": lambda record: (_text("forgot"), None),
+    "tmdb-key": lambda record: (_text("tmdb_saved"), None),
+    "tmdb-key-removed": lambda record: (_text("tmdb_removed"), None),
+    "to-stored": lambda record: (_text("to_stored"), None),
+    "to-stored-manual": lambda record: (_text("to_stored"), _with_steps("not_added")),
+    "stored": lambda record: (None, None),
+    "stored-manual": lambda record: (None, _with_steps("not_added")),
+}
 
 
 def done_message(code, record):
-    """(message, notice) for the page shown after a save: fixed texts only, chosen by a known code."""
-    texts = explain.PUBLIC_TEXTS
-    if code == "languages":
-        return texts["languages_saved"].format(names=language_names(record["languages"])), None
-    if code == "audio":           # the answer just saved, without its tag
-        answers = {value: answer for value, answer, _ in AUDIO_ANSWERS}
-        return texts["audio_saved"].format(answer=answers.get(record.get("audio"), answers["pick"])), None
-    if code == "refreshed":
-        return texts["refreshed"], None
-    if code == "refreshed-rd":
-        return texts["refreshed"], explain.PUBLIC_REAL_DEBRID_NOTICE
-    if code == "refreshed-manual":
-        return None, " ".join((texts["refresh_manual"],) + explain.PUBLIC_MANUAL_STEPS)
-    if code == "forgot":
-        return texts["forgot"], None
-    if code == "tmdb-key":
-        return texts["tmdb_saved"], None
-    if code == "tmdb-key-removed":
-        return texts["tmdb_removed"], None
-    # stored copies only: moved there by this refresh, or still there (the page's note says the rest)
-    manual = " ".join((texts["not_added"],) + explain.PUBLIC_MANUAL_STEPS)
-    if code in ("to-stored", "to-stored-manual"):
-        return texts["to_stored"], manual if code.endswith("-manual") else None
-    if code == "stored-manual":
-        return None, manual
-    return None, None
+    """(message, notice) for the page shown after a save: fixed texts only, chosen by a known code (DONE); (None, None)
+    for any other."""
+    shown = DONE.get(code)
+    return shown(record) if shown else (None, None)
 
 
 def days_ago(then, now):
@@ -381,7 +391,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                   state=None, usenet_usage=None):
     texts = explain.PUBLIC_TEXTS
     stored = record.get("store_only") is True
-    limit = settings.max_languages or 4
+    limit = settings.max_languages      # 1 to aiosconfig.MAX_LANGUAGES: the service doesn't start with another value
     usenet_usage = usenet_usage or {"listings": 0, "stopped": False}
     usenet_on = usenet_allowed(settings) and bool(record.get("usenet_uuid"))
     files_limit, bytes_limit = settings.user_files_per_day, settings.user_daily_bytes
@@ -397,7 +407,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
         "<section class=\"today\" aria-labelledby=\"today-h\"><h2 id=\"today-h\">Today</h2>"
         + ui.gauge(f"{usage['files']} of {files_limit}", "new files", _share(usage["files"], files_limit),
                    usage["files"] >= files_limit)
-        + ui.gauge(f"{_megabytes(usage['bytes'])} MB of {bytes_limit / (1024 * 1024):.0f} MB", "read",
+        + ui.gauge(f"{_megabytes(usage['bytes'])} MB of {bytes_limit / MB:.0f} MB", "read",
                    _share(usage["bytes"], bytes_limit), usage["bytes"] >= bytes_limit)
         + (ui.gauge(f"{usenet_usage['listings']} of {settings.usenet_listings_per_day}", "searches used today",
                     _share(usenet_usage["listings"], settings.usenet_listings_per_day),
@@ -434,7 +444,6 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                                 *((ui.choice("usenet", "Sync Usenet files too",
                                              explain.usenet_help(settings.usenet_listings_per_day),
                                              checked=bool(record.get("usenet"))),) if usenet_allowed(settings) else ()))
-                   + "<input type=\"hidden\" name=\"add_addon\" value=\"on\">"
                    + f"<div class=\"actions\">{ui.button('Refresh', 'primary', type='submit')}</div>", cls="")
                    + forget + "</div>")
     delete = _row("delete-h", "Delete my data",

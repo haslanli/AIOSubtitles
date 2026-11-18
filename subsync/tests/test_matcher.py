@@ -5,8 +5,11 @@ Pure pieces on synthetic timings and fakes: no network, no alass, no Silero.
 import os
 import random
 import sys
+import threading
+import time
 import unittest
 from array import array
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -145,7 +148,7 @@ class PipelineEndsTest(unittest.TestCase):
         cues = rhythm(300, 5)
         index = Index([track(cues)])
         text = srt([(s + 7.0, s + d + 7.0, f"line {i}") for i, (s, d) in enumerate(cues)])
-        r = pipeline.shift_sync(index, text, "srt", "eng")
+        r = pipeline.shift_sync(index, text, "eng")
         self.assertEqual(r["outcome"], "synced")
         self.assertLess(r["gate_synced"]["end_median_ms"], 5)
 
@@ -566,7 +569,7 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(400, 21)
         index = WordIndex(lines)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=6.0)])
-        r = pipeline.shift_sync(index, text, "srt", "eng", text_pairing=True)
+        r = pipeline.shift_sync(index, text, "eng", text_pairing=True)
         self.assertEqual(r["outcome"], "synced")
         self.assertTrue(r["reason"].startswith("passes"))
         self.assertEqual(index.asked, [])
@@ -576,13 +579,13 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(500, 22)
         index = WordIndex(lines)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
-        r = pipeline.shift_sync(index, text, "srt", "eng", text_pairing=True, snap=False, better={})
+        r = pipeline.shift_sync(index, text, "eng", text_pairing=True, snap=False, better={})
         self.assertEqual(r["outcome"], "synced", r.get("reason"))
         self.assertIn("clearly better", r["reason"])
         self.assertEqual(len(index.asked), 1)
         self.assertLessEqual(len(index.asked[0]), textpair.MAX_LINES)
         self.assertTrue(r["text"]["ok"])
-        pipeline.shift_sync(index, text, "srt", "eng", text_pairing=True, snap=False, better={})
+        pipeline.shift_sync(index, text, "eng", text_pairing=True, snap=False, better={})
         self.assertEqual(len(index.asked), 1)                  # kept on the file's index
 
     def test_words_that_disagree_refuse_a_timing_pass(self):
@@ -591,7 +594,7 @@ class PipelineWordsTest(unittest.TestCase):
         ref = pipeline.choose_reference(index, 400, "eng")
         self.assertIsNotNone(pipeline.track_words(index, ref, True))      # read earlier in this job
         wrong = [(lines[i][0] + 6.0, lines[i][0] + lines[i][1] + 6.0, lines[i + 1][2]) for i in range(len(lines) - 1)]
-        r = pipeline.shift_sync(index, srt(wrong), "srt", "eng", text_pairing=True)
+        r = pipeline.shift_sync(index, srt(wrong), "eng", text_pairing=True)
         self.assertEqual(r["outcome"], "keep_original")
         self.assertIn("words", r["reason"])
 
@@ -611,9 +614,102 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(500, 25)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
         index = WordIndex(lines, lang="en")
-        pipeline.shift_sync(index, text, "srt", "rus", text_pairing=True)
-        pipeline.shift_sync(index, text, "srt", "eng", text_pairing=False)
+        pipeline.shift_sync(index, text, "rus", text_pairing=True)
+        pipeline.shift_sync(index, text, "eng", text_pairing=False)
         self.assertEqual(index.asked, [])
+
+
+class TrackWordsLockTest(unittest.TestCase):
+    """A track's words are read once per file under that track's own lock, so languages checked against
+    different tracks read them at the same time (Spanish's lane waited for English's ~120 reads), and
+    one track asked for at once is still read once."""
+
+    def setUp(self):
+        self.lines = dialogue(300, 31)
+        self.text = {s: t for s, _, t in self.lines}
+
+    def index(self, read):
+        """A file with an English (3) and a Spanish (4) track of the same lines, whose words `read` gives."""
+        cues = [(s, d) for s, d, _ in self.lines]
+        index = Index([track(cues, "en", 3), track(cues, "es", 4)])
+        index.line_words = read
+        return index, [dict(t, route="cues") for t in index.tracks]
+
+    def test_two_tracks_are_read_at_the_same_time(self):
+        started, overlapped = {3: threading.Event(), 4: threading.Event()}, {}
+
+        def read(number, starts):
+            started[number].set()
+            overlapped[number] = started[7 - number].wait(2)   # the other track's read starts while this one runs
+            return {s: self.text[s] for s in starts}
+        index, refs = self.index(read)
+        threads = [threading.Thread(target=pipeline.track_words, args=(index, ref, True)) for ref in refs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(overlapped, {3: True, 4: True})
+        self.assertTrue(all(pipeline.track_words(index, ref, False) for ref in refs))     # both kept for the job
+
+    def test_one_track_asked_for_at_once_is_read_once(self):
+        asked, go = [], threading.Event()
+
+        def read(number, starts):
+            asked.append(number)
+            go.wait(5)
+            return {s: self.text[s] for s in starts}
+        index, refs = self.index(read)
+        got = []
+        threads = [threading.Thread(target=lambda: got.append(pipeline.track_words(index, refs[0], True)))
+                   for _ in range(3)]
+        for t in threads:
+            t.start()
+        time.sleep(0.2)
+        go.set()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(asked, [3])
+        self.assertEqual(len(got), 3)
+        self.assertTrue(got[0] is not None and all(g is got[0] for g in got))
+
+    def test_a_track_already_read_waits_for_no_other_read(self):
+        go = threading.Event()
+
+        def read(number, starts):
+            if number == 3:
+                go.wait(5)                                   # English's reads hang
+            return {s: self.text[s] for s in starts}
+        index, (english, spanish) = self.index(read)
+        self.assertIsNotNone(pipeline.track_words(index, spanish, True))
+        hanging = threading.Thread(target=pipeline.track_words, args=(index, english, True))
+        hanging.start()
+        try:
+            t0 = time.monotonic()
+            self.assertIsNotNone(pipeline.track_words(index, spanish, True))
+            self.assertLess(time.monotonic() - t0, 1.0)
+        finally:
+            go.set()
+            hanging.join(10)
+
+
+class AudioLockTest(unittest.TestCase):
+    """On the audio route the fit runs under the lock the caller gives (one audio fit at a time), and runs
+    as well without one."""
+
+    def test_the_fit_holds_the_lock_it_is_given(self):
+        lock, held = threading.Lock(), []
+
+        def fit_tracks(index, lines, **kw):
+            held.append(lock.locked())
+            return {"decision": "keep_original", "why": "a stand-in"}
+        text = srt([(s, s + d, t) for s, d, t in dialogue(40, 32)])
+        with mock.patch.object(pipeline, "fit_tracks", fit_tracks):
+            locked = pipeline.sync_subtitle(Index([]), text, "eng", vad=object(), audio_lock=lock)
+            unlocked = pipeline.sync_subtitle(Index([]), text, "eng", vad=object())
+        self.assertEqual(held, [True, False])
+        self.assertFalse(lock.locked())
+        for r in (locked, unlocked):
+            self.assertEqual((r["route"], r["outcome"], r["reason"]), ("audio", "keep_original", "a stand-in"))
 
 
 def cut_film(n, seed, cuts, gap_at_cut=3.0):

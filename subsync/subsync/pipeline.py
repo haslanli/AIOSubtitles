@@ -12,6 +12,7 @@ Outcomes: in_sync (the original passes as it is: nothing is published), synced (
 lines by more than 100 ms), keep_original (anything else).
 """
 import bisect
+import contextlib
 import re
 import statistics
 import threading
@@ -301,7 +302,9 @@ def track_words(index, ref, may_read):
     """D1: the words of some of a reference's lines (textpair.pick), read once per file and track and kept on its
     index for the job (hashes of word pairs only). A text track's lines are read as text; an image track's as
     their display sets, read by the language's recogniser (imagetext). None when there are none: another kind of track,
-    no recogniser for an image track's language, nothing read yet and `may_read` off, or nothing could be read."""
+    no recogniser for an image track's language, nothing read yet and `may_read` off, or nothing could be read.
+    Each track has its own lock: a language checked against its own track never waits for another language's reads of
+    another track, so two tracks' lines may be read at once, each WORD_READS_AT_ONCE at a time."""
     route = ref.get("route")
     reader = {"cues": "line_words", "image": "line_images"}.get(route)
     if reader is None or not hasattr(index, reader) or not hasattr(index, "__dict__"):
@@ -313,7 +316,9 @@ def track_words(index, ref, may_read):
     rec = imagetext.recogniser(ref.get("language")) if route == "image" else None
     if route == "image" and rec is None:
         return None
-    with index.__dict__.setdefault("track_words_lock", threading.Lock()):
+    # dict.setdefault is atomic: every caller for this track gets the same lock
+    locks = index.__dict__.setdefault("track_words_locks", {})
+    with locks.setdefault(key, threading.Lock()):
         if key not in kept:
             cues = ref["cues"]
             picks = textpair.pick(cues)
@@ -540,7 +545,7 @@ def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=
     return dict(out, outcome="synced", reason=why, body=write_like(text, best))
 
 
-def shift_sync(index, text, ext, lang, snap=True, snap_within=0.95, splits=True, image_ref=False, better=None,
+def shift_sync(index, text, lang, snap=True, snap_within=0.95, splits=True, image_ref=False, better=None,
                prefer_plain=True, fallback=FALLBACK_REFERENCE, text_pairing=False):
     """The shift path: the subtitle moved by one steady offset (and a 24/25 fps scale) found from its line starts
     (shift.best_shift), judged like an alass copy. Milliseconds, no alass: the original's own check (check_original)
@@ -680,8 +685,8 @@ def check_original(index, text, lang, splits=True, image_ref=False, prefer_plain
     return _in_sync(out, text, lines, ref, gate, snap_within, cross) if fits else out
 
 
-def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=0.19, vad=None, ffmpeg="ffmpeg",
-                  force_route=None, snap=True, snap_within=0.95, splits=True, image_ref=False, audio_lock=None,
+def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19, vad=None, ffmpeg="ffmpeg",
+                  snap=True, snap_within=0.95, splits=True, image_ref=False, audio_lock=None,
                   better=None, audio_better=None, audio_budget=None, prefer_plain=True, fallback=FALLBACK_REFERENCE,
                   text_pairing=False, unsettled=False, sectioned=False, audio_extra=0):
     """One subtitle re-timed to the file. text_pairing: the lines' words confirm a pass (D2); unsettled: no
@@ -695,7 +700,7 @@ def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=
     broken = broken_timing(lines)
     if broken:
         return dict(base, outcome="keep_original", reason=f"broken timing: {broken}", route=None)
-    ref = None if force_route == "audio" else choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
+    ref = choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
     if ref is not None:
         gate, recall = reference_gate(ref, len(dial), splits)
         out = dict(base, route=ref["route"], reference={"track": ref["number"], "language": ref["language"],
@@ -742,21 +747,16 @@ def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=
         return judge_copy(out, text, lines, new, ref, gate, recall, snap, snap_within, better, cross=cross, words=words,
                           may_read=unsettled)
 
-    if force_route != "audio" and own_track(index, len(dial), image_ref):
+    if own_track(index, len(dial), image_ref):
         return dict(base, outcome="keep_original", route=None,
                     reason="more than twice the lines of the file's own track: kept, never sent to the audio route")
     if not audio:   # waits_audio: only the audio route could judge it (the worker's no-track case; never stored)
         return dict(base, outcome="keep_original", reason="no text track and the audio route is off", route=None,
                     waits_audio=True)
-    if audio_lock is not None:   # one audio fit at a time: it reads the file through a shared reader
-        with audio_lock:
-            fit = fit_tracks(index, lines, vad=vad, lead=audio_lead, ffmpeg=ffmpeg, better=audio_better,
-                             original=getattr(index, "original_language", None),
-                             budget=audio_budget, extra=audio_extra)
-    else:
+    # one audio fit at a time when the caller gives a lock: it reads the file through a shared reader
+    with audio_lock if audio_lock is not None else contextlib.nullcontext():
         fit = fit_tracks(index, lines, vad=vad, lead=audio_lead, ffmpeg=ffmpeg, better=audio_better,
-                         original=getattr(index, "original_language", None),
-                         budget=audio_budget, extra=audio_extra)
+                         original=getattr(index, "original_language", None), budget=audio_budget, extra=audio_extra)
     out = dict(base, route="audio", model=fit.get("model"), gate_original=fit.get("gate_old"),
                gate_synced=fit.get("gate_new"), windows=fit.get("windows"), audio_s=fit.get("audio_s"))
     if fit.get("close_call"):                  # D5: judged again with more windows

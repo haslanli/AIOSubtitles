@@ -747,10 +747,10 @@ class CrossMissingSceneTest(unittest.TestCase):
 
     def test_the_shift_path_offers_it_across_languages_only(self):
         text = self.srt(self.translation(0.05), shift_s=5.0)
-        r = pipeline.shift_sync(self.index(), text, "srt", "rus", better={})
+        r = pipeline.shift_sync(self.index(), text, "rus", better={})
         self.assertEqual(r["outcome"], "synced", r.get("reason"))
         self.assertTrue(r["reason"].startswith("aligned to another language's track (one shift)"), r["reason"])
-        r = pipeline.shift_sync(self.index(), text, "srt", "eng", better={})       # against its own language's track
+        r = pipeline.shift_sync(self.index(), text, "eng", better={})       # against its own language's track
         self.assertEqual(r["outcome"], "keep_original")
         self.assertTrue(r["gate_synced"]["missing_scene"])
 
@@ -774,7 +774,7 @@ class CrossMissingSceneTest(unittest.TestCase):
         self.cues = sorted([(s + (300.0 if s >= cut else 0.0), d) for s, d in film] + scene)
         self.ref = [s for s, _ in self.cues]
         for shift_s in (5.0, 0.0):
-            res = pipeline.shift_sync(self.index(), self.srt(theatrical, shift_s), "srt", "rus", better={})
+            res = pipeline.shift_sync(self.index(), self.srt(theatrical, shift_s), "rus", better={})
             self.assertEqual(res["outcome"], "keep_original", res.get("reason"))
             self.assertLess(res["gate_synced"]["paired"], relgate_mod.ONE_SHIFT_PAIRED)   # one shift: the cut breaks it
         self.assertFalse(pipeline.check_original(self.index(), self.srt(theatrical), "rus",

@@ -122,7 +122,7 @@
 
   // ---------------------------------------------------------------------------------------------- the language slots
   each(".slots[data-max-languages]", function (group) {
-    var max = parseInt(group.getAttribute("data-max-languages"), 10) || 4;
+    var max = parseInt(group.getAttribute("data-max-languages"), 10);   // always written: the instance's limit
     var rows = Array.prototype.slice.call(group.querySelectorAll("[data-slot]"));
     var selects = rows.map(function (r) { return r.querySelector("select"); });
     var add = group.parentNode.querySelector("[data-add]");

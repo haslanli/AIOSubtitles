@@ -106,7 +106,7 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .choice input:checked::after{opacity:1}
 .choice input:focus-visible{outline:2px solid var(--accent-link);outline-offset:3px}
 .choice b{display:block;font-weight:700;font-size:17px;line-height:1.4}
-.choice span{display:block;margin-top:6px;font-size:15px;line-height:1.55;color:var(--text-2)}
+.choice b~span{display:block;margin-top:6px;font-size:15px;line-height:1.55;color:var(--text-2)}
 .choice:has(input:checked){background:var(--accent-bg);border-color:var(--accent-link)}
 .choice.off,.choice:has(input:disabled){opacity:.5;cursor:not-allowed}
 .choice input:disabled{cursor:not-allowed}
@@ -129,9 +129,9 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .way .head{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
 .way b{font-weight:700;font-size:19px;line-height:1.35}
 .way i{font-style:normal;font-size:15px;font-weight:700;color:var(--accent-text);white-space:nowrap}
-.way span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2)}
+.way .head~span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2)}
 .way:has(input:checked){background:var(--accent-bg);border-color:var(--accent-link)}
-.way:has(input:checked) span{color:var(--on-accent-bg)}
+.way:has(input:checked) .head~span{color:var(--on-accent-bg)}
 /* words for the picked row only (AD567): hidden while another row is picked; a browser without :has shows them */
 .way:not(:has(input:checked)) .if-chosen{display:none}
 .sheet .ways{margin-top:32px}

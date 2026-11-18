@@ -14,7 +14,7 @@ import time
 from .mkv import NotMatroska
 from .mp4 import Mp4Index, open_index
 from .reader import RangeReader, ReadFailed, Refused, Stopped
-from .settings import Settings
+from .settings import MB, Settings
 from .worker import rewrite
 
 
@@ -52,7 +52,7 @@ def run(url, cap_bytes=None, settings=None, size=None):
     except Refused as e:
         out.update(error="refused", detail=str(e))
     except Stopped:
-        out.update(error="cap", detail=f"its index is larger than subsync reads ({cap_bytes / 2 ** 20:.0f} MB): subsync "
+        out.update(error="cap", detail=f"its index is larger than subsync reads ({cap_bytes / MB:.0f} MB): subsync "
                                        "keeps the original subtitles for this file")
     except ReadFailed as e:
         out.update(error="read", detail=str(e))
@@ -69,7 +69,7 @@ def main():
     if not url.startswith(("http://", "https://")):
         print(json.dumps({"ok": False, "error": "no link on standard input"}))
         return 2
-    out = run(url, int(a.cap_mb * 1024 * 1024) if a.cap_mb else None, Settings(), a.size)
+    out = run(url, int(a.cap_mb * MB) if a.cap_mb else None, Settings(), a.size)
     print(json.dumps(out))
     return 0 if out.get("ok") else 1
 

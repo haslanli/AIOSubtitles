@@ -281,7 +281,7 @@ class PipelineTest(unittest.TestCase):
 
     def run_one(self, name):
         text = read_text(name)
-        return pipeline.sync_subtitle(self.idx, text, "srt", "eng", alass=os.environ.get("SUBSYNC_ALASS", "alass"),
+        return pipeline.sync_subtitle(self.idx, text, "eng", alass=os.environ.get("SUBSYNC_ALASS", "alass"),
                                       audio=False)
 
     def test_correct_subtitle_is_in_sync_and_not_republished(self):
@@ -296,7 +296,7 @@ class PipelineTest(unittest.TestCase):
                                          if not l.strip().isdigit())
         bad = "0\n00:00:00 --> 00:00:05\nAd line with no milliseconds\n\n" + src
         for text in (vtt, bad):
-            r = pipeline.sync_subtitle(self.idx, text, "srt", "eng", alass=os.environ.get("SUBSYNC_ALASS", "alass"),
+            r = pipeline.sync_subtitle(self.idx, text, "eng", alass=os.environ.get("SUBSYNC_ALASS", "alass"),
                                        audio=False)
             self.assertNotIn("alass_error", r)
             self.assertEqual(r["outcome"], "synced")
@@ -318,8 +318,8 @@ class PipelineTest(unittest.TestCase):
     def test_a_copy_clearly_better_than_the_original_is_offered_only_with_the_rule_on(self):
         text = self.styled_offset()
         kw = dict(alass=os.environ.get("SUBSYNC_ALASS", "alass"), audio=False, snap=False)
-        off = pipeline.sync_subtitle(self.idx, text, "srt", "eng", **kw)
-        on = pipeline.sync_subtitle(self.idx, text, "srt", "eng", better={}, **kw)
+        off = pipeline.sync_subtitle(self.idx, text, "eng", **kw)
+        on = pipeline.sync_subtitle(self.idx, text, "eng", better={}, **kw)
         self.assertFalse(off["gate_synced"]["pass"])
         self.assertEqual(off["outcome"], "keep_original")
         self.assertNotIn("better", off)
@@ -329,7 +329,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_an_offset_subtitle_is_synced_against_an_mp4s_text_track(self):
         idx = open_index(RangeReader(self.srv.url("tiny.mp4"), "test"))
-        r = pipeline.sync_subtitle(idx, read_text("tiny-offset.srt"), "srt", "eng",
+        r = pipeline.sync_subtitle(idx, read_text("tiny-offset.srt"), "eng",
                                    alass=os.environ.get("SUBSYNC_ALASS", "alass"), audio=False)
         self.assertEqual((r["route"], r["outcome"]), ("cues", "synced"))
         self.assertEqual(r["reference"]["codec"], "mp4/tx3g")
@@ -410,7 +410,7 @@ class ImageRoutePipelineTest(unittest.TestCase):
         self.idx = FakeIndex(image=[pgs_track(self.ref)])
 
     def run_one(self, text, image_ref=True):
-        return pipeline.sync_subtitle(self.idx, text, "srt", "eng", alass=ALASS, audio=False, image_ref=image_ref)
+        return pipeline.sync_subtitle(self.idx, text, "eng", alass=ALASS, audio=False, image_ref=image_ref)
 
     def test_offset_subtitle_synced_against_an_image_track(self):
         r = self.run_one(srt_of(self.ref, shift=2.7, jitter=0.05))
@@ -486,7 +486,7 @@ class ImageTranslationTest(unittest.TestCase):
         self.idx = FakeIndex(image=[pgs_left_out(self.ref)])
 
     def run_one(self, text):
-        return pipeline.sync_subtitle(self.idx, text, "srt", "rus", alass=ALASS, audio=False, image_ref=True,
+        return pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, image_ref=True,
                                       better={"paired": 0.85, "median_ms": 200, "ratio": 0.5})
 
     def test_the_track_pins_only_its_sure_starts(self):
@@ -638,7 +638,7 @@ class FrameRateTest(unittest.TestCase):
                                "cues": ref}])
         k = 23.976 / 25
         pal = to_srt([{"s": s * k + 1.5, "e": (s + d) * k + 1.5, "text": "line", "kind": "dialogue"} for s, d in ref])
-        r = pipeline.sync_subtitle(idx, pal, "srt", "eng", alass=ALASS, audio=False, better={})
+        r = pipeline.sync_subtitle(idx, pal, "eng", alass=ALASS, audio=False, better={})
         self.assertEqual(r["outcome"], "synced", (r.get("reason"), r.get("gate_synced")))
         out = parse(r["body"])
         err = sorted(abs(o["s"] - s) for o, (s, _) in zip(out, ref))
@@ -719,7 +719,7 @@ class MagnetTest(WorkerChoiceTest):
         self.assertNotIn("body", chk)
 
     def test_the_re_timing_route_snaps_an_in_sync_original_too(self):
-        r = pipeline.sync_subtitle(self.idx, self.early(), "srt", "eng", alass=ALASS, audio=False)
+        r = pipeline.sync_subtitle(self.idx, self.early(), "eng", alass=ALASS, audio=False)
         self.assertEqual(r["outcome"], "in_sync")
         self.assert_on_the_release_lines(r["body"])
 
@@ -770,7 +770,7 @@ class CrossLanguageTest(unittest.TestCase):
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_an_offset_translation_is_aligned_and_snapped(self):
         text = translated(self.ref, 6, shift=3.4, sigma=0.25, resplit=0.1)
-        r = pipeline.sync_subtitle(self.idx, text, "srt", "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
         self.assertEqual(r["outcome"], "synced", (r.get("reason"), r.get("gate_synced")))
         self.assertIn("another language", r["reason"])
         self.assertLess(self.error_ms(r["body"]), 120)
@@ -780,20 +780,20 @@ class CrossLanguageTest(unittest.TestCase):
         # Breaking Bad S01E02's Russian: alass aligns it (86-94 % paired) but its timing style leaves ~250 ms median, and some
         # tenths of the runtime have under half their lines within 500 ms; every tenth still pairs
         text = translated(self.ref, 8, shift=2.2, sigma=0.32, resplit=0.15)
-        r = pipeline.sync_subtitle(self.idx, text, "srt", "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
         self.assertEqual(r["outcome"], "synced", (r.get("reason"), r.get("gate_synced"), r.get("aligned")))
 
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_another_films_translation_is_kept(self):
         text = translated(realistic(600, 77), 6, shift=3.4)
-        r = pipeline.sync_subtitle(self.idx, text, "srt", "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
         self.assertEqual(r["outcome"], "keep_original")
 
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_another_cuts_translation_is_kept(self):
         mid = self.ref[len(self.ref) // 2][0]
         text = translated(self.ref, 6, shift=3.4, sigma=0.25, resplit=0.1, cut=(mid, mid + 400))
-        r = pipeline.sync_subtitle(self.idx, text, "srt", "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
         self.assertEqual(r["outcome"], "keep_original")
 
     def test_without_the_rule_a_translation_is_judged_as_before(self):
@@ -932,19 +932,19 @@ class ShiftPathTest(WorkerChoiceTest):
     test_in_sync_further_down_lists_nothing_by_default = test_switching_list_in_sync_on_lists_a_stored_in_sync_result = None
 
     def test_the_shift_alone_syncs_it(self):
-        r = pipeline.shift_sync(self.idx, srt_of(self.ref, shift=-1.43, jitter=0.05), "srt", "eng")
+        r = pipeline.shift_sync(self.idx, srt_of(self.ref, shift=-1.43, jitter=0.05), "eng")
         self.assertEqual(r["outcome"], "synced")
         self.assertIn("one shift", r["reason"])
         starts = [l["s"] for l in parse(r["body"])]
         self.assertLess(statistics.median(abs(a - b) for a, (b, _) in zip(starts, self.ref)), 0.06)
 
     def test_another_films_subtitle_is_not_shifted_into_place(self):
-        r = pipeline.shift_sync(self.idx, srt_of(realistic(200, 99)), "srt", "eng")
+        r = pipeline.shift_sync(self.idx, srt_of(realistic(200, 99)), "eng")
         self.assertEqual(r["outcome"], "keep_original")
 
     def test_another_cut_is_not_shifted_into_place(self):
         cut = [c for c in self.ref if not 500 <= c[0] <= 800]
-        r = pipeline.shift_sync(self.idx, srt_of(cut, shift=-2.0), "srt", "eng")
+        r = pipeline.shift_sync(self.idx, srt_of(cut, shift=-2.0), "eng")
         self.assertNotEqual(r["outcome"], "synced")
 
     def test_the_worker_needs_no_alass_for_it(self):
@@ -973,7 +973,7 @@ class OwnTrackTest(WorkerChoiceTest):
         return srt_of(realistic(450, 5))                      # 2.25 times the 200 lines of the file's track
 
     def test_a_far_longer_candidate_is_kept_without_the_audio_route(self):
-        r = pipeline.sync_subtitle(self.idx, self.long_text(), "srt", "eng", alass=ALASS, audio=True, vad=object())
+        r = pipeline.sync_subtitle(self.idx, self.long_text(), "eng", alass=ALASS, audio=True, vad=object())
         self.assertEqual((r["outcome"], r["route"]), ("keep_original", None))
         self.assertIn("more than twice the lines of the file's own track", r["reason"])
 
@@ -981,7 +981,7 @@ class OwnTrackTest(WorkerChoiceTest):
         # a signs-only track (30 lines) against a full subtitle: the file still needs the audio route
         idx = FakeIndex(text=[{"number": 3, "language": "eng", "codec": "S_TEXT/UTF8", "name": "Signs", "forced": False,
                                "cues": self.ref[:30]}])
-        r = pipeline.sync_subtitle(idx, srt_of(self.ref), "srt", "eng", alass=ALASS, audio=False)
+        r = pipeline.sync_subtitle(idx, srt_of(self.ref), "eng", alass=ALASS, audio=False)
         self.assertIn("audio route is off", r["reason"])
 
     @unittest.skipUnless(have(ALASS), "alass not installed")

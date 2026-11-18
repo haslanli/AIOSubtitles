@@ -54,6 +54,29 @@ class SettingTest(unittest.TestCase):
         self.assertIn("SUBSYNC_MAX_LANGUAGES", group)
 
 
+class CeilingTest(unittest.TestCase):
+    """The most languages anyone may choose is one value, aiosconfig.MAX_LANGUAGES, and every place that names
+    the languages one by one covers it."""
+
+    def test_one_ceiling_for_the_setting_the_parser_and_the_pages(self):
+        from subsync import aiosconfig, ui
+        top = aiosconfig.MAX_LANGUAGES
+        self.assertEqual(top, 4)
+        self.assertEqual(Settings({"SUBSYNC_MAX_LANGUAGES": str(top)}).max_languages, top)
+        over = Settings({"SUBSYNC_MAX_LANGUAGES": str(top + 1)})
+        self.assertIsNone(over.max_languages)
+        self.assertIn(f"SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to {top}.", over.conflicts())
+        self.assertIn(f"from 1 to {top}.", explain.SETTINGS["SUBSYNC_MAX_LANGUAGES"][1])
+        codes = [three for _, _, three in aiosconfig.LANGUAGES[:top + 1]]
+        self.assertEqual(len(parse_languages(", ".join(codes[:top]))[0]), top)     # the parser's default: the ceiling
+        self.assertEqual(parse_languages(", ".join(codes))[0], [])
+        for n in range(1, top + 1):
+            with self.subTest(n=n):
+                self.assertIn(n, aiosconfig.LIMIT_WORDS)
+                self.assertIn(n, explain.NUMBER_WORDS)
+        self.assertGreaterEqual(len(ui.ORDINALS), top)
+
+
 class ExplanationTest(unittest.TestCase):
     def test_four_is_todays_text(self):
         self.assertEqual(explain.languages_help(4), TODAY)

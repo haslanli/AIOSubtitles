@@ -1089,7 +1089,7 @@ class OriginalEntryTest(unittest.TestCase):
         from unittest import mock
         from subsync import pipeline
 
-        def sync_subtitle(index, text, ext, lang, **kw):   # every candidate keeps its original, measured as above
+        def sync_subtitle(index, text, lang, **kw):   # every candidate keeps its original, measured as above
             return {"outcome": "keep_original", "reason": "below the bar or shift under 100 ms",
                     "route": "audio" if kw.get("audio") else "cues",
                     "gate_original": {"within200": self.measures.get(text), "median_ms": 300}}
