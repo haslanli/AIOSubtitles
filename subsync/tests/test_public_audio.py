@@ -7,7 +7,8 @@ import threading
 import time
 import unittest
 
-from helpers import closed_after, dialogue_srt, FakeDownloads, FIXTURES, local_network_only, RangeServer, TempDir  # noqa: E402
+from helpers import (closed_after, dialogue_srt, FakeDownloads, FIXTURES, have, Limits as CountedLimits, Listing,
+                     local_network_only, RangeServer, TempDir, wait_until)
 from subsync import audiofit  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -22,58 +23,11 @@ NEEDS = "cryptography is not installed (the image has it; tests run it in a venv
 KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
 
-def wait_until(check, timeout=5.0):
-    t0 = time.time()
-    while not check() and time.time() - t0 < timeout:
-        time.sleep(0.02)
-    return check()
+class Limits(CountedLimits):
+    """A person's limits, with today's audio syncs not counted: these tests are about the places and the day's data."""
 
-
-class Listing:
-    """A sync config with one row and a fixed subtitle list."""
-
-    def __init__(self, row=None, subtitles=()):
-        self.row, self.subs, self.base, self.config_sources = row, list(subtitles), "https://aios.test/stremio/u/e", set()
-
-    def find_row(self, *a):
-        return self.row
-
-    def subtitles(self, *a):
-        return [dict(c) for c in self.subs]
-
-
-class Limits:
-    """A person's limits (public.UserLimits' methods), with a fixed key and a set amount of today's data left."""
-
-    def __init__(self, who="a" * 16, queue=3, left=10 ** 12):
-        self.who, self.queue, self.left = who, queue, left
-        self.started, self.read = 0, 0
-
-    def may_queue(self, queued):
-        return queued < self.queue
-
-    def may_start_file(self):
+    def may_start_audio(self, opened=False):
         return True
-
-    def file_started(self):
-        self.started += 1
-
-    def has_room(self, n):
-        return n <= self.left
-
-    def before_read(self, length):
-        if length > self.left:
-            raise OverLimit("bytes per day")
-
-    def after_read(self, n):
-        self.read += n
-        self.left -= n
-
-    def may_start_audio(self, opened=False):   # today's audio syncs: not counted here
-        return True
-
-    def audio_started(self, opened=False):
-        pass
 
 
 class Base(unittest.TestCase):
@@ -598,11 +552,6 @@ class TextsTest(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------------------------------- the audio decoder
-
-def have(program):
-    import shutil
-    return shutil.which(program) is not None
-
 
 class DecoderTest(unittest.TestCase):
     def test_the_decoder_opens_only_the_pipe_and_the_one_demuxer_it_names(self):

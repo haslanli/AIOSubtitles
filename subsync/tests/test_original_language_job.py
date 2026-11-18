@@ -1,11 +1,10 @@
 """The title's original language in the job: the lookup starts as the request comes in and never holds the job; the
 answer, when it is there by the time the file's index is read, is set on the index before references are chosen; a
 file judged before the answer came is judged again once it is known, and only once."""
+import concurrent.futures
 import os
-import threading
 import time
 import unittest
-from concurrent.futures import Future
 from unittest import mock
 
 from helpers import closed_after, FakeDownloads, FIXTURES, RangeServer, realistic, srt_of, TempDir
@@ -16,15 +15,37 @@ from subsync.store import Store
 from subsync.worker import Job, Safety, Worker
 
 
+class Running(concurrent.futures.Future):
+    """A lookup that never finishes. Nothing may wait for it: each wait (result, exception) or callback hung on it is
+    recorded in `waits`, and a wait is answered at once as one that timed out. A job that waits can't hang the run (a
+    wait uses no processor time, so ulimit -t never ends it), and is seen even where the worker swallows the error."""
+
+    def __init__(self, waits):
+        super().__init__()
+        self.waits = waits
+
+    def result(self, timeout=None):
+        self.waits.append("result")
+        raise concurrent.futures.TimeoutError("the lookup is still running")
+
+    def exception(self, timeout=None):
+        self.waits.append("exception")
+        raise concurrent.futures.TimeoutError("the lookup is still running")
+
+    def add_done_callback(self, fn):
+        self.waits.append("add_done_callback")
+
+
 class FakeLookup:
-    """Answers by title as told; records every start; a start can be left running for ever."""
+    """Answers by title as told; records every start; a start is left running for ever (Running), and any wait for one
+    is recorded in `waits`."""
 
     def __init__(self, answers=None):
-        self.answers, self.started = dict(answers or {}), []
+        self.answers, self.started, self.waits = dict(answers or {}), [], []
 
     def start(self, video_id, key=""):
         self.started.append((video_id, key))
-        return Future()          # never done: nothing may wait for it
+        return Running(self.waits)
 
     def peek(self, video_id):
         return self.answers.get(origlang.title_of(video_id))
@@ -114,6 +135,7 @@ class JobTest(Base):
         t0 = time.monotonic()
         job, seen = self.run_job(w)
         self.assertLess(time.monotonic() - t0, 30)       # the never-finishing lookup held nothing
+        self.assertEqual(self.lookup.waits, [])          # nor did anything wait for it
         self.assertEqual(len(self.lookup.started), 1)
         self.assertEqual(set(seen), {None})
         d = self.detail()

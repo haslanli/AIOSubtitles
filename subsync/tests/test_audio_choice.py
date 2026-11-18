@@ -8,13 +8,14 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, RangeServer, row, TempDir, wait_until
+from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, Limits, Listing, RangeServer, row,
+                     TempDir, wait_until)
 from subsync import sources
 from subsync import worker as worker_mod
 from subsync.reader import ReadFailed, Refused
 from subsync.settings import Settings
 from subsync.store import Store
-from subsync.worker import Job, OverLimit, Safety, StoreAudioCounts, Worker, audio_places
+from subsync.worker import Job, Safety, StoreAudioCounts, Worker, audio_places
 
 try:
     import cryptography  # noqa: F401
@@ -264,55 +265,6 @@ class ConfigureTest(unittest.TestCase):
 
 
 # ------------------------------------------------------------------------------------------------- the worker's side
-
-class Listing:
-    """A sync config with one row and a fixed subtitle list."""
-
-    def __init__(self, row=None, subtitles=()):
-        self.row, self.subs, self.base, self.config_sources = row, list(subtitles), "https://aios.test/stremio/u/e", set()
-
-    def find_row(self, *a):
-        return self.row
-
-    def subtitles(self, *a):
-        return [dict(c) for c in self.subs]
-
-
-class Limits:
-    """A person's limits (public.UserLimits' methods), with today's data left and today's audio syncs."""
-
-    def __init__(self, who="a" * 16, queue=3, left=10 ** 12, per_day=20, opened_per_day=5, room=True):
-        self.who, self.queue, self.left, self.room = who, queue, left, room
-        self.per_day, self.opened_per_day = per_day, opened_per_day
-        self.started, self.read, self.syncs, self.opened = 0, 0, 0, 0
-
-    def may_queue(self, queued):
-        return queued < self.queue
-
-    def may_start_file(self):
-        return True
-
-    def file_started(self):
-        self.started += 1
-
-    def has_room(self, n):
-        return self.room and n <= self.left
-
-    def before_read(self, length):
-        if length > self.left:
-            raise OverLimit("bytes per day")
-
-    def after_read(self, n):
-        self.read += n
-        self.left -= n
-
-    def may_start_audio(self, opened=False):
-        return self.syncs < self.per_day and (not opened or self.opened < self.opened_per_day)
-
-    def audio_started(self, opened=False):
-        self.syncs += 1
-        self.opened += bool(opened)
-
 
 SUB = {"id": "os-1", "lang": "eng", "release": "", "hash": "", "hash_match": False, "ai": False}
 

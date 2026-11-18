@@ -4,12 +4,16 @@ import http.client
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import unittest
+import urllib.request
+from unittest import mock
 
 import imagesubs as I
-from helpers import RangeServer, SOURCE, TempDir, watch_the_log
+from helpers import local_lookup, RangeServer, SOURCE, TempDir, watch_the_log
+from subsync import net
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 
@@ -45,6 +49,15 @@ class OnePathSetupTest(unittest.TestCase):
                 edits = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
                          and isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) == "sys.path"]
                 self.assertEqual(edits, [])
+
+    def test_a_module_also_runs_from_the_package_folder(self):
+        # `python3 -m unittest tests.test_x` in subsync/ (the folder above this one) finds helpers too
+        env = {k: v for k, v in os.environ.items() if k != "AIOSUBTITLES_IMAGE_BUILD"}
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        out = subprocess.run([sys.executable, "-m", "unittest", "tests.test_net"], cwd=SOURCE, env=env,
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        self.assertRegex(out.stderr, r"Ran [1-9]\d* tests")
 
 
 class RangeServerLogTest(unittest.TestCase):
@@ -154,6 +167,40 @@ class WatchTheLogTest(unittest.TestCase):
         self.assertTrue(clean.wasSuccessful())
         self.assertIs(logging.getLogRecordFactory(), factory)
         self.assertEqual(logging.getLogger("subsync").level, level)
+
+
+class LocalLookupTest(unittest.TestCase):
+    """For the whole run, only this machine's names are looked up, so a test that reaches for another machine
+    fails before any lookup, whatever settings it leaves at their defaults, and every module keeps its "no network".
+    No connection elsewhere is even tried here (the review's runner counts every one)."""
+
+    def test_another_machine_is_never_looked_up(self):
+        self.assertIs(socket.getaddrinfo, local_lookup)
+        for host in ("opensubtitles-v3.strem.io", b"query.wikidata.org", "93.184.216.34", "2606:4700:4700::1111"):
+            with self.subTest(host=host), self.assertRaises(AssertionError):
+                socket.getaddrinfo(host, 443)
+
+    def test_every_connection_looks_its_host_up_through_it(self):
+        # socket.create_connection, so urllib too, takes the socket module's lookup when it connects: a connection to
+        # another machine fails at that lookup
+        server = RangeServer(TESTS)
+        self.addCleanup(server.close)
+        asked, lookup = [], socket.getaddrinfo
+
+        def spy(host, *a, **k):
+            asked.append(host)
+            return lookup(host, *a, **k)
+        with mock.patch.object(socket, "getaddrinfo", spy):
+            socket.create_connection(("127.0.0.1", server.port), timeout=5).close()
+            with urllib.request.urlopen(server.url("helpers.py"), timeout=5) as r:
+                self.assertEqual(r.status, 200)
+        self.assertEqual(asked, ["127.0.0.1", "127.0.0.1"])
+
+    def test_nor_does_the_gate_of_public_mode(self):
+        net.configure(public_only=True)                     # its own resolver: the socket module's, as main_public
+        self.addCleanup(net.configure, public_only=False)
+        with self.assertRaises(AssertionError):
+            net.check_host("api.themoviedb.org", 443)
 
 
 if __name__ == "__main__":

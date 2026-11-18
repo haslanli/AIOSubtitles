@@ -4,7 +4,7 @@ data the test modules share.
 Every test module imports helpers before anything from subsync: this is the one place that puts the package on the
 import path (the source next to these tests, ahead of any other copy), so all modules test the same copy and each one
 also runs on its own (python3 -m unittest test_x from this folder). The image build is the exception: it tests the
-image's own copy (see IMAGE_BUILD)."""
+image's own copy (see IMAGE_BUILD). It is also the one place that keeps the whole run on this machine (local_lookup)."""
 import logging
 import os
 import random
@@ -26,6 +26,22 @@ IMAGE_BUILD = bool(os.environ.get("AIOSUBTITLES_IMAGE_BUILD"))
 if not IMAGE_BUILD:
     sys.path.insert(0, SOURCE)
 FIXTURES = os.path.join(TESTS, "fixtures")
+LOCAL = ("127.0.0.1", "localhost", "::1")
+_getaddrinfo = socket.getaddrinfo
+
+
+def local_lookup(host, *args, **kwargs):
+    """socket.getaddrinfo for the whole run: a name of this machine only, else the test fails before any
+    lookup. Every connection looks its host up through it (socket.create_connection, so urllib too, and net's gate,
+    whose resolver is taken from the socket module when the package is imported, just below), so no test reaches
+    another machine, even one that leaves a setting at its default (the extra sources, the original-language lookup)."""
+    name = host.decode() if isinstance(host, bytes) else host
+    if name is not None and name not in LOCAL:
+        raise AssertionError(f"a lookup of {name}: tests reach nothing but this machine")
+    return _getaddrinfo(host, *args, **kwargs)
+
+
+socket.getaddrinfo = local_lookup
 
 from subsync import realdebrid, sources  # noqa: E402  (the package from the path set just above)
 from subsync.settings import Settings  # noqa: E402
@@ -155,9 +171,6 @@ def watch_the_log(test):
     logging.setLogRecordFactory(record)
     top.setLevel(logging.DEBUG)
     test.addCleanup(check)
-
-
-LOCAL = ("127.0.0.1", "localhost", "::1")
 
 
 def local_network_only():
@@ -649,6 +662,57 @@ def truth_fit(truth, starts, durations=None, extra=0, budget=None, rate=0, end_p
     fit = fit_class(TheIndex(), lines, vad=object(), better=kw.pop("better", AUDIO_BETTER), extra=extra, budget=budget,
                     **kw)
     return fit, fit.run()
+
+
+# -- a person in public mode: their sync config and their limits ---------------------------------------------------------
+class Listing:
+    """A sync config with one row and a fixed subtitle list."""
+
+    def __init__(self, row=None, subtitles=()):
+        self.row, self.subs, self.base, self.config_sources = row, list(subtitles), "https://aios.test/stremio/u/e", set()
+
+    def find_row(self, *a):
+        return self.row
+
+    def subtitles(self, *a):
+        return [dict(c) for c in self.subs]
+
+
+class Limits:
+    """A person's limits (public.UserLimits' methods), with today's data left and today's audio syncs."""
+
+    def __init__(self, who="a" * 16, queue=3, left=10 ** 12, per_day=20, opened_per_day=5, room=True):
+        self.who, self.queue, self.left, self.room = who, queue, left, room
+        self.per_day, self.opened_per_day = per_day, opened_per_day
+        self.started, self.read, self.syncs, self.opened = 0, 0, 0, 0
+
+    def may_queue(self, queued):
+        return queued < self.queue
+
+    def may_start_file(self):
+        return True
+
+    def file_started(self):
+        self.started += 1
+
+    def has_room(self, n):
+        return self.room and n <= self.left
+
+    def before_read(self, length):
+        from subsync.worker import OverLimit
+        if length > self.left:
+            raise OverLimit("bytes per day")
+
+    def after_read(self, n):
+        self.read += n
+        self.left -= n
+
+    def may_start_audio(self, opened=False):
+        return self.syncs < self.per_day and (not opened or self.opened < self.opened_per_day)
+
+    def audio_started(self, opened=False):
+        self.syncs += 1
+        self.opened += bool(opened)
 
 
 # -- a person's AIOStreams configs for Usenet files ----------------------------------------------------------------------

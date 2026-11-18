@@ -5,7 +5,7 @@ import re
 import os
 import unittest
 
-from helpers import Clock, closed_after  # noqa: E402
+from helpers import Clock, closed_after, wait_until  # noqa: E402
 from subsync.settings import Settings, available_cpus  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -321,12 +321,11 @@ class StubLimits:
         pass
 
 
-def wait_until(check, timeout=3.0):
-    import time
-    t0 = time.time()
-    while not check() and time.time() - t0 < timeout:
-        time.sleep(0.02)
-    return check()
+def held(turn):
+    """A Turn's (tickets handed out, holders inside), read under its lock: a thread that asked has its ticket, and is
+    either inside or waiting."""
+    with turn._cv:
+        return turn._next, turn._inside
 
 
 class WorkerHooksTest(unittest.TestCase):
@@ -348,7 +347,6 @@ class WorkerHooksTest(unittest.TestCase):
 
     def test_turn_is_first_come_first_served(self):
         import threading
-        import time
         from subsync.worker import Turn
         turn, order, threads = Turn(), [], []
         with turn:
@@ -356,8 +354,9 @@ class WorkerHooksTest(unittest.TestCase):
                 t = threading.Thread(target=lambda i=i: [turn.__enter__(), order.append(i), turn.__exit__(None, None, None)])
                 t.start()
                 threads.append(t)
-                time.sleep(0.05)           # each asks after the one before
-            self.assertEqual(order, [])    # nobody runs while the turn is held
+                self.assertTrue(wait_until(lambda: held(turn)[0] == i + 2))   # it has asked: the next asks after it
+            self.assertEqual(held(turn), (4, 1))   # nobody runs while the turn is held
+            self.assertEqual(order, [])
         for t in threads:
             t.join(2)
         self.assertEqual(order, [0, 1, 2])
@@ -381,14 +380,13 @@ class WorkerHooksTest(unittest.TestCase):
                 w.submit(Job("movie", f"tt{n}{i}", {"filename": f"{n}{i}.mkv", "videoSize": 1}))
         for w in self.workers:
             w.start()
-        self.assertTrue(wait_until(lambda: len(spans) == 4))
+        self.assertTrue(wait_until(lambda: len(spans) == 4, 3.0))
         spans.sort()
         for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
             self.assertLessEqual(a1, b0)
 
     def test_a_turn_with_two_places_lets_two_in_and_keeps_the_order(self):
         import threading
-        import time
         from subsync.worker import Turn
         turn, order, threads, release = Turn(2), [], [], threading.Event()
         self.assertEqual(turn.places, 2)
@@ -401,8 +399,10 @@ class WorkerHooksTest(unittest.TestCase):
             t = threading.Thread(target=hold, args=(i,))
             t.start()
             threads.append(t)
-            time.sleep(0.05)
-        self.assertEqual(order, [0, 1])          # two places: the third and fourth wait
+            self.assertTrue(wait_until(lambda: held(turn)[0] == i + 1))   # it has asked: the next asks after it
+        self.assertEqual(held(turn), (4, 2))     # two places: the third and fourth wait
+        self.assertTrue(wait_until(lambda: len(order) == 2))
+        self.assertEqual(order, [0, 1])
         release.set()
         for t in threads:
             t.join(2)
@@ -449,7 +449,7 @@ class WorkerHooksTest(unittest.TestCase):
             w.submit(Job("movie", video_id, {"filename": name, "videoSize": 1}))
         for w in self.workers:
             w.start()
-        self.assertTrue(wait_until(lambda: len(spans) == 3))
+        self.assertTrue(wait_until(lambda: len(spans) == 3, 3.0))
         same = sorted((t0, t1) for alias, t0, t1 in spans if "same" in alias)
         self.assertLessEqual(same[0][1], same[1][0])
         other = [(t0, t1) for alias, t0, t1 in spans if "other" in alias][0]
@@ -515,7 +515,7 @@ class WorkerHooksTest(unittest.TestCase):
             w.submit(Job("movie", "tt1", {"filename": name, "videoSize": 1}))
             w.start()
             time.sleep(0.1)                                  # each asks after the one before
-        self.assertTrue(wait_until(lambda: len(spans) == 3))
+        self.assertTrue(wait_until(lambda: len(spans) == 3, 3.0))
         first, second, other = (spans[f"name:{name}|1"] for name in ("same.mkv", "same-renamed.mkv", "other.mkv"))
         self.assertLessEqual(first[1], second[0])            # the same torrent file one after the other
         self.assertLess(other[0], first[1])                  # the other file had a place while the second waited
@@ -570,7 +570,7 @@ class WorkerHooksTest(unittest.TestCase):
         self.workers.append(w)
         w.submit(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1}))
         w.start()
-        self.assertTrue(wait_until(lambda: not w.jobs and w.current is None))
+        self.assertTrue(wait_until(lambda: not w.jobs and w.current is None, 3.0))
         import time
         time.sleep(0.1)
         self.assertEqual(len(w.jobs), 0)                # not queued again for later
@@ -603,14 +603,16 @@ class WorkerHooksTest(unittest.TestCase):
         finally:
             srv.close()
 
-    def test_no_audio_lane_in_public_mode(self):
+    def test_no_audio_lane_in_public_mode_while_the_audio_route_is_off(self):
+        # With the route on, public mode has an audio lane (test_public_audio.LaneTest has both)
         import threading
         from subsync.worker import Safety, Worker
-        w = Worker(self.settings(SUBSYNC_PUBLIC="on"), self.store, ListingAios(), Safety())
+        w = Worker(self.settings(SUBSYNC_PUBLIC="on", SUBSYNC_AUDIO_ROUTE="off"), self.store, ListingAios(), Safety())
         self.workers.append(w)
         before = {t.name for t in threading.enumerate()}
         w.start()
         self.assertNotIn("subsync-audio", {t.name for t in threading.enumerate()} - before)
+        self.assertIsNone(getattr(w, "audio_worker", None))   # the worker's own: no leftover thread's name hides it
 
     def test_stop_ends_the_loop(self):
         from subsync.worker import Safety, Worker
@@ -1010,9 +1012,16 @@ class HousekeepingTest(unittest.TestCase):
 
 class StartupTest(unittest.TestCase):
     def run_main(self, env):
+        """subsync's entry point with `env` as the whole environment: its logs at ERROR, once it has stopped as it must.
+        Its logging set-up (an INFO handler on stdout) is left out, so later tests' logs stay theirs, and a
+        main that went past its checks fails at once, never serves (it would serve until stopped)."""
         from unittest import mock
         from subsync import __main__ as entry
-        with mock.patch.dict(os.environ, env, clear=True), self.assertLogs("subsync", level="ERROR") as logs:
+        went_on = AssertionError("main went on past its checks")
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("logging.basicConfig"), \
+                mock.patch.object(entry, "main_public", side_effect=went_on), \
+                mock.patch.object(entry, "Store", side_effect=went_on), \
+                self.assertLogs("subsync", level="ERROR") as logs:
             with self.assertRaises(SystemExit) as e:
                 entry.main()
         self.assertEqual(e.exception.code, 2)
@@ -1021,6 +1030,23 @@ class StartupTest(unittest.TestCase):
     def test_main_refuses_public_mode_without_a_secret(self):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test"})
         self.assertIn("SUBSYNC_SECRET_KEY", out)
+
+    def test_a_main_past_its_checks_fails_the_test_at_once(self):
+        for env in ({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test", "SUBSYNC_SECRET_KEY": KEY},
+                    {"SUBSYNC_SOURCE_MANIFEST": "https://aios.test/stremio/u/e/manifest.json",
+                     "SUBSYNC_SOURCE_PASSWORD": "p", "SUBSYNC_PUBLIC_BASE": "http://subsync.test:8790"}):
+            with self.subTest(public="SUBSYNC_PUBLIC" in env), self.assertRaisesRegex(AssertionError, "went on"):
+                self.run_main(env)
+
+    def test_main_leaves_logging_as_it_found_it(self):
+        import logging
+        from unittest import mock
+        root = logging.getLogger()
+        level = root.level
+        with mock.patch.object(root, "handlers", []):          # as in a run where nothing set logging up before
+            self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test"})
+            self.assertEqual(root.handlers, [])
+        self.assertEqual(root.level, level)
 
     def test_main_refuses_more_audio_places_than_places(self):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test", "SUBSYNC_SECRET_KEY": KEY,
@@ -1033,7 +1059,8 @@ class StartupTest(unittest.TestCase):
         path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "requirements.txt")
         if not os.path.exists(path):
             self.skipTest("requirements.txt is only in the source folder (the image installs from it with --require-hashes)")
-        text = open(path).read()
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
         for name, version, wheels in (("cryptography", "50.0.2", 2), ("cffi", "2.1.1", 2), ("pycparser", "3.12", 1)):
             with self.subTest(name=name):
                 m = re.search(rf"^{name}=={re.escape(version)}((?:\s*\\\s*--hash=sha256:[0-9a-f]{{64}})+)", text, re.M)
@@ -1057,7 +1084,8 @@ class PublicTextsTest(unittest.TestCase):
     def test_every_page_field_has_its_explanation(self):
         import re
         from subsync import explain, pages
-        source = open(pages.__file__).read()
+        with open(pages.__file__, encoding="utf-8") as f:
+            source = f.read()
         used = set(re.findall(r'_(?:field|check|chips)\("(\w+)"', source)) | set(re.findall(r'help="(\w+)"', source))
         used.discard("password")   # its explanation is named by help=
         self.assertEqual(used - set(explain.PUBLIC_FIELDS), set())

@@ -10,7 +10,7 @@ import unittest
 from array import array
 from unittest import mock
 
-from helpers import AUDIO_BETTER, FIXTURES, rhythm, truth_fit
+from helpers import AUDIO_BETTER, FakeIndex, FIXTURES, rhythm, truth_fit
 from subsync import mkv, mp4, pipeline, sections, shift, textpair  # noqa: E402
 from subsync.audiofit import AudioFit  # noqa: E402
 from subsync.reader import ReadFailed, Refused  # noqa: E402
@@ -22,17 +22,6 @@ def periodic(n, step=3.0, seed=5, start=20.0):
     shift by a multiple of `step` from another, ends can."""
     r = random.Random(seed)
     return [(start + i * step, r.uniform(0.6, 2.6)) for i in range(n)]
-
-
-class Index:
-    def __init__(self, tracks):
-        self.tracks = tracks
-
-    def text_tracks(self):
-        return self.tracks
-
-    def image_tracks(self):
-        return []
 
 
 def track(cues, lang="en", number=3):
@@ -124,7 +113,7 @@ class PipelineEndsTest(unittest.TestCase):
 
     def test_check_original_records_end_errors(self):
         cues = rhythm(300, 4)
-        index = Index([track(cues)])
+        index = FakeIndex([track(cues)])
         text = srt([(s, s + d + 0.1, f"line {i}") for i, (s, d) in enumerate(cues)])
         chk = pipeline.check_original(index, text, "eng")
         self.assertTrue(chk["in_sync"])
@@ -132,7 +121,7 @@ class PipelineEndsTest(unittest.TestCase):
 
     def test_shift_sync_records_end_errors_on_the_copy(self):
         cues = rhythm(300, 5)
-        index = Index([track(cues)])
+        index = FakeIndex([track(cues)])
         text = srt([(s + 7.0, s + d + 7.0, f"line {i}") for i, (s, d) in enumerate(cues)])
         r = pipeline.shift_sync(index, text, "eng")
         self.assertEqual(r["outcome"], "synced")
@@ -172,7 +161,7 @@ class Bytes:
         return self.b[start:start + length]
 
 
-class WordIndex(Index):
+class WordIndex(FakeIndex):
     """A file index whose text track's words can be read (index.line_words): counts what is asked."""
 
     def __init__(self, lines, lang="en"):
@@ -645,9 +634,9 @@ class TrackWordsLockTest(unittest.TestCase):
     def index(self, read):
         """A file with an English (3) and a Spanish (4) track of the same lines, whose words `read` gives."""
         cues = [(s, d) for s, d, _ in self.lines]
-        index = Index([track(cues, "en", 3), track(cues, "es", 4)])
+        index = FakeIndex([track(cues, "en", 3), track(cues, "es", 4)])
         index.line_words = read
-        return index, [dict(t, route="cues") for t in index.tracks]
+        return index, [dict(t, route="cues") for t in index.text_tracks()]
 
     def test_two_tracks_are_read_at_the_same_time(self):
         started, overlapped = {3: threading.Event(), 4: threading.Event()}, {}
@@ -718,8 +707,8 @@ class AudioLockTest(unittest.TestCase):
             return {"decision": "keep_original", "why": "a stand-in"}
         text = srt([(s, s + d, t) for s, d, t in dialogue(40, 32)])
         with mock.patch.object(pipeline, "fit_tracks", fit_tracks):
-            locked = pipeline.sync_subtitle(Index([]), text, "eng", vad=object(), audio_lock=lock)
-            unlocked = pipeline.sync_subtitle(Index([]), text, "eng", vad=object())
+            locked = pipeline.sync_subtitle(FakeIndex(), text, "eng", vad=object(), audio_lock=lock)
+            unlocked = pipeline.sync_subtitle(FakeIndex(), text, "eng", vad=object())
         self.assertEqual(held, [True, False])
         self.assertFalse(lock.locked())
         for r in (locked, unlocked):
@@ -729,16 +718,16 @@ class AudioLockTest(unittest.TestCase):
 def cut_film(n, seed, cuts, gap_at_cut=3.0):
     """A film's lines (start, duration) and the same film in another cut: `cuts` = {line index: seconds the release adds
     (or, negative, removes) just before that line}. Returns (release cues, subtitle cues): the subtitle is timed to the
-    other cut, so its shift changes at each cut."""
-    base = rhythm(n, seed)
-    out, extra, prev_end = [], 0.0, None
-    sub = []
-    for i, (st, d) in enumerate(base):
+    other cut, so its shift changes at each cut. Cuts fall at a scene change: where the line before a cut ends less than
+    `gap_at_cut` before it, that line and every one after it start later, in both cuts."""
+    out, sub = [], []
+    extra, pause, prev_end = 0.0, 0.0, None
+    for i, (st, d) in enumerate(rhythm(n, seed)):
+        st += pause
         if i in cuts:
-            if prev_end is not None and st - prev_end < gap_at_cut:   # cuts fall at a scene change: a pause
-                bump = gap_at_cut - (st - prev_end)
-                base = base[:i] + [(x + bump, y) for x, y in base[i:]]
-                st = base[i][0]
+            if prev_end is not None and st - prev_end < gap_at_cut:
+                pause += gap_at_cut - (st - prev_end)
+                st = prev_end + gap_at_cut
             extra += cuts[i]
         out.append((st + extra, d))
         sub.append((st, d))
@@ -746,21 +735,69 @@ def cut_film(n, seed, cuts, gap_at_cut=3.0):
     return out, sub
 
 
-def judge_sections(release, sub_lines, lang="eng", snap=True, better=None, jitter=0.03, seed=1):
-    """The sectioned fit of a subtitle (sub_lines: (start, duration)) and its judgement, as sync_subtitle does it."""
+def last_scene(lines, seed, gaps, added):
+    """A film (rhythm(600, 15)) and after it a scene of `lines` lines, `gaps` (shortest, longest) seconds apart. The
+    release has the film 20 s later (an intro the subtitle lacks) and the scene `added` seconds later still. Returns
+    (release cues, subtitle cues): the scene is a section of its own."""
+    base = rhythm(600, 15)
     r = random.Random(seed)
-    text = srt([(st + r.gauss(0, jitter), st + d, f"line {i}") for i, (st, d) in enumerate(sub_lines)])
-    lines = pipeline.parse(text)
-    index = Index([track(release)])
-    ref = pipeline.choose_reference(index, len(lines), lang)
-    gate, recall = pipeline.reference_gate(ref, len(lines))
-    sect = sections.fit(lines, ref["cues"])
-    if sect is None or sect["lines"] is None:
-        return None, sect
-    out = {"gate_original": pipeline.gate_lines(gate, lines)}
-    res = pipeline.judge_copy(dict(out, sections=sect["summary"]), text, lines, sect["lines"], ref, gate, recall, snap,
-                              0.95, better, how=" (sections)", cross=pipeline.is_cross(ref, lang), groups=sect["groups"])
-    return res, sect
+    t, scene = base[-1][0] + base[-1][1] + 4.0, []
+    for _ in range(lines):
+        d = r.uniform(0.8, 1.6)
+        scene.append((t, d))
+        t += d + r.uniform(*gaps)
+    return [(st + 20.0, d) for st, d in base] + [(st + 20.0 + added, d) for st, d in scene], base + scene
+
+
+def judge_sections(release, sub_lines, lang="eng", snap=True, better=None, jitter=0.03, seed=1, texts=None):
+    """A subtitle (sub_lines: (start, duration)) synced by sync_subtitle itself to a file whose track has the `release`
+    cues, with the sectioned fit on and no alass behind it. `texts`: each line's words, the same in the subtitle's line
+    and the release's line of the same index; the track's words can then be read and text pairing is on. Returns
+    (sync_subtitle's result, what sections.fit gave, the sectioned copy's own judgement or None when none was made)."""
+    r = random.Random(seed)
+    says = texts or [f"line {i}" for i in range(len(sub_lines))]
+    text = srt([(st + r.gauss(0, jitter), st + d, t) for (st, d), t in zip(sub_lines, says)])
+    index = WordIndex([(st, d, t) for (st, d), t in zip(release, texts)]) if texts else FakeIndex([track(release)])
+    seen, fit, judge = {}, sections.fit, pipeline.judge_copy
+
+    def fit_seen(*a, **kw):
+        seen["sect"] = fit(*a, **kw)
+        return seen["sect"]
+
+    def judge_seen(*a, **kw):
+        got = judge(*a, **kw)
+        if kw.get("how") == " (sections)":
+            seen["judged"] = got
+        return got
+    with mock.patch.object(sections, "fit", fit_seen), mock.patch.object(pipeline, "judge_copy", judge_seen), \
+            mock.patch.object(pipeline.alass_mod, "run", side_effect=pipeline.alass_mod.AlassFailed("no alass here")):
+        res = pipeline.sync_subtitle(index, text, lang, audio=False, snap=snap, better=better, sectioned=True,
+                                     text_pairing=bool(texts), unsettled=bool(texts))
+    if "sect" not in seen:
+        raise AssertionError(f"sync_subtitle never tried the sectioned fit: {res['reason']}")
+    return res, seen["sect"], seen.get("judged")
+
+
+class CutFilmTest(unittest.TestCase):
+    """The other cut SectionsTest's subtitles are timed to. A pause made at a cut moves every line after it."""
+
+    def test_lines_stay_in_order_with_a_pause_at_each_cut(self):
+        for n, seed, cuts in ((800, 9, {200: 30.0, 400: 30.0, 600: 30.0}),
+                              (1000, 17, {100 * k: 9.0 for k in range(1, 10)}), (900, 15, {400: 6.0, 412: -6.0})):
+            with self.subTest(seed=seed):
+                base = rhythm(n, seed)
+                release, sub = cut_film(n, seed, cuts)
+                self.assertEqual([d for _, d in sub], [d for _, d in base])
+                self.assertEqual([d for _, d in release], [d for _, d in base])
+                for i in range(1, n):
+                    gap = sub[i][0] - (sub[i - 1][0] + sub[i - 1][1])
+                    if i in cuts:
+                        self.assertGreaterEqual(gap, 3.0 - 1e-9, i)                  # a pause at the cut
+                    else:
+                        self.assertAlmostEqual(gap, base[i][0] - (base[i - 1][0] + base[i - 1][1]), delta=1e-9,
+                                               msg=i)                               # as the film has it
+                    added = sum(v for k, v in cuts.items() if k <= i)
+                    self.assertAlmostEqual(release[i][0] - sub[i][0], added, delta=1e-9, msg=i)
 
 
 class SectionsTest(unittest.TestCase):
@@ -769,16 +806,30 @@ class SectionsTest(unittest.TestCase):
     def test_two_cuts_of_inception_kind_pass_in_two_sections(self):
         release, sub = cut_film(900, 7, {450: 8.0})
         sub = [(st - 55.0, d) for st, d in sub]                   # +55 s, then +63 s after the cut
-        res, sect = judge_sections(release, sub)
+        res, sect, _ = judge_sections(release, sub)
         self.assertEqual([round(x["offset_s"]) for x in sect["summary"]["sections"]], [55, 63])
         self.assertEqual(res["outcome"], "synced", res.get("reason"))
-        self.assertTrue(res["reason"].endswith("(sections)") or "(sections)" in res["reason"])
+        self.assertIn("(sections)", res["reason"])               # " (snapped)" may follow it
         self.assertTrue(all(c["ok"] for c in res["section_checks"]))
+
+    def test_lines_paired_by_their_words_anchor_the_sections(self):
+        # the track's words are read once a sectioned fit is possible (TextCheck.shifts), and each section counts the
+        # lines its words pair under its own shift
+        release, sub = cut_film(900, 7, {450: 8.0})
+        sub = [(st - 55.0, d) for st, d in sub]
+        r = random.Random(7)
+        res, sect, _ = judge_sections(release, sub, texts=[sentence(r) for _ in release])
+        self.assertEqual(res["outcome"], "synced", res.get("reason"))
+        self.assertIn("(sections)", res["reason"])
+        self.assertEqual([round(x["offset_s"]) for x in sect["summary"]["sections"]], [55, 63])
+        self.assertTrue(all(x["anchors"] >= sections.MIN_ANCHORS for x in sect["summary"]["sections"]),
+                        sect["summary"]["sections"])
+        self.assertTrue(res["text"]["ok"])                       # and the copy is confirmed by the same words
 
     def test_three_ad_breaks_pass(self):
         release, sub = cut_film(800, 9, {200: 30.0, 400: 30.0, 600: 30.0})
         sub = [(st - 5.0, d) for st, d in sub]
-        res, sect = judge_sections(release, sub)
+        res, sect, _ = judge_sections(release, sub)
         self.assertEqual([round(x["offset_s"]) for x in sect["summary"]["sections"]], [5, 35, 65, 95])
         self.assertEqual(res["outcome"], "synced", res.get("reason"))
 
@@ -793,30 +844,42 @@ class SectionsTest(unittest.TestCase):
             t += d + r.uniform(0.5, 2.5)
         added = t - (base[450][0]) + 3.0
         release = base[:450] + scene + [(st + added, d) for st, d in base[450:]]
-        res, sect = judge_sections(release, base)
-        self.assertNotEqual((res or {}).get("outcome"), "synced")
-        if res is not None:
-            self.assertTrue(res["gate_synced"]["missing_scene"])
+        res, _, judged = judge_sections(release, base)
+        self.assertNotEqual(res["outcome"], "synced")
+        self.assertIsNotNone(judged)                              # the sectioned copy was judged, and refused for it
+        self.assertTrue(judged["gate_synced"]["missing_scene"])
 
-    def test_a_short_section_is_refused(self):
-        release, sub = cut_film(900, 15, {400: 6.0, 412: -6.0})   # 12 lines with their own shift
-        res, sect = judge_sections(release, sub)
-        if sect and sect["lines"] is not None:
-            self.assertTrue(all(len(g) >= sections.MIN_SECTION_LINES for g in sect["groups"]))
-        else:
-            self.assertTrue(sect is None or "short" in sect["summary"]["why"] or "lands" in sect["summary"]["why"])
+    def short_section(self, release, sub, lines):
+        """The fit of a subtitle whose last section breaks one of the size rules: refused for it, and recorded."""
+        res, sect, judged = judge_sections(release, sub)
+        self.assertIsNone(sect["lines"])
+        self.assertEqual(sect["summary"]["why"], "a section is too short")
+        self.assertEqual([x["lines"] for x in sect["summary"]["sections"]], [600, lines])
+        self.assertIsNone(judged)
+        self.assertEqual((res["outcome"], res["sections"]["why"]), ("keep_original", "a section is too short"))
+        return sect["summary"]["sections"][-1]
+
+    def test_a_section_shorter_than_the_shortest_span_is_refused(self):
+        last = self.short_section(*last_scene(30, 3, (0.2, 0.7), 7.0), 30)     # 30 lines in 50 s
+        self.assertLess(last["to_s"] - last["from_s"], sections.MIN_SECTION_S)
+        self.assertGreaterEqual(last["lines"], sections.MIN_SECTION_LINES)
+
+    def test_a_section_with_too_few_lines_is_refused(self):
+        last = self.short_section(*last_scene(18, 4, (7.0, 10.0), 30.0), 18)   # 18 lines over 162 s
+        self.assertGreaterEqual(last["to_s"] - last["from_s"], sections.MIN_SECTION_S)
+        self.assertLess(last["lines"], sections.MIN_SECTION_LINES)
 
     def test_at_most_eight_sections(self):
         cuts = {100 * k: 9.0 for k in range(1, 10)}               # ten stretches
         release, sub = cut_film(1000, 17, cuts)
-        res, sect = judge_sections(release, sub)
-        self.assertNotEqual((res or {}).get("outcome"), "synced")
+        res, sect, _ = judge_sections(release, sub)
+        self.assertNotEqual(res["outcome"], "synced")
         if sect and sect["lines"] is not None:
             self.assertLessEqual(len(sect["groups"]), sections.MAX_SECTIONS)
 
     def test_sections_begin_only_after_a_pause(self):
         release, sub = cut_film(900, 19, {300: 12.0, 600: -7.0})
-        _, sect = judge_sections(release, sub)
+        _, sect, _ = judge_sections(release, sub)
         self.assertEqual(len(sect["groups"]), 3)
         text_lines = pipeline.parse(srt([(st, st + d, "x") for st, d in sub]))
         for a, b in zip(sect["groups"], sect["groups"][1:]):
@@ -826,14 +889,14 @@ class SectionsTest(unittest.TestCase):
         release = rhythm(900, 7)
         passed = 0
         for k in range(40):
-            res, _ = judge_sections(release, rhythm(900, 1000 + k), jitter=0.05, seed=k, better={})
-            passed += (res or {}).get("outcome") == "synced"
+            res, _, _ = judge_sections(release, rhythm(900, 1000 + k), jitter=0.05, seed=k, better={})
+            passed += res["outcome"] == "synced"
         self.assertEqual(passed, 0)
 
     def test_a_neighbouring_episode_never_passes(self):
         release = rhythm(500, 31)
-        res, _ = judge_sections(release, rhythm(500, 32), better={})
-        self.assertNotEqual((res or {}).get("outcome"), "synced")
+        res, _, _ = judge_sections(release, rhythm(500, 32), better={})
+        self.assertNotEqual(res["outcome"], "synced")
 
     def test_words_are_asked_only_once_a_sectioned_fit_is_possible(self):
         release = rhythm(600, 41)
@@ -844,7 +907,7 @@ class SectionsTest(unittest.TestCase):
 
     def test_lines_left_out_are_not_measured(self):
         cues = rhythm(300, 6)
-        index = Index([track(cues)])
+        index = FakeIndex([track(cues)])
         ref = pipeline.choose_reference(index, 300, "eng")
         gate, _ = pipeline.reference_gate(ref, 300)
         lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, d in cues]
@@ -854,7 +917,7 @@ class SectionsTest(unittest.TestCase):
 
     def test_one_steady_shift_is_no_sectioned_fit(self):
         release = rhythm(600, 41)
-        _, sect = judge_sections(release, [(st - 20.0, d) for st, d in release])
+        _, sect, _ = judge_sections(release, [(st - 20.0, d) for st, d in release])
         self.assertIsNone(sect)
 
 
@@ -880,7 +943,7 @@ class CloseCallTest(unittest.TestCase):
     """D5: up to 12 more windows only on a close call, within the audio budget."""
 
     def fit(self):
-        return AudioFit(Index([]), [], vad=object(), better=AUDIO_BETTER, extra=12)
+        return AudioFit(FakeIndex(), [], vad=object(), better=AUDIO_BETTER, extra=12)
 
     def test_what_counts_as_a_close_call(self):
         f = self.fit()
@@ -889,8 +952,7 @@ class CloseCallTest(unittest.TestCase):
         far = {"matched": 30, "miss": 0.25, "median_ms": 400.0, "within200": 0.20}
         self.assertEqual(f.close_call({"decision": "keep_original", "plan": plan, "gate_new": near}), "close to the bar")
         self.assertIsNone(f.close_call({"decision": "keep_original", "plan": plan, "gate_new": far, "gate_old": far}))
-        self.assertEqual(f.close_call({"decision": "synced", "plan": plan, "gate_new": dict(near, matched=30)}),
-                         "passed on few lines")
+        self.assertEqual(f.close_call({"decision": "synced", "plan": plan, "gate_new": near}), "passed on few lines")
         self.assertIsNone(f.close_call({"decision": "synced", "plan": plan, "gate_new": dict(near, matched=60)}))
         self.assertEqual(f.close_call({"decision": "synced", "plan": plan, "gate_new": dict(near, matched=60),
                                        "segment_offsets": [0.0, 9.0], "seq": [(100, 0.0), (400, 0.0), (800, 9.0)]}),
@@ -959,7 +1021,7 @@ class SpeechEndsTest(unittest.TestCase):
         fit, _ = truth_fit(truth, [st for st, _ in truth], end_pad=-0.6)
         windows = [fit.read_window(st, 30.0) for st in (200.0, 600.0, 1000.0)]
         self.assertAlmostEqual(fit.end_lag(1.0, 0.0, windows), -0.6, delta=0.05)
-        self.assertIsInstance(fit, AudioFit)
+        self.assertIs(type(fit).end_lag, AudioFit.end_lag)      # AudioFit's own: the stand-in only reads windows
 
     def test_a_shift_change_is_placed_with_ends_too(self):
         truth = rhythm(900, 104)

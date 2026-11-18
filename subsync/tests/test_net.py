@@ -14,10 +14,13 @@ from helpers import local_network_only  # noqa: E402
 from subsync import net, realdebrid  # noqa: E402
 
 
-def resolver_answering(ip):
+def resolver_answering(*ips, asked=None):
+    """A name lookup answering these addresses, in this order; the names asked are added to `asked`."""
     def resolve(host, port, *a, **k):
-        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
-        return [(family, socket.SOCK_STREAM, 6, "", (ip, port or 80))]
+        if asked is not None:
+            asked.append(host)
+        return [(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 80))
+                for ip in ips]
     return resolve
 
 
@@ -114,6 +117,25 @@ class GateTest(unittest.TestCase):
         net.configure(public_only=True, resolver=resolver_answering("10.0.0.5"))
         with local_network_only():
             refused(self, lambda: realdebrid.urlopen("http://evil.test/x", timeout=5))
+
+    def test_a_name_with_any_address_not_public_is_refused_before_connecting(self):
+        # Every address the name answers is checked, not only the first (the order a lookup gives varies)
+        for ips in (("93.184.216.34", "10.0.0.5"), ("10.0.0.5", "93.184.216.34"),
+                    ("2606:4700:4700::1111", "93.184.216.34", "fd00::1")):
+            net.configure(public_only=True, resolver=resolver_answering(*ips))
+            with self.subTest(ips=ips), local_network_only():
+                refused(self, lambda: realdebrid.urlopen("http://mixed.test/x", timeout=5))
+
+    def test_an_address_written_in_brackets_is_judged_as_it_is(self):
+        # An IPv6 address in the link is checked without a lookup: loopback, IPv4-mapped private and
+        # link-local with its zone are refused, a public one passes
+        asked = []
+        net.configure(public_only=True, resolver=resolver_answering("93.184.216.34", asked=asked))
+        for url in ("http://[::1]/x", "http://[::ffff:10.0.0.1]/x", "http://[fe80::1%25eth0]/x"):
+            with self.subTest(url=url), local_network_only():
+                refused(self, lambda: realdebrid.urlopen(url, timeout=5))
+        net.check_url("http://[2606:4700:4700::1111]/x")
+        self.assertEqual(asked, [])
 
     def test_the_metadata_service_is_refused(self):
         net.configure(public_only=True, resolver=resolver_answering("169.254.169.254"))
