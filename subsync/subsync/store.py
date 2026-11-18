@@ -285,12 +285,16 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,0,NULL)",
                             (file_key, size, oshash, 1 if text_track else 0, json.dumps(detail), self.clock()))
 
+    def file_state(self, file_key):
+        """(when the file was read, what its first read found as file_detail gives it), or (None, None)."""
+        with self.lock:
+            row = self.db.execute("SELECT read_at, detail FROM files WHERE file_key=?", (file_key,)).fetchone()
+        return (row[0], json.loads(row[1] or "{}")) if row else (None, None)
+
     def file_detail(self, file_key):
         """What the first read of a file found (`file_read`'s detail: its tracks, bytes, whether it has a track a
         subtitle can be judged against, its audio byte rate), or None."""
-        with self.lock:
-            row = self.db.execute("SELECT detail FROM files WHERE file_key=?", (file_key,)).fetchone()
-        return json.loads(row[0] or "{}") if row else None
+        return self.file_state(file_key)[1]
 
     def file_failed(self, alias, backoff=READ_FAILED_BACKOFF_S):
         """A read failure for a file (by alias, since a file that can't be read has no hash): the waits of `backoff`

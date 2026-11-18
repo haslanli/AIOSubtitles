@@ -104,6 +104,34 @@ def local_network_only():
     return mock.patch("socket.create_connection", guarded)
 
 
+def exchange(port, raw, timeout=5):
+    """Sends `raw` bytes on one connection to this machine's `port` and returns all the server sends until it closes
+    the connection; a server that keeps it open fails the test (socket timeout)."""
+    data = b""
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        sock.sendall(raw)
+        while chunk := sock.recv(65536):
+            data += chunk
+    return data
+
+
+def answers(data):
+    """The status codes of the HTTP/1.1 answers in `data`, one after the other (each body by its Content-Length);
+    bytes that are no such answer (an HTTP/0.9 one) count as one more, None."""
+    codes = []
+    while data:
+        head, sep, rest = data.partition(b"\r\n\r\n")
+        if not sep or not head.startswith(b"HTTP/1.1 "):
+            codes.append(None)
+            break
+        lines = head.decode("latin-1").split("\r\n")
+        length = next((int(line.split(":", 1)[1]) for line in lines[1:] if line.lower().startswith("content-length:")),
+                      0)
+        codes.append(int(lines[0].split()[1]))
+        data = rest[length:]
+    return codes
+
+
 class FakeAiostreams:
     """A stand-in for a person's AIOStreams: its status, its config API (read, save, create, delete, with basic auth)
     and each config's manifest. Records every request (method, path). Faults: 'wrong_password', 'refuse_create',

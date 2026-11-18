@@ -343,7 +343,6 @@ class PublicService:
 
 class PublicHandler(Handler):
     service = None
-    timeout = 30           # an idle kept-open connection gives its slot back after this long
 
     def do_GET(self):
         self._route("GET")
@@ -386,7 +385,7 @@ class PublicHandler(Handler):
         if length < 0 or length > MAX_FORM:
             self.close_connection = True
             raise FormError("The form is too large: send it again from this page.", 413)
-        raw = self.rfile.read(length)
+        raw = self.read_body(length)
         try:
             text = raw.decode("utf-8")
             fields = urllib.parse.parse_qs(text, keep_blank_values=True, max_num_fields=MAX_FIELDS)

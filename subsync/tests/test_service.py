@@ -1,18 +1,22 @@
 """Store, safety, sources filters and the addon's answers."""
 import json
 import os
+import socket
 import sys
 import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
+from http.client import HTTPConnection
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FakeDownloads, TempDir, dialogue_srt, local_network_only  # noqa: E402
+from helpers import FakeDownloads, TempDir, answers, dialogue_srt, exchange, local_network_only  # noqa: E402
 from subsync import ALGO_VERSION  # noqa: E402
-from subsync.addon import App, serve, token  # noqa: E402
+from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.sources import Aios, expected_size, extras, parse_extras, same_hash, unreadable  # noqa: E402
 from subsync.store import REFUSED_BACKOFF_S, Store, result_key  # noqa: E402
@@ -116,6 +120,19 @@ class StoreTest(unittest.TestCase):
     def test_key_format(self):
         self.assertEqual(result_key(FILE, SHA_A), f"subsync:{ALGO_VERSION}:{FILE}:{'a' * 16}")
 
+    def test_file_state_is_when_a_file_was_read_and_what_its_read_found(self):
+        # What the addon asks of a file's read, through the store's lock and on its clock
+        with TempDir() as d:
+            clock = Clock()
+            st = Store(d, clock=clock)
+            self.assertEqual((st.file_state(FILE), st.file_detail(FILE)), ((None, None), None))
+            st.file_read(FILE, 1000, FILE[:16], True, {"reference": False})
+            clock.t += 10
+            self.assertEqual(st.file_state(FILE), (clock.t - 10, {"reference": False}))
+            self.assertEqual(st.file_detail(FILE), {"reference": False})
+            st.file_failed("name:x|1")                     # a read that failed: its time, no detail
+            self.assertEqual((st.file_state("name:x|1"), st.file_detail("name:x|1")), ((clock.t, {}), {}))
+
 
 class SafetyTest(unittest.TestCase):
     def test_guard_rules(self):
@@ -173,6 +190,20 @@ class SourcesTest(unittest.TestCase):
     def test_extras_round_trip(self):
         h = {"videoHash": "0123456789abcdef", "videoSize": 123, "filename": "A B [x].mkv"}
         self.assertEqual(parse_extras(extras(h)), h)
+
+    def test_extras_are_split_before_each_value_is_decoded(self):
+        # An "&", a "%" or a "+" in a file name stays in it; "+" between words is a space (form encoding);
+        # Stremio's own form, the whole segment encoded once more, reads the same
+        tom = {"videoSize": 1000, "filename": "Tom & Jerry.mkv"}
+        self.assertEqual(parse_extras("videoSize=1000&filename=Tom%20%26%20Jerry.mkv"), tom)
+        self.assertEqual(parse_extras("videoSize=1000&filename=Tom+%26+Jerry.mkv"), tom)
+        self.assertEqual(parse_extras(urllib.parse.quote("videoSize=1000&filename=Tom+%26+Jerry.mkv", safe="")), tom)
+        self.assertEqual(parse_extras("filename=100%25AB.mkv"), {"filename": "100%AB.mkv"})
+        self.assertEqual(parse_extras("filename=C%2B%2B.mkv"), {"filename": "C++.mkv"})
+        for h in ({"filename": "Law.&.Order.S01E01.mkv", "videoSize": 5}, {"filename": "100%AB+1 =2.mkv"}):
+            self.assertEqual(parse_extras(extras(h)), h)
+        self.assertEqual(parse_extras(""), {})
+        self.assertEqual(parse_extras("videoSize=x&other=1&filename="), {"filename": ""})
 
 
 class FindRowTest(unittest.TestCase):
@@ -913,6 +944,23 @@ class PickTest(AddonTest):
         code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, headers.get("Retry-After")), (503, "1"))
 
+    def test_a_late_original_whose_address_cant_go_out_as_it_is_is_a_503(self):
+        # The redirect's Location was the address in this person's list as it is: a line break in it wrote a
+        # header of its own, a character outside latin-1 broke the answer half-way, and any scheme went out
+        self.s.pick_wait = 0.3
+        self.waiting()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        for address in ("http://opensubs/x.srt\r\nSet-Cookie: injected=1", "http://opensubs/Ж.srt",
+                        "http://opensubs/a b.srt", "ftp://opensubs/x.srt", "javascript:alert(1)"):
+            with self.subTest(address=address):
+                self.listed({"id": "os-9", "url": address, "lang": "eng"})
+                self.downloads.hold[address] = release
+                code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+                self.assertEqual((code, headers.get("Retry-After")), (503, "1"))
+                self.assertNotIn("Location", headers)
+                self.assertNotIn("Set-Cookie", headers)
+
     def test_a_slow_first_pass_leaves_time_to_download_the_original(self):
         # found in review: the pick spent its whole deadline waiting for the job, and the original, not
         # downloaded yet, got no time: a 503 where 1.4.0 served it
@@ -1497,6 +1545,17 @@ class NameOnlyTest(unittest.TestCase):
         self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "videoSize": 3}).alias, "hash:ab|3")
         self.assertEqual(Job("movie", "tt1").alias, "title:movie/tt1")
 
+    def test_aliases(self):
+        # The aliases the store may know a request's file by, in one place (written out four times before):
+        # its alias, and with a file name its name and size
+        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "videoSize": 3, "filename": "a.mkv"}).aliases,
+                         ("hash:ab|3", "name:a.mkv|3"))
+        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "filename": "a.mkv"}).aliases, ("name:a.mkv|None",))
+        self.assertEqual(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 3}).aliases, ("name:a.mkv|3",))
+        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "videoSize": 3}).aliases, ("hash:ab|3",))
+        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab"}).aliases, ("title:movie/tt1",))
+        self.assertEqual(Job("movie", "tt1").aliases, ("title:movie/tt1",))
+
     def test_another_release_of_the_title_gets_nothing_of_this_file(self):
         self.store.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nHi\n", fmt="srt")
         self.store.alias(Job("movie", "tt1", {"filename": "a.mkv"}).alias, FILE)
@@ -1507,6 +1566,150 @@ class NameOnlyTest(unittest.TestCase):
         self.assertEqual([s["label"] for s in other], ["English (Subsync)"])
         self.assertTrue(other[0]["url"].endswith("/pick/" + token("name:b.mkv|None") + "/eng.srt"))
         self.assertEqual(self.app.subtitles("movie", "tt1", ""), [])
+
+
+class ReadLatelyTest(unittest.TestCase):
+    """Whether a file was read lately is asked of the store, on its own clock (the addon read store.db itself,
+    outside the store's lock, and compared with time.time())."""
+
+    def setUp(self):
+        self.tmp = TempDir()
+        d = self.tmp.__enter__()
+        self.addCleanup(self.tmp.__exit__, None, None, None)
+        self.clock = Clock()
+        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
+        self.store = Store(d, clock=self.clock)
+        self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started: jobs stay queued
+        self.app = App(self.s, self.store, self.worker, Safety())
+
+    def test_a_file_read_a_day_ago_on_the_stores_clock_is_read_again(self):
+        self.store.alias("name:a.mkv|1000", FILE)
+        self.store.file_read(FILE, 1000, FILE[:16], True, {})
+        self.clock.t += REPROCESS_S - 1
+        self.app.subtitles("movie", "tt1", "filename=a.mkv&videoSize=1000")
+        self.assertEqual(list(self.worker.jobs), [])                            # read lately: nothing queued
+        self.clock.t += 2
+        self.app.subtitles("movie", "tt1", "filename=a.mkv&videoSize=1000")
+        self.assertEqual(list(self.worker.jobs), ["name:a.mkv|1000"])
+
+
+class ConnectionTest(unittest.TestCase):
+    """The self-hosted service's HTTP: what a request may carry and what its connection does."""
+
+    def setUp(self):
+        self.tmp = TempDir()
+        d = self.tmp.__enter__()
+        self.addCleanup(self.tmp.__exit__, None, None, None)
+        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
+        self.store = Store(d)
+        self.safety = Safety()
+        self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
+        self.app = App(self.s, self.store, self.worker, self.safety)
+        self.server = serve(self.app, 0)
+        self.port = self.server.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def queued(self):
+        """The hints of the jobs queued since the last call."""
+        with self.worker.cv:
+            jobs = list(self.worker.jobs.values())
+            self.worker.jobs.clear()
+            self.worker.queue.clear()
+        return [j.hints for j in jobs]
+
+    def test_a_body_no_route_reads_closes_the_connection(self):
+        # The body stayed on the kept-open connection and was read as the next request, so a request hidden in
+        # it was answered too (behind a web server that keeps its connections, to whoever it sent next)
+        hidden = b"GET /status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        length = b"Content-Length: %d" % len(hidden)
+        for head in (length, length + b"\r\nTransfer-Encoding: chunked"):
+            with self.subTest(head=head):
+                data = exchange(self.port, b"GET /health HTTP/1.1\r\nHost: x\r\n" + head + b"\r\n\r\n" + hidden)
+                self.assertEqual(answers(data), [200])
+                self.assertIn(b"\r\nConnection: close\r\n", data)
+                self.assertNotIn(b'"store"', data)
+        chunked = b"%x\r\n" % len(hidden) + hidden + b"\r\n0\r\n\r\n"
+        data = exchange(self.port, b"GET /health HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" + chunked)
+        self.assertEqual(answers(data), [200])
+
+    def test_a_request_without_a_body_keeps_the_connection(self):
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        self.addCleanup(conn.close)
+        for headers in ({}, {"Content-Length": "0"}):
+            conn.request("GET", "/health", headers=headers)
+            r = conn.getresponse()
+            self.assertEqual((r.status, r.read(), r.getheader("Connection")), (200, b"ok", None))
+            sock = conn.sock
+            conn.request("GET", "/manifest.json")
+            r = conn.getresponse()
+            self.assertEqual(r.status, 200)
+            r.read()
+            self.assertIs(conn.sock, sock)                         # the same connection answered both
+
+    def test_an_idle_kept_open_connection_is_closed(self):
+        # It held its thread for good (public mode closed it after 30 s)
+        handler = self.server.RequestHandlerClass
+        self.assertIsNotNone(handler.timeout)
+        self.assertLessEqual(handler.timeout, 30)
+        with mock.patch.object(handler, "timeout", 0.3), socket.create_connection(("127.0.0.1", self.port), 5) as sock:
+            t0 = time.time()
+            self.assertEqual(sock.recv(1), b"")
+            self.assertLess(time.time() - t0, 3)
+
+    def test_each_server_answers_with_its_own_app(self):
+        # Serve set the app on Handler itself, so the last server made answered for every one
+        other = App(self.s, self.store, self.worker, self.safety)
+        other.subtitle_requests = 7
+        self.addCleanup(serve(other, 0).server_close)
+        code, body, _ = http(self.base + "/status")
+        self.assertEqual((code, json.loads(body)["subtitle_requests"]), (200, 0))
+
+    def test_answers_name_no_python_version(self):
+        # Every answer said "BaseHTTP/0.6 Python/3.x.y"
+        for method in ("GET", "POST"):
+            _, _, headers = http(self.base + "/health", method=method, data=b"" if method == "POST" else None)
+            self.assertEqual(headers["Server"].strip(), "AIOSubtitles")
+
+    def test_an_id_no_title_has_is_404_and_never_logged(self):
+        # The id went to the log as it was: a line break in it wrote a log line of the sender's own
+        forged = "tt1%0A2026-11-17%2000:00:00,000%20ERROR%20subsync.worker%20forged"
+        with self.assertNoLogs("subsync", level="INFO"):
+            for vid in (forged, "tt1%09x", "tt1%C2%85x", "tt" + "1" * 300):
+                code, body, _ = http(self.base + f"/subtitles/movie/{vid}/filename=q.mkv&videoSize=3.json")
+                self.assertEqual((code, body), (404, b""))
+        self.assertEqual((self.queued(), self.app.subtitle_requests), ([], 0))
+        for i, vid in enumerate(("kitsu:46474:1", "tt2%3A1%3A1", "tt" + "1" * 200)):
+            code, _, _ = http(self.base + f"/subtitles/series/{vid}/filename=q{i}.mkv&videoSize=3.json")
+            self.assertEqual(code, 200)
+        self.assertEqual(len(self.queued()), 3)
+
+    def test_extras_are_split_before_each_value_is_decoded(self):
+        # The whole segment was decoded before its split: "Tom%20%26%20Jerry.mkv" arrived as "Tom ", a file
+        # never found in the listing
+        stremio = urllib.parse.quote("filename=Tom+%26+Jerry.mkv&videoSize=5", safe="")   # the segment encoded again
+        for segment, name in (("videoSize=5&filename=Tom%20%26%20Jerry.mkv", "Tom & Jerry.mkv"),
+                              ("filename=Law.%26.Order.S01E01.mkv&videoSize=5", "Law.&.Order.S01E01.mkv"),
+                              ("filename=100%25AB.mkv&videoSize=5", "100%AB.mkv"),
+                              ("filename=Tom+%26+Jerry.mkv&videoSize=5", "Tom & Jerry.mkv"),
+                              (stremio, "Tom & Jerry.mkv")):
+            with self.subTest(segment=segment):
+                self.assertEqual(http(self.base + f"/subtitles/movie/tt1/{segment}.json")[0], 200)
+                self.assertEqual(self.queued(), [{"filename": name, "videoSize": 5}])
+
+
+class PlayerAddressTest(unittest.TestCase):
+    def test_only_an_address_that_can_go_out_as_it_is(self):
+        # The redirect's Location is the address in this person's list as it is
+        from subsync.worker import plain_address
+        for url in ("http://opensubs/x.srt", "https://dl.example/a%20b.srt?x=1&y=2", "HTTPS://Host:8080/x"):
+            self.assertTrue(plain_address(url), url)
+        for url in ("", "http://opensubs/x.srt\r\nSet-Cookie: a=1", "http://opensubs/a b.srt", "http://opensubs/Ж.srt",
+                    "http://opensubs/é.srt", "http://opensubs/\x7f", "ftp://opensubs/x.srt", "javascript:alert(1)",
+                    "http:///x.srt", "http://[::1/x.srt", "//opensubs/x.srt"):
+            self.assertFalse(plain_address(url), url)
 
 
 class StreamDataTest(unittest.TestCase):

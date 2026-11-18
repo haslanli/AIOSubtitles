@@ -16,6 +16,7 @@ import logging
 import threading
 import time
 import urllib.error
+import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FutureTimeout
 
@@ -79,6 +80,18 @@ def trim_oldest(d, limit):
     """Drops a map's oldest entries (a dict keeps insertion order) past `limit`."""
     while len(d) > limit:
         d.pop(next(iter(d)))
+
+
+def plain_address(url):
+    """An http(s) address with a host, in ASCII with no space or control character (as http.client sends one): it
+    can go out as it is in a redirect's Location header, where a line break would start a header of its own."""
+    if not url.isascii() or any(c <= " " or c == "\x7f" for c in url):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:   # e.g. an unclosed "[" in its host
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def usenet_size_ok(listed):
@@ -403,6 +416,14 @@ class Job:
             # same title match this file's result
             return f"name:{h['filename']}|None"
         return f"title:{self.type}/{self.video_id}"
+
+    @property
+    def aliases(self):
+        """The aliases the store may know the file by: `alias`, and with a file name its name and size (a file read for
+        a request that named it is found again by one that also gives its hash)."""
+        h = self.hints
+        named = f"name:{h['filename']}|{h.get('videoSize')}" if h.get("filename") else None
+        return tuple(dict.fromkeys(a for a in (self.alias, named) if a))
 
     @property
     def label(self):
@@ -1336,8 +1357,7 @@ class Worker(threading.Thread):
         if not hints.get("videoHash"):   # the file's own hash is known now: a subtitle made for it is the better guess
             self._set_originals(job.alias, candidates, hints.get("filename"), oshash)
         file_key = f"{oshash}-{index.size}"
-        for a in {job.alias, f"hash:{oshash}|{index.size}", bt,
-                  f"name:{hints.get('filename')}|{hints.get('videoSize')}" if hints.get("filename") else None} - {None}:
+        for a in {*job.aliases, f"hash:{oshash}|{index.size}", bt} - {None}:
             self.store.alias(a, file_key)
         tracks = index.text_tracks()
         images = index.image_tracks()
@@ -1731,11 +1751,11 @@ class Worker(threading.Thread):
 
     def player_address(self, cand):
         """A subtitle's address in this person's list when a player can download it as it is (the redirect 1.4.0 sent
-        for a pick): not one subsync found itself that needs a key (extra.headers_for) or is a zip it unpacks
-        (srclimits.ZIPPED, a file's pick after "#"); None otherwise."""
+        for a pick): a plain_address, not one subsync found itself that needs a key (extra.headers_for) or is a zip it
+        unpacks (srclimits.ZIPPED, a file's pick after "#"); None otherwise."""
         url = cand.get("url") or ""
         source = cand.get("source") or srclimits.source_of_url(url)
-        if not url or "#" in url or source in srclimits.ZIPPED:
+        if not plain_address(url) or "#" in url or source in srclimits.ZIPPED:
             return None
         if self.extra is not None and self.extra.headers_for(dict(cand, source=source)):
             return None

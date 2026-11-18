@@ -51,11 +51,17 @@ def extras(hints):
 
 
 def parse_extras(text):
+    """The hints of a subtitles request's extras segment, as it is in the path: "videoHash=…&videoSize=…&filename=…",
+    each value percent-encoded (as `extras` writes it, or form-encoded with "+" for a space), or that whole segment
+    percent-encoded once more (Stremio's own form: no "=" left in it). Each value is decoded once, after the split, so
+    an "&" or a "%" in a file name stays in it."""
+    text = text or ""
+    if "=" not in text and "%3D" in text.upper():
+        text = urllib.parse.unquote(text)
     out = {}
-    for part in (text or "").split("&"):
-        k, _, v = part.partition("=")
+    for k, v in urllib.parse.parse_qsl(text, keep_blank_values=True):
         if k in ("videoHash", "filename"):
-            out[k] = urllib.parse.unquote(v)
+            out[k] = v
         elif k == "videoSize" and v.isdigit():
             out[k] = int(v)
     return out

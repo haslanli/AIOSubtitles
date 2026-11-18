@@ -78,6 +78,9 @@ FILE_ROUTE = re.compile(r"^/file/(v\d+_[0-9a-f]{16}-\d+_[0-9a-f]{16})\.(srt|ass)
 PENDING_ROUTE = re.compile(r"^/pending/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 PICK_ROUTE = re.compile(r"^/pick/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 ORIGINAL_ROUTE = re.compile(r"^/original/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
+# a Stremio id is short ("tt0944947:1:1", "kitsu:46474:1"): a longer one, or one with a line break or another control
+# character, names no title and is answered 404 (it would reach the log as it is)
+MAX_VIDEO_ID = 256
 REPROCESS_S = 24 * 3600
 # A pick or pending entry stops waiting for the job this long before its deadline while the original it would serve
 # isn't downloaded yet, so that download has time (a subtitle file is tens of KB; a slow site's first answer takes a
@@ -209,7 +212,7 @@ class App:
         (Subsync)" entry per language for a file that has no subtitle track of its own, or whose tracks are not known
         yet: downloading it is the viewer's pick. It serves the synced copy when there is one, else the original."""
         t0 = time.time()
-        out = self._with_pick_entries(type_, video_id, extras)
+        out = self._with_pick_entries(Job(type_, video_id, parse_extras(extras)))
         if self.action() is not None:     # public mode: one entry after the others while only the person can fix something
             out.append({"id": "aiosubtitles-notice", "url": f"{self.s.public_base}/notice.srt",
                         "lang": self.s.languages[0], "label": explain.PUBLIC_NOTICE_LABEL})
@@ -217,10 +220,9 @@ class App:
                  sum(str(e.get("id", "")).startswith("subsync-pick-") for e in out), (time.time() - t0) * 1000)
         return out
 
-    def _with_pick_entries(self, type_, video_id, extras):
-        out = self._subtitles(type_, video_id, extras)
+    def _with_pick_entries(self, job):
+        out = self._subtitles(job)
         pick_mode = self.s.audio_choice != "off"   # on pick or when opened, a pick entry starts it too
-        job = Job(type_, video_id, parse_extras(extras))
         if not (job.hints.get("filename") or job.hints.get("videoHash")):
             return out
         # Also with the audio route off, a file subsync works on now gets the entry (its download serves the copy
@@ -252,8 +254,7 @@ class App:
 
     def _no_track(self, job):
         """The file's first read found no subtitle track of its own to judge against (False while it isn't read)."""
-        file_key = self.store.resolve(job.alias, f"name:{job.hints['filename']}|{job.hints.get('videoSize')}"
-                                      if job.hints.get("filename") else None)
+        file_key = self.store.resolve(*job.aliases)
         detail = self.store.file_detail(file_key) if file_key else None
         return (detail or {}).get("reference") is False
 
@@ -269,8 +270,7 @@ class App:
         here: the original the file's judging kept, else (a file not judged) this person's likeliest by name. Its
         address names only the file; the subtitle comes from this person's own list when it is downloaded."""
         have = {e["lang"] for e in out}
-        file_key = self.store.resolve(job.alias, f"name:{job.hints['filename']}|{job.hints.get('videoSize')}"
-                                      if job.hints.get("filename") else None)
+        file_key = self.store.resolve(*job.aliases)
         originals = None
         entries = []
         tok = token(job.alias)
@@ -291,32 +291,28 @@ class App:
             self.worker.remember(job)
         return entries
 
-    def _subtitles(self, type_, video_id, extras):
-        hints = parse_extras(extras)
-        job = Job(type_, video_id, hints)
-        self.worker.start_lookup(video_id)     # the title's original language, in the background (origlang.py)
-        aliases = [job.alias]
-        if hints.get("filename") and hints.get("videoSize"):
-            aliases.append(f"name:{hints['filename']}|{hints['videoSize']}")
-        file_key, out = self.offers(aliases)
-        if out and (hints.get("filename") or hints.get("videoHash")):
+    def _subtitles(self, job):
+        names_file = bool(job.hints.get("filename") or job.hints.get("videoHash"))
+        self.worker.start_lookup(job.video_id)     # the title's original language, in the background (origlang.py)
+        file_key, out = self.offers(job.aliases)
+        if out and names_file:
             # A copy listed here is rebuilt from this person's own subtitle list when it is downloaded; with no
             # job for the file, the list is fetched then, from this request's file
             self.worker.remember(job)
-        if len({e["lang"] for e in out}) == len(self.s.languages) or not (hints.get("filename") or hints.get("videoHash")):
+        if len({e["lang"] for e in out}) == len(self.s.languages) or not names_file:
             return out
         recent = False
         if file_key:
-            row = self.store.db.execute("SELECT read_at, detail FROM files WHERE file_key=?", (file_key,)).fetchone()
-            recent = bool(row and row[0] and time.time() - row[0] < REPROCESS_S)
-            detail = json.loads(row[1] or "{}") if row else {}
-            rule, now_rule = detail.get("rule"), origlang.current(self.worker.rule_for(video_id))
+            read_at, detail = self.store.file_state(file_key)
+            now = self.store.clock()
+            recent = bool(read_at and now - read_at < REPROCESS_S)
+            detail = detail or {}
+            rule, now_rule = detail.get("rule"), origlang.current(self.worker.rule_for(job.video_id))
             if recent and rule is not None and not now_rule(rule):
                 # read under another pass rule, or before its title's original language was known: judge its
                 # subtitles again now
                 recent = False
-            judged = self.store.judged_all(file_key, self.s.languages, now_rule, time.time() - REPROCESS_S) \
-                if recent else None
+            judged = self.store.judged_all(file_key, self.s.languages, now_rule, now - REPROCESS_S) if recent else None
             no_track = detail.get("reference") is False
             if judged is False and not (no_track and self.s.audio_route and self.s.audio_choice == "off"):
                 # read lately, but not for every language asked here (another person's, in public mode); for a
@@ -329,7 +325,9 @@ class App:
                 # (an index read) and can pick it, or open it; never someone whose choice is off
                 recent = False
         if not recent and not self.worker.recently_unlisted(job.alias):
-            job = self.worker.submit(job) or job
+            # a job of its own for the queue: the worker changes a queued job's state (a pick makes it an audio job),
+            # and this request's job is read again by _with_pick_entries
+            self.worker.submit(job.again())
         if not self.worker.busy_with(job.alias):
             return out
         if not self.s.pending_entry:
@@ -340,7 +338,7 @@ class App:
         # A file being synced now: the Cues route takes a fraction of a second, so wait up to SUBSYNC_PENDING_WAIT_MS
         # for it and list what is ready (players and AIOStreams may keep this answer a while).
         originals = self.worker.wait_for_file(job.alias, self.s.pending_wait)
-        file_key, out = self.offers(aliases)
+        file_key, out = self.offers(job.aliases)
         if not (self.s.pending_entry and originals and self.worker.busy_with(job.alias)):
             return out
         have = {e["lang"] for e in out}
@@ -355,10 +353,36 @@ class App:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    server_version = "AIOSubtitles"   # the Server header, without http.server's name and the Python version
+    sys_version = ""
+    timeout = 30           # an idle kept-open connection gives its thread (public mode: its slot) back after this long
     app = None
+    body_unread = False    # the request declared a body no route has read (parse_request)
 
     def log_message(self, *a):  # no access log: URLs may carry file names
         pass
+
+    def parse_request(self):
+        """http.server's parsing, noting whether the request declares a body: one a route doesn't read would stay on a
+        kept-open connection and be read as the next request (another one hidden in it, run as if a proxy sent it)."""
+        self.body_unread = False
+        if not super().parse_request():
+            return False
+        length = (self.headers.get("Content-Length") or "0").strip()
+        self.body_unread = bool(self.headers.get("Transfer-Encoding")) or length != "0"
+        return True
+
+    def read_body(self, length):
+        """The request's body, `length` bytes as its Content-Length says. A body that also declares a Transfer-Encoding
+        (which http.server can't follow) still closes the connection after the answer."""
+        raw = self.rfile.read(length)
+        self.body_unread = bool(self.headers.get("Transfer-Encoding"))
+        return raw
+
+    def end_headers(self):
+        if self.body_unread and not self.close_connection:
+            self.send_header("Connection", "close")   # the body unread: nothing more is read from this connection
+        super().end_headers()
 
     def _send(self, code, body=b"", ctype="application/json; charset=utf-8", headers=None):
         if isinstance(body, str):
@@ -410,10 +434,13 @@ class Handler(BaseHTTPRequestHandler):
                                    "bytes_today": app.store.bytes_today("read")})
             m = SUB_ROUTE.match(path)
             if m:
-                type_, vid, extras = m.group(1), urllib.parse.unquote(m.group(2)), urllib.parse.unquote(m.group(3) or "")
+                vid = urllib.parse.unquote(m.group(2))
+                if len(vid) > MAX_VIDEO_ID or not vid.isprintable():
+                    return self._send(404, b"")
                 app.subtitle_requests += 1
                 app.last_subtitle_request = int(time.time())
-                return self._json({"subtitles": app.subtitles(type_, vid, extras)}, cache="max-age=60")
+                # the extras as they are in the path: parse_extras splits them before it decodes each value
+                return self._json({"subtitles": app.subtitles(m.group(1), vid, m.group(3) or "")}, cache="max-age=60")
             m = FILE_ROUTE.match(path)
             if m:
                 key = key_of(m.group(1))
@@ -531,8 +558,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(unknown, b"")
         return self._subtitle(no_subtitle_note(lang), "note")
 
+
 def serve(app, port):
-    Handler.app = app
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    handler = type("BoundHandler", (Handler,), {"app": app})   # this server's app, not every Handler's
+    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     server.daemon_threads = True
     return server

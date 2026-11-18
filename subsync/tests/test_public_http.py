@@ -13,7 +13,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FakeAiostreams, TempDir  # noqa: E402
+from helpers import FakeAiostreams, TempDir, answers, exchange  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 
 try:
@@ -287,6 +287,25 @@ class PublicHttpTest(Base):
             self.assertEqual(http(self.base + "/signup", form(link="", password="x"))[0], 400)
         code, body, _ = http(self.base + "/signup", form(link="", password="x"))
         self.assertEqual(code, 429)
+
+    def test_a_body_no_route_reads_closes_the_connection(self):
+        # The body stayed on the kept-open connection and was read as the next request: a request hidden in it
+        # ran as if the web server in front had sent it (its X-Forwarded-For believed), and behind a web server that
+        # keeps its connections its answer went to whoever that server sent next
+        port = self.server.server_address[1]
+        hidden = b"GET /health HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9\r\nConnection: close\r\n\r\n"
+        for line, code in ((b"POST /health", 405), (b"POST /nope", 404), (b"GET /static/app.css", 200),
+                           (b"POST /u/" + b"A" * 43 + b"/manifest.json", 405)):
+            with self.subTest(line=line):
+                data = exchange(port, line + b" HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(hidden)
+                                + hidden)
+                self.assertEqual(answers(data), [code])
+                self.assertIn(b"\r\nConnection: close\r\n", data)
+        # a form the route reads keeps the connection: the next request on it is answered
+        body = form(link="", password="x")
+        data = exchange(port, b"POST /signup HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                        b"Content-Length: %d\r\n\r\n" % len(body) + body + hidden)
+        self.assertEqual(answers(data), [400, 200])
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
