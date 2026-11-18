@@ -48,6 +48,12 @@ class Health:
         if was:
             log.info("source %s answers again", source)
 
+    def not_asked(self, source):
+        """A call let through by allowed() that asked the source nothing (an id it can't use): nothing is learnt, so a
+        pause stays and its trial goes to the next request."""
+        with self.lock:
+            self.probing.discard(source)
+
     def failed(self, source, why=""):
         now = self.clock()
         with self.lock:

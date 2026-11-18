@@ -884,18 +884,20 @@ class PublicTextsTest(unittest.TestCase):
 
     def test_the_privacy_text_names_cloudflare_and_the_backups_before_how_long(self):
         from subsync import explain
-        text = explain.PUBLIC_TEXTS["privacy"]
+        parts = explain.privacy_parts(Settings({}))
+        text = " ".join(f"{head}: {text}" for head, text in parts)       # the parts in order, under their headings
         added = ("AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address "
                  "and the links you open, your personal link included. AIOSubtitles itself keeps no log of requests. "
                  "Backups of the stored data are kept for up to 30 days.")
-        self.assertIn("Logs name the titles synced, never who asked. " + added + " How long:", text)
+        self.assertIn("Logs name the titles synced, never who asked. Who else sees your requests: " + added
+                      + " How long it is kept:", text)
 
     def test_the_privacy_text_says_what_reading_a_track_of_pictures_means(self):
         # Image subtitle tracks' words are read on the server, and such a track can take a few MB
         from subsync import explain
         self.assertIn("for each file you play, its subtitle track (about 1 MB; a few MB when the track's lines are "
                       "pictures, whose words AIOSubtitles reads on its own server and doesn't keep) and the subtitles "
-                      "your AIOStreams lists", explain.PUBLIC_TEXTS["privacy"])
+                      "your AIOStreams lists", dict(explain.privacy_parts(Settings({})))["What is read"])
 
     def test_the_other_read_sizes_say_the_same_with_the_same_words(self):
         # The landing intro and the README's texts that give "about 1 MB" per file take the privacy sentence's

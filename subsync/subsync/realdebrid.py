@@ -63,7 +63,10 @@ def check(url):
 
 
 class GuardedRedirects(urllib.request.HTTPRedirectHandler):
-    """Follows redirects like urllib does, except to a Real-Debrid address."""
+    """Follows redirects like urllib does, except to a Real-Debrid address, and without the request's credentials (a
+    source's key, a password) when the redirect leaves its origin: urllib would send every header on to wherever it
+    points."""
+    CREDENTIALS = ("authorization", "x-api-key")
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         try:
@@ -72,7 +75,11 @@ class GuardedRedirects(urllib.request.HTTPRedirectHandler):
         except OSError:
             fp.close()
             raise
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and not net.credentials_follow(req.full_url, new.full_url):
+            for name in [k for k in new.headers if k.lower() in self.CREDENTIALS]:
+                del new.headers[name]
+        return new
 
 
 _OPENER = net.build_opener()

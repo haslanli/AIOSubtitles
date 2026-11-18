@@ -22,7 +22,10 @@ MAX_LANGUAGES_TEXT = (
     "play: its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: 4, "
     "the most the pages offer; lower it only when the server can't keep up. A lower limit applies when people next "
     "save their languages; until then they keep the ones they have.")
-TODAY = explain.PUBLIC_FIELDS["languages"]
+# the approved text, as the pages show it with today's limit of four
+TODAY = ("The languages you want synced subtitles in, up to four, like English, Spanish. Each one is a separate sync "
+         "for every file you play, so fewer is faster. The first one gets up to three synced choices, the others one "
+         "each. You can change them later; a change applies from the next file you play.")
 ONE = ("The language you want synced subtitles in, like English. It gets up to three synced choices for every file you "
        "play. You can change it later; a change applies from the next file you play.")
 

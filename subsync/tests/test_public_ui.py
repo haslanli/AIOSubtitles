@@ -171,18 +171,19 @@ def approved_corpus():
     from subsync import explain, pages
     from subsync.aiosconfig import LANGUAGES
     texts = list(explain.PUBLIC_FIELDS.values()) + list(explain.PUBLIC_BEFORE) + list(explain.PUBLIC_MANUAL_STEPS)
-    texts += list(explain.PUBLIC_DELETE_LIST) + list(explain.PUBLIC_STORE_ONLY) + list(explain.PUBLIC_HEADLINE)
-    texts += [explain.PUBLIC_REAL_DEBRID_WARNING, explain.CONTACT] + [explain.languages_help(n) for n in (1, 2, 3, 4)]
-    texts += [h for h, _, _ in explain.PRIVACY_PARTS]
-    texts += [(t[:1].upper() + t[1:]) for _, _, t in explain.PRIVACY_PARTS]
+    texts += list(explain.PUBLIC_DELETE_LIST.values()) + list(explain.PUBLIC_STORE_ONLY) + list(explain.PUBLIC_HEADLINE)
+    texts += [explain.PUBLIC_REAL_DEBRID_NOTICE, explain.CONTACT] + [explain.languages_help(n) for n in (1, 2, 3, 4)]
+    texts.append(explain.PUBLIC_MANUAL_LEAD)
+    texts += [h for h, _ in explain.PRIVACY_PARTS]
+    texts += [(t[:1].upper() + t[1:]) for _, t in explain.PRIVACY_PARTS]
     audio = settings(SUBSYNC_AUDIO_ROUTE="on")            # the audio route's words, as an instance with it on shows them
-    texts += [explain.intro_text(audio), explain.next_text(audio)]
-    texts += [(t[:1].upper() + t[1:]) for _, _, t in explain.privacy_parts(audio)]
+    texts += list(explain.intro_parts(audio)) + [explain.next_text(audio)]
+    texts += [(t[:1].upper() + t[1:]) for _, t in explain.privacy_parts(audio)]
     # the original-language lookups' words, by what the instance uses (TMDB with its key, each person's, Wikidata
     # only, none), and TMDB's notice and its logo's name
     for env in ({"SUBSYNC_TMDB_KEY": "k"}, {"SUBSYNC_TMDB_PERSONAL": "on"}, {}, {"SUBSYNC_ORIGINAL_LANGUAGE": "off"},
                 {"SUBSYNC_TMDB_KEY": "k", "SUBSYNC_AUDIO_ROUTE": "on"}):
-        texts += [(t[:1].upper() + t[1:]) for _, _, t in explain.privacy_parts(settings(**env))]
+        texts += [(t[:1].upper() + t[1:]) for _, t in explain.privacy_parts(settings(**env))]
     texts.append(explain.TMDB_NOTICE)
     for title, text, _ in explain.PUBLIC_STATES.values():
         texts += [title, text.replace("{detail}", "Detail.")]
@@ -344,7 +345,8 @@ class LookTest(unittest.TestCase):
         for text in (pages.signup_page(s, error=HOSTILE), pages.error_page(HOSTILE),
                      pages.settings_page(s, dict(RECORD, state="cannot_rebuild", state_detail=HOSTILE), USAGE,
                                          LINK + HOSTILE, now=0, error=HOSTILE, notice=HOSTILE, message=HOSTILE),
-                     pages.result_page(result(changes=[HOSTILE], manifest_url=LINK + HOSTILE, warning=HOSTILE)),
+                     pages.result_page(result(changes=[HOSTILE], manifest_url=LINK + HOSTILE,
+                                              warning=(HOSTILE, HOSTILE))),
                      pages.delete_confirm_page(error=HOSTILE)):
             self.assertNotIn("<b onclick", text)
             self.assertIn("&lt;b onclick=&quot;x&quot;&gt;&amp;&#x27;&quot;", text)
@@ -546,7 +548,7 @@ class SettingsPageTest(unittest.TestCase):
                          ("Languages saved: English, Spanish. They apply from the next file you play.", None))
         self.assertEqual(pages.done_message("refreshed", record), (explain.PUBLIC_TEXTS["refreshed"], None))
         self.assertEqual(pages.done_message("refreshed-rd", record),
-                         (explain.PUBLIC_TEXTS["refreshed"], explain.PUBLIC_REAL_DEBRID_WARNING))
+                         (explain.PUBLIC_TEXTS["refreshed"], explain.PUBLIC_REAL_DEBRID_NOTICE))
         manual = " ".join((explain.PUBLIC_TEXTS["not_added"],) + explain.PUBLIC_MANUAL_STEPS)
         self.assertEqual(pages.done_message("to-stored", record), (explain.PUBLIC_TEXTS["to_stored"], None))
         self.assertEqual(pages.done_message("to-stored-manual", record), (explain.PUBLIC_TEXTS["to_stored"], manual))
@@ -696,13 +698,13 @@ class OtherPagesTest(unittest.TestCase):
     def test_delete_confirm_lists_what_goes_and_shows_an_error_at_the_password(self):
         from subsync import explain, pages
         tree = Tree(pages.delete_confirm_page(error="Wrong.", field="delete"))
-        for line in explain.PUBLIC_DELETE_LIST:
+        for line in explain.PUBLIC_DELETE_LIST.values():
             self.assertIn(line, tree.text())
         self.assertEqual(tree.all("input", id="delete")[0].get("aria-invalid"), "true")
         self.assertIn("Nothing was deleted", tree.text())
         self.assertEqual(tree.all("input", type="hidden", name="action")[0]["value"], "delete")
         stored = Tree(pages.delete_confirm_page(stored=True)).text()
-        self.assertNotIn(explain.PUBLIC_DELETE_LIST[1], stored)              # no config of its own to remove
+        self.assertNotIn(explain.PUBLIC_DELETE_LIST["config"], stored)       # no config of its own to remove
 
     def test_deleted_page_says_what_is_left_to_do(self):
         from subsync import explain, pages
@@ -716,7 +718,9 @@ class OtherPagesTest(unittest.TestCase):
         from subsync import explain, pages
         tree = Tree(pages.privacy_page(settings()))
         self.assertEqual(len(tree.all("h2")), len(explain.PRIVACY_PARTS) + 1)
-        for head, _, text in explain.PRIVACY_PARTS:
+        default = {"audio": "", "tmdb": "", "lookup": explain.PRIVACY_LOOKUP["wikidata"]}   # what settings() fills in
+        for head, text in explain.PRIVACY_PARTS:
+            text = text.format(**default)
             self.assertIn(head, tree.text())
             self.assertIn(re.sub(r"\s+", " ", text[:1].upper() + text[1:]), tree.text())
 

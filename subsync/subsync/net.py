@@ -88,6 +88,36 @@ def check_url(url):
     check_host(parts.hostname, parts.port)
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def origin(url):
+    """An address's origin: (scheme, host, port), the scheme's port when none is written; None without a host or with a
+    port that isn't one."""
+    parts = urllib.parse.urlsplit(str(url or ""))
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port or _DEFAULT_PORTS.get(scheme)
+    except ValueError:
+        return None
+    return (scheme, parts.hostname, port) if parts.hostname else None
+
+
+def same_origin(url, other):
+    """Whether two addresses have the same origin: where a request's credentials (a key, a password) may go."""
+    mine = origin(url)
+    return mine is not None and mine == origin(other)
+
+
+def credentials_follow(url, new_url):
+    """Whether a redirect from `url` to `new_url` may carry the request's credentials: to the same origin, or from http
+    to https on the same host and the schemes' own ports (as browsers do)."""
+    if same_origin(url, new_url):
+        return True
+    old, new = origin(url), origin(new_url)
+    return old is not None and new is not None and old == ("http", new[1], 80) and new == ("https", old[1], 443)
+
+
 def _guarded_create_connection(address, *args, **kwargs):
     host, port = address[0], address[1]
     check_host(host, port)

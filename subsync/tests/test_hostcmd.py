@@ -71,6 +71,27 @@ class HostCmdTest(unittest.TestCase):
         code, out = self.run_cmd("delete-everything")
         self.assertEqual(code, 2)
 
+    def test_a_data_folder_whose_name_has_uri_characters_is_read_as_it_is(self):
+        # The read-only address was "file:<path>?mode=ro" as written: '#' or '?' cut it (SQLite then opened
+        # and made another file, read-write), '%' changed it
+        for name in ("e#f", "g?h", "d%41b"):
+            with self.subTest(name=name):
+                data = os.path.join(self.data, name)
+                os.makedirs(data)
+                people(data, 2)
+                Store(data).db.close()
+                before = sorted(os.listdir(self.data))
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = hostcmd.main(["status"], env={"SUBSYNC_DATA": data})
+                self.assertEqual((code, json.loads(out.getvalue())["people"]), (0, 2))
+                dest = os.path.join(data, "copy")
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(hostcmd.main(["copy-databases", dest], env={"SUBSYNC_DATA": data}), 0)
+                with closing(sqlite3.connect(os.path.join(dest, "users.sqlite3"))) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 2)
+                self.assertEqual(sorted(os.listdir(self.data)), before)          # nothing made beside it
+
 
 if __name__ == "__main__":
     unittest.main()

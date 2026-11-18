@@ -165,7 +165,9 @@ CREDIT = re.compile(r"(?i)https?://|www\.|\.(com|org|net|info|tv|ru)\b|subtitles
                     r"subdl|subsource|addic7ed|advertise")
 
 
-def _plain(text):
+def plain_line(text):
+    """A line's words as the language check and fingerprints compare them: markup (ASS overrides, HTML tags) and ASS
+    line breaks and hard spaces gone, spaces collapsed, lower case."""
     text = re.sub(r"\{[^}]*\}|<[^>]*>", "", text or "").replace("\\N", " ").replace("\\n", " ").replace("\\h", " ")
     return " ".join(text.split()).lower()
 
@@ -181,14 +183,14 @@ def fingerprint(text):
     notice doesn't change it; another timing or text does."""
     lines = [l for l in parse(text) if l["kind"] == "dialogue"]
     for _ in range(3):
-        if lines and CREDIT.search(_plain(lines[0]["text"])):
+        if lines and CREDIT.search(plain_line(lines[0]["text"])):
             lines = lines[1:]
     for _ in range(3):
-        if lines and CREDIT.search(_plain(lines[-1]["text"])):
+        if lines and CREDIT.search(plain_line(lines[-1]["text"])):
             lines = lines[:-1]
     if len(lines) > 20:
         lines = lines[srclimits.FINGERPRINT_EDGE:-srclimits.FINGERPRINT_EDGE]
-    body = "\n".join(f"{round(l['s'], 1):.1f}|{_plain(WEBVTT_NOTE.sub('', l['text']))}" for l in lines)
+    body = "\n".join(f"{round(l['s'], 1):.1f}|{plain_line(WEBVTT_NOTE.sub('', l['text']))}" for l in lines)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 

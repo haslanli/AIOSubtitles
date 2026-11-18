@@ -11,6 +11,7 @@ import unittest
 import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,6 +24,8 @@ from subsync.sources import fetch_subtitle  # noqa: E402
 
 SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n"
 HASH = "a" * 40
+PACK = "b" * 40      # a season pack's torrent: its subtitles name their episodes, one names none
+SINGLE = "c" * 40    # one episode's torrent, whose subtitles name no episode
 
 
 def zipped(names):
@@ -39,7 +42,8 @@ def tsdb_item(i, lang, release, cues=900):
 
 
 class Fake:
-    """Answers like the sources. `mode` per source: None, "500", "404", "423", "429", "slow"."""
+    """Answers like the sources. `mode` per source: None, "500", "404", "423", "429", "503" (no Retry-After),
+    "503-retry" (with one), "slow"; /hop?to=<address> answers with a redirect there."""
 
     def __init__(self):
         self.calls, self.headers, self.mode, self.slow_s = [], [], {}, 1.5
@@ -76,7 +80,13 @@ class Fake:
                     return self.send(500, {"error": "down"})
                 elif mode == "429":
                     return self.send(429, {"error": "slow down"}, extra={"Retry-After": "120"})
+                elif mode == "503":
+                    return self.send(503, {"error": "restarting"})
+                elif mode == "503-retry":
+                    return self.send(503, {"error": "busy"}, extra={"Retry-After": "120"})
                 p = u.path
+                if p == "/hop":
+                    return self.send(302, b"", "text/plain", extra={"Location": q["to"]})
                 # TheSubtitleDB
                 if p == "/tsdb/v1/by-imdb/tt1":
                     return self.send(200, self.items([tsdb_item(11, "en", "Movie.2010.WEB-DL"),
@@ -87,6 +97,12 @@ class Fake:
                     return self.send(200, self.items([tsdb_item(21, "en", "Show.S01E02.1080p.WEB-NTb"),
                                                       tsdb_item(22, "en", "Show.S01E03.1080p.WEB-NTb"),
                                                       tsdb_item(23, "ru", "Show.S01E02.1080p.WEB-NTb")]))
+                if p == f"/tsdb/v1/by-infohash/{PACK}":
+                    return self.send(200, self.items([tsdb_item(51, "en", "Show.S01E02.1080p.WEB-NTb"),
+                                                      tsdb_item(52, "en", "Show.S01E03.1080p.WEB-NTb"),
+                                                      tsdb_item(53, "en", "Show.S01.1080p.WEB-DL-NTb")]))
+                if p == f"/tsdb/v1/by-infohash/{SINGLE}":
+                    return self.send(200, self.items([tsdb_item(61, "en", "Show.1080p.WEB-DL-NTb")]))
                 if p == "/tsdb/v1/by-releasename":
                     if outer.mode.get("tsdb-release") == "400":
                         return self.send(400, {"error": "bad release"})
@@ -422,6 +438,133 @@ class WaitPauseCacheTest(SourcesBase):
         self.extra(SUBSYNC_EXTRA_SOURCES="tsdb,osv3").search("movie", "tt1", skip={"osv3"})
         self.assertFalse(self.fake.asked("/osv3"))
         self.assertTrue(self.fake.asked("/tsdb"))
+
+
+class ReviewCycle1Test(SourcesBase):
+    """to (the step 9 review, cycle 1)."""
+
+    def test_a_key_goes_only_to_its_sources_own_origin(self):
+        # The key was chosen by the candidate's source label alone, so an http address on SubSource's domain
+        # or a TheSubtitleDB download_url on another host got it
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb", SUBSYNC_SUBSOURCE_KEY="ss-key", SUBSYNC_TSDB_KEY="sdb_k",
+                        SUBSYNC_SUBSOURCE_URL="https://api.subsource.net/api/v1")
+        own = "https://api.subsource.net/api/v1/subtitles/7/download"
+        self.assertEqual(ex.headers_for({"source": "subsource", "url": own}), {"X-API-Key": "ss-key"})
+        for url in ("http://api.subsource.net/api/v1/subtitles/7/download", "https://other.subsource.net/x",
+                    "https://api.subsource.net:8443/api/v1/subtitles/7/download"):
+            with self.subTest(url=url):
+                self.assertEqual(ex.headers_for({"source": "subsource", "url": url}), {})
+        self.assertEqual(ex.headers_for({"source": "tsdb", "url": f"{self.fake.url}/tsdb/get/1"}),
+                         {"Authorization": "Bearer sdb_k"})
+        self.assertEqual(ex.headers_for({"source": "tsdb", "url": "https://cdn.other.example/get/1"}), {})
+
+    def test_a_redirect_to_another_origin_leaves_the_key_behind(self):
+        # Urllib sends every header on to wherever a redirect points
+        other = Fake()
+        self.addCleanup(other.close)
+        keys = {"X-API-Key": "ss-key", "Authorization": "Bearer sdb_k"}
+        for fake, kept in ((other, False), (self.fake, True)):
+            target = f"{fake.url}/tsdb/get/1"
+            with self.subTest(kept=kept):
+                fetch_subtitle(f"{self.fake.url}/hop?to={urllib.parse.quote(target, safe='')}", headers=keys)
+                path, got = fake.headers[-1]
+                got = {k.lower(): v for k, v in got.items()}
+                self.assertEqual(path, "/tsdb/get/1")
+                self.assertEqual((got.get("x-api-key"), got.get("authorization")),
+                                 ("ss-key", "Bearer sdb_k") if kept else (None, None))
+
+    def test_a_503_without_retry_after_counts_as_a_failure(self):
+        # One 503 (a restart) paused the source for everyone at once; only "too many requests" (429, or 503
+        # with Retry-After) does
+        self.fake.mode["tsdb"] = "503"
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
+        ex.search("movie", "tt1")
+        self.assertEqual(ex.health.status(), {})
+        for _ in range(srclimits.PAUSE_FAILURES - 1):
+            ex.search("movie", "tt1")
+        self.assertIn("tsdb", ex.health.status())                   # then like any failure: three pause it
+        self.fake.mode["tsdb"] = "503-retry"
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
+        ex.search("movie", "tt1")
+        self.assertIn("tsdb", ex.health.status())                   # asked to come back later: paused at once
+
+    def test_two_threads_making_room_for_an_id_never_drop_the_same_one(self):
+        # The ids table was changed by the pool's threads without a lock: two lookups at full capacity took
+        # the same oldest entry, and the second one's pop failed
+        ex = self.extra()
+        first_look, both_looked = threading.Event(), threading.Event()
+
+        class Held(dict):
+            """Holds each eviction until another thread has looked for the oldest entry too (at most 0.5 s)."""
+            looks = 0
+
+            def __iter__(self):
+                Held.looks += 1
+                (both_looked if Held.looks > 1 else first_look).set()
+                return super().__iter__()
+
+            def pop(self, key, *default):
+                both_looked.wait(0.5)
+                return super().pop(key, *default)
+
+        ex.ids = Held({("tvdb", "tt8"): (0, 8), ("tvdb", "tt9"): (0, 9)})
+        errors = []
+
+        def look(key):
+            try:
+                ex._id("tvdb", key, lambda: key)
+            except Exception as e:
+                errors.append(e)
+        with mock.patch.object(srclimits, "SEARCH_CACHE_ENTRIES", 2):
+            a = threading.Thread(target=look, args=("tt1",))
+            a.start()
+            first_look.wait(2)
+            b = threading.Thread(target=look, args=("tt2",))
+            b.start()
+            a.join(5)
+            b.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(set(ex.ids), {("tvdb", "tt1"), ("tvdb", "tt2")})
+
+    def test_a_call_that_asks_a_paused_source_nothing_keeps_its_pause(self):
+        # After the pause, a request whose id Gestdown can't use (Kitsu) took the one trial without asking it,
+        # and its "answer" opened Gestdown again
+        self.fake.mode["gestdown"] = "500"
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="gestdown")
+        for _ in range(srclimits.PAUSE_FAILURES):
+            ex.search("series", "tt2:1:2")
+        self.assertIn("gestdown", ex.health.status())
+        self.clock.t += srclimits.PAUSE_S + 1
+        n = len(self.fake.asked("/gestdown"))
+        with self.assertNoLogs("subsync.sources", "INFO"):
+            self.assertEqual(ex.search("series", "kitsu:7442:2"), [])
+        self.assertEqual(len(self.fake.asked("/gestdown")), n)                 # not asked
+        ex.search("series", "tt2:1:2")                                          # the trial, which fails: paused again
+        self.assertEqual(len(self.fake.asked("/gestdown")), n + 1)
+        self.assertIn("gestdown", ex.health.status())
+
+    def test_in_a_season_packs_torrent_only_the_played_episodes_subtitles_are_its_own(self):
+        # A pack's subtitle named for no episode was taken as the played episode's own (a hash match)
+        got = {c["id"]: c for c in self.extra(SUBSYNC_EXTRA_SOURCES="tsdb").search("series", "tt2:1:2",
+                                                                                 hints={"infoHash": PACK})}
+        self.assertTrue(got["tsdb-51"]["hash_match"])
+        self.assertNotIn("tsdb-52", got)                                        # another episode's
+        self.assertFalse(got["tsdb-53"]["hash_match"])                         # which episode is unknown
+        self.assertIn("tsdb-53", got)                                           # but still a candidate
+        got = {c["id"]: c for c in self.extra(SUBSYNC_EXTRA_SOURCES="tsdb").search("series", "tt2:1:2",
+                                                                                 hints={"infoHash": SINGLE})}
+        self.assertTrue(got["tsdb-61"]["hash_match"])                          # no batch: as before
+
+    def test_cinemeta_asking_to_slow_down_doesnt_pause_gestdown(self):
+        # Cinemeta's "too many requests", met while looking up the TVDB id, paused Gestdown for ten minutes
+        for mode in ("429", "503-retry"):
+            with self.subTest(mode=mode):
+                self.fake.mode["cinemeta"] = mode
+                ex = self.extra(SUBSYNC_EXTRA_SOURCES="gestdown")
+                self.assertEqual(ex.search("series", "tt2:1:2"), [])
+                self.assertEqual(ex.health.status(), {})
+                self.fake.mode.pop("cinemeta")
+                self.assertEqual([c["id"] for c in ex.search("series", "tt2:1:2")], ["gd-G1"])   # nothing was kept
 
 
 class StateTest(unittest.TestCase):

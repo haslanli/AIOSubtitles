@@ -105,11 +105,8 @@ def _headline():
 
 
 def _intro(settings=None):
-    """The intro in two paragraphs, split at a sentence end (no word changed)."""
-    text = explain.intro_text(settings)
-    at = text.find(" A file synced once")
-    parts = [text[:at], text[at + 1:]] if at > 0 else [text]
-    return "".join(f"<p>{e(p)}</p>" for p in parts)
+    """The intro in its two paragraphs."""
+    return "".join(f"<p>{e(p)}</p>" for p in explain.intro_parts(settings))
 
 
 def _screen(name, steps, fill, content, last=False):
@@ -218,13 +215,12 @@ def result_page(result, settings=None):
     if why in explain.USENET_WHY:
         notes.append(ui.note("warn", explain.USENET_WHY[why], role="status"))
     if result.warning:
-        head, sep, rest = result.warning.partition(": ")
-        notes.append(ui.note("warn", rest[:1].upper() + rest[1:], head, role="status") if sep
-                     else ui.note("warn", result.warning, role="status"))
+        title, text = result.warning
+        notes.append(ui.note("warn", text, title, role="status"))
     left = ""
     if not result.added:
         lines = ([f"<p>{e(texts['not_added'])}</p>"] if result.manual else []) + \
-                ["<p>Add AIOSubtitles to your AIOStreams config yourself:</p>", ui.dots(explain.PUBLIC_MANUAL_STEPS)]
+                [f"<p>{e(explain.PUBLIC_MANUAL_LEAD)}</p>", ui.dots(explain.PUBLIC_MANUAL_STEPS)]
         left = ui.note("warn", None, "One step left", extra="".join(lines))
     # the personal link first; what to know about this setup heads the column beside it
     body = (f"<div class=\"wrap\">{ui.top(explain.CONTACT)}<main class=\"grid\"><h1>You're signed up</h1>"
@@ -281,7 +277,7 @@ def done_message(code, record):
     if code == "refreshed":
         return texts["refreshed"], None
     if code == "refreshed-rd":
-        return texts["refreshed"], explain.PUBLIC_REAL_DEBRID_WARNING
+        return texts["refreshed"], explain.PUBLIC_REAL_DEBRID_NOTICE
     if code == "refreshed-manual":
         return None, " ".join((texts["refresh_manual"],) + explain.PUBLIC_MANUAL_STEPS)
     if code == "forgot":
@@ -312,8 +308,8 @@ def _state_note(record, state):
     state = state or record.get("state")
     if state not in explain.PUBLIC_STATES:
         return ""
-    title, text, _ = explain.PUBLIC_STATES[state]
-    return ui.note("warn", text.replace("{detail}", record.get("state_detail") or ""), title, role="status")
+    return ui.note("warn", explain.state_text(state, record.get("state_detail")), explain.PUBLIC_STATES[state].title,
+                   role="status")
 
 
 def _form(action, content, cls="controls"):
@@ -470,7 +466,7 @@ def _letter(title, heading, content, personal=False, start="/", settings=None):
 
 def delete_confirm_page(error=None, field=None, stored=False):
     """The delete step. `stored`: a person with stored copies only has no config of AIOSubtitles' own to remove."""
-    gone = [line for i, line in enumerate(explain.PUBLIC_DELETE_LIST) if not (stored and i == 1)]
+    gone = [line for key, line in explain.PUBLIC_DELETE_LIST.items() if not (stored and key == "config")]
     content = (_problem(error, field, "Nothing was deleted", ("delete",))
                + f"<div class=\"body\"><div><p class=\"lead\">{e(explain.PUBLIC_TEXTS['undone'])}</p>{ui.dots(gone)}</div></div>"
                + _form("delete", ui.field("delete", "Your AIOStreams password (optional)", explain.PUBLIC_FIELDS["delete"], name="password",
@@ -499,7 +495,7 @@ def deleted_page(outcome):
 def privacy_page(settings):
     sections = "".join(
         f"<section aria-labelledby=\"privacy-{i}\"><h2 id=\"privacy-{i}\">{e(head)}</h2>"
-        f"<p>{e(text[:1].upper() + text[1:])}</p></section>" for i, (head, _, text) in enumerate(explain.privacy_parts(settings)))
+        f"<p>{e(text[:1].upper() + text[1:])}</p></section>" for i, (head, text) in enumerate(explain.privacy_parts(settings)))
     content = (f"<div class=\"body\">{sections}<section aria-labelledby=\"privacy-q\"><h2 id=\"privacy-q\">Questions</h2>"
                f"<p><a class=\"mono\" href=\"{e(explain.CONTACT)}\">{e(explain.CONTACT)}</a></p></section></div>")
     return _letter("Privacy · AIOSubtitles", "What AIOSubtitles reads and keeps", content, settings=settings)

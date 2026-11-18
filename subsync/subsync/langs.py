@@ -1,6 +1,7 @@
 """Language codes: everything to ISO 639-2/B (what Matroska and most players use), plus display names. The two-letter
 table is all of ISO 639-1 and the terminologic spellings all of ISO 639-2's twenty (from the Library of Congress's ISO
-639-2 list); the names are the list's first English name, except the 32 names the service always used."""
+639-2 list); the names are the list's first English name, except the 32 names the service always used. Codes of a
+subtitle source's own that are no ISO code are kept apart, in SOURCE_CODES."""
 
 TWO = {"aa": "aar", "ab": "abk", "ae": "ave", "af": "afr", "ak": "aka", "am": "amh", "an": "arg", "ar": "ara",
        "as": "asm", "av": "ava", "ay": "aym", "az": "aze", "ba": "bak", "be": "bel", "bg": "bul", "bi": "bis",
@@ -27,7 +28,9 @@ TWO = {"aa": "aar", "ab": "abk", "ae": "ave", "af": "afr", "ak": "aka", "am": "a
        "wo": "wol", "xh": "xho", "yi": "yid", "yo": "yor", "za": "zha", "zh": "chi", "zu": "zul"}
 TERMINOLOGIC = {"bod": "tib", "ces": "cze", "cym": "wel", "deu": "ger", "ell": "gre", "eus": "baq", "fas": "per",
                 "fra": "fre", "hye": "arm", "isl": "ice", "kat": "geo", "mkd": "mac", "mri": "mao", "msa": "may",
-                "mya": "bur", "nld": "dut", "pob": "por", "ron": "rum", "slk": "slo", "sqi": "alb", "zho": "chi"}
+                "mya": "bur", "nld": "dut", "ron": "rum", "slk": "slo", "sqi": "alb", "zho": "chi"}
+# a source's own codes, no ISO code: OpenSubtitles' Brazilian Portuguese
+SOURCE_CODES = {"pob": "por"}
 NAMES = {"aar": "Afar", "abk": "Abkhazian", "afr": "Afrikaans", "aka": "Akan", "alb": "Albanian", "amh": "Amharic",
          "ara": "Arabic", "arg": "Aragonese", "arm": "Armenian", "asm": "Assamese", "ava": "Avaric", "ave": "Avestan",
          "aym": "Aymara", "aze": "Azerbaijani", "bak": "Bashkir", "bam": "Bambara", "baq": "Basque",
@@ -61,6 +64,7 @@ NAMES = {"aar": "Afar", "abk": "Abkhazian", "afr": "Afrikaans", "aka": "Akan", "
          "uzb": "Uzbek", "ven": "Venda", "vie": "Vietnamese", "vol": "Volapük", "wel": "Welsh", "wln": "Walloon",
          "wol": "Wolof", "xho": "Xhosa", "yid": "Yiddish", "yor": "Yoruba", "zha": "Zhuang", "zul": "Zulu"}
 BY_NAME = {v.lower(): k for k, v in NAMES.items()}
+TWO_OF = {three: two for two, three in TWO.items()}     # ISO 639-2/B -> ISO 639-1
 
 
 # TMDB's original languages are ISO 639-1 codes, plus two of its own: "cn" (Cantonese, which Matroska tracks tag as
@@ -77,13 +81,20 @@ FAMILY = {"yue": "chi", "cmn": "chi", "nan": "chi", "hak": "chi", "wuu": "chi", 
 def lang3(code):
     raw = str(code or "").strip()
     key = raw.lower().replace("_", "-").split("-")[0]
-    if key in TERMINOLOGIC:
-        return TERMINOLOGIC[key]
+    alias = TERMINOLOGIC.get(key) or SOURCE_CODES.get(key)
+    if alias:
+        return alias
     if len(key) == 3 and key.isalpha():
         return key
     if key in TWO:
         return TWO[key]
     return BY_NAME.get(raw.lower(), key or "und")
+
+
+def lang2(code):
+    """A code as its two-letter ISO 639-1 code (what some subtitle sites ask by); None for a language ISO 639-1 has no
+    code for."""
+    return TWO_OF.get(lang3(code))
 
 
 def name(code):

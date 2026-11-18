@@ -2,11 +2,12 @@
 recogniser, so `textpair` can pair a subtitle with an image track in its language as with a text track.
 
 PGS (S_HDMV/PGS): a Matroska block is one display set, its segments without the "PG" header: palette (0x14: entry, Y,
-Cr, Cb, alpha), object (0x15: run-length coded, possibly split over several segments), composition (0x16), window
-(0x17), end (0x80). VobSub (S_VOBSUB): a block is one subpicture: two interlaced fields of 2-bit run-length data and a
-control sequence naming four of the 16 colours of the track's palette (its CodecPrivate, the .idx text) and their
-contrast. Both become a grey image of dark text on white (the fill is the bright part of a subtitle): each pixel 255 -
-luminance x alpha. A subtitle has one to three text rows, cut apart where no row holds text (rows); each row is scaled to
+Cr, Cb, alpha), object (0x15: run-length coded, possibly split over several segments), composition (0x16: the objects
+shown, at most two), window (0x17), end (0x80); only the objects the composition places are decoded. VobSub (S_VOBSUB):
+a block is one subpicture: two interlaced fields of 2-bit run-length data and a control sequence naming four of the 16
+colours of the track's palette (its CodecPrivate, the .idx text) and their contrast. Both become a grey image of dark
+text on white (the fill is the bright part of a subtitle): each pixel 255 - luminance x alpha. A subtitle has one to
+three text rows, cut apart where no row holds text (rows; at most MAX_ROWS are read of an image); each row is scaled to
 the recogniser's input height (to_input).
 
 The recogniser (E2): PP-OCRv5 mobile line recognition (PaddleOCR, Apache-2.0) on onnxruntime, the Latin model
@@ -31,6 +32,9 @@ INK = 128             # a pixel darker than this is text
 ROW_GAP = 2           # empty pixel rows that separate two text rows
 ROW_PAD = 3
 MIN_ROW = 6
+MAX_ROWS = 4          # text rows read of one image: a subtitle has one to three
+PGS_OBJECTS = 2       # objects a PGS display set shows at most (its composition places no more)
+MAX_OBJECT_PIXELS = 4096 * 1024   # the largest object decoded (a 1920 x 1080 screen is half of it)
 BUDGET_S = 20.0
 LATIN = {"eng", "fre", "ger", "spa", "ita", "por", "dut", "swe", "nor", "nob", "nno", "dan", "fin", "pol", "cze", "slo",
          "hun", "rum", "hrv", "slv", "bos", "est", "lav", "lit", "tur", "ind", "may", "cat", "glg", "baq", "ice", "gle",
@@ -91,21 +95,36 @@ def _pgs_rle(data, w, h):
     return out
 
 
+def _placed(d):
+    """The object ids a composition segment places, in its order, each once, at most PGS_OBJECTS: after its 11-byte head
+    (video size, frame rate, number, state, palette update and id, object count), 8 bytes an object, 16 when it is
+    cropped (flag 0x80)."""
+    ids, p = [], 11
+    for _ in range(d[10] if len(d) >= 11 else 0):
+        if p + 8 > len(d) or len(ids) == PGS_OBJECTS:
+            break
+        oid = struct.unpack_from(">H", d, p)[0]
+        p += 16 if d[p + 3] & 0x80 else 8
+        if oid not in ids:
+            ids.append(oid)
+    return ids
+
+
 def pgs_images(payload):
-    """The images a PGS display set shows: [grey uint8 array, dark text on white], in the order of their objects; []
-    for a clear, an update without objects, or damaged data."""
+    """The images a PGS display set shows: [grey uint8 array, dark text on white], the objects its composition places
+    and the set defines, in the composition's order; [] for a clear, an update without objects, or damaged data."""
     try:
-        palette, objects, order = {}, {}, []
+        palette, objects, placed = {}, {}, []
         for kind, d in _segments(payload):
-            if kind == 0x14:
+            if kind == 0x16:
+                placed = _placed(d)
+            elif kind == 0x14:
                 for k in range(2, len(d) - 4, 5):
                     palette[d[k]] = (d[k + 1], d[k + 4])
             elif kind == 0x15 and len(d) >= 4:
                 oid, flag = struct.unpack_from(">H", d, 0)[0], d[3]
                 if flag & 0x80 and len(d) >= 11:
                     w, h = struct.unpack_from(">HH", d, 7)
-                    if oid not in objects:
-                        order.append(oid)
                     objects[oid] = {"w": w, "h": h, "data": bytearray(d[11:])}
                 elif oid in objects:
                     objects[oid]["data"] += d[4:]
@@ -113,9 +132,9 @@ def pgs_images(payload):
         for k, (y, a) in palette.items():
             lum[k] = 255 - int(round(y * a / 255))
         out = []
-        for oid in order:
-            o = objects[oid]
-            if not o["w"] or not o["h"] or o["w"] * o["h"] > 4096 * 1024:
+        for oid in placed:
+            o = objects.get(oid)
+            if o is None or not o["w"] or not o["h"] or o["w"] * o["h"] > MAX_OBJECT_PIXELS:
                 continue
             out.append(lum[_pgs_rle(bytes(o["data"]), o["w"], o["h"])])
         return out
@@ -337,7 +356,7 @@ def texts(codec, payloads, rec, private=b"", budget=BUDGET_S, clock=time.monoton
             images = [img] if img is not None else []
         else:
             images = pgs_images(payloads[s])
-        lines = [r for img in images for r in rows(img)]
+        lines = [r for img in images for r in rows(img)[:MAX_ROWS]]
         if not lines:
             continue
         try:

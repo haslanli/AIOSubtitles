@@ -58,6 +58,22 @@ class TableTest(unittest.TestCase):
             self.assertEqual(langs.lang3(t), b, t)
             self.assertEqual(langs.lang3(b), b, b)
 
+    def test_the_terminologic_table_is_iso_639_2s_and_a_sources_own_codes_are_apart(self):
+        # OpenSubtitles' "pob" sat in the ISO table as a twenty-first entry
+        self.assertEqual(langs.TERMINOLOGIC, {t: b for b, t in B_T.items()})
+        self.assertEqual(langs.SOURCE_CODES, {"pob": "por"})
+
+    def test_two_letter_codes(self):
+        # From the ISO 639-1 table, never cut from a three-letter code
+        for two, three in BEFORE.items():
+            self.assertEqual(langs.lang2(three), two, three)
+        for three, two in {"est": "et", "slo": "sk", "arm": "hy", "ben": "bn", "kaz": "kk", "lit": "lt", "lav": "lv",
+                           "bos": "bs", "baq": "eu", "alb": "sq", "ice": "is", "mac": "mk", "may": "ms", "nob": "nb",
+                           "fra": "fr", "pob": "pt", "en-US": "en", "Estonian": "et"}.items():
+            self.assertEqual(langs.lang2(three), two, three)
+        for code in ("haw", "yue", "und", "", None):
+            self.assertIsNone(langs.lang2(code), code)
+
     def test_every_language_of_the_table_has_a_name(self):
         for three in langs.TWO.values():
             self.assertIn(three, langs.NAMES)

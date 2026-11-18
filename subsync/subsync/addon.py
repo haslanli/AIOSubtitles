@@ -68,7 +68,7 @@ MANIFEST = {
 def manifest(settings):
     """The addon's manifest; with a TMDB key, TMDB's notice in its description (TMDB's terms ask for it wherever its
     data is used)."""
-    if settings.original_language and settings.tmdb_key:
+    if explain.tmdb_used(settings):
         return dict(MANIFEST, description=MANIFEST["description"] + " " + explain.TMDB_NOTICE)
     return MANIFEST
 
@@ -159,7 +159,7 @@ class App:
         """Public mode: the state only the person can fix now (explain.PUBLIC_STATES), or None."""
         if not self.s.public:
             return None
-        if self.state in explain.PUBLIC_STATES and explain.PUBLIC_STATES[self.state][2]:
+        if self.state in explain.PUBLIC_STATES and explain.PUBLIC_STATES[self.state].person_must_act:
             return self.state
         if getattr(self.safety, "refusals", 0) >= REFUSALS_FOR_NOTICE:
             return "reads_refused"
@@ -170,8 +170,7 @@ class App:
         state = self.action()
         if state is None:
             return None
-        title, text, _ = explain.PUBLIC_STATES[state]
-        text = text.replace("{detail}", self.detail or "")
+        title, text = explain.PUBLIC_STATES[state].title, explain.state_text(state, self.detail)
         return (f"1\n00:00:01,000 --> 00:00:09,000\n{title}.\n{text}\n\n"
                 f"2\n00:00:09,500 --> 00:00:16,000\n{explain.PUBLIC_TEXTS['notice_where']}\n")
 

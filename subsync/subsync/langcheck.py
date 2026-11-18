@@ -18,7 +18,7 @@ import re
 import unicodedata
 
 from .langs import lang3
-from .subs import _plain, parse
+from .subs import parse, plain_line
 
 PASS, FAIL, NO_VERDICT = "pass", "fail", "no verdict"
 
@@ -103,7 +103,7 @@ def plain_text(text):
     for line in parse(text or ""):
         if line["kind"] != "dialogue" or _DRAWING.search(line["text"]):
             continue
-        lines.append(_plain(line["text"]))
+        lines.append(plain_line(line["text"]))
     return unicodedata.normalize("NFC", "\n".join(lines))
 
 

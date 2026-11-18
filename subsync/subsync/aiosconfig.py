@@ -73,12 +73,11 @@ SYNC_SETTINGS = {
 OFFERED = ('eng', 'spa', 'fre', 'ger', 'ita', 'por', 'rus', 'ukr', 'pol', 'dut', 'swe', 'nor', 'dan', 'fin', 'cze',
            'hun', 'rum', 'bul', 'hrv', 'srp', 'gre', 'tur', 'ara', 'heb', 'per', 'hin', 'ind', 'tha', 'vie', 'jpn',
            'kor', 'chi')
-_ISO_639_1 = {three: two for two, three in langs.TWO.items()}
-LANGUAGES = [(langs.NAMES[three], _ISO_639_1[three], three) for three in OFFERED]   # (name, ISO 639-1, ISO 639-2/B)
+LANGUAGES = [(langs.NAMES[three], langs.lang2(three), three) for three in OFFERED]   # (name, ISO 639-1, ISO 639-2/B)
 # what parse_languages understands: each language's name (any case) and codes, ISO 639-2's terminologic codes (deu,
-# fra, …; not OpenSubtitles' "pob", also in langs.TERMINOLOGIC) and "farsi"
+# fra, …) and "farsi"
 _BY = {key: lang for lang in LANGUAGES for key in (lang[0].lower(), lang[1], lang[2])}
-_BY.update({code: _BY[three] for code, three in langs.TERMINOLOGIC.items() if three in OFFERED and code != 'pob'})
+_BY.update({code: _BY[three] for code, three in langs.TERMINOLOGIC.items() if three in OFFERED})
 _BY['farsi'] = _BY['per']
 # an AIOStreams config ID (searched for in setup's pasted text; whole, with fullmatch, in a link's path)
 UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)

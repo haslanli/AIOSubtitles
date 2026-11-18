@@ -57,7 +57,7 @@ class SignupResult:
     token: str
     manifest_url: str
     changes: list = field(default_factory=list)
-    warning: str = None
+    warning: tuple = None         # (title, text): explain.PUBLIC_REAL_DEBRID_WARNING when Real-Debrid was left out
     added: bool = False
     manual: bool = False
     languages: list = field(default_factory=list)

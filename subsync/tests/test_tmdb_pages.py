@@ -62,7 +62,7 @@ class AttributionTest(unittest.TestCase):
 
 class PrivacyTest(unittest.TestCase):
     def read_part(self, s):
-        return dict((head, text) for head, _, text in explain.privacy_parts(s))
+        return dict(explain.privacy_parts(s))
 
     def test_the_lookup_sentence_by_the_instances_setting(self):
         cases = (({"SUBSYNC_TMDB_KEY": "k"}, explain.PRIVACY_LOOKUP["tmdb"]),

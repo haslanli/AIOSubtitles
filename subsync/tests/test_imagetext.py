@@ -2,6 +2,7 @@
 tests (a fake recogniser reads a bar's width as its text), no network."""
 import os
 import random
+import struct
 import sys
 import unittest
 
@@ -80,6 +81,49 @@ class PgsDecodeTest(unittest.TestCase):
         ds = I.pgs_show(I.bar(80))
         self.assertEqual(imagetext.pgs_images(ds[:40]), [])
         self.assertEqual(imagetext.pgs_images(b"\x15\xff\xff"), [])
+
+
+def object_segment(oid, img):
+    """An object definition segment holding `img` whole."""
+    h, w = img.shape
+    rle = I.pgs_rle(img)
+    return I._seg(0x15, struct.pack(">HBB", oid, 0, 0xC0) + (len(rle) + 4).to_bytes(3, "big") + struct.pack(">HH", w, h)
+                  + rle)
+
+
+def composition(*placed):
+    """A composition segment placing objects: (id, cropped) pairs, a cropped one with its 8 more bytes."""
+    head = struct.pack(">HHBHBBBB", 1920, 1080, 0x10, 1, 0x80, 0, 0, len(placed))
+    return I._seg(0x16, head + b"".join(struct.pack(">HBBHH", oid, 0, 0x80 if cropped else 0, 100, 900)
+                                        + (struct.pack(">HHHH", 0, 0, 10, 10) if cropped else b"")
+                                        for oid, cropped in placed))
+
+
+class PgsLimitsTest(unittest.TestCase):
+    """Every object a block defined was decoded and kept, and every row of each read, so one 64 KB block
+    could hold thousands of 2048 x 2048 objects (about 18 GB). A display set shows at most two objects, the ones its
+    composition places, and a subtitle has one to three rows."""
+
+    def test_objects_the_composition_doesnt_place_are_not_decoded(self):
+        ds = I.pgs_show(I.bar(80))
+        unplaced = b"".join(I._seg(0x15, struct.pack(">HBB", oid, 0, 0xC0) + (4).to_bytes(3, "big")
+                                   + struct.pack(">HH", 512, 512)) for oid in range(1, 11))
+        self.assertEqual([img.shape for img in imagetext.pgs_images(ds[:-3] + unplaced + ds[-3:])], [(24, 80)])
+
+    def test_at_most_two_objects_in_the_compositions_order(self):
+        palette = I._seg(0x14, bytes([0, 0]) + b"".join(bytes(e) for e in I.PGS_PALETTE))
+        bars = {oid: I.bar(60 + 10 * oid) for oid in range(5)}
+        objects = b"".join(object_segment(oid, bar) for oid, bar in bars.items())
+        shown = imagetext.pgs_images(composition((4, True), (2, False), (0, False), (1, False)) + palette + objects
+                                     + I._seg(0x80, b""))
+        self.assertEqual([img.shape[1] for img in shown], [100, 80])
+        undefined = composition((3, False)) + palette + I._seg(0x80, b"")
+        self.assertEqual(imagetext.pgs_images(undefined), [])            # placed, but not defined in the set
+
+    def test_an_image_gives_at_most_max_rows_rows(self):
+        rec = FakeRecogniser()
+        imagetext.texts("S_HDMV/PGS", {0: I.pgs_show(I.stack(*[I.bar(60) for _ in range(12)]))}, rec)
+        self.assertEqual(rec.lines, imagetext.MAX_ROWS)
 
 
 class VobSubDecodeTest(unittest.TestCase):

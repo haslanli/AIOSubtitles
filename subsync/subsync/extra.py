@@ -21,17 +21,13 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 
-from . import choose, realdebrid, srclimits
-from .langs import lang3, name as lang_name
+from . import choose, net, realdebrid, srclimits
+from .langs import lang2, lang3, name as lang_name
 from .sourcestate import Health, Ledger
 from .sources import extras, release_info, release_name
 
 log = logging.getLogger("subsync.extra")
 USER_AGENT = "AIOSubtitles/1.6 (subsync)"
-TWO_LETTER = {"eng": "en", "rus": "ru", "jpn": "ja", "fre": "fr", "ger": "de", "spa": "es", "ita": "it", "por": "pt",
-              "kor": "ko", "chi": "zh", "ukr": "uk", "pol": "pl", "dut": "nl", "swe": "sv", "tur": "tr", "ara": "ar",
-              "heb": "he", "cze": "cs", "hun": "hu", "gre": "el", "fin": "fi", "dan": "da", "nor": "no", "rum": "ro",
-              "bul": "bg", "hrv": "hr", "srp": "sr", "ind": "id", "tha": "th", "vie": "vi", "hin": "hi", "per": "fa"}
 # SubSource names its languages in words
 SUBSOURCE_LANGS = {"eng": "english", "rus": "russian", "jpn": "japanese", "fre": "french", "ger": "german",
                    "spa": "spanish", "ita": "italian", "por": "portuguese", "kor": "korean", "chi": "chinese",
@@ -44,8 +40,10 @@ SUBSOURCE_BY_NAME = {v: k for k, v in SUBSOURCE_LANGS.items()}
 MACHINE = re.compile(r"(?i)machine|\bai\b|auto[ ._-]?translat")
 
 
-def two(code):
-    return TWO_LETTER.get(lang3(code), lang3(code)[:2])
+def two_letter(langs):
+    """The ISO 639-1 codes of languages, for the sources that ask by them; a language ISO 639-1 has no code for is left
+    out (it is never asked as another one)."""
+    return [code for code in map(lang2, langs) if code]
 
 
 def split_id(video_id):
@@ -72,7 +70,8 @@ class NotFound(Exception):
 
 
 class Busy(Exception):
-    """The source asked to be asked again later without being down (Gestdown's 423): nothing now, nothing kept."""
+    """The source asked to be asked again later without being down (Gestdown's 423), or a site it needs an id from did
+    (Cinemeta's "too many requests"): nothing now, nothing kept, no pause."""
 
 
 class Limited(Exception):
@@ -88,12 +87,18 @@ class ExtraSources:
         self.health = health or Health(clock)
         self.ledger = ledger
         self.cache = {}             # (source, type, id, langs, keys) -> (time, candidates)
-        self.cache_lock = threading.Lock()
-        self.pool = ThreadPoolExecutor(max_workers=srclimits.CALLS_AT_ONCE, thread_name_prefix="subsync-extra")
         self.ids = {}               # (kind, key) -> (time, id or None): TVDB ids, Gestdown shows, SubSource ids
+        self.cache_lock = threading.Lock()      # the pool's threads share cache and ids
+        self.pool = ThreadPoolExecutor(max_workers=srclimits.CALLS_AT_ONCE, thread_name_prefix="subsync-extra")
+        self.asking = threading.local()        # per pool thread: the requests made of the source it asks (_ask)
 
     # -- asking ------------------------------------------------------------------------------------------------
-    def _get(self, url, headers=None, timeout=None):
+    def _get(self, url, headers=None, timeout=None, lookup=False):
+        """A source's JSON answer. 404 is NotFound, 423 Busy, and "too many requests" (429, or 503 with Retry-After:
+        sourcestate's rule) Limited; any other error is raised as it is. `lookup`: a request to another site for an id
+        the source needs (Cinemeta's TVDB id), not a request of the source itself."""
+        if not lookup:
+            self.asking.requests = getattr(self.asking, "requests", 0) + 1
         req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                    **(headers or {})})
         try:
@@ -106,19 +111,22 @@ class ExtraSources:
                 raise NotFound() from None
             if code == 423:
                 raise Busy() from None
-            if code in (429, 503):
+            if code == 429 or (code == 503 and retry):
                 raise Limited(retry) from None
             raise
 
     def _id(self, kind, key, lookup):
-        """An id another site gives for a title, kept for the process; "none" is asked again after EMPTY_TTL_S."""
-        got = self.ids.get((kind, key))
+        """An id another site gives for a title, kept for the process; "none" is asked again after EMPTY_TTL_S. The
+        table is shared by the pool's threads (cache_lock); the lookup itself runs outside the lock."""
+        with self.cache_lock:
+            got = self.ids.get((kind, key))
         if got and (got[1] is not None or self.clock() - got[0] < srclimits.EMPTY_TTL_S):
             return got[1]
         value = lookup()
-        self.ids[(kind, key)] = (self.clock(), value)
-        while len(self.ids) > srclimits.SEARCH_CACHE_ENTRIES:
-            self.ids.pop(next(iter(self.ids)))
+        with self.cache_lock:
+            self.ids[(kind, key)] = (self.clock(), value)
+            while len(self.ids) > srclimits.SEARCH_CACHE_ENTRIES:
+                self.ids.pop(next(iter(self.ids)))
         return value
 
     def _count(self, source, kind="request", n=1):
@@ -126,11 +134,13 @@ class ExtraSources:
             self.ledger.count(source, kind, n)
 
     def headers_for(self, cand):
-        """The headers a candidate's download needs (a source's key), never part of its address."""
-        source = cand.get("source")
-        if source == "subsource" and self.s.subsource_key:
+        """The headers a candidate's download needs (a source's key), never part of its address; only for an address
+        on the source's own origin (the scheme, host and port of its configured address), so a key goes neither to
+        another site nor over http to an https source."""
+        source, url = cand.get("source"), cand.get("url") or ""
+        if source == "subsource" and self.s.subsource_key and net.same_origin(url, self.s.subsource_url):
             return {"X-API-Key": self.s.subsource_key}
-        if source == "tsdb" and self.s.tsdb_key:
+        if source == "tsdb" and self.s.tsdb_key and net.same_origin(url, self.s.tsdb_url):
             return {"Authorization": f"Bearer {self.s.tsdb_key}"}
         return {}
 
@@ -190,12 +200,13 @@ class ExtraSources:
 
     def _ask(self, source, fn, key, type_, video_id, langs, hints):
         """One source's answer (a list; empty when it failed), kept in the cache unless it failed or was busy."""
+        self.asking.requests = 0
         try:
             got = fn(type_, video_id, langs, hints)
         except NotFound:
             got = []
         except Busy:
-            self.health.ok(source)
+            self._answered(source)
             log.info("source %s busy for %s/%s: asked again next time", source, type_, video_id)
             return []
         except Limited as e:
@@ -209,7 +220,7 @@ class ExtraSources:
             self.health.failed(source, type(e).__name__)
             log.info("source %s failed for %s/%s: %s", source, type_, video_id, type(e).__name__)
             return []
-        self.health.ok(source)
+        self._answered(source)
         seen, unique = set(), []
         for c in got:          # the same subtitle found twice by one source (TheSubtitleDB's three lookups) counts once
             if (c["id"], c["lang"]) not in seen:
@@ -220,6 +231,14 @@ class ExtraSources:
             while len(self.cache) > srclimits.SEARCH_CACHE_ENTRIES:
                 self.cache.pop(next(iter(self.cache)))
         return unique
+
+    def _answered(self, source):
+        """The source answered: it is open again (Health.ok) when it was asked at all; a call that asked it nothing (an
+        id it can't use, nothing to look it up by) only gives back a pause's trial (Health.not_asked)."""
+        if getattr(self.asking, "requests", 0):
+            self.health.ok(source)
+        else:
+            self.health.not_asked(source)
 
     @staticmethod
     def _cand(source, cid, url, lang, release="", **flags):
@@ -250,10 +269,11 @@ class ExtraSources:
         """The addon AIOStreams' "OpenSubtitles V3+" preset adds, asked with the same path: languages, then options
         (AI-translated ones only with SUBSYNC_SKIP_AI off; every uploader; no server-side timing change)."""
         imdb, _, _ = split_id(video_id)
-        if not imdb:
+        codes = two_letter(langs)
+        if not imdb or not codes:
             return []
         opts = f"ai-translated={'false' if self.s.skip_ai else 'true'}|from=all|auto-adjustment=false"
-        config = urllib.parse.quote("|".join(two(x) for x in langs), safe="") + "/" + urllib.parse.quote(opts, safe="")
+        config = urllib.parse.quote("|".join(codes), safe="") + "/" + urllib.parse.quote(opts, safe="")
         ex = extras(hints)
         got = self._get(f"{self.s.osv3plus_url}/{config}/subtitles/{urllib.parse.quote(type_)}/"
                         f"{urllib.parse.quote(video_id, safe=':')}{'/' + ex if ex else ''}.json") or {}
@@ -274,23 +294,26 @@ class ExtraSources:
         and only its matched subtitle, at a score of at least srclimits.TSDB_RELEASE_SCORE, is a release match; with
         no IMDb id to check the title against, only that matched subtitle counts."""
         imdb, season, episode = split_id(video_id)
+        codes = two_letter(langs)
+        if not codes:
+            return []
         name = release_name(hints.get("filename"))
         if season is None and name:
             tags = choose.episodes(name)
             if tags:
                 season, episode = tags[0][0], tags[0][1]
         headers = {"Authorization": f"Bearer {self.s.tsdb_key}"} if self.s.tsdb_key else {}
-        query = {"lang": ",".join(two(x) for x in langs), "limit": 100}
+        query = {"lang": ",".join(codes), "limit": 100}
         if self.s.skip_ai:
             query["ai"] = "exclude"
         out, errors, tried = [], [], 0
 
-        def take(path, params, pages=1, **flags):
+        def take(path, params, pages=1, release=False, hash_match=False):
             """One lookup; its error is logged and leaves the other lookups' subtitles (a 429 pauses the source)."""
             nonlocal tried
             tried += 1
             try:
-                pages_of(path, params, pages, **flags)
+                pages_of(path, params, pages, release, hash_match)
             except Limited:
                 raise
             except Exception as e:
@@ -302,7 +325,7 @@ class ExtraSources:
             got = str(((answer.get("title") or {}).get("imdb")) or "")
             return not imdb or not got or got.lstrip("t") == imdb.lstrip("t")
 
-        def pages_of(path, params, pages, release=False, **flags):
+        def pages_of(path, params, pages, release, hash_match):
             offset = 0
             for _ in range(pages):
                 try:
@@ -316,26 +339,30 @@ class ExtraSources:
                 match = answer.get("match") or {}
                 strong = isinstance(match.get("score"), (int, float)) and match["score"] >= srclimits.TSDB_RELEASE_SCORE
                 items = page.get("items") or []
+                # a torrent's subtitles that name other episodes make it a batch: then only those naming the played
+                # episode are its own, and the ones naming none are ordinary candidates
+                batch = hash_match and any(other_episode(it.get("release_name"), season, episode) for it in items)
                 for it in items:
                     if it.get("id") is None or other_episode(it.get("release_name"), season, episode):
                         continue
                     matched = release and strong and it.get("id") == match.get("sub_id")
                     if release and not imdb and not matched:
                         continue   # the title can't be checked: only its matched subtitle counts
+                    own = hash_match and (not batch or bool(choose.episodes(it.get("release_name"))))
                     out.append(self._cand("tsdb", f"tsdb-{it.get('id')}",
                                           it.get("download_url") or f"{self.s.tsdb_url}/get/{it.get('id')}",
                                           lang3(it.get("language")), it.get("release_name"),
                                           ai=bool(it.get("ai") or it.get("ai_transcribed")),
-                                          hi=bool(it.get("hearing_impaired")), release_match=matched,
-                                          cues=it.get("cues") if isinstance(it.get("cues"), int) else None, **flags))
+                                          hi=bool(it.get("hearing_impaired")), release_match=matched, hash_match=own,
+                                          cues=it.get("cues") if isinstance(it.get("cues"), int) else None))
                 offset += len(items)
                 if not items or offset >= int(page.get("total") or 0):
                     return
 
         info_hash = str(hints.get("infoHash") or "").lower()
         if re.fullmatch(r"[0-9a-f]{40}", info_hash):
-            # the torrent's own subtitles fit its video, but in a batch only those of the played episode: without a
-            # known episode they are ordinary candidates
+            # the torrent's own subtitles fit its video, but in a batch only those of the played episode (pages_of):
+            # without a known episode they are ordinary candidates
             take(f"/v1/by-infohash/{info_hash}", query, hash_match=type_ != "series" or episode is not None)
         if name:
             take("/v1/by-releasename", dict(query, release=name), release=True)
@@ -357,9 +384,12 @@ class ExtraSources:
             return []
         def tvdb_of():
             try:
-                return ((self._get(f"{self.s.cinemeta_url}/meta/series/{imdb}.json") or {}).get("meta") or {}).get("tvdb_id")
+                return ((self._get(f"{self.s.cinemeta_url}/meta/series/{imdb}.json", lookup=True) or {}).get("meta")
+                        or {}).get("tvdb_id")
             except NotFound:
                 return None
+            except (Limited, Busy):   # Cinemeta asked to be asked later: Gestdown gives nothing now, and isn't paused
+                raise Busy() from None
 
         tvdb = self._id("tvdb", imdb, tvdb_of)
         if not tvdb:
@@ -406,10 +436,11 @@ class ExtraSources:
     # -- SubDL (key) -------------------------------------------------------------------------------------------
     def _subdl(self, type_, video_id, langs, hints):
         imdb, season, episode = split_id(video_id)
-        if not imdb:
+        codes = two_letter(langs)
+        if not imdb or not codes:
             return []
         q = {"api_key": self.s.subdl_key, "imdb_id": imdb, "type": "tv" if season is not None else "movie",
-             "languages": ",".join(two(x).upper() for x in langs), "subs_per_page": 30}
+             "languages": ",".join(code.upper() for code in codes), "subs_per_page": 30}
         if season is not None:
             q.update(season_number=season, episode_number=episode)
         self._count("subdl")
@@ -477,7 +508,10 @@ class ExtraSources:
             return []
         out = []
         for lang in langs:
-            q = {"id": imdb, "language": two(lang), "key": self.s.wyzie_key}
+            code = lang2(lang)
+            if not code:
+                continue
+            q = {"id": imdb, "language": code, "key": self.s.wyzie_key}
             if season is not None:
                 q.update(season=season, episode=episode)
             self._count("wyzie")

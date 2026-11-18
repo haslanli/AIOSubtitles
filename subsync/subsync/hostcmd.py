@@ -12,6 +12,7 @@ Standard library only.
 """
 import json
 import os
+import pathlib
 import sqlite3
 import sys
 from contextlib import closing
@@ -24,7 +25,9 @@ USAGE = "usage: python -m subsync.hostcmd status | copy-databases DEST"
 
 
 def _read_only(path):
-    return closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True))
+    """A database opened read-only. Its address is a file: URI with the path percent-encoded, so a '#', '?' or '%' in
+    SUBSYNC_DATA's path stays part of it (unencoded, the URI would name another file, opened read-write)."""
+    return closing(sqlite3.connect(pathlib.Path(path).absolute().as_uri() + "?mode=ro", uri=True))
 
 
 def numbers(settings):

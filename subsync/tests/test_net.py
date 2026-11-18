@@ -80,6 +80,24 @@ class RangesTest(unittest.TestCase):
                 self.assertTrue(net.is_public_ip(ip))
 
 
+class OriginTest(unittest.TestCase):
+    def test_where_credentials_may_follow_a_redirect(self):
+        # A redirect keeps a key or password only on the same origin, or from http to https on the same host
+        self.assertEqual(net.origin("https://API.example/x?y"), ("https", "api.example", 443))
+        self.assertIsNone(net.origin("https://api.example:99999/x"))
+        self.assertIsNone(net.origin("/relative"))
+        follow = (("https://a.example/x", "https://a.example:443/y"), ("http://a.example/x", "https://a.example/y"))
+        drop = (("https://a.example/x", "https://b.example/x"), ("https://a.example/x", "http://a.example/x"),
+                ("https://a.example/x", "https://a.example:8443/x"), ("http://a.example:8080/x", "https://a.example/x"),
+                ("https://a.example/x", "https://a.example.evil.example/x"))
+        for old, new in follow:
+            with self.subTest(old=old, new=new):
+                self.assertTrue(net.credentials_follow(old, new))
+        for old, new in drop:
+            with self.subTest(old=old, new=new):
+                self.assertFalse(net.credentials_follow(old, new))
+
+
 class GateTest(unittest.TestCase):
     def tearDown(self):
         net.configure(public_only=False)

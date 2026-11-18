@@ -222,6 +222,21 @@ class ExtraSourcesTest(unittest.TestCase):
         self.assertEqual(args[:2], ("movie", "tt1"))
         self.assertEqual(kw.get("hints"), {"filename": "a.mkv", "videoSize": 5, "videoHash": "abcd"})
 
+    def test_languages_are_asked_by_their_own_two_letter_codes(self):
+        # A language outside the 32 offered was asked by the first two letters of its three-letter code:
+        # Estonian as "es" (Spanish), Slovak as "sl" (Slovenian); one ISO 639-1 has no code for is not asked at all
+        ex = self.extra(SUBSYNC_LANGUAGES="est,slo,haw", SUBSYNC_SUBDL_KEY="k1", SUBSYNC_WYZIE_KEY="k2")
+        ex.search("series", "tt2:1:2")
+        self.assertEqual(next(q for p, q in self.fake.calls if p.startswith("/tsdb/v1"))["lang"], "et,sk")
+        self.assertEqual(next(q for p, q in self.fake.calls if p == "/subdl/api/v1/subtitles")["languages"], "ET,SK")
+        self.assertEqual([q["language"] for p, q in self.fake.calls if p == "/wyzie/search"], ["et", "sk"])
+        self.assertTrue(next(p for p, _ in self.fake.calls if p.startswith("/osv3/")).startswith("/osv3/et%7Csk/"))
+        self.fake.calls.clear()
+        got = self.extra(SUBSYNC_LANGUAGES="haw", SUBSYNC_SUBDL_KEY="k1", SUBSYNC_WYZIE_KEY="k2",
+                         SUBSYNC_EXTRA_SOURCES="osv3plus,tsdb").search("movie", "tt1")
+        self.assertEqual(got, [])
+        self.assertEqual(self.fake.calls, [])
+
     def test_a_failing_source_does_not_stop_the_others(self):
         self.fake.fail.add("tsdb")
         got = self.extra().search("series", "tt2:1:2")
