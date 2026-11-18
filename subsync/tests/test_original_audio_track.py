@@ -2,19 +2,13 @@
 track named as a commentary skipped), then the default track, then the second track in another language as before;
 an untagged track counts only for an English original and only after a tagged one; without an original language the
 order is exactly as before."""
-import os
 import random
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from helpers import AUDIO_BETTER, FIXTURES, rhythm
 from subsync import audiofit  # noqa: E402
 from subsync.mp4 import open_index  # noqa: E402
 from subsync.worker import audio_facts  # noqa: E402
-from test_core import AUDIO_BETTER, rhythm  # noqa: E402
-
-FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
 def track(i, lang, default=False, name="", tagged=True):

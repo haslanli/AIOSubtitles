@@ -1,12 +1,9 @@
 """Language codes: the full two-letter (ISO 639-1) table to the three-letter bibliographic codes (ISO 639-2/B) that
 Matroska tracks use, the terminologic spellings, TMDB's own codes, and the language families that count as one language
 when a title's original language is compared with a file's tracks."""
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import helpers  # noqa: F401  (first: it puts the package on the import path)
 from subsync import langs  # noqa: E402
 
 # the 32 two-letter codes the table knew before it was completed: each must map exactly as before

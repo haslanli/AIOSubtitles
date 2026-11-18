@@ -8,15 +8,12 @@ import unittest
 from concurrent.futures import Future
 from unittest import mock
 
-from helpers import closed_after, FakeDownloads, RangeServer, TempDir
+from helpers import closed_after, FakeDownloads, FIXTURES, RangeServer, realistic, srt_of, TempDir
 from subsync import origlang, pipeline
 from subsync.addon import App
 from subsync.settings import Settings
 from subsync.store import Store
 from subsync.worker import Job, Safety, Worker
-from test_io import realistic, srt_of
-
-FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
 class FakeLookup:

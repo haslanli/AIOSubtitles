@@ -1,13 +1,9 @@
 """The language check: a subtitle whose text isn't in the language it is listed under is refused; a short one,
 or one the check can't tell, never is."""
-import os
 import random
 import re
-import sys
 import time
 import unittest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import DIALOGUE  # noqa: E402
 from subsync import langcheck  # noqa: E402

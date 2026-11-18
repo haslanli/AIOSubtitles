@@ -1,11 +1,9 @@
 """Every setting and fixed rule has its one explanation, and every explanation matches what the code does."""
 import os
 import re
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import helpers  # noqa: F401  (first: it puts the package on the import path)
 from subsync import explain  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 

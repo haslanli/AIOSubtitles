@@ -2,15 +2,11 @@
 only; nothing here reaches a debrid service)."""
 import base64
 import json
-import os
-import sys
 import threading
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import local_network_only  # noqa: E402
 from subsync import realdebrid  # noqa: E402

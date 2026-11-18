@@ -4,7 +4,6 @@ a source's key in a header and are counted. No network."""
 import json
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import time
@@ -12,10 +11,7 @@ import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import closed_after, dialogue_srt, FakeDownloads, local_network_only, RangeServer  # noqa: E402
-from test_io import FakeIndex, realistic, srt_of  # noqa: E402
+from helpers import closed_after, dialogue_srt, FakeDownloads, FakeIndex, local_network_only, RangeServer, realistic, srt_of  # noqa: E402
 from subsync import choose, pipeline, srclimits  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.sourcestate import Ledger  # noqa: E402

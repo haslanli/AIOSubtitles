@@ -1,20 +1,17 @@
 """Pure pieces: subtitle text, the gate, the per-line snap, the OpenSubtitles hash, language codes, the VAD
 timestamp rule."""
-import os
 import random
 import statistics
 import struct
-import sys
 import time
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from subsync import choose, imageref, langs, pipeline, refine, shift, subs  # noqa: E402
-from subsync import relgate as relgate_mod  # noqa: E402
-from subsync.mkv import oshash  # noqa: E402
-from subsync.relgate import aligned, clearly_better, relgate  # noqa: E402
-from subsync.vad import FRAME, timestamps  # noqa: E402
+from helpers import AUDIO_BETTER, FakeIndex, realistic, rhythm, timeline_fit
+from subsync import choose, imageref, langs, pipeline, refine, shift, subs
+from subsync import relgate as relgate_mod
+from subsync.mkv import oshash
+from subsync.relgate import aligned, clearly_better, relgate
+from subsync.vad import FRAME, timestamps
 
 ASS = """[Script Info]
 ScriptType: v4.00+
@@ -211,16 +208,6 @@ class RelgateSplitTest(unittest.TestCase):
         cand = [x + (0.3 if i % 12 == 0 else 0.02) for i, x in enumerate(self.ref)]  # ~92 % within 200 ms
         self.assertTrue(relgate(self.ref, cand, self.dur)["pass"])
         self.assertFalse(relgate(self.ref, cand, self.dur, within_share=0.95)["pass"])
-
-
-def rhythm(n, seed):
-    r = random.Random(seed)
-    t, out = 20.0, []
-    for _ in range(n):
-        d = r.uniform(1.0, 4.0)
-        out.append((t, d))
-        t += d + r.uniform(0.3, 3.0)
-    return out
 
 
 def lines_from(cues, jitter=0.0, seed=1):
@@ -477,16 +464,6 @@ class PlainTrackReferenceTest(unittest.TestCase):
     """The plain track of the language is the reference, not the SDH one (on Game of Thrones S01E01 the SDH track
     trails the speech by about 0.3 s), unless the plain one is too short to pin the subtitle."""
 
-    class Index:
-        def __init__(self, tracks):
-            self.tracks = tracks
-
-        def text_tracks(self):
-            return self.tracks
-
-        def image_tracks(self):
-            return []
-
     @staticmethod
     def track(number, name, n, lang="en"):
         return {"number": number, "language": lang, "codec": "S_TEXT/UTF8", "name": name, "forced": False,
@@ -494,21 +471,21 @@ class PlainTrackReferenceTest(unittest.TestCase):
 
     def test_the_plain_track_wins_over_a_longer_sdh_one(self):
         for name in ("SDH", "English (SDH)", "English CC", "Hearing Impaired", "English [HoH]"):
-            idx = self.Index([self.track(6, name, 665), self.track(5, "", 498)])
+            idx = FakeIndex(text=[self.track(6, name, 665), self.track(5, "", 498)])
             self.assertEqual(pipeline.choose_reference(idx, 600, "eng")["number"], 5, name)
 
     def test_a_track_for_the_dub_comes_after_the_one_for_the_original_audio(self):
         # Spirited Away (dual audio): "For Dub Audio" has more lines, but its timing follows the English dub
         for name in ("For Dub Audio", "English (Dubtitles)", "SDH For Dub", "Dub"):
-            idx = self.Index([self.track(5, name, 1216), self.track(4, "For Japanese Audio", 1074)])
+            idx = FakeIndex(text=[self.track(5, name, 1216), self.track(4, "For Japanese Audio", 1074)])
             self.assertEqual(pipeline.choose_reference(idx, 1000, "eng")["number"], 4, name)
 
     def test_an_sdh_track_is_used_when_the_plain_one_is_too_short(self):
-        idx = self.Index([self.track(6, "SDH", 665), self.track(5, "English", 40)])
+        idx = FakeIndex(text=[self.track(6, "SDH", 665), self.track(5, "English", 40)])
         self.assertEqual(pipeline.choose_reference(idx, 600, "eng")["number"], 6)
 
     def test_the_language_still_comes_first(self):
-        idx = self.Index([self.track(6, "SDH", 665, "en"), self.track(5, "", 600, "ru")])
+        idx = FakeIndex(text=[self.track(6, "SDH", 665, "en"), self.track(5, "", 600, "ru")])
         self.assertEqual(pipeline.choose_reference(idx, 600, "eng")["number"], 6)
         self.assertEqual(pipeline.choose_reference(idx, 600, "rus")["number"], 5)
 
@@ -517,8 +494,6 @@ class AgreeingTrackReferenceTest(unittest.TestCase):
     """With several tracks in the subtitle's language, the reference is the one whose timing agrees with
     the file's other plain tracks, not the one with the most lines (Game of Thrones S01E01: es-ES, 576 lines, runs about
     167 ms early against English and es-419, 552 lines)."""
-
-    Index = PlainTrackReferenceTest.Index
 
     @staticmethod
     def track(number, lang, base, seed, lead=0.0, keep=1.0, name=""):
@@ -537,30 +512,30 @@ class AgreeingTrackReferenceTest(unittest.TestCase):
         self.assertGreater(len(self.es_es["cues"]), len(self.es_419["cues"]))          # today's order: es-ES
 
     def test_the_track_that_agrees_with_the_others_wins(self):
-        idx = self.Index([self.es_es, self.es_419] + self.others)
+        idx = FakeIndex(text=[self.es_es, self.es_419] + self.others)
         self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 11)
         self.assertEqual(pipeline.choose_reference(idx, 540, "es")["number"], 11)
 
     def test_one_track_in_the_language_is_unchanged(self):
-        idx = self.Index([self.es_es] + self.others)
+        idx = FakeIndex(text=[self.es_es] + self.others)
         self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 12)
 
     def test_with_no_other_track_to_compare_with_the_most_lines_win(self):
-        idx = self.Index([self.es_es, self.es_419])
+        idx = FakeIndex(text=[self.es_es, self.es_419])
         self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 12)
 
     def test_other_languages_keep_their_reference(self):
-        idx = self.Index([self.es_es, self.es_419] + self.others)
+        idx = FakeIndex(text=[self.es_es, self.es_419] + self.others)
         self.assertEqual(pipeline.choose_reference(idx, 540, "rus")["number"], 2)      # the fallback, English
         self.assertEqual(pipeline.choose_reference(idx, 540, "fre")["number"], 3)
 
     def test_a_plain_track_still_beats_an_sdh_one_that_agrees(self):
         sdh = dict(self.es_419, name="SDH")
-        idx = self.Index([self.es_es, sdh] + self.others)
+        idx = FakeIndex(text=[self.es_es, sdh] + self.others)
         self.assertEqual(pipeline.choose_reference(idx, 540, "spa")["number"], 12)
 
     def test_the_agreement_is_worked_out_once_per_file(self):
-        idx = self.Index([self.es_es, self.es_419] + self.others)
+        idx = FakeIndex(text=[self.es_es, self.es_419] + self.others)
         calls = []
         real = pipeline.relgate
         pipeline.relgate = lambda *a, **kw: calls.append(1) or real(*a, **kw)
@@ -579,8 +554,6 @@ class TypesettingTrackReferenceTest(unittest.TestCase):
     """A fansub ASS track can hold tens of thousands of typesetting frames (Frieren S01E01's Portuguese track: 55,735 cues
     in 24 minutes). Against such a track any subtitle pairs by chance and the snap moves its lines onto sign frames, so a
     track is a reference only through its dialogue lines, and only when they are as dense as dialogue can be."""
-
-    Index = PlainTrackReferenceTest.Index
 
     @staticmethod
     def dialogue(number, lang, n=300, step=4.5):
@@ -601,18 +574,18 @@ class TypesettingTrackReferenceTest(unittest.TestCase):
         self.assertEqual(got, [(10.0, 2.5), (15.0, 0.0), (20.0, 1.5)])
 
     def test_another_languages_dialogue_track_beats_a_typesetting_track(self):
-        idx = self.Index([self.typesetting(4, "pt", signs=3000), self.dialogue(2, "en")])
+        idx = FakeIndex(text=[self.typesetting(4, "pt", signs=3000), self.dialogue(2, "en")])
         ref = pipeline.choose_reference(idx, 290, "rus")
         self.assertEqual(ref["number"], 2)
         self.assertEqual(len(ref["cues"]), 300)
 
     def test_a_track_of_typesetting_only_is_no_reference(self):
-        idx = self.Index([self.typesetting(4, "pt", signs=3000)])
+        idx = FakeIndex(text=[self.typesetting(4, "pt", signs=3000)])
         self.assertIsNone(pipeline.choose_reference(idx, 290, "rus"))
         self.assertFalse(pipeline.own_track(idx, 290))
 
     def test_the_dialogue_lines_are_worked_out_once_per_file(self):
-        idx = self.Index([self.typesetting(4, "pt", signs=3000), self.dialogue(2, "en")])
+        idx = FakeIndex(text=[self.typesetting(4, "pt", signs=3000), self.dialogue(2, "en")])
         calls = []
         real = pipeline.dialogue_cues
         pipeline.dialogue_cues = lambda cues: calls.append(1) or real(cues)
@@ -625,13 +598,14 @@ class TypesettingTrackReferenceTest(unittest.TestCase):
 
     def test_calibration_skips_typesetting_tracks(self):
         image = {"number": 7, "language": "pt", "codec": "S_HDMV/PGS", "forced": False, "cues": [(30.0 + 4.5 * i, 0.0) for i in range(300)]}
-        self.assertEqual(pipeline.image_check(pipeline.text_references(self.Index([self.typesetting(4, "pt", signs=3000)])), [image]), [])
+        refs = pipeline.text_references(FakeIndex(text=[self.typesetting(4, "pt", signs=3000)]))
+        self.assertEqual(pipeline.image_check(refs, [image]), [])
 
     def test_a_dialogue_track_with_its_signs_is_still_a_reference(self):
         track = self.dialogue(2, "en")
         track["cues"] = sorted(track["cues"] + [(31.0 + 9 * i, 0.042) for i in range(2000)]
                                + [(33.3 + 20 * i, 4.0) for i in range(60)])
-        ref = pipeline.choose_reference(self.Index([track]), 290, "eng")
+        ref = pipeline.choose_reference(FakeIndex(text=[track]), 290, "eng")
         self.assertEqual(ref["number"], 2)
         self.assertEqual(len(ref["cues"]), 360)
 
@@ -951,8 +925,8 @@ class CrossMissingSceneTest(unittest.TestCase):
                          for i, (s, d) in enumerate(cand, 1))
 
     def index(self):
-        return PlainTrackReferenceTest.Index([{"number": 2, "language": "en", "codec": "S_TEXT/UTF8", "name": "",
-                                               "forced": False, "cues": list(self.cues)}])
+        return FakeIndex(text=[{"number": 2, "language": "en", "codec": "S_TEXT/UTF8", "name": "", "forced": False,
+                                "cues": list(self.cues)}])
 
     def test_an_untranslated_stretch_under_one_shift_is_aligned(self):
         g = self.gate(self.translation(0.05))
@@ -1020,9 +994,6 @@ class ImageRecallTest(unittest.TestCase):
         self.assertEqual(pipeline.reference_gate({"route": "cues", "cues": [(1.0, 1.0)] * 10}, 1000)[1], 1.0)
 
 
-AUDIO_BETTER = {"matched": 25, "miss": 0.30, "median_ms": 150.0, "within": 0.55, "min_shift_s": 1.0}
-
-
 class AudioClearlyBetterTest(unittest.TestCase):
     """The audio route's second way to pass. Synthetic speech: each release line is spoken a little off its start
     (sigma 80 ms); a third-party subtitle has its own timing style (sigma 150 ms) and is 9 s off. Like Primer's YTS
@@ -1033,8 +1004,6 @@ class AudioClearlyBetterTest(unittest.TestCase):
         self.truth = rhythm(700, 11)
 
     def fit(self, starts, better=AUDIO_BETTER, durations=None):
-        import numpy as np
-        from subsync.audiofit import AudioFit
         r = random.Random(5)
         speech = [(s + r.gauss(0, 0.08), s + d) for s, d in self.truth]
         end = self.truth[-1][0] + self.truth[-1][1] + 30
@@ -1042,23 +1011,9 @@ class AudioClearlyBetterTest(unittest.TestCase):
         class Index:
             def duration(self):
                 return end
-
-        class TruthFit(AudioFit):
-            def _read_window(self, start, length):   # speech straight from the timeline: no audio, no VAD
-                self.windows_read += 1
-                self.audio_s += length
-                n = int(round(length * 100))
-                mask, onsets = np.zeros(n, dtype=bool), []
-                for a, b in speech:
-                    if b <= start or a >= start + length:
-                        continue
-                    mask[max(0, int((a - start) * 100)):min(n, int((b - start) * 100))] = True
-                    if a >= start:
-                        onsets.append(a - self.lead)
-                return {"start": start, "len": length, "mask": mask, "onsets": np.array(onsets)}
         durations = durations or [d for _, d in self.truth]
         lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, d in zip(starts, durations)]
-        return TruthFit(Index(), lines, vad=object(), better=better).run()
+        return timeline_fit(speech)(Index(), lines, vad=object(), better=better).run()   # windows without speech ends
 
     def styled(self, seed, shift, sigma=0.15):
         r = random.Random(seed)
@@ -1162,7 +1117,6 @@ class OtherAudioTrackTest(unittest.TestCase):
         self.dub = rhythm(700, 4242)                               # the dub: speech at other times
 
     def fit(self, starts, follows=1):
-        import numpy as np
         from subsync import audiofit
         r = random.Random(5)
         end = max(self.truth[-1][0] + self.truth[-1][1], self.dub[-1][0] + self.dub[-1][1]) + 30
@@ -1175,22 +1129,8 @@ class OtherAudioTrackTest(unittest.TestCase):
 
             def audio_tracks(self):
                 return [{"index": 0, "language": "eng", "default": True}, {"index": 1, "language": "jpn", "default": False}]
-
-        class TruthFit(audiofit.AudioFit):
-            def _read_window(self, start, length):
-                self.windows_read += 1
-                self.audio_s += length
-                n = int(round(length * 100))
-                mask, onsets = np.zeros(n, dtype=bool), []
-                for a, b in speech[self.track or 0]:
-                    if b <= start or a >= start + length:
-                        continue
-                    mask[max(0, int((a - start) * 100)):min(n, int((b - start) * 100))] = True
-                    if a >= start:
-                        onsets.append(a - self.lead)
-                return {"start": start, "len": length, "mask": mask, "onsets": np.array(onsets)}
         lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, (_, d) in zip(starts, self.truth)]
-        return audiofit.fit_tracks(Index(), lines, vad=object(), better=AUDIO_BETTER, fit_class=TruthFit)
+        return audiofit.fit_tracks(Index(), lines, vad=object(), better=AUDIO_BETTER, fit_class=timeline_fit(speech))
 
     def test_the_other_track_is_tried_when_the_default_fails(self):
         r = random.Random(1)
@@ -1212,8 +1152,6 @@ class AudioBudgetTest(unittest.TestCase):
         self.truth = rhythm(700, 11)
 
     def fit(self, rate, budget, starts=None, spent=0):
-        import numpy as np
-        from subsync.audiofit import AudioFit
         truth = self.truth
         r = random.Random(5)
         speech = [(s + r.gauss(0, 0.08), s + d) for s, d in truth]
@@ -1225,25 +1163,11 @@ class AudioBudgetTest(unittest.TestCase):
 
             def duration(self):
                 return end
-
-        class Fit(AudioFit):
-            def _read_window(self, start, length):
-                self.index.audio_bytes += int(length * rate)     # what a read of this window costs
-                self.windows_read += 1
-                n = int(round(length * 100))
-                mask, onsets = np.zeros(n, dtype=bool), []
-                for a, b in speech:
-                    if b <= start or a >= start + length:
-                        continue
-                    mask[max(0, int((a - start) * 100)):min(n, int((b - start) * 100))] = True
-                    if a >= start:
-                        onsets.append(a - self.lead)
-                return {"start": start, "len": length, "mask": mask, "onsets": np.array(onsets)}
         rr = random.Random(1)
         starts = starts or [s - 9.0 + rr.gauss(0, 0.15) for s, _ in truth]
         lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, (_, d) in zip(starts, truth)]
         idx = Index()
-        fit = Fit(idx, lines, vad=object(), better=AUDIO_BETTER, budget=budget)
+        fit = timeline_fit(speech, rate=rate)(idx, lines, vad=object(), better=AUDIO_BETTER, budget=budget)
         return fit, fit.run(), idx
 
     def test_a_low_bitrate_file_keeps_its_30_s_windows(self):
@@ -1405,9 +1329,9 @@ class AudioPrefetchTest(unittest.TestCase):
         self.assertEqual(len(idx.reads), 3)                    # the fourth would pass the budget: left to read_window
 
 
-def pgs_events(lines, merge_every=0):
+def pgs_events(lines):
     """PGS cue times for lines (start, duration): show and clear, the clear left out when the next line starts at the
-    same moment (every merge_every-th line made contiguous)."""
+    same moment."""
     ev = []
     for k, (s, d) in enumerate(lines):
         ev.append(s)
@@ -1417,31 +1341,12 @@ def pgs_events(lines, merge_every=0):
     return [(t, 0.0) for t in ev]
 
 
-def contiguous(lines, every):
-    out = list(lines)
-    for k in range(0, len(out) - 1, every):
-        s, _ = out[k]
-        out[k] = (s, out[k + 1][0] - s)      # this line ends exactly when the next starts: no clear event
-    return out
-
-
 class ImageRefTest(unittest.TestCase):
     def setUp(self):
         self.lines = rhythm(400, 11)
 
-    def starts_found(self, ref_lines, got):
-        g = relgate([s for s, _ in ref_lines], [s for s, _ in got], [d for _, d in ref_lines])
-        return g
-
     def test_pgs_with_every_clear_gives_the_line_starts(self):
-        # Blu-ray style: every line has its clear (2-frame gaps in dialogue, pauses between scenes)
-        r = random.Random(5)
-        t, lines = 30.0, []
-        for _ in range(400):
-            d = r.uniform(1.0, 4.5)
-            lines.append((t, d))
-            x = r.random()
-            t += d + (0.083 if x < 0.45 else r.uniform(0.25, 1) if x < 0.7 else r.uniform(1, 8) if x < 0.9 else r.uniform(8, 40))
+        lines = realistic(400, 5)       # Blu-ray style: every line has its clear (2-frame gaps, pauses between scenes)
         ref = imageref.reference({"codec": "S_HDMV/PGS", "cues": pgs_events(lines)})
         self.assertTrue(ref["plausible"])
         got = [round(s, 3) for s, _ in ref["cues"]]

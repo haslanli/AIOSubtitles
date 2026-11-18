@@ -2,14 +2,11 @@
 goes, sample counts a few bytes can claim kept within bounds, a movie length the header leaves unknown, the esds fields
 in their order, and windows streamed into the decoder, never further than their share of the file. No network: files
 are served from memory."""
-import os
 import struct
 import sys
 import time
 import unittest
 from unittest import mock
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import have  # noqa: E402
 from subsync import mp4  # noqa: E402

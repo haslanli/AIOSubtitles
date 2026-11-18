@@ -3,12 +3,9 @@ file with no usable subtitle track, through that person's own sync config, withi
 person's and the service's data for the day; one audio sync at a time per two places. Plain Python except where marked;
 no network beyond 127.0.0.1; every run bounded (ulimit -t)."""
 import os
-import sys
 import threading
 import time
 import unittest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import closed_after, dialogue_srt, FakeDownloads, FIXTURES, local_network_only, RangeServer, TempDir  # noqa: E402
 from subsync import audiofit  # noqa: E402

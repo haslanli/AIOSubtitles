@@ -3,9 +3,7 @@ anime ids; kept per title in the store, shared, never holding a job. A local sta
 no network."""
 import json
 import logging
-import os
 import re
-import sys
 import threading
 import time
 import unittest
@@ -13,12 +11,10 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from helpers import Clock, closed_after, TempDir  # noqa: E402
 from subsync import origlang  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
-from helpers import closed_after, TempDir  # noqa: E402
 
 KEY = "0123456789abcdef0123456789abcdef"            # a made-up v3 key (32 hex characters)
 TOKEN = "eyJhbGciOiJIUzI1NiJ9.made-up-token-for-tests.c2lnbmF0dXJl"   # a made-up Read Access Token
@@ -124,14 +120,6 @@ class Services:
     def close(self):
         self.srv.shutdown()
         self.srv.server_close()
-
-
-class Clock:
-    def __init__(self, t=1_800_000_000.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
 
 
 class Base(unittest.TestCase):

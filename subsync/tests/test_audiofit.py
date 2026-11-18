@@ -2,7 +2,6 @@
 the correlation of a window with only the stretch of the subtitle it can reach, the windows' places on any runtime, and
 a subtitle signal no longer than the windows can read."""
 import collections
-import os
 import random
 import sys
 import threading
@@ -11,16 +10,12 @@ from unittest import mock
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from helpers import AUDIO_BETTER, FIXTURES, RangeServer, rhythm, truth_fit  # noqa: E402
 from subsync import audiofit  # noqa: E402
 from subsync.audiofit import DT, OMAX, AudioFit  # noqa: E402
 from subsync.mp4 import NoAudioThere, NotMp4, open_index  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
-from helpers import FIXTURES, RangeServer  # noqa: E402
-from test_core import AUDIO_BETTER, rhythm  # noqa: E402
-from test_matcher import truth_fit  # noqa: E402
 
 
 class LoudVad:

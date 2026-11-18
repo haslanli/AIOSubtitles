@@ -3,14 +3,11 @@ person's copy is made from the original, downloaded again from its source, with 
 import hashlib
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import closed_after, local_network_only, RangeServer  # noqa: E402
 from subsync.addon import App, file_id, serve  # noqa: E402

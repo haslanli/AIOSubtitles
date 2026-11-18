@@ -56,12 +56,15 @@ def _seg(kind, data):
 
 def pgs_show(img, x=100, y=900, number=1, split=0):
     """A display set (segments as Matroska stores them: no "PG" header) that shows `img`. split > 0 cuts the object's
-    run-length data into several object segments of at most `split` bytes."""
+    run-length data into several object segments of at most `split` bytes; a split that would cut nothing (not under
+    the data's length) is refused, so a test of a split object can't quietly test a whole one."""
     h, w = img.shape
     pcs = struct.pack(">HHBHBBBB", 1920, 1080, 0x10, number, 0x80, 0, 0, 1) + struct.pack(">HBBHH", 0, 0, 0, x, y)
     wds = bytes([1, 0]) + struct.pack(">HHHH", x, y, w, h)
     pds = bytes([0, 0]) + b"".join(bytes(e) for e in PGS_PALETTE)
     rle = pgs_rle(img)
+    if split and split >= len(rle):
+        raise ValueError(f"split={split} cuts nothing: the object's data is {len(rle)} bytes")
     first = struct.pack(">HBB", 0, 0, 0x80 | (0x40 if not split else 0)) + (len(rle) + 4).to_bytes(3, "big") + \
         struct.pack(">HH", w, h)
     if not split:

@@ -6,8 +6,8 @@ their own); with the original language unknown, or no such track, the reference 
 import random
 import unittest
 
+from helpers import pgs_track, realistic
 from subsync import pipeline
-from test_io import pgs_track, realistic
 
 
 def shifted(cues, by, keep=1.0, seed=1):

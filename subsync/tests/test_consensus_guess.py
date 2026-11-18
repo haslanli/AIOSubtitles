@@ -4,14 +4,11 @@ other English subtitles agreed within 100 ms, and AutoSync's first was right).""
 import os
 import unittest
 
-from helpers import closed_after, FakeDownloads, RangeServer, TempDir
+from helpers import closed_after, FakeDownloads, FIXTURES, RangeServer, realistic, srt_of, TempDir, translated
 from subsync import pipeline
 from subsync.settings import Settings
 from subsync.store import Store
 from subsync.worker import Job, Safety, Worker
-from test_io import realistic, srt_of, translated
-
-FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
 class ConsensusGuessTest(unittest.TestCase):

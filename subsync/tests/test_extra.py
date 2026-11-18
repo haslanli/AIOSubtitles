@@ -2,8 +2,8 @@
 answers like TheSubtitleDB, Cinemeta + Gestdown, SubDL and Wyzie; no network."""
 import io
 import json
-import os
-import sys
+import shutil
+import tempfile
 import threading
 import time
 import unittest
@@ -11,13 +11,11 @@ import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import closed_after  # noqa: E402
-from subsync import choose  # noqa: E402
-from subsync.extra import ExtraSources  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.sources import fetch_subtitle  # noqa: E402
+from helpers import closed_after
+from subsync import choose
+from subsync.extra import ExtraSources
+from subsync.settings import Settings
+from subsync.sources import fetch_subtitle
 
 SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n"
 
@@ -209,13 +207,14 @@ class ExtraSourcesTest(unittest.TestCase):
                 return []
 
         class Extra:
-            calls = []
+            def __init__(self):
+                self.calls = []
 
             def search(self, *a, **k):
                 self.calls.append((a, k))
                 return []
-        import tempfile
         d = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)    # after the store is closed (cleanups run last first)
         extra = Extra()
         w = Worker(Settings({"SUBSYNC_DATA": d}), closed_after(self, Store(d)), Aios(), Safety(), extra=extra)
         w.process(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 5, "videoHash": "abcd"}))
@@ -242,6 +241,16 @@ class ExtraSourcesTest(unittest.TestCase):
         self.fake.fail.add("tsdb")
         got = self.extra().search("series", "tt2:1:2")
         self.assertEqual({c["source"] for c in got}, {"gestdown", "osv3plus"})
+        # TheSubtitleDB has nothing for that episode anyway; for the film it has three, and they alone go
+        ex = self.extra()
+        got = ex.search("movie", "tt1")
+        self.assertEqual([(c["source"], c["lang"]) for c in got], [("osv3plus", "eng"), ("osv3plus", "rus")])
+        self.assertEqual(len(ex.health.failures["tsdb"]), 1)                 # its failure counted (three pause it)
+        self.fake.fail = {"osv3"}                                             # OpenSubtitles v3+ failing instead
+        ex = self.extra()
+        got = ex.search("movie", "tt1")
+        self.assertEqual([c["id"] for c in got], ["tsdb-11", "tsdb-12", "tsdb-13"])
+        self.assertEqual(len(ex.health.failures["osv3plus"]), 1)
 
     def test_off_means_nothing_is_asked(self):
         self.assertEqual(self.extra(SUBSYNC_EXTRA_SOURCES="").search("series", "tt2:1:2"), [])

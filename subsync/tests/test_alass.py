@@ -2,11 +2,8 @@
 its time limit, which is a failure like the others (AlassFailed), not an error that ends the language's judging."""
 import os
 import stat
-import sys
 import time
 import unittest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import TempDir  # noqa: E402
 from subsync import alass  # noqa: E402

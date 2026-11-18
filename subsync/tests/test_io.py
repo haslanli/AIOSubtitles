@@ -7,14 +7,13 @@ import types
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import closed_after, FIXTURES, have, RangeServer, TempDir  # noqa: E402
+from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_track, RangeServer,  # noqa: E402
+                     realistic, srt_of, TempDir, translated)
 from subsync import pipeline  # noqa: E402
 from subsync.mkv import MkvIndex, NotMatroska, oshash  # noqa: E402
 from subsync.mp4 import Mp4Index, open_index  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed, Refused, Stopped  # noqa: E402
-from subsync.subs import parse  # noqa: E402
+from subsync.subs import parse, ts  # noqa: E402
 
 TINY = os.path.join(FIXTURES, "tiny.mkv")
 
@@ -309,13 +308,10 @@ class PipelineTest(unittest.TestCase):
         pattern = (0, 120, -150, 260, -90, 30, -280, 180, 60, -210)
         lines, out, n = parse(read_text("tiny-offset.srt")), [], 0
 
-        def stamp(x):
-            ms = int(round(x * 1000))
-            return "%02d:%02d:%02d,%03d" % (ms // 3600000, ms // 60000 % 60, ms // 1000 % 60, ms % 1000)
         for i, l in enumerate(lines):
             d = pattern[i % len(pattern)] / 1000
             n += 1
-            out.append("%d\n%s --> %s\n%s\n" % (n, stamp(l["s"] + d), stamp(l["e"] + d), l["text"]))
+            out.append("%d\n%s --> %s\n%s\n" % (n, ts(l["s"] + d), ts(l["e"] + d), l["text"]))
         return "\n".join(out)
 
     def test_a_copy_clearly_better_than_the_original_is_offered_only_with_the_rule_on(self):
@@ -365,47 +361,6 @@ from subsync.worker import Job, Worker  # noqa: E402
 ALASS = os.environ.get("SUBSYNC_ALASS", "alass")
 
 
-class FakeIndex:
-    """An index with given tracks: no reads."""
-
-    def __init__(self, text=(), image=()):
-        self._t, self._i, self.size = list(text), list(image), 1
-
-    def text_tracks(self):
-        return self._t
-
-    def image_tracks(self):
-        return self._i
-
-
-def realistic(n, seed, start=30.0):
-    """(start, duration) lines with real subtitle gaps (2-frame gaps, short, mid and long pauses)."""
-    r = random.Random(seed)
-    t, out = start, []
-    for _ in range(n):
-        d = r.uniform(1.0, 4.5)
-        out.append((t, d))
-        x = r.random()
-        t += d + (0.083 if x < 0.45 else r.uniform(0.25, 1) if x < 0.7 else r.uniform(1, 8) if x < 0.9 else r.uniform(8, 40))
-    return out
-
-
-def pgs_track(lines, number=7, lang="eng"):
-    ev = []
-    for s, d in lines:
-        ev += [(s, 0.0), (s + d, 0.0)]
-    return {"number": number, "language": lang, "codec": "S_HDMV/PGS", "name": "", "forced": False, "cues": ev}
-
-
-def srt_of(lines, shift=0.0, jitter=0.0, seed=1):
-    r = random.Random(seed)
-    out = []
-    for s, d in lines:
-        e = max(-0.12, min(0.12, r.gauss(0, jitter))) if jitter else 0.0
-        out.append({"s": s + shift + e, "e": s + d + shift + e, "text": "line", "kind": "dialogue"})
-    return to_srt(out)
-
-
 @unittest.skipUnless(have(ALASS), "alass not installed")
 class ImageRoutePipelineTest(unittest.TestCase):
     def setUp(self):
@@ -434,20 +389,6 @@ class ImageRoutePipelineTest(unittest.TestCase):
         self.assertEqual(r["outcome"], "keep_original")
 
 
-def back_to_back(n, seed, start=30.0):
-    """Lines as a busy film has them: a fifth follow the previous one with no gap, so their PGS clears are left out and
-    the image reference keeps only its sure starts (about half here; 73 % on Kingdom of Heaven's director's cut)."""
-    r = random.Random(seed)
-    t, out = start, []
-    for _ in range(n):
-        d = r.uniform(1.0, 4.5)
-        out.append((t, d))
-        x = r.random()
-        t += d + (0.0 if x < 0.22 else 0.083 if x < 0.39 else r.uniform(0.25, 1) if x < 0.75 else
-                  r.uniform(1, 8) if x < 0.93 else r.uniform(8, 40))
-    return out
-
-
 def pgs_left_out(lines, number=7):
     ev = []
     for k, (s, d) in enumerate(lines):
@@ -455,27 +396,6 @@ def pgs_left_out(lines, number=7):
         if k + 1 == len(lines) or lines[k + 1][0] - (s + d) > 0.001:   # a back-to-back line replaces it: no clear
             ev.append((s + d, 0.0))
     return {"number": number, "language": "eng", "codec": "S_HDMV/PGS", "name": "", "forced": False, "cues": ev}
-
-
-def translated(lines, seed, shift, cut=None, sigma=0.12, resplit=0.2, merge=0.25):
-    """Another language's subtitle of the same film: a quarter of the line pairs merged into one line, each start in its
-    author's timing style, a fifth split elsewhere (0.3 to 0.8 s off), all shifted; with `cut` (a, b) the lines of that
-    stretch left out (a subtitle for another cut)."""
-    r = random.Random(seed)
-    out, k = [], 0
-    while k < len(lines):
-        s, d = lines[k]
-        if k + 1 < len(lines) and r.random() < merge:
-            d = lines[k + 1][0] + lines[k + 1][1] - s
-            k += 1
-        k += 1
-        if cut and cut[0] <= s <= cut[1]:
-            continue
-        e = r.gauss(0, sigma)
-        if r.random() < resplit:
-            e += r.choice((-1, 1)) * r.uniform(0.3, 0.8)
-        out.append({"s": s + shift + e, "e": s + d + shift + e, "text": "строка", "kind": "dialogue"})
-    return to_srt(out)
 
 
 @unittest.skipUnless(have(ALASS), "alass not installed")
@@ -490,7 +410,7 @@ class ImageTranslationTest(unittest.TestCase):
 
     def run_one(self, text):
         return pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, image_ref=True,
-                                      better={"paired": 0.85, "median_ms": 200, "ratio": 0.5})
+                                      better=BETTER)
 
     def test_the_track_pins_only_its_sure_starts(self):
         share = imageref.reference(self.idx.image_tracks()[0])["stats"]["sure_share"]
@@ -748,7 +668,6 @@ class CrossLanguageTest(unittest.TestCase):
     start their lines at the same moments, so the main bar cannot hold (Breaking Bad S01E02's Russian against the English
     track: 245-267 ms median after alass, every one refused; Frieren's Russian: 90 ms, 81 %). An alignment that is sound is
     accepted and its lines are snapped onto the reference's starts, as AutoSync's magnet does."""
-    BETTER = {"paired": 0.85, "median_ms": 200, "ratio": 0.5, "cross_median_ms": 300, "cross_paired": 0.75}
 
     def setUp(self):
         self.ref = realistic(600, 41)
@@ -765,7 +684,7 @@ class CrossLanguageTest(unittest.TestCase):
 
     def test_a_translation_in_sync_is_listed_snapped(self):
         text = translated(self.ref, 5, shift=0.0, sigma=0.15, resplit=0.1)
-        chk = pipeline.check_original(self.idx, text, "rus", snap_within=0.95, better=self.BETTER)
+        chk = pipeline.check_original(self.idx, text, "rus", snap_within=0.95, better=BETTER)
         self.assertTrue(chk["in_sync"], chk["gate_original"])
         self.assertTrue(chk["cross"])                                  # recorded as judged against another language
         self.assertLess(self.error_ms(chk["body"]), self.error_ms(text))
@@ -773,7 +692,7 @@ class CrossLanguageTest(unittest.TestCase):
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_an_offset_translation_is_aligned_and_snapped(self):
         text = translated(self.ref, 6, shift=3.4, sigma=0.25, resplit=0.1)
-        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=BETTER)
         self.assertEqual(r["outcome"], "synced", (r.get("reason"), r.get("gate_synced")))
         self.assertIn("another language", r["reason"])
         self.assertLess(self.error_ms(r["body"]), 120)
@@ -783,20 +702,20 @@ class CrossLanguageTest(unittest.TestCase):
         # Breaking Bad S01E02's Russian: alass aligns it (86-94 % paired) but its timing style leaves ~250 ms median, and some
         # tenths of the runtime have under half their lines within 500 ms; every tenth still pairs
         text = translated(self.ref, 8, shift=2.2, sigma=0.32, resplit=0.15)
-        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=BETTER)
         self.assertEqual(r["outcome"], "synced", (r.get("reason"), r.get("gate_synced"), r.get("aligned")))
 
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_another_films_translation_is_kept(self):
         text = translated(realistic(600, 77), 6, shift=3.4)
-        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=BETTER)
         self.assertEqual(r["outcome"], "keep_original")
 
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_another_cuts_translation_is_kept(self):
         mid = self.ref[len(self.ref) // 2][0]
         text = translated(self.ref, 6, shift=3.4, sigma=0.25, resplit=0.1, cut=(mid, mid + 400))
-        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=self.BETTER)
+        r = pipeline.sync_subtitle(self.idx, text, "rus", alass=ALASS, audio=False, better=BETTER)
         self.assertEqual(r["outcome"], "keep_original")
 
     def test_without_the_rule_a_translation_is_judged_as_before(self):
@@ -884,7 +803,7 @@ class RecentreTest(unittest.TestCase):
         new = [dict(l, s=l["s"] - 4.0 - 0.06 + r.gauss(0, 0.15), e=l["e"] - 4.0 - 0.06) for l in lines]
         gate, recall = pipeline.reference_gate(ref_track, len(lines))
         out = pipeline.judge_copy({"gate_original": gate([l["s"] for l in lines])}, to_srt(lines), lines, new, ref_track,
-                                  gate, recall, snap=False, better={"paired": 0.85, "median_ms": 200, "ratio": 0.5})
+                                  gate, recall, snap=False, better=BETTER)
         self.assertEqual(out["outcome"], "synced")
         self.assertLess(abs(out["gate_synced"]["signed_median_ms"]), 15)
         self.assertGreater(abs(out["recentred_ms"]), 40)

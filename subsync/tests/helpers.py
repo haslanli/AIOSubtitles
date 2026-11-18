@@ -1,18 +1,40 @@
-"""Test helpers: a local HTTP range server (stands in for AIOS's proxy), with switchable faults."""
+"""Test helpers: a local HTTP range server (stands in for AIOS's proxy), with switchable faults, and the stand-ins and
+data the test modules share.
+
+Every test module imports helpers before anything from subsync: this is the one place that puts the package on the
+import path (the source next to these tests, ahead of any other copy), so all modules test the same copy and each one
+also runs on its own (python3 -m unittest test_x from this folder)."""
 import os
+import random
 import shutil
 import socket
+import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+TESTS = os.path.dirname(os.path.abspath(__file__))
+SOURCE = os.path.dirname(TESTS)          # subsync/, the folder that holds the package
+sys.path.insert(0, SOURCE)
+FIXTURES = os.path.join(TESTS, "fixtures")
+
+from subsync import realdebrid, sources  # noqa: E402  (the package from the path set just above)
+from subsync.settings import Settings  # noqa: E402
+from subsync.subs import to_srt, ts  # noqa: E402
+
+# the "clearly better than the original" rules as the service ships them (the settings' defaults): a test of the shipped
+# rule follows it when its numbers change; one meant for another rule says so with its own numbers
+BETTER = Settings({}).better
+AUDIO_BETTER = Settings({}).audio_better
 
 
 class RangeServer:
     """Serves files under root with Range support. fault: None | '403' | 'ignore-range' | 'wrong-size' | 'aligned'
-    (a proxy that answers whole 4096-byte blocks: from the start of the block that holds the first byte asked)."""
+    (a proxy that answers whole 4096-byte blocks: from the start of the block that holds the first byte asked).
+    `log`: (start, length) of each range of a file it answers, recorded before any of the answer is sent, so a client
+    that has had its bytes always finds its read there."""
 
     def __init__(self, root):
         self.root, self.fault, self.log, self.headers = root, None, [], []
@@ -40,11 +62,14 @@ class RangeServer:
                 size = os.path.getsize(path)
                 start, end = 0, size - 1
                 rng = self.headers.get("Range")
-                if rng and outer.fault != "ignore-range":
+                ranged = bool(rng) and outer.fault != "ignore-range"
+                if ranged:
                     a, _, b = rng[6:].partition("-")
                     start, end = int(a), min(int(b) if b else size - 1, size - 1)
                     if outer.fault == "aligned":
                         start -= start % 4096
+                outer.log.append((start, end - start + 1))
+                if ranged:
                     self.send_response(206)
                     shown = size + 1000 if outer.fault == "wrong-size" else size
                     self.send_header("Content-Range", f"bytes {start}-{end}/{shown}")
@@ -62,9 +87,8 @@ class RangeServer:
                                 break
                             self.wfile.write(chunk)
                             left -= len(chunk)
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
-                outer.log.append((start, end - start + 1))
+                    except (BrokenPipeError, ConnectionResetError):    # the client went: so does the connection
+                        self.close_connection = True
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.server.daemon_threads = True
@@ -404,13 +428,8 @@ def dialogue_srt(lang, n=120, start=30.0, step=3.0):
     out = []
     for i in range(n):
         s = start + i * step
-        out.append(f"{i + 1}\n{_ts(s)} --> {_ts(s + 2.0)}\n{DIALOGUE[lang][i % len(DIALOGUE[lang])]}\n")
+        out.append(f"{i + 1}\n{ts(s)} --> {ts(s + 2.0)}\n{DIALOGUE[lang][i % len(DIALOGUE[lang])]}\n")
     return "\n".join(out)
-
-
-def _ts(t):
-    ms = int(round(t * 1000))
-    return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
 
 
 class FakeDownloads:
@@ -432,3 +451,233 @@ class FakeDownloads:
 
     def patch(self):
         return mock.patch("subsync.worker.fetch_subtitle", self)
+
+
+class Clock:
+    """A clock the test moves by hand (t, seconds as time.time gives them)."""
+
+    def __init__(self, t=1_800_000_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def wait_until(check, timeout=5.0):
+    """check() once it is true, or its last answer after `timeout` seconds."""
+    t0 = time.time()
+    while not check() and time.time() - t0 < timeout:
+        time.sleep(0.02)
+    return check()
+
+
+# -- synthetic timings: a release's lines as (start, duration), and subtitles made from them ----------------------------
+def rhythm(n, seed, start=20.0):
+    """n release lines: durations 1-4 s, gaps 0.3-3 s."""
+    r = random.Random(seed)
+    t, out = start, []
+    for _ in range(n):
+        d = r.uniform(1.0, 4.0)
+        out.append((t, d))
+        t += d + r.uniform(0.3, 3.0)
+    return out
+
+
+def realistic(n, seed, start=30.0):
+    """n lines with real subtitle gaps (2-frame gaps, short, mid and long pauses)."""
+    r = random.Random(seed)
+    t, out = start, []
+    for _ in range(n):
+        d = r.uniform(1.0, 4.5)
+        out.append((t, d))
+        x = r.random()
+        t += d + (0.083 if x < 0.45 else r.uniform(0.25, 1) if x < 0.7 else r.uniform(1, 8) if x < 0.9 else r.uniform(8, 40))
+    return out
+
+
+def back_to_back(n, seed, start=30.0):
+    """Lines as a busy film has them: a fifth follow the previous one with no gap, so their PGS clears are left out and
+    the image reference keeps only its sure starts (about half here; 73 % on Kingdom of Heaven's director's cut)."""
+    r = random.Random(seed)
+    t, out = start, []
+    for _ in range(n):
+        d = r.uniform(1.0, 4.5)
+        out.append((t, d))
+        x = r.random()
+        t += d + (0.0 if x < 0.22 else 0.083 if x < 0.39 else r.uniform(0.25, 1) if x < 0.75 else
+                  r.uniform(1, 8) if x < 0.93 else r.uniform(8, 40))
+    return out
+
+
+def pgs_track(lines, number=7, lang="eng"):
+    """An image track showing and clearing each line."""
+    ev = []
+    for s, d in lines:
+        ev += [(s, 0.0), (s + d, 0.0)]
+    return {"number": number, "language": lang, "codec": "S_HDMV/PGS", "name": "", "forced": False, "cues": ev}
+
+
+def srt_of(lines, shift=0.0, jitter=0.0, seed=1):
+    """An SRT of the lines, shifted, each start `jitter` (sigma, at most 120 ms) off."""
+    r = random.Random(seed)
+    out = []
+    for s, d in lines:
+        e = max(-0.12, min(0.12, r.gauss(0, jitter))) if jitter else 0.0
+        out.append({"s": s + shift + e, "e": s + d + shift + e, "text": "line", "kind": "dialogue"})
+    return to_srt(out)
+
+
+def translated(lines, seed, shift, cut=None, sigma=0.12, resplit=0.2, merge=0.25):
+    """Another language's subtitle of the same film: a quarter of the line pairs merged into one line, each start in its
+    author's timing style, a fifth split elsewhere (0.3 to 0.8 s off), all shifted; with `cut` (a, b) the lines of that
+    stretch left out (a subtitle for another cut)."""
+    r = random.Random(seed)
+    out, k = [], 0
+    while k < len(lines):
+        s, d = lines[k]
+        if k + 1 < len(lines) and r.random() < merge:
+            d = lines[k + 1][0] + lines[k + 1][1] - s
+            k += 1
+        k += 1
+        if cut and cut[0] <= s <= cut[1]:
+            continue
+        e = r.gauss(0, sigma)
+        if r.random() < resplit:
+            e += r.choice((-1, 1)) * r.uniform(0.3, 0.8)
+        out.append({"s": s + shift + e, "e": s + d + shift + e, "text": "строка", "kind": "dialogue"})
+    return to_srt(out)
+
+
+class FakeIndex:
+    """A file's index with the given text and image tracks: no reads."""
+
+    def __init__(self, text=(), image=()):
+        self._t, self._i, self.size = list(text), list(image), 1
+
+    def text_tracks(self):
+        return self._t
+
+    def image_tracks(self):
+        return self._i
+
+
+# -- the audio route on a synthetic timeline ---------------------------------------------------------------------------
+def timeline_fit(speech, rate=0, ends=False, base=None):
+    """An AudioFit class (`base`, AudioFit by default) whose windows come straight from a timeline of speech: no audio,
+    no Silero. `speech`: [(start, end)], or {audio track: [(start, end)]}. A window read costs `rate` bytes a second,
+    added to the index's audio_bytes; with `ends` it carries its speech-run ends ("offsets"), as every window does
+."""
+    import numpy as np
+    from subsync.audiofit import AudioFit
+
+    class TimelineFit(base or AudioFit):
+        def _read_window(self, start, length):
+            if rate:
+                self.index.audio_bytes += int(length * rate)
+            self.windows_read += 1
+            self.audio_s += length
+            n = int(round(length * 100))
+            mask, onsets, offsets = np.zeros(n, dtype=bool), [], []
+            for a, b in speech[self.track or 0] if isinstance(speech, dict) else speech:
+                if b <= start or a >= start + length:
+                    continue
+                mask[max(0, int((a - start) * 100)):min(n, int((b - start) * 100))] = True
+                if a >= start:
+                    onsets.append(a - self.lead)
+                if b <= start + length:
+                    offsets.append(b)
+            window = {"start": start, "len": length, "mask": mask, "onsets": np.array(onsets)}
+            if ends:
+                window["offsets"] = np.array(offsets)
+            return window
+    return TimelineFit
+
+
+def truth_fit(truth, starts, durations=None, extra=0, budget=None, rate=0, end_pad=-0.6, fit_class=None, **kw):
+    """The audio fit of lines at `starts` on the release timeline `truth`: speech starts ~80 ms off each release line's
+    start and ends `end_pad` from its end (None: windows without speech-run ends, as before). Returns (fit object,
+    result)."""
+    r = random.Random(5)
+    speech = [(st + r.gauss(0, 0.08), st + d + (end_pad or 0.0)) for st, d in truth]
+    end = truth[-1][0] + truth[-1][1] + 30
+
+    class TheIndex:
+        size = int(rate * end)
+        audio_bytes = 0
+
+        def duration(self):
+            return end
+
+    durations = durations or [d for _, d in truth]
+    lines = [{"s": st, "e": st + d, "text": "x", "kind": "dialogue"} for st, d in zip(starts, durations)]
+    fit_class = timeline_fit(speech, rate=rate, ends=end_pad is not None, base=fit_class)
+    fit = fit_class(TheIndex(), lines, vad=object(), better=kw.pop("better", AUDIO_BETTER), extra=extra, budget=budget,
+                    **kw)
+    return fit, fit.run()
+
+
+# -- a person's AIOStreams configs for Usenet files ----------------------------------------------------------------------
+def row(kind="usenet", service="aiostreams", cached=True, library=False, url="http://aios/playback/1", name="a.mkv",
+        size=2_000_000_000):
+    """A stream listing's row."""
+    return {"url": url, "streamData": {"type": kind, "filename": name, "size": size, "library": library,
+                                        "service": {"id": service, "cached": cached}}}
+
+
+class FakeDebrid:
+    """The sync config: never has the file (it is on Usenet only)."""
+
+    def __init__(self, subs=()):
+        self.base, self.subs, self.config_sources, self.calls = "https://aios/stremio/d/e", list(subs), set(), []
+
+    def find_row(self, *a):
+        self.calls.append("find_row")
+        return None
+
+    def subtitles(self, *a):
+        self.calls.append("subtitles")
+        return [dict(c) for c in self.subs]
+
+
+class FakeUsenet(FakeDebrid):
+    """The Usenet config: lists `listed` (or raises `fail`), counting its listings and config checks."""
+
+    def __init__(self, listed=(), fail=None, subs=()):
+        super().__init__(subs)
+        self.base = "https://aios/stremio/u/e"
+        self.listed, self.fail, self.listings = list(listed), fail, 0
+        self.blocked, self.config_checks = False, 0   # with blocked, the config can't be checked (sources.Aios)
+
+    def check_config(self):
+        self.config_checks += 1
+        if self.blocked:
+            raise realdebrid.Blocked("subsync's config can't be checked for Real-Debrid")
+
+    def streams(self, *a):
+        self.check_config()                                  # as sources.Aios does before every request through it
+        self.listings += 1
+        if self.fail:
+            raise self.fail
+        return [dict(r) for r in self.listed]
+
+    def match(self, listed, hints, usenet=False):
+        return sources.Aios("").match(listed, hints, usenet=usenet)
+
+
+class Counts:
+    """A day's Usenet listings (the gate's counts), in memory."""
+
+    def __init__(self):
+        self.n, self.stopped_ = 0, False
+
+    def listings(self):
+        return self.n
+
+    def add_listing(self):
+        self.n += 1
+
+    def stopped(self):
+        return self.stopped_
+
+    def stop(self):
+        self.stopped_ = True

@@ -5,13 +5,11 @@ the language limit, stored copies only, the small script, the installer's parts,
 import html.parser
 import os
 import re
-import sys
 import types
 import unittest
 import urllib.parse
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import helpers  # noqa: F401  (first: it puts the package on the import path)
 from subsync.settings import Settings  # noqa: E402
 
 try:

@@ -3,8 +3,6 @@ torrent hash and release name), Stremio's OpenSubtitles v3, Cinemeta + Gestdown 
 opens a connection to anything but this machine fails)."""
 import io
 import json
-import os
-import sys
 import threading
 import time
 import unittest
@@ -13,14 +11,12 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import local_network_only  # noqa: E402
-from subsync import srclimits  # noqa: E402
-from subsync.extra import ExtraSources, split_id  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.sourcestate import Health, Ledger  # noqa: E402
-from subsync.sources import fetch_subtitle  # noqa: E402
+from helpers import Clock, local_network_only, wait_until
+from subsync import srclimits
+from subsync.extra import ExtraSources, split_id
+from subsync.settings import Settings
+from subsync.sourcestate import Health, Ledger
+from subsync.sources import fetch_subtitle
 
 SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n"
 HASH = "a" * 40
@@ -91,6 +87,11 @@ class Fake:
                 if p == "/tsdb/v1/by-imdb/tt1":
                     return self.send(200, self.items([tsdb_item(11, "en", "Movie.2010.WEB-DL"),
                                                       tsdb_item(12, "ru", "Movie.2010.BluRay", 870)]))
+                if p == "/tsdb/v1/by-imdb/tt7":             # a popular title: page after page, 2 a page
+                    off = int(q.get("offset", 0))
+                    answer = self.items([tsdb_item(700 + k, "en", f"Movie.Release.{k}") for k in range(off, off + 2)])
+                    answer["subtitles"].update(total=100, limit=2, offset=off)
+                    return self.send(200, answer)
                 if p == "/tsdb/v1/by-imdb/tt2/season/1/episode/2":
                     return self.send(200, self.items([tsdb_item(41, "en", "Show.S01E02.HDTV")]))
                 if p == f"/tsdb/v1/by-infohash/{HASH}":
@@ -173,14 +174,6 @@ class Fake:
     def close(self):
         self.server.shutdown()
         self.server.server_close()
-
-
-class Clock:
-    def __init__(self):
-        self.t = 1_800_000_000.0
-
-    def __call__(self):
-        return self.t
 
 
 class Ticking:
@@ -315,7 +308,6 @@ class ReleaseNameTest(SourcesBase):
         got = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb").search("series", "kitsu:1:1", hints={"filename": "Show.S01E02.x.mkv"})
         self.assertEqual([c["id"] for c in got], ["tsdb-31"])                  # the title can't be checked: its others out
         self.fake.mode["score"] = "0.6"
-        self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
         ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
         self.assertEqual(ex.search("series", "kitsu:1:1", hints={"filename": "Show.S01E02.x.mkv"}), [])
 
@@ -406,7 +398,11 @@ class WaitPauseCacheTest(SourcesBase):
         got = ex.search("movie", "tt1")
         self.assertLess(time.time() - t0, 1.0)
         self.assertEqual({c["source"] for c in got}, {"osv3"})
-        time.sleep(1.5)                                              # the slow answer arrives in the background
+
+        def kept():
+            with ex.cache_lock:
+                return any(key[0] == "tsdb" for key in ex.cache)
+        self.assertTrue(wait_until(kept, timeout=30))                # the slow answer arrives in the background
         n = len(self.fake.asked("/tsdb"))
         got = ex.search("movie", "tt1")
         self.assertEqual({c["source"] for c in got}, {"osv3", "tsdb"})
@@ -443,6 +439,26 @@ class WaitPauseCacheTest(SourcesBase):
         self.assertEqual(len(self.fake.calls), n)                     # still kept
         ex.search("movie", "tt9")
         self.assertEqual(len(self.fake.calls), n + 1)                 # asked again
+        self.clock.t += srclimits.SEARCH_TTL_S - srclimits.EMPTY_TTL_S
+        ex.search("movie", "tt1")
+        self.assertEqual(len(self.fake.calls), n + 2)                 # hours later, a found answer is asked again too
+
+    def test_answers_are_kept_for_the_latest_titles_only(self):
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
+        with mock.patch.object(srclimits, "SEARCH_CACHE_ENTRIES", 2):
+            for title in ("tt1", "tt8", "tt9"):
+                ex.search("movie", title)
+            self.assertEqual(len(ex.cache), 2)
+            n = len(self.fake.calls)
+            ex.search("movie", "tt9")
+            self.assertEqual(len(self.fake.calls), n)                 # kept
+            ex.search("movie", "tt1")
+            self.assertEqual(len(self.fake.calls), n + 1)             # the oldest went to make room: asked again
+
+    def test_thesubtitledb_is_asked_for_a_few_pages_at_most(self):
+        got = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb").search("movie", "tt7")
+        self.assertEqual(len(self.fake.asked("/tsdb/v1/by-imdb/tt7")), srclimits.TSDB_PAGES)   # of 50
+        self.assertEqual(len(got), 2 * srclimits.TSDB_PAGES)
 
     def test_a_source_the_config_already_has_is_skipped(self):
         self.extra(SUBSYNC_EXTRA_SOURCES="tsdb,osv3").search("movie", "tt1", skip={"osv3"})

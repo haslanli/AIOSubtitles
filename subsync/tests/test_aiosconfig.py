@@ -4,7 +4,6 @@ read with a size cap and a time limit; a password is never sent on through a red
 import gc
 import json
 import os
-import sys
 import threading
 import time
 import unittest
@@ -12,8 +11,6 @@ import types
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import TempDir, local_network_only  # noqa: E402
 from subsync import aiosconfig, net  # noqa: E402

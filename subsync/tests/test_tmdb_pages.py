@@ -3,15 +3,12 @@ original-language lookups, and (when the instance asks each person for one) a pe
 page, checked with TMDB once when saved, kept only in their encrypted record and never shown."""
 import html as htmllib
 import json
-import os
-import sys
 import threading
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import helpers  # noqa: F401  (first: it puts the package on the import path)
 from subsync import explain, origlang, pages, ui  # noqa: E402
 from test_public_ui import HAVE_CRYPTOGRAPHY, LINK, NEEDS, RECORD, USAGE, settings  # noqa: E402
 

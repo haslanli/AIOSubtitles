@@ -15,8 +15,6 @@ import zlib
 from array import array
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from helpers import FIXTURES, have  # noqa: E402
 from subsync import mkv  # noqa: E402
 from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash  # noqa: E402

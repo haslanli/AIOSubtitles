@@ -2,22 +2,19 @@
 instance's audio route; the audio syncs a person may start a day and the audio places as settings; Usenet files in the
 audio route. Plain Python except where marked; no network beyond 127.0.0.1; every run bounded (ulimit -t)."""
 import os
-import sys
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import closed_after, FIXTURES, RangeServer, TempDir  # noqa: E402
-from subsync import sources  # noqa: E402
-from subsync import worker as worker_mod  # noqa: E402
-from subsync.reader import ReadFailed, Refused  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.store import Store  # noqa: E402
-from subsync.worker import Job, OverLimit, Safety, StoreAudioCounts, Worker, audio_places  # noqa: E402
+from helpers import closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, RangeServer, row, TempDir, wait_until
+from subsync import sources
+from subsync import worker as worker_mod
+from subsync.reader import ReadFailed, Refused
+from subsync.settings import Settings
+from subsync.store import Store
+from subsync.worker import Job, OverLimit, Safety, StoreAudioCounts, Worker, audio_places
 
 try:
     import cryptography  # noqa: F401
@@ -26,13 +23,6 @@ except ImportError:
     HAVE_CRYPTOGRAPHY = False
 NEEDS = "cryptography is not installed (the image has it; tests run it in a venv)"
 KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
-
-
-def wait_until(check, timeout=5.0):
-    t0 = time.time()
-    while not check() and time.time() - t0 < timeout:
-        time.sleep(0.02)
-    return check()
 
 
 # ---------------------------------------------------------------------------------------------------- the settings
@@ -905,7 +895,6 @@ class UsenetTest(Base):
 
     def setUp(self):
         super().setUp()
-        from test_usenet import Counts, FakeDebrid, FakeUsenet, row
         self.link = Redirect(self.srv.url("tiny-nosub.mp4"))
         self.addCleanup(self.link.close)
         self.counts = Counts()

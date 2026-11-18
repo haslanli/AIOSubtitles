@@ -4,15 +4,12 @@ import copy
 import os
 import shutil
 import sqlite3
-import sys
 import tempfile
 import threading
 import time
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import closed_after  # noqa: E402
+from helpers import closed_after, Counts, FakeDebrid, FakeUsenet, row  # noqa: E402
 from test_resolve_once import Debrid  # noqa: E402
 from subsync import aiosconfig, realdebrid, sources, worker as worker_mod  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
@@ -166,7 +163,6 @@ class UsenetRouteTest(unittest.TestCase):
         self.assertEqual(aiosconfig.usenet_names(["easynews"]), "Easynews")
 
 
-
 # ------------------------------------------------------------------------------------------- reading Usenet files
 
 class SettingsTest(unittest.TestCase):
@@ -300,12 +296,6 @@ class UsageTest(TempDirTest):
         db.close()
 
 
-def row(kind="usenet", service="aiostreams", cached=True, library=False, url="http://aios/playback/1", name="a.mkv",
-        size=2_000_000_000):
-    return {"url": url, "streamData": {"type": kind, "filename": name, "size": size, "library": library,
-                                        "service": {"id": service, "cached": cached}}}
-
-
 class RowsTest(unittest.TestCase):
     """Which Usenet rows are read: through a readable service, ready, never a TorBox library item."""
 
@@ -406,61 +396,6 @@ class ReaderTest(unittest.TestCase):
         self.d.expire()
         with self.assertRaises(ReadFailed):          # a later look-up has the plain timeout
             r.get(0, 100)
-
-
-class FakeDebrid:
-    """The sync config: never has the file (it is on Usenet only)."""
-
-    def __init__(self, subs=()):
-        self.base, self.subs, self.config_sources, self.calls = "https://aios/stremio/d/e", list(subs), set(), []
-
-    def find_row(self, *a):
-        self.calls.append("find_row")
-        return None
-
-    def subtitles(self, *a):
-        self.calls.append("subtitles")
-        return [dict(c) for c in self.subs]
-
-
-class FakeUsenet(FakeDebrid):
-    def __init__(self, listed=(), fail=None, subs=()):
-        super().__init__(subs)
-        self.base = "https://aios/stremio/u/e"
-        self.listed, self.fail, self.listings = list(listed), fail, 0
-        self.blocked, self.config_checks = False, 0   # with blocked, the config can't be checked (sources.Aios)
-
-    def check_config(self):
-        self.config_checks += 1
-        if self.blocked:
-            raise realdebrid.Blocked("subsync's config can't be checked for Real-Debrid")
-
-    def streams(self, *a):
-        self.check_config()                                  # as sources.Aios does before every request through it
-        self.listings += 1
-        if self.fail:
-            raise self.fail
-        return [dict(r) for r in self.listed]
-
-    def match(self, listed, hints, usenet=False):
-        return sources.Aios("").match(listed, hints, usenet=usenet)
-
-
-class Counts:
-    def __init__(self):
-        self.n, self.stopped_ = 0, False
-
-    def listings(self):
-        return self.n
-
-    def add_listing(self):
-        self.n += 1
-
-    def stopped(self):
-        return self.stopped_
-
-    def stop(self):
-        self.stopped_ = True
 
 
 HINTS = {"filename": "a.mkv", "videoSize": 2_000_000_000}
@@ -920,7 +855,6 @@ class PublicUsenetTest(TempDirTest):
         aios = sources.Aios(link, password=record["usenet_password"])
         self.assertEqual(aios.match(aios.streams("movie", "tt1"), HINTS, usenet=True), row())
         self.assertEqual(self.fake.listed, [(record["usenet_uuid"], "stream")])
-
 
 
 class PagesTest(unittest.TestCase):

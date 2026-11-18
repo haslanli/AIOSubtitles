@@ -2,10 +2,7 @@
 is made and none of its files is ever read; its subtitle lists get the copies other people's syncs already made for
 the same release. Refresh and the daily check (with a kept password) move a person both ways."""
 import os
-import sys
 import unittest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import closed_after, TempDir  # noqa: E402
 from subsync.settings import Settings  # noqa: E402

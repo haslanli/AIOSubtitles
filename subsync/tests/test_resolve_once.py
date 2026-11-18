@@ -3,13 +3,10 @@ followed once per reader; later reads go to where it pointed, and when that addr
 once more. Against a local server: no network."""
 import logging
 import os
-import sys
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers import FIXTURES  # noqa: E402
 from subsync.reader import MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused  # noqa: E402

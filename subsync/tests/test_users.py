@@ -2,13 +2,10 @@
 link, so the database alone, or the database and the secret, opens nothing."""
 import os
 import sqlite3
-import sys
 import threading
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import TempDir  # noqa: E402
+from helpers import Clock, TempDir  # noqa: E402
 
 try:
     import cryptography  # noqa: F401
@@ -21,14 +18,6 @@ RECORD = {"instance": "https://aios.test", "sync_uuid": "11111111-2222-3333-4444
           "sync_link": "https://aios.test/stremio/11111111-2222-3333-4444-555555555555/ENCRYPTEDPART/manifest.json",
           "sync_password": "sync-password-made-by-the-service", "languages": ["eng", "rus"], "version": 1}
 DAY = 86400
-
-
-class Clock:
-    def __init__(self, t=1_800_000_000.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")

@@ -2,12 +2,9 @@
 underscores, four-digit episodes, several episodes in one tag), every video extension left out before a trailing
 release group, source tags written with a hyphen, "Non-Forced" subtitles, and AI-made, machine-translated and forced
 subtitles last when they are not skipped."""
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import helpers  # noqa: F401  (first: it puts the package on the import path)
 from subsync import choose, extra  # noqa: E402
 from test_builtin_sources import SourcesBase  # noqa: E402
 

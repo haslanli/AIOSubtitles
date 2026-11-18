@@ -5,15 +5,12 @@ to let AIOSubtitles keep, it also rebuilds AIOSubtitles' config from theirs. It 
 import json
 import logging
 import os
-import sys
 import threading
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import FakeAiostreams, TempDir  # noqa: E402
+from helpers import Clock, FakeAiostreams, TempDir  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 
 try:
@@ -31,14 +28,6 @@ REALDEBRID = {"id": "realdebrid", "enabled": True, "credentials": {"apiKey": "rd
 TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
 COMET = {"type": "comet", "instanceId": "cmt", "enabled": True, "options": {"name": "Comet"}}
 HOUR = 3600
-
-
-class Clock:
-    def __init__(self):
-        self.t = 1_800_000_000.0
-
-    def __call__(self):
-        return self.t
 
 
 class Logs(logging.Handler):

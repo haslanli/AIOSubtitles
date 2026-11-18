@@ -3,7 +3,6 @@ on the name's lookup and again on the address the connection really reached, red
 name up or connects anywhere but this machine."""
 import os
 import socket
-import sys
 import unittest
 import urllib.error
 import urllib.request
@@ -11,10 +10,8 @@ import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from subsync import net, realdebrid  # noqa: E402
 from helpers import local_network_only  # noqa: E402
+from subsync import net, realdebrid  # noqa: E402
 
 
 def resolver_answering(ip):

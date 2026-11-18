@@ -19,9 +19,7 @@ import zipfile
 from http.client import HTTPConnection
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import answers, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only, TempDir  # noqa: E402
+from helpers import answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only, TempDir  # noqa: E402
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -48,14 +46,6 @@ def fake_downloads(test):
         patcher.start()
         test.addCleanup(patcher.stop)
     return downloads
-
-
-class Clock:
-    def __init__(self):
-        self.t = 1_800_000_000.0
-
-    def __call__(self):
-        return self.t
 
 
 class StoreTest(unittest.TestCase):

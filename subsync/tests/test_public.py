@@ -3,12 +3,9 @@ and limits."""
 import base64
 import re
 import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import closed_after  # noqa: E402
+from helpers import Clock, closed_after  # noqa: E402
 from subsync.settings import Settings, available_cpus  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -634,14 +631,6 @@ except ImportError:
 def record(link="https://aios.test/stremio/u1/E1/manifest.json", languages=("eng",)):
     return {"instance": "https://aios.test", "sync_uuid": "u1", "sync_link": link, "sync_password": "p1",
             "languages": list(languages), "version": 1}
-
-
-class Clock:
-    def __init__(self, t=1_800_000_000.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")

@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import socket
-import sys
 import threading
 import time
 import unittest
@@ -11,9 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from helpers import answers, closed_after, exchange, FakeAiostreams, TempDir  # noqa: E402
+from helpers import answers, closed_after, exchange, FakeAiostreams, TempDir, wait_until  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 
 try:
@@ -441,16 +438,17 @@ class ConnectionCapTest(Base):
 
     def test_connection_cap(self):
         held = socket.create_connection(("127.0.0.1", self.server.server_address[1]))
-        try:
-            time.sleep(0.2)                                   # the first connection holds the only slot
+
+        def refused():
             t0 = time.time()
-            code, _, headers = http(self.base + "/health")
-            self.assertEqual(code, 503)
-            self.assertLess(time.time() - t0, 2)
+            code = http(self.base + "/health")[0]
+            self.assertLess(time.time() - t0, 2)               # answered at once, never left waiting for the slot
+            return code == 503
+        try:
+            self.assertTrue(wait_until(refused, timeout=10))   # once the server has the first connection, its only slot
         finally:
             held.close()
-        time.sleep(0.2)
-        self.assertEqual(http(self.base + "/health")[0], 200)
+        self.assertTrue(wait_until(lambda: http(self.base + "/health")[0] == 200, timeout=10))   # the slot is free again
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")

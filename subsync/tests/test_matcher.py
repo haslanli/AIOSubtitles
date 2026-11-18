@@ -4,31 +4,17 @@ Pure pieces on synthetic timings and fakes: no network, no alass, no Silero.
 """
 import os
 import random
-import sys
 import threading
 import time
 import unittest
 from array import array
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from helpers import AUDIO_BETTER, FIXTURES, rhythm, truth_fit
 from subsync import mkv, mp4, pipeline, sections, shift, textpair  # noqa: E402
+from subsync.audiofit import AudioFit  # noqa: E402
 from subsync.reader import ReadFailed, Refused  # noqa: E402
 from subsync.relgate import relgate  # noqa: E402
-
-FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-
-
-def rhythm(n, seed, start=20.0):
-    """n release lines: (start, duration), durations 1-4 s, gaps 0.3-3 s."""
-    r = random.Random(seed)
-    t, out = start, []
-    for _ in range(n):
-        d = r.uniform(1.0, 4.0)
-        out.append((t, d))
-        t += d + r.uniform(0.3, 3.0)
-    return out
 
 
 def periodic(n, step=3.0, seed=5, start=20.0):
@@ -872,9 +858,6 @@ class SectionsTest(unittest.TestCase):
         self.assertIsNone(sect)
 
 
-AUDIO_BETTER = {"matched": 25, "miss": 0.30, "median_ms": 150.0, "within": 0.55, "min_shift_s": 1.0}
-
-
 def dense(n, seed):
     """Talkative dialogue: a line every ~1.5 s, so a 30 s window hears ~20 lines."""
     r = random.Random(seed)
@@ -886,55 +869,17 @@ def dense(n, seed):
     return out
 
 
-def truth_fit(truth, starts, durations=None, extra=0, budget=None, rate=0, end_pad=-0.6, fit_class=None, **kw):
-    """The audio fit on a synthetic timeline: speech starts ~80 ms off each line's start and ends `end_pad` from its end;
-    windows come straight from it (no audio, no Silero), with speech-run ends. Returns (fit object, result)."""
-    import numpy as np
-    from subsync.audiofit import AudioFit
-    r = random.Random(5)
-    speech = [(st + r.gauss(0, 0.08), st + d + (end_pad or 0.0)) for st, d in truth]
-    end = truth[-1][0] + truth[-1][1] + 30
+class Forced(AudioFit):
+    """An audio fit whose first verdict is always a close call: it reads its extra windows and judges again."""
 
-    class TheIndex:
-        size = int(rate * end)
-        audio_bytes = 0
-
-        def duration(self):
-            return end
-
-    base = fit_class or AudioFit
-
-    class TruthFit(base):
-        def _read_window(self, start, length):
-            self.index.audio_bytes += int(length * rate)
-            self.windows_read += 1
-            self.audio_s += length
-            n = int(round(length * 100))
-            mask, onsets, offsets = np.zeros(n, dtype=bool), [], []
-            for a, b in speech:
-                if b <= start or a >= start + length:
-                    continue
-                mask[max(0, int((a - start) * 100)):min(n, int((b - start) * 100))] = True
-                if a >= start:
-                    onsets.append(a - self.lead)
-                if b <= start + length:
-                    offsets.append(b)
-            w = {"start": start, "len": length, "mask": mask, "onsets": np.array(onsets)}
-            if end_pad is not None:          # None: windows without speech-run ends (as before)
-                w["offsets"] = np.array(offsets)
-            return w
-    durations = durations or [d for _, d in truth]
-    lines = [{"s": st, "e": st + d, "text": "x", "kind": "dialogue"} for st, d in zip(starts, durations)]
-    fit = TruthFit(TheIndex(), lines, vad=object(), better=kw.pop("better", AUDIO_BETTER), extra=extra, budget=budget,
-                   **kw)
-    return fit, fit.run()
+    def close_call(self, r):
+        return "test" if r.get("plan") and not r.get("close_call") else None
 
 
 class CloseCallTest(unittest.TestCase):
     """D5: up to 12 more windows only on a close call, within the audio budget."""
 
     def fit(self):
-        from subsync.audiofit import AudioFit
         return AudioFit(Index([]), [], vad=object(), better=AUDIO_BETTER, extra=12)
 
     def test_what_counts_as_a_close_call(self):
@@ -963,11 +908,6 @@ class CloseCallTest(unittest.TestCase):
         self.assertEqual(f0.windows_read, f1.windows_read)
 
     def test_a_close_call_reads_at_most_12_more_windows_and_judges_again(self):
-        from subsync.audiofit import AudioFit
-
-        class Forced(AudioFit):
-            def close_call(self, r):
-                return "test" if r.get("plan") and not r.get("close_call") else None
         truth = rhythm(700, 11)
         starts = [st - 9.0 + random.Random(i).gauss(0, 0.15) for i, (st, _) in enumerate(truth)]
         f0, r0 = truth_fit(truth, starts, extra=0)
@@ -980,11 +920,6 @@ class CloseCallTest(unittest.TestCase):
         self.assertEqual(r1["decision"], r0["decision"])
 
     def test_extra_fit_windows_never_overlap_a_held_out_window(self):
-        from subsync.audiofit import AudioFit
-
-        class Forced(AudioFit):
-            def close_call(self, r):
-                return "test" if r.get("plan") and not r.get("close_call") else None
         truth = rhythm(700, 11)
         starts = [st - 9.0 + random.Random(i).gauss(0, 0.15) for i, (st, _) in enumerate(truth)]
         f, r = truth_fit(truth, starts, extra=12, fit_class=Forced)
@@ -994,11 +929,7 @@ class CloseCallTest(unittest.TestCase):
                 self.assertGreaterEqual(abs(a - b), W - 1e-6)
 
     def test_never_past_the_audio_budget(self):
-        from subsync.audiofit import COST, AudioFit
-
-        class Forced(AudioFit):
-            def close_call(self, r):
-                return "test" if r.get("plan") and not r.get("close_call") else None
+        from subsync.audiofit import COST
         truth = rhythm(700, 11)
         starts = [st - 9.0 + random.Random(i).gauss(0, 0.15) for i, (st, _) in enumerate(truth)]
         rate = 200_000
@@ -1014,8 +945,9 @@ class CloseCallTest(unittest.TestCase):
         for seed in range(40):
             other = rhythm(700, 3000 + seed)
             _, r = truth_fit(truth, [st for st, _ in other], durations=[d for _, d in other], extra=12)
-            if r["decision"] != "keep_original":
-                accepted.append((seed, r["decision"], r.get("why")))
+            first = r.get("close_call", {}).get("first", r)        # the verdict before any more windows (extra=0's)
+            if r["decision"] != "keep_original" or first["decision"] != "keep_original":
+                accepted.append((seed, r["decision"], r.get("why"), first["decision"]))
         self.assertEqual(accepted, [])
 
 
@@ -1024,7 +956,6 @@ class SpeechEndsTest(unittest.TestCase):
 
     def test_the_subtitles_own_end_lag_is_measured(self):
         truth = dense(1200, 5)
-        from subsync.audiofit import AudioFit
         fit, _ = truth_fit(truth, [st for st, _ in truth], end_pad=-0.6)
         windows = [fit.read_window(st, 30.0) for st in (200.0, 600.0, 1000.0)]
         self.assertAlmostEqual(fit.end_lag(1.0, 0.0, windows), -0.6, delta=0.05)

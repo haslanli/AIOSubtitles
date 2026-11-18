@@ -1,11 +1,8 @@
 """The language limit is an instance setting, 1 to 4, default 4: the setting, its explanation, the
 languages explanation and the too-many error take its number, and the sign-up and the settings save enforce it."""
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import helpers  # noqa: F401  (first: it puts the package on the import path)
 from subsync import explain  # noqa: E402
 from subsync.aiosconfig import parse_languages  # noqa: E402
 from subsync.settings import Settings  # noqa: E402

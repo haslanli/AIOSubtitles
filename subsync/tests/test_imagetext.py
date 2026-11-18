@@ -8,14 +8,11 @@ import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+from helpers import FIXTURES
 import imagesubs as I  # noqa: E402
 from subsync import imagetext, mkv, pipeline, textpair  # noqa: E402
 from subsync.reader import ReadFailed, Refused  # noqa: E402
 
-FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 WORDS = ("time money house water night light dream river stone heart road friend father mother brother sister city "
          "story letter window garden forest winter summer morning evening doctor captain soldier machine").split()
 
@@ -70,7 +67,7 @@ class PgsDecodeTest(unittest.TestCase):
     def test_long_runs_and_an_object_split_over_segments(self):
         bar = I.bar(700)
         a = imagetext.pgs_images(I.pgs_show(bar))[0]
-        b = imagetext.pgs_images(I.pgs_show(bar, split=300))[0]
+        b = imagetext.pgs_images(I.pgs_show(bar, split=90))[0]          # 188 bytes: three object segments
         self.assertEqual(a.shape, (24, 700))
         np.testing.assert_array_equal(a, b)
 
