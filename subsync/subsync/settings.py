@@ -9,6 +9,7 @@ import socket
 import struct
 
 from . import ALGO_VERSION, RULE_REVISION
+from .audiofit import BETTER as AUDIO_BETTER
 from .worker import lang_list
 
 
@@ -199,11 +200,11 @@ class Settings:
         # with no track in a subtitle's language, a track in one of these languages is its reference first
         self.fallback_reference = tuple(lang_list(g("SUBSYNC_FALLBACK_REFERENCE", "eng")))
         # the audio route's second way to pass: a re-timed copy clearly closer to the speech than the original
-        self.audio_better = {"matched": int(g("SUBSYNC_AUDIO_BETTER_MATCHED", "25")),
-                             "miss": float(g("SUBSYNC_AUDIO_BETTER_MISS", "0.30")),
-                             "median_ms": float(g("SUBSYNC_AUDIO_BETTER_MEDIAN_MS", "150")),
-                             "within": float(g("SUBSYNC_AUDIO_BETTER_WITHIN", "0.55")),
-                             "min_shift_s": float(g("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S", "1.0"))} \
+        self.audio_better = {"matched": int(g("SUBSYNC_AUDIO_BETTER_MATCHED", AUDIO_BETTER["matched"])),
+                             "miss": float(g("SUBSYNC_AUDIO_BETTER_MISS", AUDIO_BETTER["miss"])),
+                             "median_ms": float(g("SUBSYNC_AUDIO_BETTER_MEDIAN_MS", AUDIO_BETTER["median_ms"])),
+                             "within": float(g("SUBSYNC_AUDIO_BETTER_WITHIN", AUDIO_BETTER["within"])),
+                             "min_shift_s": float(g("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S", AUDIO_BETTER["min_shift_s"]))} \
             if _on(g("SUBSYNC_AUDIO_BETTER", "on")) else None
         self.gate_splits = _on(g("SUBSYNC_GATE_SPLITS", "on"))               # a line that splits a release line counts as paired
         self.rank_by_release = _on(g("SUBSYNC_RANK_BY_RELEASE", "on"))       # subtitles made for this release tried first

@@ -21,10 +21,10 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 
-from . import realdebrid, srclimits
+from . import choose, realdebrid, srclimits
 from .langs import lang3, name as lang_name
 from .sourcestate import Health, Ledger
-from .sources import extras, release_info
+from .sources import extras, release_info, release_name
 
 log = logging.getLogger("subsync.extra")
 USER_AGENT = "AIOSubtitles/1.6 (subsync)"
@@ -41,9 +41,7 @@ SUBSOURCE_LANGS = {"eng": "english", "rus": "russian", "jpn": "japanese", "fre":
                    "hrv": "croatian", "srp": "serbian", "ind": "indonesian", "tha": "thai", "vie": "vietnamese",
                    "hin": "hindi", "per": "farsi_persian"}
 SUBSOURCE_BY_NAME = {v: k for k, v in SUBSOURCE_LANGS.items()}
-EPISODE = re.compile(r"(?i)\bs(\d{1,2})[ ._-]?e(\d{1,4})\b")
 MACHINE = re.compile(r"(?i)machine|\bai\b|auto[ ._-]?translat")
-VIDEO_EXT = re.compile(r"(?i)\.(mkv|mp4|avi|m2ts|ts|webm|mov)$")
 
 
 def two(code):
@@ -62,12 +60,11 @@ def split_id(video_id):
 
 
 def other_episode(release, season, episode):
-    """Does a release name name another episode than (season, episode)? A name without an episode tag (a season pack,
-    a film) doesn't."""
+    """Does a release name name episodes, none of them (season, episode)? A name without an episode tag (a season pack,
+    a film) doesn't (choose's parsing: S01E05_, S01E05E06, S01E01-E10)."""
     if season is None or episode is None:
         return False
-    tags = EPISODE.findall(release or "")
-    return bool(tags) and all((int(s), int(e)) != (season, episode) for s, e in tags)
+    return bool(choose.episodes(release)) and choose.other_episode(release, (season, episode))
 
 
 class NotFound(Exception):
@@ -277,11 +274,11 @@ class ExtraSources:
         and only its matched subtitle, at a score of at least srclimits.TSDB_RELEASE_SCORE, is a release match; with
         no IMDb id to check the title against, only that matched subtitle counts."""
         imdb, season, episode = split_id(video_id)
-        name = VIDEO_EXT.sub("", str(hints.get("filename") or "")).strip()
+        name = release_name(hints.get("filename"))
         if season is None and name:
-            m = EPISODE.search(name)
-            if m:
-                season, episode = int(m.group(1)), int(m.group(2))
+            tags = choose.episodes(name)
+            if tags:
+                season, episode = tags[0][0], tags[0][1]
         headers = {"Authorization": f"Bearer {self.s.tsdb_key}"} if self.s.tsdb_key else {}
         query = {"lang": ",".join(two(x) for x in langs), "limit": 100}
         if self.s.skip_ai:

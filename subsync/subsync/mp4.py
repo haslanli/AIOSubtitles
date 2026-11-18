@@ -27,6 +27,10 @@ class NotMp4(NotMatroska):
     """Not an MP4 this module can read (kept under NotMatroska so callers treat both the same way)."""
 
 
+class NoAudioThere(NotMp4):
+    """No sample of the audio track covers the asked time (an audio window past the end of the file's audio)."""
+
+
 def boxes(buf, pos, end):
     """(type, payload start, box end) for each box in buf[pos:end]; stops at a box that does not fit."""
     while pos + 8 <= end:
@@ -315,7 +319,7 @@ class Mp4Index:
         first, last, _ = self._samples_in(t, start, start + length)
         offs = self._sample_offsets(t)
         if first is None or last >= len(offs):
-            raise NotMp4("no audio samples there")
+            raise NoAudioThere("no audio samples there")
         return offs[first], offs[last] + self._size(t, last)
 
     def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg"):
@@ -326,7 +330,7 @@ class Mp4Index:
         first, last, first_time = self._samples_in(t, start - 0.1, start + length + 0.1)
         offs = self._sample_offsets(t)
         if first is None or last >= len(offs):
-            raise NotMp4("no audio samples there")
+            raise NoAudioThere("no audio samples there")
         a, b = offs[first], offs[last] + self._size(t, last)
         data = self.r.get(a, b - a)
         add_audio_bytes(self, len(data))
@@ -340,9 +344,12 @@ class Mp4Index:
             fmt = AUDIO_RAW[t["codec"]]
             stream = b"".join(data[offs[i] - a: offs[i] - a + self._size(t, i)] for i in range(first, last + 1))
         skip = max(0.0, start - first_time)
-        out = subprocess.run(decoder_cmd(ffmpeg, fmt, ["-ss", f"{skip:.3f}", "-t", f"{length:.3f}", "-ac", "1",
-                                                       "-ar", str(sr), "-f", "s16le", "-"]),
-                             input=stream, capture_output=True, timeout=300)
+        try:
+            out = subprocess.run(decoder_cmd(ffmpeg, fmt, ["-ss", f"{skip:.3f}", "-t", f"{length:.3f}", "-ac", "1",
+                                                           "-ar", str(sr), "-f", "s16le", "-"]),
+                                 input=stream, capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired as e:   # as mkv.pipe_until: what was decoded (AudioFit refuses a short window)
+            return e.stdout or b""
         return out.stdout
 
 

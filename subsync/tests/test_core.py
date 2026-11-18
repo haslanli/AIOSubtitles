@@ -1057,6 +1057,9 @@ class AudioWindowReuseTest(unittest.TestCase):
             def __init__(self):
                 self.reads = 0
 
+            def duration(self):
+                return 6000.0
+
             def window_pcm(self, start, length, sr, ffmpeg):
                 self.reads += 1
                 return b"\0\0" * int(sr * length)
