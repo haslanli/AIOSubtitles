@@ -49,17 +49,40 @@ def cmd_status():
     return 0
 
 
+# --restore FILE when FILE can't be read, or isn't a saved copy of a config (engine.backup's {"uuid", "config"})
+CANT_OPEN = "Setup can't open {file}."
+NOT_A_COPY = "{file} isn't a saved copy of a config."
+GIVE_A_COPY = ('Give a saved copy from state/backups/, like '
+               './setup --restore state/backups/viewer-1a2b3c4d-20261117-120000.json.')
+
+
+def saved_copy(path):
+    """(config ID, config) of a saved copy of a config; a Stop that says what to give when `path` can't be read or
+    isn't one (a databases-… folder, say)."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except IsADirectoryError:
+        data = None
+    except OSError:
+        raise Stop(CANT_OPEN.format(file=path), GIVE_A_COPY) from None
+    except ValueError:                  # not JSON, or not text
+        data = None
+    if not (isinstance(data, dict) and isinstance(data.get('uuid'), str) and data['uuid']
+            and isinstance(data.get('config'), dict)):
+        raise Stop(NOT_A_COPY.format(file=path), GIVE_A_COPY)
+    return data['uuid'], data['config']
+
+
 def cmd_restore(args, path):
-    data = json.loads(Path(path).read_text())
+    uuid, config = saved_copy(path)         # before anything is asked or changed
     e = engine.Engine(answers_from(args), yes=args.yes)
     e.aios = engine.saved_aios(e.prev)
-    uuid = data['uuid']
     password = e.ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)
     if not e.ask.yesno('CONFIRM', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):
         stop('Nothing was changed.')
     current, _ = e.aios.get_config(uuid, password)
     backup(current, uuid, 'before-restore')
-    e.with_sign_in(lambda: e.aios.save_config(uuid, password, data['config']))    # asks a sign-in AIOStreams wants
+    e.with_sign_in(lambda: e.aios.save_config(uuid, password, config))    # asks a sign-in AIOStreams wants
     ok('Restored.')
     return 0
 
@@ -74,12 +97,13 @@ def cmd_uninstall(args):
 
 def open_page():
     """The setup page. Inside a container nothing opens a browser: the address is printed. On Docker's bridge network
-    the page listens inside the container, and the machine's port given in the docker run command reaches it."""
+    the page listens inside the container, and the machine's port given in the docker run command reaches it: a port
+    on this machine only (127.0.0.1 or ::1), never one other computers reach."""
     place = engine.PLACE
     if place and place.network == 'bridge':
-        if not place.page_port:
+        if not place.page_port or place.page_exposed:
             say()
-            bad(where.NO_PAGE_PORT)
+            bad(where.PAGE_PORT_NOT_LOCAL if place.page_port else where.NO_PAGE_PORT)
             return 1
         app = web.App(port=where.PAGE_PORT, bind='0.0.0.0', public_port=place.page_port)
     else:

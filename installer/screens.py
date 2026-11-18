@@ -87,6 +87,11 @@ STATUS = {'yourself': 'AIOSubtitles · subsync status', 'host': 'AIOSubtitles st
 REMOVING = {'yourself': 'Removing subsync', 'host': 'Removing AIOSubtitles'}
 KEPT_ANSWERS = ('Already set up here: your answers are kept unless you change them. To switch between installing it '
                 'for yourself and hosting a public instance, remove it first.')
+TRY_AGAIN = 'Try again'         # a stopped install's way on: it runs the install again
+# an error setup doesn't know (a full disk, a folder it can't write): the stop and its way out; the details stay in the
+# terminal, never on the page
+UNEXPECTED = ('Something unexpected went wrong, so setup stopped here.',
+              'Run ./setup again. If it happens again, send what the terminal shows with a bug report.')
 
 # words the screens use besides explain.py's texts and the site's UI_WORDS, each approved by the owner
 INSTALLER_WORDS = (
@@ -103,6 +108,7 @@ INSTALLER_WORDS = (
     explain.TMDB_NOTICE, 'TMDB',
     'Updates', 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
     RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, TICK_TO_REMOVE, REMOVE_HOST, REMOVE_HOST_TEXT,
+    TRY_AGAIN, *UNEXPECTED,
     *[REMOVE_TEXT.format(count='', configs=configs) for configs in REMOVED_CONFIGS.values()], REMOVE_SAVED_KEY,
     KEPT_ANSWERS,
     update.ABOUT, update.ABOUT_HOSTING, update.NEWEST, update.ROLLBACK_HEADING, update.ROLLBACK_ABOUT,
@@ -124,9 +130,12 @@ INSTALLER_WORDS = (
 
 # ------------------------------------------------------------------------------------------- the frame
 
-def _page(content, refresh=None, kind='letter'):
-    return ui.page(TITLE, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}{content}</div>', kind,
-                   refresh=refresh)
+def _page(content, refresh=None, kind='letter', heading=None):
+    """A page in setup's frame, titled by its `heading` (its step's name, or its own heading) before setup's name, so
+    tabs, history and a screen reader's announcement tell the pages apart."""
+    title = f'{heading} · {TITLE}' if heading and heading != TITLE else TITLE
+    return ui.page(title, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}{content}</div>',
+                   kind, refresh=refresh)
 
 
 def _explanation(key):
@@ -207,7 +216,7 @@ def step(route, step_id, body, actions, back=True, refresh=None, done=False, for
     back_href = (ids[i - 1] if i else './') if back else False
     inner = f'<h1 tabindex="-1">{e(names[i])}</h1><div class="body">{body}</div><div class="actions">{actions}</div>'
     content = f'<form method="post" novalidate>{inner}</form>' if form else inner
-    return _page(ui.step_frame(names, i, content, RAIL, done=done, back=back_href), refresh=refresh)
+    return _page(ui.step_frame(names, i, content, RAIL, done=done, back=back_href), refresh=refresh, heading=names[i])
 
 
 def _back_and_continue(route, step_id, enabled=True, label='Continue'):
@@ -239,7 +248,8 @@ def machine(route, rows, stop=None):
 # ------------------------------------------------------------------------------------------- install it for yourself
 
 def aios(rows, ask=None, value='', problem=None, containers=(), done=False, stop=None):
-    """Your AIOStreams: what was found; the address question when it wasn't found; the choice when several run."""
+    """Your AIOStreams: what was found; the address question when it wasn't found; the choice when several run
+    (`containers`: their names, each with its image under it)."""
     body = _rows(rows) + _stop(stop)
     if ask == 'AIOS_CONTAINER':
         body += ui.radio_group(LABELS['AIOS_CONTAINER'],
@@ -260,11 +270,12 @@ def config(rows, config_id='', problem=None, stop=None):
 
 
 def choices(languages, audio, public_address, problem=None, offer_opensubtitles=False, add_opensubtitles=True,
-            limit=4, usenet=None, stop=None, saved=()):
-    """Your choices: the languages (the site's slots), the audio route (`audio`: the answer picked, no, pick or
-    open), Usenet when the config has a Usenet service subsync reads through (`usenet` not None), the optional
-    keys (`saved`: those with a saved key), OpenSubtitles when the config has no subtitle source, and subsync's address
-    for your apps. `stop`: a config without a debrid service answered no to Usenet."""
+            limit=4, usenet=None, stop=None, saved=(), rows=()):
+    """Your choices: what the step reported (`rows`: why Usenet stays off, a saved key removed), the languages (the
+    site's slots), the audio route (`audio`: the answer picked, no, pick or open), Usenet when the config has a
+    Usenet service subsync reads through (`usenet` not None), the optional keys (`saved`: those with a saved
+    key), OpenSubtitles when the config has no subtitle source, and subsync's address for your apps. `stop`: a config
+    without a debrid service answered no to Usenet."""
     error = _error(problem, 'LANGUAGES')
     langs = (f'<div class="field"><span class="label" id="languages-l">{e(LABELS["LANGUAGES"])}</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
@@ -274,8 +285,8 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
     usenet_box = (_choice('USENET', LABELS['USENET'], usenet),) if usenet is not None else ()
     audio_rows = [ui.radio_row('AUDIO', value, answer, '', checked=value == audio)
                   for value, answer in plan.AUDIO_ANSWERS]
-    body = (_stop(stop) + langs + ui.radio_group(LABELS['AUDIO'], audio_rows, help_text=_explanation('AUDIO'),
-                                                 id='audio')
+    body = (_rows(rows) + _stop(stop) + langs + ui.radio_group(LABELS['AUDIO'], audio_rows,
+                                                                help_text=_explanation('AUDIO'), id='audio')
             + (ui.choices(*usenet_box) if usenet_box else '')
             + _key('SUBDL_KEY', LABELS['SUBDL_KEY'], problem, saved)
             + _key('WYZIE_KEY', LABELS['WYZIE_KEY'], problem, saved)
@@ -301,18 +312,18 @@ def _limit(lim, value, problem):
     return field
 
 
-def limits(route, values, problem=None, audio=False, usenet=False):
+def limits(route, values, problem=None, audio=False, usenet=False, stop=None):
     """Limits: a personal install asks the daily total and, with the audio route, the audio limit; a public instance
     every limit in its three groups (each
     install only the limits that do something for it)."""
     if route == 'host':
-        body = ''.join(f'<section class="limits" aria-labelledby="g{i}"><h2 id="g{i}">{e(heading)}</h2>'
-                       + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem) for lim in group)
-                       + '</section>' for i, (heading, group) in enumerate(limit_list.hosting_groups(usenet, audio)))
-        return step('host', 'hostlimits', body, _back_and_continue('host', 'hostlimits'))
+        groups = ''.join(f'<section class="limits" aria-labelledby="g{i}"><h2 id="g{i}">{e(heading)}</h2>'
+                         + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem) for lim in group)
+                         + '</section>' for i, (heading, group) in enumerate(limit_list.hosting_groups(usenet, audio)))
+        return step('host', 'hostlimits', _stop(stop) + groups, _back_and_continue('host', 'hostlimits'))
     body = '<div class="limits">' + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem)
                                             for lim in limit_list.personal(audio, usenet)) + '</div>'
-    return step('yourself', 'limits', body, _back_and_continue('yourself', 'limits'))
+    return step('yourself', 'limits', _stop(stop) + body, _back_and_continue('yourself', 'limits'))
 
 
 def review(sections, cache=False, sign_in=False, problem=None, username='', rows=(), stop=None):
@@ -330,11 +341,12 @@ def review(sections, cache=False, sign_in=False, problem=None, username='', rows
     return step('yourself', 'review', body, actions)
 
 
-def installing(route, rows, running, stop=None, rule=None, rule_intro=None, rule_note=None):
-    """Installing: the progress, and the web server's rule with its note under it; no Back and Continue unavailable
-    until the work is done."""
+def installing(route, rows, running, stop=None, rule=None, rule_intro=None, rule_note=None, warnings=()):
+    """Installing: the warnings of saving the configs before it (`warnings`: the cache setting's, say), the progress,
+    and the web server's rule with its note under it; no Back and Continue unavailable until the work is done. A stopped
+    install has Back and Try again, which runs it again."""
     step_id = 'hostinstall' if route == 'host' else 'install'
-    body = _progress(rows) + _stop(stop)
+    body = _rows(warnings) + _progress(rows) + _stop(stop)
     if rule:
         body += f'<p>{e(rule_intro)}</p>' + ''.join(f'<p class="help">{e(name)}</p>{ui.code_lines(lines)}'
                                                      for name, lines in rule.items())
@@ -343,7 +355,9 @@ def installing(route, rows, running, stop=None, rule=None, rule_intro=None, rule
     if running:
         return step(route, step_id, body, _continue(False), back=False, refresh=2)
     if stop:
-        return step(route, step_id, body, _back_and_continue(route, step_id, enabled=False))
+        _, ids = _steps(route)
+        again = ui.button(TRY_AGAIN, 'primary', type='submit', attrs='name="go" value="again"')
+        return step(route, step_id, body, _back(ids[ids.index(step_id) - 1]) + again)
     return step(route, step_id, body, _continue(True), back=False)
 
 
@@ -371,7 +385,7 @@ def done(route, title, lines, after, warnings=()):
         paragraphs += ui.code_lines([text]) if kind == 'code' else f'<p>{e(text)}</p>'
     paragraphs += f'<p>{e(RUN_AGAIN)}</p>'
     content = f'<h1 tabindex="-1">{e(title)}</h1><div class="body">{paragraphs}</div>'
-    return _page(ui.step_frame(names, len(ids) - 1, content, RAIL, done=True, back=False))
+    return _page(ui.step_frame(names, len(ids) - 1, content, RAIL, done=True, back=False), heading=title)
 
 
 # ------------------------------------------------------------------------------------------- host a public instance
@@ -382,9 +396,9 @@ def host_address(address='', proxy='gateway', problem=None, stop=None):
     return step('host', 'address', body, _back_and_continue('host', 'address'))
 
 
-def host_signups(invite, problem=None):
+def host_signups(invite, problem=None, stop=None):
     """Sign-ups: the invite code, and the secret key as a fixed row of dots: it never reaches the page."""
-    body = (_input('SUBSYNC_PUBLIC_INVITE', 'Invite code', invite, problem, mono=True)
+    body = (_stop(stop) + _input('SUBSYNC_PUBLIC_INVITE', 'Invite code', invite, problem, mono=True)
             + ui.field('secret', 'Secret key', _explanation('SUBSYNC_SECRET_KEY'), name='secret', kind='text', mono=True,
                        attrs=f'value="{SECRET_DOTS}" readonly tabindex="-1" aria-readonly="true"'))
     return step('host', 'signups', body, _back_and_continue('host', 'signups'))
@@ -404,8 +418,8 @@ def _tmdb(label, problem, saved):
     return _key('TMDB_KEY', label, problem, saved) + ui.tmdb_credit(explain.TMDB_NOTICE)
 
 
-def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False, saved=()):
-    body = (_key('SUBDL_KEY', LABELS['SUBDL_KEY'], problem, saved)
+def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False, saved=(), stop=None):
+    body = (_stop(stop) + _key('SUBDL_KEY', LABELS['SUBDL_KEY'], problem, saved)
             + _key('SUBSYNC_SUBSOURCE_KEY', LABELS['SUBSYNC_SUBSOURCE_KEY'], problem, saved)
             + _tmdb(TMDB_FOR_EVERYONE, problem, saved)
             + ui.choices(_choice('SUBSYNC_TMDB_PERSONAL', LABELS['SUBSYNC_TMDB_PERSONAL'], tmdb_personal),
@@ -479,8 +493,9 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
         about = removing or remove_text({})
     remove = ui.row('rm-h', REMOVING[route], f'<p class="help">{e(about)}</p>',
                     f'<form class="controls" method="post" action="remove">{controls}</form>')
-    return ui.page(TITLE, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}<main>{status}'
-                          f'<div class="rows">{panel}{answers}{remove}</div></main></div>', 'settings')
+    return ui.page(STATUS[route],         # titled by its heading
+                   f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}<main>{status}'
+                   f'<div class="rows">{panel}{answers}{remove}</div></main></div>', 'settings')
 
 
 def working(heading, rows, running, stop=None, back='./'):
@@ -489,7 +504,7 @@ def working(heading, rows, running, stop=None, back='./'):
     actions = '' if running else ui.link_button('Continue', back, 'primary', arrow=True)
     content = (f'<h1 tabindex="-1">{e(heading)}</h1><div class="body">{body}</div>'
                + (f'<div class="actions">{actions}</div>' if actions else ''))
-    return _page(f'<main class="letter">{content}</main>', refresh=2 if running else None)
+    return _page(f'<main class="letter">{content}</main>', refresh=2 if running else None, heading=heading)
 
 
 def removed(heading, rows, stays):
@@ -497,7 +512,8 @@ def removed(heading, rows, stays):
     if stays:
         body += (f'<p>{e("These stay, in case you set it up again; remove them when you no longer need them:")}</p>'
                  + ui.dots(stays))
-    return _page(f'<main class="letter"><h1 tabindex="-1">{e(heading)}</h1><div class="body">{body}</div></main>')
+    return _page(f'<main class="letter"><h1 tabindex="-1">{e(heading)}</h1><div class="body">{body}</div></main>',
+                 heading=heading)
 
 
 def ended():

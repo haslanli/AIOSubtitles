@@ -20,7 +20,9 @@ PORT = plan.SUBSYNC_PORT
 AUDIO_QUESTION = 'Offer syncing files that have no subtitles of their own, from their audio?'
 # asked when no TMDB key is given for everyone: let each person add their own (explain.SETTINGS['SUBSYNC_TMDB_PERSONAL'])
 TMDB_PERSONAL_QUESTION = 'Let each person add their own TMDB key?'
-ADDRESS_WORDS = 'The web address of your public instance, with https, like https://subtitles.example.com.'   # the address question's own words
+# a refused web address: what it must be (the personal route takes a path; public mode's pages start at the root)
+ADDRESS_REFUSED = ('Type an https address with no path after the name, like https://subtitles.example.com: the pages '
+                   'and links start at its root.')
 # an address that doesn't answer from this machine, on both routes: the warning and the notes under it
 NO_ANSWER = "{address}/health doesn't answer from this machine."
 NO_ANSWER_NOTES = ('If you just added the web server rule, reload the web server; some routers also block a machine',
@@ -49,7 +51,7 @@ def check_address(value):
     parts = urllib.parse.urlsplit(text)
     if parts.scheme != 'https' or not parts.hostname or not plan.has_usable_port(parts) or parts.path not in ('', '/') \
             or parts.query or parts.fragment or parts.username or parts.password:
-        return False, ADDRESS_WORDS, text
+        return False, ADDRESS_REFUSED, text
     return True, '', f'https://{parts.netloc.lower()}'
 
 

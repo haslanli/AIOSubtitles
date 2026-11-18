@@ -6,6 +6,7 @@ the service, a public instance's port and the one wording of each question, agai
 test_flow with Docker stubbed out. Nothing connects beyond 127.0.0.1."""
 import contextlib
 import io
+import json
 import os
 import re
 import socket
@@ -134,7 +135,7 @@ class Addresses(unittest.TestCase):
     def test_a_public_instances_address_with_a_port_that_cant_be_one_is_refused(self):
         for bad in ('https://subs.example.com:abc', 'https://subs.example.com:99999', 'https://subs.example.com:0'):
             with self.subTest(bad=bad):
-                self.assertEqual(hosting.check_address(bad), (False, hosting.ADDRESS_WORDS, bad))
+                self.assertEqual(hosting.check_address(bad), (False, hosting.ADDRESS_REFUSED, bad))
         self.assertEqual(hosting.check_address('https://Subs.Example.com:8443/'), (True, '', 'https://subs.example.com:8443'))
 
 
@@ -283,7 +284,7 @@ class StateFlows(Offline):
         e = engine.Engine({'HOST_ADDRESS': 'https://subs.example.com:abc'}, page=True)
         with self.assertRaises(engine.Problem) as caught:
             e.host_address()
-        self.assertEqual((caught.exception.field, caught.exception.message), ('HOST_ADDRESS', hosting.ADDRESS_WORDS))
+        self.assertEqual((caught.exception.field, caught.exception.message), ('HOST_ADDRESS', hosting.ADDRESS_REFUSED))
 
 
 class ConfigRecovery(Offline):
@@ -1129,6 +1130,77 @@ class Removal(Offline):
                       'config, and removes the subsync container with its stored copies. Your other subtitle sources '
                       'stay.', flat(out))
         self.assertIn("Deleted subsync's Usenet config", out)
+
+
+class Restore(Offline):
+    """./setup --restore FILE, the documented way back after a bad save: the copy put back with the current config saved
+    first; a wrong password, a no, and a file that can't be read or isn't a saved copy change nothing and end with
+    code 1 and a plain message (they ended in a Python traceback, and no test ran --restore)."""
+
+    GIVE = ('Give a saved copy from state/backups/, like '
+            './setup --restore state/backups/viewer-1a2b3c4d-20261117-120000.json.')
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.copy = next(p for p in (self.state / 'backups').iterdir() if p.name.startswith('viewer-'))
+
+    def restore(self, path, **answers):
+        answers = self.answers_file(dict({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, **answers))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(['--restore', str(path), '--answers', answers, '--yes'])
+        return code, out.getvalue()
+
+    def unchanged(self):
+        """The config as it is now, and the copies: what a restore that stops must leave as they are."""
+        return json.dumps(self.aios.users[UUID]['config'], sort_keys=True), sorted(os.listdir(self.state / 'backups'))
+
+    def test_the_copy_is_put_back_and_the_current_config_saved_first(self):
+        current, saved = self.aios.users[UUID]['config'], json.loads(self.copy.read_text())
+        code, out = self.restore(self.copy)
+        self.assertEqual(code, 0, out)
+        self.assertIn('Restored.', out)
+        self.assertEqual(self.aios.users[UUID]['config'], saved['config'])
+        before = [p for p in (self.state / 'backups').iterdir() if p.name.startswith('before-restore-')]
+        self.assertEqual([p.name[:24] for p in before], [f'before-restore-{UUID[:8]}-'])
+        self.assertEqual(json.loads(before[0].read_text()), {'uuid': UUID, 'config': current})
+
+    def test_a_wrong_password_changes_nothing(self):
+        before = self.unchanged()
+        code, out = self.restore(self.copy, AIOS_CONFIG_PASSWORD='wrong')
+        self.assertEqual(code, 1, out)
+        self.assertIn("don't match", out)
+        self.assertNotIn('Restored.', out)
+        self.assertEqual(self.unchanged(), before)
+
+    def test_answering_no_changes_nothing(self):
+        before = self.unchanged()
+        code, out = self.restore(self.copy, CONFIRM='no')
+        self.assertEqual(code, 1, out)
+        self.assertIn('Nothing was changed.', out)
+        self.assertEqual(self.unchanged(), before)
+
+    def test_a_file_that_cant_be_read_or_isnt_a_saved_copy_is_a_plain_message(self):
+        folder = Path(self.tmp.name)
+        files = {'not-json.json': 'not json', 'no-id.json': '{"config": {}}', 'list.json': '[1, 2]',
+                 'id-a-number.json': '{"uuid": 5, "config": {}}', 'config-a-list.json': '{"uuid": "x", "config": []}'}
+        for name, text in files.items():
+            (folder / name).write_text(text)
+        (folder / 'binary.json').write_bytes(b'\xff\xfe\x00\x01')
+        databases = self.state / 'backups' / 'databases-20261117-120000'
+        databases.mkdir()
+        before = self.unchanged()
+        cant_open, not_a_copy = "Setup can't open {}.", "{} isn't a saved copy of a config."
+        cases = [(folder / 'missing.json', cant_open), ('no-such-folder/viewer-1.json', cant_open),
+                 (databases, not_a_copy), (folder / 'binary.json', not_a_copy)]
+        cases += [(folder / name, not_a_copy) for name in files]
+        for path, message in cases:
+            with self.subTest(path=Path(path).name):
+                code, out = self.restore(path)
+                self.assertEqual(code, 1, out)
+                self.assertIn(f'✗ {message.format(path)} {self.GIVE}', flat(out))
+                self.assertEqual(self.unchanged(), before)
 
 
 class Advice(Offline):

@@ -1,23 +1,28 @@
 """The setup page: a temporary web page on this machine, served by ./setup itself.
 
-It listens on 127.0.0.1 only, at a free port (on Docker's bridge network: inside setup's container, which only the
-machine's 127.0.0.1 port given in the docker run command reaches), and answers only under a one-time random key in the
-address and only to a Host of 127.0.0.1 or localhost at the machine's port (a page elsewhere in the same browser can't
-guess it, and DNS rebinding gets nothing). Every page has the public site's security header and nothing inline. Passwords and keys typed in stay
-in this process's memory for the run and are never sent back in a page. The work of each step is installer/engine.py;
-long work (installing, checking, updating) runs in the background once, and its page loads itself again every 2
-seconds until it is done. The page stops when setup is done, after 60 minutes without a request under its key,
-or with Ctrl-C.
+It listens on 127.0.0.1 only, at a free port (on Docker's bridge network: inside setup's container, which the machine
+reaches through the port on this machine only (127.0.0.1 or ::1) given in the docker run command: setup refuses to start
+the page on a port published beyond it, wizard.open_page. Other containers on the same Docker networks reach the
+container's port too, and get nothing without the key), and answers only under a one-time random key in the address
+and only to a Host of 127.0.0.1 or localhost at the machine's port (a page elsewhere in the same browser can't guess
+it, and DNS rebinding gets nothing). Every page has the public site's security header and nothing inline. Passwords and
+keys typed in stay in this process's memory for the run and are never sent back in a page. The work of each step is
+installer/engine.py; long work (installing, checking, updating) runs in the background once (an install that stopped
+is tried again on the person's word, and one whose answers changed after it runs again), and its page loads itself
+again every 2 seconds until it is done; meanwhile the steps before it lead to its page. An error setup doesn't know is
+a stop on the page with its way out, its details only in the terminal. The page stops when setup is done, after 60
+minutes without a request under its key, or with Ctrl-C.
 """
 import os
 import re
 import secrets
 import threading
 import time
+import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from installer import dockerenv, engine, limits, plan, screens, update
+from installer import engine, limits, plan, screens, update
 from installer.aios import AiosError
 from installer.ui import Stop
 from subsync import ui
@@ -95,6 +100,9 @@ class Session:
             self.stops[step] = (s.message, s.page_fix)
         except AiosError as a:
             self.stops[step] = (a.message, a.fix)
+        except Exception:       # an error setup doesn't know: a stop with its way out, the details in the terminal only
+            traceback.print_exc()
+            self.stops[step] = screens.UNEXPECTED
         if not ok:      # work that stopped: a line it was on isn't turning any more
             for row in out.rows[start:]:
                 if row[0] == 'now':
@@ -104,9 +112,23 @@ class Session:
             self.done.add(step)
         else:           # a step that stopped half way isn't done, even when it was before (its answers changed)
             self.done.discard(step)
-        if step in self.ids:      # a step run again: the ones after it are to be done again too
-            self.done -= set(self.ids[self.ids.index(step) + 1:])
+        if step in self.ids:      # a step run again: the ones after it are to be done again too, their work with them
+            later = self.ids[self.ids.index(step) + 1:]
+            self.done -= set(later)
+            self.redo(later)
         return ok
+
+    def redo(self, steps):
+        """`steps` are to be done again: their finished background work goes, so it runs again (the check's test read
+        with the check), and a save among them is made again: the next "Save these changes" saves and installs the
+        answers given since. Work still running stays (the steps before it lead to its page meanwhile, App.route)."""
+        for step in steps:
+            self.again(step)
+        if 'check' in steps:
+            self.again('check-read')
+            self.test_read = False
+        if 'review' in steps:
+            self.saved = False
 
     def start_job(self, step, work):
         """Starts a step's background work once; a second start while it runs, or after it ran, does nothing."""
@@ -124,12 +146,20 @@ class Session:
         threading.Thread(target=go, daemon=True).start()
 
     def again(self, step):
+        """A step's background work, once it has ended, may be started again."""
         with self.lock:
             if step in self.jobs and not self.jobs[step]['running']:
                 del self.jobs[step]
 
     def running(self, step):
         return step in self.jobs and self.jobs[step]['running']
+
+    def working(self):
+        """The step whose background work runs now (the test read is the check's), or None."""
+        for step in self.ids:
+            if self.running(step) or (step == 'check' and self.running('check-read')):
+                return step
+        return None
 
     def live(self, step):
         """The rows of a step, while its work runs too."""
@@ -169,8 +199,12 @@ class App:
         name = parsed.path[len(prefix):].strip('/')
         try:
             return self.route(method, name, form)
-        except Stop as s:                           # the engine stopped outside a step (state missing, ...)
-            return self.page(screens.working('Set up AIOSubtitles', [], False, stop=(s.message, s.page_fix)))
+        except (Stop, AiosError) as s:              # the engine stopped outside a step (state missing, ...)
+            stop = (s.message, getattr(s, 'page_fix', s.fix))
+        except Exception:                           # an error setup doesn't know: its details in the terminal only
+            traceback.print_exc()
+            stop = screens.UNEXPECTED
+        return self.page(screens.working(screens.TITLE, [], False, stop=stop))
 
     def page(self, html, status=200):
         return status, dict(PAGE_HEADERS, **{'Content-Type': 'text/html; charset=utf-8'}), html.encode()
@@ -211,6 +245,10 @@ class App:
         if not s or name not in s.ids + ('done',):
             return self.page(screens.ended(), 404)
         with s.busy:
+            # while a step's work runs, the steps before it lead to its page: their answers can't change under the work
+            working = s.working()
+            if working and name in s.ids and s.ids.index(name) < s.ids.index(working):
+                return self.go(working)
             # a step before its turn goes back to the first one not done
             for earlier in s.ids[:s.ids.index(name) if name in s.ids else len(s.ids)]:
                 if earlier not in s.done:
@@ -239,7 +277,7 @@ class App:
             s.run('aios', e.find_aios)
         problem = s.problems.get('aios')
         ask = (problem or (None,))[0] or s.asks.get('aios')
-        containers = [(c['name'], f"{c['name']}  ({c['image']})") for c in getattr(e, 'found', [])]
+        containers = [(c['name'], c['image']) for c in getattr(e, 'found', [])]
         value = e.answers.get(ask or '', '') or e.prefill().get(ask or '', '')
         if ask == 'AIOS_URL' and not value:
             value = plan.AIOS_DEFAULT_URL
@@ -291,12 +329,11 @@ class App:
         audio = plan.audio_answer(e.answers.get('AUDIO') or filled.get('AUDIO')) or 'no'
         usenet = str(e.answers.get('USENET') or filled.get('USENET')) == 'yes' \
             if getattr(e, 'usenet_services', None) else None
-        address = e.answers.get('PUBLIC_ADDRESS') or filled.get('PUBLIC_ADDRESS') or \
-            plan.public_default(e.s['aios_public'], dockerenv.lan_address())[1]
+        address = e.answers.get('PUBLIC_ADDRESS') or filled.get('PUBLIC_ADDRESS') or e.address_default()
         return self.page(screens.choices(languages, audio, address, s.problems.get('choices'), offer_opensubtitles=offer,
                                          add_opensubtitles=e.answers.get('ADD_OPENSUBTITLES', 'yes') == 'yes',
                                          usenet=usenet, stop=s.stops.get('choices'),
-                                         saved=saved_keys(e, PERSONAL_KEYS)))
+                                         saved=saved_keys(e, PERSONAL_KEYS), rows=s.rows.get('choices', [])))
 
     def step_limits(self, s, method, form, one):
         e = s.e
@@ -315,7 +352,8 @@ class App:
         problem = s.problems.get('limits')
         if problem and problem[0] == 'AUDIO_BUDGET':        # the engine's key for the page's audio limit
             problem = (limits.AUDIO.setting, problem[1])
-        return self.page(screens.limits('yourself', values, problem, audio=e.audio, usenet=getattr(e, 'usenet', False)))
+        return self.page(screens.limits('yourself', values, problem, audio=e.audio, usenet=getattr(e, 'usenet', False),
+                                        stop=s.stops.get('limits')))
 
     def step_review(self, s, method, form, one):
         e = s.e
@@ -341,16 +379,24 @@ class App:
                                         rows=s.rows.get('review', []), stop=s.stops.get('review')))
 
     def step_install(self, s, method, form, one):
-        return self.installing(s, 'install', method, 'check')
+        return self.installing(s, 'install', method, one, s.e.install, 'check')
 
-    def installing(self, s, step, method, next_step):
-        if method == 'POST' and step in s.done:
-            return self.go(next_step)
+    def installing(self, s, step, method, one, work, next_step):
+        """An install's page: its progress, after the warnings of saving the configs before it; Try again on a stopped
+        one runs `work` again."""
+        if method == 'POST':
+            if step in s.done:
+                return self.go(next_step)
+            if one.get('go') == 'again' and step in s.stops and not s.running(step):
+                s.again(step)
+                s.start_job(step, work)
+                return self.go(step)
         running = s.running(step)
         rule = getattr(s.e, 'web_server_rule', None)
+        warnings = [row for row in s.rows.get('review', []) if row[0] in ('warn', 'bad')]
         return self.page(screens.installing(s.route, s.live(step), running, s.stops.get(step), rule=rule,
                                             rule_intro=getattr(s.e, 'rule_intro', None),
-                                            rule_note=getattr(s.e, 'rule_note', None)))
+                                            rule_note=getattr(s.e, 'rule_note', None), warnings=warnings))
 
     def step_check(self, s, method, form, one):
         e = s.e
@@ -403,7 +449,7 @@ class App:
                 return self.go('hostchoices')
         if not hasattr(e, 'invite'):
             e.host_signups()
-        return self.page(screens.host_signups(e.invite, s.problems.get('signups')))
+        return self.page(screens.host_signups(e.invite, s.problems.get('signups'), stop=s.stops.get('signups')))
 
     def step_hostchoices(self, s, method, form, one):
         e = s.e
@@ -421,7 +467,7 @@ class App:
         return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=chosen['SUBSYNC_USENET'],
                                               audio=chosen['SUBSYNC_AUDIO_ROUTE'],
                                               tmdb_personal=chosen['SUBSYNC_TMDB_PERSONAL'],
-                                              saved=saved_keys(e, HOST_KEYS)))
+                                              saved=saved_keys(e, HOST_KEYS), stop=s.stops.get('hostchoices')))
 
     def step_hostlimits(self, s, method, form, one):
         e = s.e
@@ -436,10 +482,11 @@ class App:
         usenet, audio = getattr(e, 'host_usenet', True), getattr(e, 'host_audio', False)
         values = {lim.setting: e.answers.get(lim.setting) or limits.current(lim, env)
                   for lim in limits.hosting(usenet, audio)}
-        return self.page(screens.limits('host', values, s.problems.get('hostlimits'), usenet=usenet, audio=audio))
+        return self.page(screens.limits('host', values, s.problems.get('hostlimits'), usenet=usenet, audio=audio,
+                                        stop=s.stops.get('hostlimits')))
 
     def step_hostinstall(self, s, method, form, one):
-        return self.installing(s, 'hostinstall', method, 'hostcheck')
+        return self.installing(s, 'hostinstall', method, one, s.e.host_install, 'hostcheck')
 
     def step_hostcheck(self, s, method, form, one):
         if method == 'POST' and not s.running('hostcheck'):

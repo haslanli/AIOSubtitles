@@ -736,9 +736,11 @@ class Engine:
         self.tmdb_key_question(screens.LABELS['TMDB_KEY'])
 
     def tmdb_key_question(self, label):
-        """The original-language lookup's optional TMDB key, with TMDB's notice under it (its terms ask for it)."""
+        """The original-language lookup's optional TMDB key, with TMDB's notice under it (its terms ask for it; the page
+        shows it under the key's field, screens._tmdb, so it is no row of the step there)."""
         value = self.optional_key('TMDB_KEY', label)
-        self.out.note(explain.TMDB_NOTICE)
+        if not self.page:
+            self.out.note(explain.TMDB_NOTICE)
         return value
 
     def optional_key(self, key, label):
@@ -754,14 +756,20 @@ class Engine:
             self.out.ok(KEY_REMOVED.format(name=screens.LABELS[key].removesuffix(' (optional)')))
         return value
 
+    def address_default(self):
+        """subsync's address for your apps when there is no answer to keep or given (plan.public_default): it holds this
+        machine's LAN address only when AIOStreams' own address is local. That address is looked up only then: on the
+        bridge network the lookup starts a helper container (setup's own container has an address of its own there,
+        which phones can't reach)."""
+        local = plan.is_local_host(plan.host_of(self.s['aios_public']))
+        return plan.public_default(self.s['aios_public'], lan_address() if local else '')[1]
+
     def public_address(self):
         prev = self.prev.get('public_base')
-        # The default is used or shown only without a last answer to keep and, on the page, without one sent; it holds
-        # this machine's LAN address only when AIOStreams' own address is local. That address is looked up only then:
-        # on the bridge network the lookup starts a helper container.
+        # The default is used or shown only without a last answer to keep and, on the page, without one sent (the page
+        # fills in the same one, address_default)
         answered = self.page and str(self.ask.answers.get('PUBLIC_ADDRESS') or '').strip()
-        lan = lan_address() if not (prev or answered) and plan.is_local_host(plan.host_of(self.s['aios_public'])) else ''
-        _, default = plan.public_default(self.s['aios_public'], lan)
+        default = None if prev or answered else self.address_default()
         url = self.ask.text('PUBLIC_ADDRESS', screens.LABELS['PUBLIC_ADDRESS'], current=prev, default=default,
                             check=plan.check_public)
         kind = 'path' if plan.base_path_of(url) else 'port'

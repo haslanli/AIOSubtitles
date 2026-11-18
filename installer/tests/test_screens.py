@@ -315,6 +315,121 @@ class Rules(unittest.TestCase):
                                            'Installing AIOSubtitles', 'Checking that it works'))
 
 
+class StopsAndLines(unittest.TestCase):
+    """A stopped install's Try again, the stop for an error setup doesn't know on every step that can meet one, the
+    lines of saving the configs over the install's progress, Your choices' own lines, and the container choice's
+    rows."""
+
+    def test_a_stopped_install_has_back_and_try_again(self):
+        # it had Back and a greyed-out Continue, and nothing on the page ran the install again
+        for name in ('install-failed', 'install-unexpected'):
+            html, _ = samples.every_state()[name]
+            with self.subTest(screen=name):
+                self.assertIn('<div class="actions"><a class="btn secondary" href="review">Back</a><button class="btn '
+                              'primary" type="submit" name="go" value="again">Try again</button></div>', html)
+                self.assertNotIn('disabled', html)
+        html = screens.installing('host', [], running=False, stop=('Starting AIOSubtitles failed.', None))
+        self.assertIn('<a class="btn secondary" href="hostlimits">Back</a><button class="btn primary" type="submit" '
+                      'name="go" value="again">Try again</button>', html)
+        self.assertNotIn('Try again', samples.every_state()['install-done'][0])
+        self.assertNotIn('Try again', samples.every_state()['install-running'][0])
+        self.assertIn('Try again', screens.INSTALLER_WORDS)
+
+    def test_an_unexpected_error_is_a_stop_with_its_way_out(self):
+        self.assertEqual(screens.UNEXPECTED, ('Something unexpected went wrong, so setup stopped here.',
+                                              'Run ./setup again. If it happens again, send what the terminal shows '
+                                              'with a bug report.'))
+        for words in screens.UNEXPECTED:
+            self.assertIn(words, screens.INSTALLER_WORDS)
+        for name in ('install-unexpected', 'limits-stopped', 'host-signups-stopped', 'host-choices-stopped',
+                     'host-limits-stopped', 'stopped-unexpectedly'):
+            texts = Tree(samples.every_state()[name][0]).texts
+            with self.subTest(screen=name):
+                self.assertIn(screens.UNEXPECTED[0], texts)
+                self.assertEqual(texts[texts.index(screens.UNEXPECTED[0]) + 1], screens.UNEXPECTED[1])
+
+    def test_the_install_shows_what_saving_the_configs_warned_over_its_progress(self):
+        texts = Tree(samples.every_state()['install-review-warned'][0]).texts
+        locked = texts.index("The setting is fixed by AIOStreams' environment (SUBTITLE_CACHE_TTL); change it there:")
+        self.assertEqual(texts[locked + 1], 'SUBTITLE_CACHE_TTL=*:300,aiosubtitles-subsync:-1')
+        self.assertLess(locked, texts.index('That account is not an admin; the setting stays as it is.'))
+        self.assertLess(texts.index('That account is not an admin; the setting stays as it is.'),
+                        texts.index("Created subsync's own config (5e6f7a8b…)"))
+
+    def test_your_choices_shows_its_own_lines_first(self):
+        # why Usenet stays off, answered yes before, was dropped: the step's lines were shown on no page
+        texts = Tree(samples.every_state()['choices-usenet-why'][0]).texts
+        self.assertLess(texts.index(explain.USENET_WHY['proxy']),
+                        texts.index('Which subtitle languages should be synced?'))
+        self.assertNotIn(explain.USENET_WHY['proxy'], Tree(samples.every_state()['choices'][0]).texts)
+
+    def test_the_container_choice_shows_each_name_once_with_its_image_under_it(self):
+        # each row read "aiostreams" and under it "aiostreams  (ghcr.io/viren070/aiostreams:latest)"
+        html, _ = samples.every_state()['aios-several']
+        self.assertIn('<b>aiostreams</b></span><span id="AIOS_CONTAINER-aiostreams-help">'
+                      'ghcr.io/viren070/aiostreams:latest</span>', html)
+        self.assertEqual(Tree(html).texts.count('aiostreams'), 1)
+        self.assertNotIn('aiostreams  (', html)
+
+    def test_the_values_of_these_parts_are_escaped(self):
+        rows = [('warn', HOSTILE, HOSTILE), ('note', HOSTILE, None)]
+        for html in (screens.installing('yourself', [], running=False, warnings=rows, stop=(HOSTILE, HOSTILE)),
+                     screens.choices(['eng'], 'no', HOSTILE, rows=rows),
+                     screens.aios([], ask='AIOS_CONTAINER', containers=[('a', HOSTILE), ('b', HOSTILE)]),
+                     screens.limits('host', {}, stop=(HOSTILE, HOSTILE)),
+                     screens.host_signups('x', stop=(HOSTILE, None)),
+                     screens.host_choices(stop=(HOSTILE, HOSTILE))):
+            self.assertNotIn('<script>alert', html)
+            self.assertNotIn('"&gt;&lt;script', html)
+
+
+class Titles(unittest.TestCase):
+    """Each page's own browser title: every page was "Set up AIOSubtitles", so tabs, history and a screen reader's page
+    announcement couldn't tell the steps apart."""
+
+    @staticmethod
+    def title(html):
+        return htmllib.unescape(re.search(r'<title>(.*?)</title>', html).group(1))
+
+    def test_a_step_is_titled_by_its_name(self):
+        for route, names, ids in (('yourself', screens.PERSONAL, screens.PERSONAL_IDS),
+                                  ('host', screens.HOSTING, screens.HOSTING_IDS)):
+            for name, step_id in zip(names, ids):
+                with self.subTest(route=route, step=step_id):
+                    self.assertEqual(self.title(screens.step(route, step_id, '', '')), f'{name} · Set up AIOSubtitles')
+        states = samples.every_state()
+        for name, title in (('machine', 'This machine · Set up AIOSubtitles'),
+                            ('install-failed', 'Installing subsync · Set up AIOSubtitles'),
+                            ('host-limits', 'Limits · Set up AIOSubtitles')):
+            with self.subTest(screen=name):
+                self.assertEqual(self.title(states[name][0]), title)
+
+    def test_a_progress_or_result_page_is_titled_by_its_heading(self):
+        states = samples.every_state()
+        for name, title in (('updating', 'Updates · Set up AIOSubtitles'),
+                            ('update-failed', 'Updates · Set up AIOSubtitles'),
+                            ('removing-failed', 'Removing subsync · Set up AIOSubtitles'),
+                            ('removed', 'Removing subsync · Set up AIOSubtitles'),
+                            ('removed-host', 'Removing AIOSubtitles · Set up AIOSubtitles'),
+                            ('done', 'Done · Set up AIOSubtitles'),
+                            ('done-warned', 'Installed, with warnings · Set up AIOSubtitles')):
+            with self.subTest(screen=name):
+                self.assertEqual(self.title(states[name][0]), title)
+
+    def test_the_page_after_setup_is_titled_by_its_heading(self):
+        states = samples.every_state()
+        self.assertEqual(self.title(states['after'][0]), 'AIOSubtitles · subsync status')
+        self.assertEqual(self.title(states['after-host'][0]), 'AIOSubtitles status')
+
+    def test_the_start_and_ended_pages_keep_setups_name(self):
+        states = samples.every_state()
+        for name in ('start', 'start-host', 'ended'):
+            with self.subTest(screen=name):
+                self.assertEqual(self.title(states[name][0]), 'Set up AIOSubtitles')
+        # a stop outside a step (web.App.handle): headed by setup's name, which the title doesn't repeat
+        self.assertEqual(self.title(screens.working(screens.TITLE, [], False, stop=('x', None))), 'Set up AIOSubtitles')
+
+
 class Removal(unittest.TestCase):
     """The page after setup's removing: its words by route and by the configs an install has, the box's problem tied to
     it, and the sign-in an AIOStreams may ask for."""

@@ -2,7 +2,9 @@
 security header, each piece of work once, the idle stop, and both routes and the page after setup driven end to end
 through the real engine (a stand-in AIOStreams, Docker faked)."""
 import ast
+import contextlib
 import html
+import io
 import re
 import socket
 import tempfile
@@ -18,7 +20,7 @@ from installer import engine, screens, tests, update, web
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
-from subsync import ui
+from subsync import explain, ui
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -534,6 +536,203 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertIn('It calls http://aiosubtitles-subsync:8790/…; check that address works from AIOStreams.', text)
         self.assertNotIn('AIOStreams asks subsync for subtitles', text)        # the warnings only
 
+    def up_fails_once(self, error='Error response from daemon: port is already allocated'):
+        """Docker's compose, its first `up` failing with `error`."""
+        failures, compose = [error], engine.dockerenv.compose
+
+        def up(state, *args, **kw):
+            if 'up' in args and failures:
+                return 1, '', failures.pop()
+            return compose(state, *args, **kw)
+        return mock.patch.object(engine.dockerenv, 'compose', up)
+
+    def test_a_stopped_install_can_be_tried_again(self):
+        # Back and "Save these changes" showed the same stop again, with a greyed-out Continue: nothing on the page ran
+        # the install again
+        self.walk_to_review()
+        with self.up_fails_once():
+            self.b.post('review', {'CONFIRM': 'yes'})
+            _, _, text = self.b.settle('install')
+            self.assertIn('Starting subsync failed.', text)
+            self.assertIn('Error response from daemon: port is already allocated', text)
+            self.assertIn('<button class="btn primary" type="submit" name="go" value="again">Try again</button>',
+                          self.b.pages[-1])
+            self.assertNotIn('disabled', self.b.pages[-1])
+            status, headers, _ = self.b.post('install', {'go': 'next'})          # no way on but Try again
+            self.assertEqual(status, 200)
+            status, headers, _ = self.b.post('install', {'go': 'again'})
+            self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/install'))
+            _, _, text = self.b.settle('install')
+        self.assertIn('subsync is running (it restarts by itself after a reboot)', text)
+        self.assertNotIn('Starting subsync failed.', text)
+        self.assertEqual(self.started_count, 1)                                 # the one try that worked
+        self.assertEqual(len([p for m, p, _ in self.aios.log if m == 'POST' and p == '/api/v1/user']), 1)  # saved once
+        status, headers, _ = self.b.post('install', {'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/check'))
+
+    def test_an_answer_changed_after_the_install_is_saved_and_installed(self):
+        # the next "Save these changes" led back to the review page every time, and the new answers were never applied
+        checks, real = [], engine.Engine.self_test_checks
+        with mock.patch.object(engine.Engine, 'self_test_checks', lambda e: checks.append(e) or real(e)):
+            self.walk_to_review()
+            self.b.post('review', {'CONFIRM': 'yes'})
+            self.b.settle('install')
+            self.b.follow('install', {'go': 'next'})
+            self.b.settle('check')
+            _, _, text = self.b.get('choices')                                      # the browser's Back
+            self.assertIn('Which subtitle languages should be synced?', text)
+            self.b.follow('choices', {'LANGUAGES': ['eng', 'spa', ''], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
+                                      'ADD_OPENSUBTITLES': 'yes', 'go': 'next'})
+            self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+            status, headers, _ = self.b.post('review', {'CONFIRM': 'yes'})
+            self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/install'))
+            _, _, text = self.b.settle('install')
+            self.assertIn('subsync is running (it restarts by itself after a reboot)', text)
+            self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_LANGUAGES'], 'eng,spa')
+            self.assertEqual(self.started_count, 2)
+            self.assertEqual(len([p for m, p, _ in self.aios.log if m == 'POST' and p == '/api/v1/user']), 1)
+            self.b.follow('install', {'go': 'next'})
+            _, _, text = self.b.settle('check')                                     # the new install checked
+        self.assertEqual(len(checks), 2)
+        self.assertIn('AIOStreams asks subsync for subtitles', text)
+
+    def test_while_the_install_runs_the_steps_before_it_lead_to_its_page(self):
+        # an earlier step's answers once changed under the running install
+        release = threading.Event()
+        self.addCleanup(release.set)
+        install = engine.Engine.install
+        self.walk_to_review()
+        with mock.patch.object(engine.Engine, 'install', lambda e: (release.wait(10), install(e))):
+            self.b.post('review', {'CONFIRM': 'yes'})
+            for step in ('machine', 'choices', 'limits', 'review'):
+                with self.subTest(step=step):
+                    status, headers, _ = self.b.get(step)
+                    self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/install'))
+            status, headers, _ = self.b.post('choices', {'LANGUAGES': ['spa'], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
+                                                         'go': 'next'})
+            self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/install'))
+            self.assertEqual(self.app.session.e.answers['LANGUAGES'], 'eng, rus')
+            release.set()
+            self.b.settle('install')
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_LANGUAGES'], 'eng,rus')
+
+    def test_an_unexpected_error_in_the_background_is_a_stop_on_the_page(self):
+        # the install page showed an empty step whose Continue did nothing; the reason was only in the terminal
+        self.walk_to_review()
+        terminal = io.StringIO()
+        refused = PermissionError(13, 'Permission denied', 'subsync.env')
+        with mock.patch.object(engine, 'write_env', side_effect=refused), contextlib.redirect_stderr(terminal):
+            self.b.post('review', {'CONFIRM': 'yes'})
+            _, _, text = self.b.settle('install')
+        self.assertIn('Something unexpected went wrong, so setup stopped here.', text)
+        self.assertIn('Run ./setup again. If it happens again, send what the terminal shows with a bug report.', text)
+        self.assertIn('value="again">Try again</button>', self.b.pages[-1])
+        self.assertNotIn('Permission denied', text)                              # the details: the terminal only
+        self.assertIn('PermissionError: [Errno 13] Permission denied', terminal.getvalue())
+
+    def test_an_unexpected_error_in_a_step_is_a_stop_on_its_page(self):
+        terminal = io.StringIO()
+        self.walk_to_review()
+        with mock.patch.object(engine.Engine, 'limits', side_effect=KeyError('settings')), \
+                contextlib.redirect_stderr(terminal):
+            status, _, text = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        self.assertEqual(status, 200)
+        self.assertIn('<h1 tabindex="-1">Limits</h1>', text)
+        self.assertIn('Something unexpected went wrong, so setup stopped here.', text)
+        self.assertIn("KeyError: 'settings'", terminal.getvalue())
+        self.assertNotIn('settings', text.split('<h1', 1)[1].split('Data a day in total')[0])
+
+    def test_an_unexpected_error_outside_a_step_is_a_page_not_a_dropped_connection(self):
+        terminal = io.StringIO()
+        with mock.patch.object(engine, 'load_settings', side_effect=PermissionError(13, 'Permission denied')), \
+                contextlib.redirect_stderr(terminal):
+            status, _, text = self.b.get('')
+        self.assertEqual(status, 200)
+        self.assertIn('<h1 tabindex="-1">Set up AIOSubtitles</h1>', text)
+        self.assertIn('Something unexpected went wrong, so setup stopped here.', text)
+        self.assertIn('Run ./setup again. If it happens again, send what the terminal shows with a bug report.', text)
+        self.assertNotIn('Permission denied', text)
+        self.assertIn('PermissionError', terminal.getvalue())
+
+    def test_an_aiostreams_error_outside_a_step_shows_its_words(self):
+        # it ended the request with no answer
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        error = engine.AiosError("Can't reach AIOStreams at http://aiostreams:3000 (timed out).",
+                                 'Check the address, and that AIOStreams is running (docker ps).')
+        with mock.patch.object(engine.Engine, 'status_parts', side_effect=error):
+            status, _, text = self.b.get('')
+        self.assertEqual(status, 200)
+        self.assertIn(error.message, text)
+        self.assertIn(error.fix, text)
+
+    def test_the_install_page_shows_what_saving_the_configs_warned(self):
+        # the cache setting fixed by AIOStreams' environment, with the value to set there, and a sign-in that isn't an
+        # admin's, were recorded and shown on no page: the person thought the cache was off
+        sign_in = {'CONFIRM': 'yes', 'CACHE': 'yes', 'AIOS_USERNAME': 'admin', 'AIOS_PASSWORD': 'adminpw'}
+        self.aios.setting_source = 'environment'
+        self.walk_to_review()
+        self.b.post('review', sign_in)
+        _, _, text = self.b.settle('install')
+        locked = "The setting is fixed by AIOStreams' environment (SUBTITLE_CACHE_TTL); change it there:"
+        self.assertIn(locked, text)
+        self.assertIn('SUBTITLE_CACHE_TTL=*:300,aiosubtitles-subsync:-1', text)
+        self.assertLess(text.index(locked), text.index('subsync is running'))
+        self.assertNotIn('Signed in', text)                                     # its warnings only
+        self.assertFalse(any('adminpw' in page for page in self.b.pages))
+
+    def test_the_install_page_says_a_sign_in_isnt_an_admins(self):
+        self.aios.admin = False
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes', 'CACHE': 'yes', 'AIOS_USERNAME': 'admin', 'AIOS_PASSWORD': 'adminpw'})
+        _, _, text = self.b.settle('install')
+        self.assertIn('That account is not an admin; the setting stays as it is.', text)
+
+    def test_your_choices_shows_why_usenet_stays_off(self):
+        # Usenet answered yes last time, and no service of the config reads it any more: the reason was dropped
+        self.aios.users[UUID]['config'] = {'services': [TORBOX, ENGINE], 'presets': [ZILEAN, NEWZNAB, SUBS],
+                                           'failover': {'enabled': True}}
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', USENET='yes'))
+        self.assertEqual(code, 0, out)
+        config = self.aios.users[UUID]['config']                                # as setup saved it
+        config['services'] = [TORBOX, {'id': 'nzbdav', 'enabled': True, 'credentials': {'url': 'http://nzbdav:3000'}}]
+        config['presets'] = [ZILEAN, dict(NEWZNAB, options={'name': 'Geek', 'services': ['nzbdav']}), SUBS]
+        self.b.post('answers', {})
+        self.b.get('machine')
+        self.b.follow('machine', {'go': 'next'})
+        self.b.follow('aios', {'go': 'next'})
+        self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        _, _, text = self.b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+        self.assertNotIn('Sync files you play from Usenet too?', text)            # no service reads it: not asked
+        form = {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': 'ftp://x', 'go': 'next'}
+        _, _, text = self.b.post('choices', form)
+        self.assertIn('Type a full address that starts with http:// or https://', text)
+        self.assertLess(text.index(explain.USENET_WHY['proxy']),
+                        text.index('Which subtitle languages should be synced?'))
+        self.assertEqual(text.count(explain.TMDB_NOTICE), 1)                    # under its field only, not a line too
+        self.b.follow('choices', dict(form, PUBLIC_ADDRESS=f'{PUBLIC}/subsync'))
+        _, _, text = self.b.get('choices')                                       # Back from Limits
+        self.assertIn(explain.USENET_WHY['proxy'], text)
+
+    def test_the_container_choice_shows_each_name_once_with_its_image(self):
+        two = [{'name': name, 'image': image, 'port': 3000, 'base_url': PUBLIC, 'host_network': False,
+                'networks': ['aio_default'], 'ips': [], 'published': []}
+               for name, image in (('aiostreams', 'ghcr.io/viren070/aiostreams:latest'),
+                                   ('aiostreams-test', 'ghcr.io/viren070/aiostreams:2.37'))]
+        with mock.patch.object(engine.dockerenv, 'aios_containers', lambda: two):
+            self.walk_to_config()
+            _, _, text = self.b.get('aios')
+        self.assertIn('More than one AIOStreams runs here. Which one do your apps use?', text)
+        self.assertIn('<b>aiostreams</b></span><span id="AIOS_CONTAINER-aiostreams-help">ghcr.io/viren070/aiostreams:'
+                      'latest</span>', self.b.pages[-1])
+        self.assertNotIn('aiostreams  (', text)
+
+    def test_a_decimal_comma_in_the_daily_total_is_refused_on_the_page(self):
+        # "1,5" was saved as 15 GB
+        self.walk_to_review()
+        _, _, text = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '1,5', 'go': 'next'})
+        self.assertIn('A number above 0, with a dot for decimals and no commas, like 1.5.', text)
+        self.assertNotIn('review', self.app.session.done)
+
     def test_the_page_after_setup(self):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8803)
@@ -641,6 +840,47 @@ class Pieces(unittest.TestCase):
         s.run('install', work)
         self.assertNotIn('now', [kind for kind, _, _ in s.rows['install']])
 
+    def test_an_unexpected_error_is_a_stop_whose_details_stay_in_the_terminal(self):
+        # it ended the background thread with no rows and no stop: an empty step whose Continue did nothing
+        s = web.Session('yourself', {})
+        terminal = io.StringIO()
+
+        def work():
+            s.e.out.working('Starting subsync ...')
+            raise OSError(28, 'No space left on device', 'state/compose.yaml')
+        with contextlib.redirect_stderr(terminal):
+            self.assertFalse(s.run('install', work))
+        self.assertEqual(s.stops['install'], ('Something unexpected went wrong, so setup stopped here.',
+                                              'Run ./setup again. If it happens again, send what the terminal shows '
+                                              'with a bug report.'))
+        self.assertEqual(s.rows['install'], [('next', 'Starting subsync ...', None)])
+        self.assertNotIn('install', s.done)
+        self.assertIn('OSError: [Errno 28] No space left on device', terminal.getvalue())
+
+    def test_a_step_run_again_lets_the_finished_work_after_it_run_again(self):
+        s = web.Session('yourself', {})
+
+        def ended(job):
+            deadline = time.monotonic() + 10
+            while s.running(job) and time.monotonic() < deadline:
+                time.sleep(0.01)
+        for job in ('install', 'check-read'):
+            s.start_job(job, lambda: None)
+            ended(job)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        s.start_job('check', lambda: release.wait(10))                  # still running
+        s.done.update(s.ids[:-1])
+        s.saved = s.test_read = True
+        self.assertEqual(s.working(), 'check')
+        self.assertTrue(s.run('choices', lambda: None))
+        self.assertEqual(set(s.jobs), {'check'})                        # the finished work goes, the running stays
+        self.assertEqual((s.saved, s.test_read), (False, False))
+        self.assertEqual(s.done & set(s.ids), {'machine', 'aios', 'config', 'choices'})
+        release.set()
+        ended('check')
+        self.assertIsNone(s.working())
+
 
 class Hosting(BackgroundWork, RouteFixture):
     def test_change_your_answers_opens_the_public_instances_own_steps(self):
@@ -677,9 +917,11 @@ class Hosting(BackgroundWork, RouteFixture):
         b.get('machine')
         _, _, text = b.follow('machine', {'go': 'next'})
         self.assertIn('Web address', text)
-        _, _, text = b.post('address', {'HOST_ADDRESS': 'http://subs.example.com', 'SUBSYNC_TRUSTED_PROXY': 'gateway',
-                                        'go': 'next'})
-        self.assertIn('with https, like https://subtitles.example.com', text)
+        for refused in ('http://subs.example.com', 'https://subs.example.com/subtitles'):
+            _, _, text = b.post('address', {'HOST_ADDRESS': refused, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
+            self.assertIn('<p class="field-error" id="host_address-error">Type an https address with no path after '
+                          'the name, like https://subtitles.example.com: the pages and links start at its root.</p>',
+                          text)
         _, _, text = b.follow('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
         invite = re.search(r'name="SUBSYNC_PUBLIC_INVITE"[^>]*value="([^"]+)"|value="([^"]+)"[^>]*name="SUBSYNC_PUBLIC_INVITE"',
                            text)
@@ -701,6 +943,64 @@ class Hosting(BackgroundWork, RouteFixture):
         env = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual((env['SUBSYNC_PUBLIC_INVITE'], env['SUBSYNC_MAX_USERS']), ('my-own-code', '150'))
         self.assertFalse(any(env['SUBSYNC_SECRET_KEY'] in page for page in b.pages))     # never on a page
+
+    def walk_to_limits(self, b):
+        b.post('', {'ROUTE': 'host'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
+        b.follow('signups', {'SUBSYNC_PUBLIC_INVITE': 'my-own-code', 'go': 'next'})
+        _, _, text = b.follow('hostchoices', {'go': 'next'})
+        self.assertIn('The whole service', text)
+
+    def test_a_stopped_install_can_be_tried_again(self):
+        # its Continue was greyed out and nothing on the page ran the install again
+        b = Browser(web.App(port=8813))
+        self.walk_to_limits(b)
+        failures, compose = ['Error response from daemon: port is already allocated'], engine.dockerenv.compose
+
+        def up(state, *args, **kw):
+            return (1, '', failures.pop()) if 'up' in args and failures else compose(state, *args, **kw)
+        with mock.patch.object(engine.dockerenv, 'compose', up):
+            b.post('hostlimits', {'SUBSYNC_MAX_USERS': '150', 'go': 'next'})
+            _, _, text = b.settle('hostinstall')
+            self.assertIn('Starting AIOSubtitles failed.', text)
+            self.assertIn('<a class="btn secondary" href="hostlimits">Back</a><button class="btn primary" '
+                          'type="submit" name="go" value="again">Try again</button>', b.pages[-1])
+            status, headers, _ = b.post('hostinstall', {'go': 'again'})
+            self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostinstall'))
+            _, _, text = b.settle('hostinstall')
+        self.assertIn('AIOSubtitles is running (it restarts by itself after a reboot)', text)
+        status, headers, _ = b.post('hostinstall', {'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostcheck'))
+
+    def test_a_limit_changed_after_the_install_is_installed(self):
+        # Continue on the install page showed the same page again, and the new number was never written
+        b = Browser(web.App(port=8814))
+        self.walk_to_limits(b)
+        b.post('hostlimits', {'SUBSYNC_MAX_USERS': '150', 'go': 'next'})
+        b.settle('hostinstall')
+        b.follow('hostinstall', {'go': 'next'})
+        b.settle('hostcheck')
+        status, headers, _ = b.post('hostlimits', {'SUBSYNC_MAX_USERS': '120', 'go': 'next'})    # Back, a new number
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostinstall'))
+        _, _, text = b.settle('hostinstall')
+        self.assertIn('AIOSubtitles is running (it restarts by itself after a reboot)', text)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_MAX_USERS'], '120')
+        b.follow('hostinstall', {'go': 'next'})
+        _, _, text = b.settle('hostcheck')                                          # checked again
+        self.assertIn(f'People can reach AIOSubtitles at {ADDRESS}', text)
+
+    def test_a_limit_subsync_cant_hold_is_refused_on_the_page(self):
+        # a 400-digit number was written and crashed subsync at start; over 4300 digits ended the request with no answer
+        b = Browser(web.App(port=8815))
+        self.walk_to_limits(b)
+        for value in ('9' * 400, '9' * 5000):
+            with self.subTest(digits=len(value)):
+                status, _, text = b.post('hostlimits', {'SUBSYNC_USER_DAILY_MB': value, 'go': 'next'})
+                self.assertEqual(status, 200)
+                self.assertIn('A whole number from 1, like 10,000.', text)
+        self.assertFalse((self.state / 'subsync.env').exists())                     # nothing installed
 
     def test_removing_a_public_instance_on_the_page(self):
         # its page said "subsync" and "Removing subsync", showed the warning twice, asked for a password it has no
@@ -725,6 +1025,47 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertIn(f'this folder, {self.state.parent}</li>', text)                   # no database copies here
         self.assertNotIn('--restore', text)
         self.assertFalse((self.state / 'subsync.env').exists())
+
+
+class OnBridge(BackgroundWork, FlowFixture):
+    """The page on Docker's bridge network (the image route), where setup's own container has an address of its own."""
+
+    def setUp(self):
+        super().setUp()
+        place = self.place._replace(network='bridge', gateway='172.17.0.1', page_port=8789)
+        status = engine.Aios.status
+
+        def local_status(aios):            # AIOStreams' own address is this machine's: http://localhost:3000
+            found = status(aios)
+            found['settings']['baseUrl'] = 'http://localhost:3000'
+            return found
+        for p in (mock.patch.object(engine, 'PLACE', place),
+                  mock.patch.object(engine.dockerenv, 'lan_address', lambda: '172.17.0.3'),    # setup's container
+                  mock.patch.object(engine.dockerenv, 'probe', lambda image, checks: {'lan': '192.168.1.7',
+                                                                                       'taken': []}),
+                  mock.patch.object(engine.dockerenv, 'join', lambda network, container: True),
+                  mock.patch.object(engine.Engine, 'aios_urls', lambda e, c: [self.aios.url]),
+                  mock.patch.object(engine.Aios, 'status', local_status)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.b = Browser(web.App(port=8816))
+
+    def test_your_choices_fills_in_this_machines_network_address(self):
+        # it filled in setup's container's own address (http://172.17.0.3:8790), which phones can't reach, and the page
+        # always sends the field, so that address was saved
+        b = self.b
+        b.post('', {'ROUTE': 'yourself'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('aios', {'go': 'next'})
+        b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        _, _, text = b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+        self.assertRegex(text, r'<input[^>]*name="PUBLIC_ADDRESS"[^>]*value="http://192\.168\.1\.7:8790"')
+        self.assertNotIn('172.17.0.3', text)
+        status, headers, _ = b.post('choices', {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': 'http://192.168.1.7:8790',
+                                                'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/limits'))
+        self.assertEqual(b.app.session.e.s['public_base'], 'http://192.168.1.7:8790')
 
 
 class Removing(BackgroundWork, FlowFixture):

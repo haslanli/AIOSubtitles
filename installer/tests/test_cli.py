@@ -49,6 +49,15 @@ class CommandLine(FlowFixture):
         self.assertEqual((code, served), (1, []))
         self.assertIn(where.NO_PAGE_PORT, ' '.join(out.split()))
 
+    def test_a_page_port_other_computers_reach_is_refused(self):
+        # -p 8789:8789 started the page; one try from another computer sent its key over the network in clear
+        place = self.place._replace(network='bridge', page_port=8789, page_exposed=True)
+        with mock.patch.object(engine, 'PLACE', place):
+            code, out, served = self.serve()
+        self.assertEqual((code, served), (1, []))
+        self.assertIn('✗ The setup page must be reachable on this machine only: use -p 127.0.0.1:8789:8789 in the '
+                      'docker run command (README, Install), not -p 8789:8789.', ' '.join(out.split()))
+
     def test_version(self):
         with mock.patch.object(engine, 'setup_version', lambda: '1.4.0'), \
                 mock.patch.object(where, 'discover', side_effect=AssertionError('no Docker needed')):

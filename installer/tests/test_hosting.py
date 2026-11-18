@@ -39,7 +39,9 @@ class Pieces(unittest.TestCase):
             with self.subTest(bad=bad):
                 good, message, _ = hosting.check_address(bad)
                 self.assertFalse(good)
-                self.assertIn('with https, like https://subtitles.example.com', message)
+                # it repeated the question's own explanation, with no word of what was wrong (a path, say)
+                self.assertEqual(message, 'Type an https address with no path after the name, like '
+                                          'https://subtitles.example.com: the pages and links start at its root.')
 
     def test_the_env_passes_subsyncs_own_checks_never_has_wyzie_and_audio_only_when_chosen(self):
         # WYZIE_KEY and AUDIO are a personal install's answers: neither may reach a public instance's lines; the limits

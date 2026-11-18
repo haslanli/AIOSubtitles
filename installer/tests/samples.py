@@ -7,7 +7,7 @@ import urllib.error
 
 from installer import dockerenv, engine, hosting, limits, plan, screens, update
 from installer.aios import Aios, AiosError
-from subsync import realdebrid
+from subsync import explain, realdebrid
 
 ADDRESS = 'https://subs.example.com'
 PUBLIC = 'https://aio.example.com'
@@ -62,10 +62,9 @@ def every_state():
     add('aios-problem', screens.aios(missing, ask='AIOS_URL', value='http://127.0.0.1:3001', problem=problem),
         missing[0][1], problem[1], 'http://127.0.0.1:3001')
     add('aios-several', screens.aios([], ask='AIOS_CONTAINER', value='aiostreams',
-                                     containers=[('aiostreams', 'aiostreams  (ghcr.io/viren070/aiostreams:latest)'),
-                                                 ('aiostreams-test', 'aiostreams-test  (ghcr.io/viren070/aiostreams:2.37)')]),
-        'aiostreams', 'aiostreams-test', 'aiostreams  (ghcr.io/viren070/aiostreams:latest)',
-        'aiostreams-test  (ghcr.io/viren070/aiostreams:2.37)')
+                                     containers=[('aiostreams', 'ghcr.io/viren070/aiostreams:latest'),
+                                                 ('aiostreams-test', 'ghcr.io/viren070/aiostreams:2.37')]),
+        'aiostreams', 'aiostreams-test', 'ghcr.io/viren070/aiostreams:latest', 'ghcr.io/viren070/aiostreams:2.37')
     add('config', screens.config([], CONFIG_ID), CONFIG_ID)
     config_rows = [('ok', 'Config found', None), ('ok', 'Debrid services: TorBox, Real-Debrid', None),
                    ('ok', 'Subtitle sources: OpenSubtitles V3+', None),
@@ -92,6 +91,7 @@ def every_state():
                                        audio=True))
     daily = ('SUBSYNC_DAILY_BUDGET_GB', limits.check(limits.DAILY, '0')[1])
     add('limits-problem', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '0'}, problem=daily), daily[1])
+    add('limits-stopped', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50'}, stop=screens.UNEXPECTED))
     sections = [('Your config 1a2b3c4d…', [('+', 'adds 1 subtitle source: subsync (synced copies of the subtitles you '
                                                  'already get)')],
                  'Nothing else in it changes. A copy of it as it is now is saved first.'),
@@ -113,6 +113,11 @@ def every_state():
     no_usenet = (engine.NO_USENET, engine.NO_USENET_WAY_OUT_PAGE)
     add('choices-usenet-stop', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', usenet=False, stop=no_usenet),
         f'{PUBLIC}/subsync', *no_usenet)
+    # the step's own lines: why Usenet stays off (answered yes before, no service of the config reads it any more)
+    why = [('note', explain.USENET_WHY['proxy'], None)]
+    not_an_address = ('PUBLIC_ADDRESS', plan.check_public('ftp://x')[1])
+    add('choices-usenet-why', screens.choices(['eng'], 'no', 'ftp://x', problem=not_an_address, rows=why),
+        'ftp://x', not_an_address[1], why[0][1])
     add('limits-usenet', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50',
                                                      'SUBSYNC_USENET_LISTINGS_PER_DAY': '10'}, usenet=True))
     usenet_section = ("subsync's Usenet config (new)", [], 'only your Usenet searches and services, with nothing running '
@@ -139,6 +144,15 @@ def every_state():
     failed = ('Starting subsync failed.', 'Error response from daemon: driver failed programming external connectivity')
     add('install-failed', screens.installing('yourself', progress[:1], running=False, stop=failed),
         progress[0][1], *failed)
+    add('install-unexpected', screens.installing('yourself', progress[:1], running=False, stop=screens.UNEXPECTED),
+        progress[0][1])
+    # what saving the configs warned, over the install's progress
+    cache_warnings = [
+        ('warn', "The setting is fixed by AIOStreams' environment (SUBTITLE_CACHE_TTL); change it there:",
+         'SUBTITLE_CACHE_TTL=*:300,aiosubtitles-subsync:-1'),
+        ('warn', 'That account is not an admin; the setting stays as it is.', None)]
+    add('install-review-warned', screens.installing('yourself', finished, running=False, warnings=cache_warnings),
+        *[r[1] for r in finished], *cache_warnings[0][1:], cache_warnings[1][1])
     personal_rule = plan.proxy_snippets(f'{PUBLIC}/subsync', '127.0.0.1:8790')
     personal_intro = (f'Your web server needs one rule so {PUBLIC}/subsync/... reaches subsync. Add it next to your '
                       "AIOStreams rule (keep the path as it is; don't strip it):")
@@ -170,11 +184,13 @@ def every_state():
     # hosting
     add('host-machine', screens.machine('host', found), *[r[1] for r in found])
     add('host-address', screens.host_address(ADDRESS), ADDRESS, 'gateway')
-    bad_address = ('HOST_ADDRESS', hosting.ADDRESS_WORDS)
+    bad_address = ('HOST_ADDRESS', hosting.ADDRESS_REFUSED)
     add('host-address-problem', screens.host_address('http://subs.example.com', problem=bad_address),
-        'http://subs.example.com', 'gateway', hosting.ADDRESS_WORDS)
+        'http://subs.example.com', 'gateway', hosting.ADDRESS_REFUSED)
     add('host-signups', screens.host_signups('k7pm-2qra-9xwd'), 'k7pm-2qra-9xwd')
+    add('host-signups-stopped', screens.host_signups('k7pm-2qra-9xwd', stop=screens.UNEXPECTED), 'k7pm-2qra-9xwd')
     add('host-choices', screens.host_choices())
+    add('host-choices-stopped', screens.host_choices(stop=screens.UNEXPECTED))
     add('host-choices-usenet', screens.host_choices(usenet=True))
     add('host-choices-audio', screens.host_choices(usenet=True, audio=True))
     add('host-choices-saved-keys', screens.host_choices(saved={'SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY'}))
@@ -188,6 +204,7 @@ def every_state():
     at_once = ('SUBSYNC_SYNCS_AT_ONCE', limits.check(syncs, 'many')[1])
     add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'}, problem=at_once),
         at_once[1])
+    add('host-limits-stopped', screens.limits('host', {}, stop=screens.UNEXPECTED))
     host_progress = [('done', 'Made the secret key and kept it in state/subsync.env, readable only by your user.', None),
                      ('ok', 'AIOSubtitles is running (it restarts by itself after a reboot)', None)]
     add('host-install', screens.installing('host', host_progress, running=False, rule=rule, rule_intro=intro),
@@ -275,4 +292,5 @@ def every_state():
     add('removed-host', screens.removed('Removing AIOSubtitles', host_gone, host_stays), *[r[1] for r in host_gone],
         *host_stays)
     add('ended', screens.ended())
+    add('stopped-unexpectedly', screens.working(screens.TITLE, [], False, stop=screens.UNEXPECTED))   # web.App.handle
     return out

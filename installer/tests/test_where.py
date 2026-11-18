@@ -86,6 +86,21 @@ class Place(unittest.TestCase):
         p = where.place_from(inspect(ports={}), PULLED, '1.4.0', 'image', (0, 0))
         self.assertIsNone(p.page_port)
 
+    def test_a_page_port_published_beyond_this_machine_is_marked(self):
+        # -p 8789:8789 was used as it was: other computers reached the page's port
+        every = [{'HostIp': '0.0.0.0', 'HostPort': '8789'}, {'HostIp': '::', 'HostPort': '8789'}]
+        local = [{'HostIp': '127.0.0.1', 'HostPort': '8899'}]
+        for binds, exposed in ((local, False), ([{'HostIp': '::1', 'HostPort': '8899'}], False),
+                               (local + [{'HostIp': '::1', 'HostPort': '8899'}], False), (every, True),
+                               ([{'HostIp': '192.168.1.5', 'HostPort': '8789'}], True), (local + every[:1], True),
+                               ([{'HostIp': '', 'HostPort': '8789'}], True)):
+            with self.subTest(binds=binds):
+                p = where.place_from(inspect(ports={'8789/tcp': binds}), PULLED, '1.4.0', 'image', (0, 0))
+                self.assertEqual(p.page_exposed, exposed)
+        p = where.place_from(inspect(ports={'8789/tcp': local + every[:1]}), PULLED, '1.4.0', 'image', (0, 0))
+        self.assertEqual(p.page_port, 8899)                                 # the machine's own port still preferred
+        self.assertFalse(where.place_from(inspect(ports={}), PULLED, '1.4.0', 'image', (0, 0)).page_exposed)
+
     def test_what_is_missing_from_the_docker_run_command(self):
         self.assertEqual(where.missing(inspect(), 'image'), [])
         self.assertEqual(where.missing(inspect(mounts=[]), 'image'), [where.NO_FOLDER])
@@ -144,6 +159,9 @@ class Scripts(unittest.TestCase):
         self.assertIn(socket_mount, where.NO_SOCKET)
         self.assertIn(f'-v "$PWD:{where.MOUNT}"', where.NO_FOLDER)
         self.assertIn(f'-p 127.0.0.1:{where.PAGE_PORT}:{where.PAGE_PORT}', where.NO_PAGE_PORT)
+        self.assertEqual(where.PAGE_PORT_NOT_LOCAL, 'The setup page must be reachable on this machine only: use -p '
+                                                    '127.0.0.1:8789:8789 in the docker run command (README, Install), '
+                                                    'not -p 8789:8789.')
         source = (REPO / 'setup').read_text()
         self.assertIn(socket_mount, source)
         self.assertIn(f'/state:{where.MOUNT}/state"', source)

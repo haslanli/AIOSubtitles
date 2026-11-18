@@ -54,8 +54,14 @@ COUNT = 'A whole number from 0, like {default}.'
 WHOLE_OR_AUTO = 'A whole number from 1, or auto.'
 NOT_ABOVE_PLACES = 'A whole number from 1 to {places} (the files synced at a time), or auto.'
 ABOVE_ZERO = 'A number above 0, like {default}.'
+# a comma in a GB value: a decimal comma once multiplied it ("1,5" became 15 GB); the page never writes one there
+NO_COMMA = 'A number above 0, with a dot for decimals and no commas, like 1.5.'
 NOT_AN_AUDIO_LIMIT = f'Type {plan.AUDIO_BUDGET_WORDS} (GB per file).'
 NOT_A_LANGUAGE_LIMIT = 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'
+# what subsync can hold: a longer answer, or a GB value whose bytes (subsync counts 10^9 to a GB, settings.py) are no
+# finite number, crashed it at start
+LONGEST = 15
+GB = 1e9
 
 
 def personal(audio, usenet=False):
@@ -90,6 +96,8 @@ def names(asked):
 
 def _whole(text, least=1):
     value = text.strip()
+    if len(value) > LONGEST:
+        return None
     parts = value.split(',')
     if len(parts) > 1 and not (1 <= len(parts[0]) <= 3 and all(len(p) == 3 for p in parts[1:])):
         return None
@@ -98,11 +106,15 @@ def _whole(text, least=1):
 
 
 def _above_zero(text):
+    """A GB value above 0, written with a dot for decimals (a comma is refused before, with NO_COMMA)."""
+    value = text.strip()
+    if len(value) > LONGEST:
+        return None
     try:
-        number = float(text.strip().replace(',', ''))
+        number = float(value)
     except ValueError:
         return None
-    if not (math.isfinite(number) and number > 0):
+    if not (math.isfinite(number * GB) and number > 0):
         return None
     return str(int(number)) if number == int(number) else str(number)
 
@@ -126,6 +138,8 @@ def check(lim, text, current=None, places=None):
             return None, NOT_ABOVE_PLACES.format(places=places)
         return (value, None) if value else (None, WHOLE_OR_AUTO)
     if lim.kind == 'decimal':
+        if ',' in text:
+            return None, NO_COMMA
         value = _above_zero(text)
         return (value, None) if value else (None, ABOVE_ZERO.format(default=shown(lim, lim.default)))
     if lim is AUDIO or lim.setting == AUDIO.setting:
@@ -136,9 +150,9 @@ def check(lim, text, current=None, places=None):
 
 
 def shown(lim, value):
-    """A value as the page shows it: thousands marked in whole numbers."""
+    """A value as the page shows it: thousands marked in whole numbers (one too long to be a limit as it was typed)."""
     value = str(value)
-    return f'{int(value):,}' if lim.kind in ('number', 'count') and value.isdigit() else value
+    return f'{int(value):,}' if lim.kind in ('number', 'count') and value.isdigit() and len(value) <= LONGEST else value
 
 
 def current(lim, env):

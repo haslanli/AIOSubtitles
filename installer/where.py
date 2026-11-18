@@ -35,8 +35,16 @@ NO_FOLDER = (f'Setup needs a folder for its files: add -v "$PWD:{MOUNT}" to the 
              'made for it (README, Install).')
 NO_PAGE_PORT = (f'The setup page needs a port on this machine: add -p 127.0.0.1:{PAGE_PORT}:{PAGE_PORT} to the docker '
                 'run command (README, Install), or give every answer with --answers FILE --yes.')
+# its port published beyond this machine (-p 8789:8789): one try from another computer sends the page's key in clear
+PAGE_PORT_NOT_LOCAL = ('The setup page must be reachable on this machine only: use '
+                       f'-p 127.0.0.1:{PAGE_PORT}:{PAGE_PORT} in the docker run command (README, Install), '
+                       f'not -p {PAGE_PORT}:{PAGE_PORT}.')
+LOOPBACK = ('127.0.0.1', '::1')
 
-Place = namedtuple('Place', 'route network container image local run_as page_port host_folder owner gateway')
+# page_exposed: the page's port is published on more than this machine's loopback address
+Place = namedtuple('Place', 'route network container image local run_as page_port host_folder owner gateway '
+                            'page_exposed')
+Place.__new__.__defaults__ = (False,)
 
 
 def _repo(name):
@@ -72,19 +80,20 @@ def place_from(info, image, version, route, owner):
         pinned = f'{repo}:{version}@{digest}'
     network = 'host' if (info.get('HostConfig') or {}).get('NetworkMode') == 'host' else 'bridge'
     settings = info.get('NetworkSettings') or {}
-    page_port = None
+    page_port, page_exposed = None, False
     if network == 'bridge':
         binds = (settings.get('Ports') or {}).get(f'{PAGE_PORT}/tcp') or []
         binds = sorted(binds, key=lambda b: b.get('HostIp') != '127.0.0.1')
         if binds:
             page_port = int(binds[0]['HostPort'])
+        page_exposed = any(b.get('HostIp') not in LOOPBACK for b in binds)
     nets = settings.get('Networks') or {}
     gateway = '' if network == 'host' else ((nets.get('bridge') or next(iter(nets.values()), {})).get('Gateway') or '')
     target = MOUNT if route == 'image' else f'{MOUNT}/state'
     source = next((m.get('Source') for m in info.get('Mounts') or [] if m.get('Destination') == target), '') or ''
     host_folder = source if route == 'image' else posixpath.dirname(source.rstrip('/'))
     return Place(route, network, info.get('Id', ''), pinned, local, run_as, page_port, host_folder, tuple(owner),
-                 gateway)
+                 gateway, page_exposed)
 
 
 def missing(info, route):

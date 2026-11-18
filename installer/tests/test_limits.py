@@ -115,6 +115,35 @@ class Checks(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertEqual(limits.check(lim, bad), (None, 'A number above 0, like 100.'))
 
+    def test_a_comma_in_a_gb_value_is_refused(self):
+        # every comma was dropped: "1,5" (1.5 with a decimal comma) became 15 GB, "0,5" 5 GB, "1,2,3" 123 GB
+        lim = self.lim('SUBSYNC_DAILY_BUDGET_GB')
+        for bad in ('1,5', '0,5', '2,5', '12,34', '1,2,3', '1,000', '1,000.5', ',5'):
+            with self.subTest(bad=bad):
+                self.assertEqual(limits.check(lim, bad),
+                                 (None, 'A number above 0, with a dot for decimals and no commas, like 1.5.'))
+        self.assertEqual(limits.check(lim, '1.5'), ('1.5', None))
+        self.assertEqual(limits.check(self.lim('SUBSYNC_MAX_USERS'), '1,000'), ('1000', None))   # thousands: whole only
+
+    def test_what_subsync_cant_hold_is_refused_with_the_fields_words(self):
+        # "1e300" GB and a 400-digit MB a day were written, and subsync crashed at start (OverflowError) and restarted
+        # in a loop; over 4300 digits crashed the check itself (ValueError), and with it the setup page's request
+        daily = self.lim('SUBSYNC_DAILY_BUDGET_GB')
+        for bad in ('1e300', '2e299', '1' * 16, '9' * 400, '9' * 5000):
+            with self.subTest(bad=bad[:20]):
+                self.assertEqual(limits.check(daily, bad), (None, 'A number above 0, like 100.'))
+        self.assertEqual(limits.check(daily, '1e290'), (str(int(1e290)), None))      # its bytes still a number
+        self.assertEqual(limits.check(daily, ' 123456789012345 '), ('123456789012345', None))    # 15 characters
+        by = {lim.setting: lim for lim in limits.hosting(usenet=True, audio=True)}
+        for setting, words in (('SUBSYNC_USER_DAILY_MB', 'A whole number from 1, like 10,000.'),
+                               ('SUBSYNC_USER_AUDIO_PER_DAY', 'A whole number from 0, like 20.'),
+                               ('SUBSYNC_SYNCS_AT_ONCE', 'A whole number from 1, or auto.')):
+            for bad in ('9' * 16, '9' * 400, '9' * 5000, '9,999,999,999,999,999'):
+                with self.subTest(setting=setting, bad=bad[:20]):
+                    self.assertEqual(limits.check(by[setting], bad), (None, words))
+            with self.subTest(setting=setting, good='15 characters'):
+                self.assertEqual(limits.check(by[setting], '999,999,999,999'), ('999999999999', None))
+
     def test_the_segmented_choices(self):
         audio, langs = self.lim('SUBSYNC_AUDIO_BUDGET_GB'), self.lim('SUBSYNC_MAX_LANGUAGES')
         self.assertEqual(limits.check(audio, '2'), ('2', None))
@@ -163,6 +192,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(limits.shown(self.lim('SUBSYNC_USER_DAILY_MB'), '1000'), '1,000')
         self.assertEqual(limits.shown(self.lim('SUBSYNC_DAILY_BUDGET_GB'), '50'), '50')
         self.assertEqual(limits.shown(self.lim('SUBSYNC_SYNCS_AT_ONCE'), 'auto'), 'auto')
+        self.assertEqual(limits.shown(self.lim('SUBSYNC_USER_DAILY_MB'), '9' * 5000), '9' * 5000)   # refused: as typed
 
 
 class InTheEnvFile(unittest.TestCase):
