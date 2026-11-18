@@ -8,15 +8,16 @@ at a time and never on the same file twice at once.
 
 A worker with nothing to do for a while stops, and its opened record leaves memory; the next request opens it again.
 """
+import io
 import logging
 import re
+import socket
 import threading
 import time
 import urllib.parse
-from http.server import ThreadingHTTPServer
 
 from . import pages, ui
-from .addon import App, Handler
+from .addon import App, Handler, Server
 from .aiosconfig import MAX_LANGUAGES, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
@@ -39,21 +40,22 @@ def person_audio(record, settings):
     return "pick" if choice == "open" and settings.user_opened_per_day <= 0 else choice
 
 
-def user_settings(env, record, token):
+def user_settings(env, record, token, instance=None):
     """A person's own settings: the service's, with their languages, their sync config, their Usenet config,
     their own address and their own audio choice (the instance's audio route and limits, started as they chose;
     the instance's SUBSYNC_AUDIO_WHEN is not theirs). A record for stored copies only has no sync config:
-    nothing to read through; one with Usenet only has only the Usenet config."""
-    base = Settings(env).public_base
+    nothing to read through; one with Usenet only has only the Usenet config. `instance`: the service's own settings,
+    made from `env` (the Pool passes the ones it has, so `env` is parsed once more only, for the person's own)."""
+    if instance is None:
+        instance = Settings(env)
     own = dict(env)
     own.update({"SUBSYNC_LANGUAGES": ",".join(record["languages"]),
                 "SUBSYNC_SOURCE_MANIFEST": record.get("sync_link") or "",
                 "SUBSYNC_SOURCE_PASSWORD": record.get("sync_password") or "",
                 "SUBSYNC_USENET_MANIFEST": record.get("usenet_link") or "",
                 "SUBSYNC_USENET_PASSWORD": record.get("usenet_password") or "",
-                "SUBSYNC_PUBLIC_BASE": f"{base}/u/{token}",
+                "SUBSYNC_PUBLIC_BASE": f"{instance.public_base}/u/{token}",
                 "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
-    instance = Settings(env)
     if instance.public and instance.tmdb_personal:     # the person's own TMDB key, when the instance asks for one
         own["SUBSYNC_TMDB_KEY"] = record.get("tmdb_key") or ""
     s = Settings(own)
@@ -126,7 +128,8 @@ class UserUsenetCounts:
 
 
 class StoreOnly:
-    """The limits of a person who gets no worker now (too many people active): nothing is queued or read."""
+    """The limits of a person answered from the shared store only (a record for stored copies, or no worker free
+    now): nothing is queued or read."""
     who = None   # no person's key: the sources' fair shares count no one for them (Worker.who)
 
     def may_queue(self, queued):
@@ -154,8 +157,23 @@ class StoreOnly:
         pass
 
 
+# What a person's App that stopped knew of the files they asked about (Worker.seen) goes to their next one for this
+# long, so the entries of a list they got before still download: a player keeps a subtitle list an hour (AIOMetadata)
+SEEN_KEPT_S = 3600
+
+
+def _refusing(safety):
+    """Whether a person's refusals in a row still count towards their next back-off (worker.Safety): some came, and the
+    pause the last one started ended less than the longest back-off ago."""
+    return safety.refusals > 0 and safety.clock() < safety.refused_until + safety.backoff_max_s
+
+
 class Pool:
-    """The people with a running worker, by user id (never by token)."""
+    """Everyone being served, by user id (never by token), each with an App kept between their requests: with a running
+    worker, for up to SUBSYNC_ACTIVE_WORKERS people, else answering from the shared store only, as for a record for
+    stored copies. Kept, an App knows the files its person asked about, which the entries of their lists need
+    when they are downloaded (a copy is rebuilt from the person's own list). Their next App starts from what the
+    last one had: their refusal back-off (doubling while refusals come in a row) and, for SEEN_KEPT_S, those files."""
 
     def __init__(self, settings, env, store, users, clock=time.time, start_workers=True):
         self.s, self.env, self.store, self.users, self.clock = settings, dict(env), store, users, clock
@@ -171,21 +189,32 @@ class Pool:
         # one original-language lookup for everyone: answers shared, each person's own TMDB key with their requests
         from .origlang import make_lookup
         self.lookup = make_lookup(settings, store)
-        self.entries = {}          # user id -> {"app", "last", "day"}
+        # user id -> {"app", "last", "day", "kind"}: kind "worker" (theirs runs), "stored" (a record for stored copies
+        # only) or "waiting" (no worker was free: built again with one once one is)
+        self.entries = {}
+        self.safeties = {}         # user id -> their worker.Safety, while they have an App or refusals that count
+        self.seen = {}             # user id -> (until, Worker.seen) of their App that stopped last
+        self.stops = 0             # Apps stopped so far: a record opened before a stop may have changed or gone
         self.lock = threading.Lock()
         self.expired_day = None
 
-    def _build(self, token, record, limits, start):
-        s = user_settings(self.env, record, token)
+    def _build(self, uid, token, record, limits, start):
+        """A new App for the person (lock held), with their refusal back-off and the files their last one knew."""
+        s = user_settings(self.env, record, token, self.s)
         aios = Aios.from_settings(s, s.source_manifest, s.source_password, self.s.public_base)
         usenet = gate = None
         if self.s.usenet and self.s.usenet_listings_per_day > 0 and s.usenet_manifest and \
                 isinstance(limits, UserLimits):
             usenet = Aios.from_settings(s, s.usenet_manifest, s.usenet_password, self.s.public_base)
             gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(), who=limits.who)
-        safety = Safety(backoff_s=s.backoff_s)
+        safety = self.safeties.get(uid)
+        if safety is None:
+            safety = self.safeties[uid] = Safety(backoff_s=s.backoff_s)
         worker = Worker(s, self.store, aios, safety, vad_factory=self.vad, extra=self.extra, turn=self.turn,
                         limits=limits, usenet=usenet, usenet_gate=gate, audio_turn=self.audio_turn, lookup=self.lookup)
+        until, seen = self.seen.pop(uid, (0.0, {}))
+        if until > self.clock():
+            worker.seen.update(seen)
         if start:
             worker.start()
         return App(s, self.store, worker, safety, state=record.get("state"), detail=record.get("state_detail"))
@@ -199,60 +228,113 @@ class Pool:
             return self._vad
 
     def app(self, token):
-        """The person's App (their worker started on first use), or None for a token nobody signed up with. Past
-        SUBSYNC_ACTIVE_WORKERS, an App that answers from the shared store only."""
+        """The person's App, kept for their next requests, or None for a token nobody signed up with. A new one opens
+        their record and gets a worker (started on first use) while fewer than SUBSYNC_ACTIVE_WORKERS people have one;
+        else, as always for a record for stored copies only, it answers from the shared store only."""
         uid = self.users.user_id(token) if isinstance(token, str) else None
-        now = self.clock()
-        with self.lock:
-            entry = self.entries.get(uid)
-            if entry is not None:
-                entry["last"] = now
-                if entry["day"] != day_of(now):
-                    entry["day"] = day_of(now)
-                    self.users.touch(token)
-                return entry["app"]
-        record = self.users.open(token)
-        if record is None:
+        while True:
+            with self.lock:
+                app, stops = self._kept(uid, token), self.stops
+            if app is not None:
+                return app
+            record = self.users.open(token)
+            if record is None:
+                return None
+            self.users.touch(token)
+            with self.lock:
+                # else an App was stopped meanwhile (a save, a refresh, a delete), maybe this person's: their record is
+                # opened again, so one changed is read as it is now and one deleted isn't served on
+                if self.stops == stops:
+                    # another request of theirs may have made it meanwhile
+                    return self._kept(uid, token) or self._add(uid, token, record)
+
+    def _kept(self, uid, token):
+        """The person's kept App, its use noted (their record touched once a UTC day); None when there is none, or when
+        it waits for a worker and one is free now (lock held)."""
+        entry = self.entries.get(uid)
+        if entry is None or (entry["kind"] == "waiting" and self._workers() < self.s.active_workers):
             return None
-        self.users.touch(token)
+        now = self.clock()
+        entry["last"] = now
+        if entry["day"] != day_of(now):
+            entry["day"] = day_of(now)
+            self.users.touch(token)
+        return entry["app"]
+
+    def _add(self, uid, token, record):
+        """The person's new App, kept (lock held); in place of one that waited for a worker."""
+        waited = self.entries.pop(uid, None)
+        if waited is not None:     # its worker never started: it stops at once
+            self._keep_seen(uid, waited["app"])
+            waited["app"].worker.stop()
         if store_only(record):     # answered from the shared store only, never a worker or a read of theirs
-            return self._build(token, record, StoreOnly(), start=False)
-        with self.lock:
-            entry = self.entries.get(uid)
-            if entry is not None:          # another request opened it meanwhile
-                return entry["app"]
-            if len(self.entries) >= self.s.active_workers:
-                return self._build(token, record, StoreOnly(), start=False)
-            app = self._build(token, record, UserLimits(self.s, self.users, token), start=self.start_workers)
-            self.entries[uid] = {"app": app, "last": now, "day": day_of(now)}
-            return app
+            kind, limits = "stored", StoreOnly()
+        elif self._workers() < self.s.active_workers:
+            kind, limits = "worker", UserLimits(self.s, self.users, token)
+        else:
+            kind, limits = "waiting", StoreOnly()
+        app = self._build(uid, token, record, limits, start=kind == "worker" and self.start_workers)
+        now = self.clock()
+        self.entries[uid] = {"app": app, "last": now, "day": day_of(now), "kind": kind}
+        return app
+
+    def _workers(self):
+        """How many people have a worker now (lock held)."""
+        return sum(entry["kind"] == "worker" for entry in self.entries.values())
+
+    def _keep_seen(self, uid, app):
+        """What an App that stops knew of the files its person asked about, for their next one (lock held)."""
+        with app.worker.cv:
+            seen = dict(app.worker.seen)
+        if seen:
+            self.seen[uid] = (self.clock() + SEEN_KEPT_S, seen)
 
     def active(self):
+        """How many people have a worker now."""
         with self.lock:
-            return len(self.entries)
+            return self._workers()
 
     def live_app(self, token):
-        """The person's running App, without opening their record or starting anything; None when there is none."""
+        """The person's kept App, without opening their record or starting anything; None when there is none."""
         with self.lock:
             entry = self.entries.get(self.users.user_id(token))
         return entry["app"] if entry else None
 
-    def stop(self, token):
-        """Stops the person's worker (refresh, delete); the next request opens their record again."""
+    def stop(self, token, reset=False, forget=False):
+        """Stops the person's App (a settings save, a refresh, a delete, a change the daily check found); the next
+        request opens their record again. Their next App keeps their refusal back-off and the files this one knew,
+        except: `reset` drops the back-off (a refresh: they may have changed their debrid key), `forget` drops both (a
+        delete)."""
+        uid = self.users.user_id(token)
         with self.lock:
-            entry = self.entries.pop(self.users.user_id(token), None)
+            self.stops += 1
+            entry = self.entries.pop(uid, None)
+            if entry is not None and not forget:
+                self._keep_seen(uid, entry["app"])
+            if reset or forget:
+                self.safeties.pop(uid, None)
+            if forget:
+                self.seen.pop(uid, None)
         if entry is not None:
             entry["app"].worker.stop()
 
     def reap(self):
-        """Stops the workers idle longer than SUBSYNC_WORKER_IDLE_MIN with nothing waiting or running."""
-        cutoff = self.clock() - self.s.worker_idle_s
+        """Stops the Apps idle longer than SUBSYNC_WORKER_IDLE_MIN with nothing waiting or running (the files they knew
+        go to their person's next App), and drops what was kept of people that no next App needs any more. Returns how
+        many stopped."""
+        now = self.clock()
+        cutoff = now - self.s.worker_idle_s
         stopped = []
         with self.lock:
             for uid, entry in list(self.entries.items()):
                 worker = entry["app"].worker
                 if entry["last"] < cutoff and not worker.jobs and worker.current is None and worker.current_audio is None:
-                    stopped.append(self.entries.pop(uid)["app"].worker)
+                    del self.entries[uid]
+                    self._keep_seen(uid, entry["app"])
+                    stopped.append(worker)
+            self.seen = {uid: kept for uid, kept in self.seen.items() if kept[0] > now}
+            self.safeties = {uid: safety for uid, safety in self.safeties.items()
+                             if uid in self.entries or _refusing(safety)}
         for worker in stopped:
             worker.stop()
         return len(stopped)
@@ -324,7 +406,8 @@ class PublicService:
         # worker with the new record
         self.checker = Checker(settings, users, on_change=pool.stop, api_factory=api_factory, clock=clock,
                                timeout=timeout)
-        # the routes everyone shares (synced files, health) need no person's service: an App that never works
+        # the routes everyone shares (health, and synced files from a store that keeps their texts) need no person's
+        # service: an App that never works
         self.shared = App(settings, store, Worker(settings, store, Aios(""), Safety(), limits=StoreOnly()), Safety())
 
     def client_ip(self, request):
@@ -341,8 +424,47 @@ class PublicService:
         return f"{self.s.public_base}/u/{token}/manifest.json"
 
 
+# A request's line, headers and form come whole within this long of its first bytes, however slowly they trickle in:
+# a sender that keeps each wait under the connection's timeout can't hold one of SUBSYNC_MAX_CONNECTIONS for hours
+REQUEST_ARRIVAL_S = 10
+
+
+class _ArrivalBound(socket.SocketIO):
+    """A connection's reads (PublicHandler.rfile). A request's first bytes are waited for as an idle kept-open
+    connection is (the handler's timeout); after them each read waits at most what is left of REQUEST_ARRIVAL_S."""
+
+    def __init__(self, sock, timeout):
+        super().__init__(sock, "rb")
+        self.sock, self.timeout, self.until = sock, timeout, None
+
+    def readinto(self, b):
+        if self.until is None:          # a request's first bytes
+            got = super().readinto(b)
+            self.until = time.monotonic() + REQUEST_ARRIVAL_S
+            return got
+        left = self.until - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the request came too slowly")
+        self.sock.settimeout(min(left, self.timeout))
+        try:
+            return super().readinto(b)
+        finally:
+            self.sock.settimeout(self.timeout)
+
+
 class PublicHandler(Handler):
     service = None
+
+    def setup(self):
+        super().setup()
+        # every read through _ArrivalBound: the reader setup() made is let go before it has read anything
+        self.rfile.close()
+        self.arrival = _ArrivalBound(self.connection, self.timeout)
+        self.rfile = io.BufferedReader(self.arrival)
+
+    def handle_one_request(self):
+        self.arrival.until = None       # this request's time starts with its first bytes
+        super().handle_one_request()
 
     def do_GET(self):
         self._route("GET")
@@ -352,6 +474,12 @@ class PublicHandler(Handler):
 
     def _html(self, code, text, personal=False):
         self._send(code, text, "text/html; charset=utf-8", PERSONAL_HEADERS if personal else PAGE_HEADERS)
+
+    def _asset(self, text, ctype, url):
+        """The script or the stylesheet. Pages ask for it at `url`, which carries the hash of its text (ui.JS_URL,
+        ui.CSS_URL): what that address gives never changes, so it is kept for good, as the typefaces are; asked for at
+        any other (an old page's hash, none), for an hour."""
+        return self._send(200, text, ctype, FONT_HEADERS if self.path == url else SCRIPT_HEADERS)
 
     def _font(self, name):
         """One of the two typefaces, as the image build put them in; 404 otherwise."""
@@ -407,14 +535,20 @@ class PublicHandler(Handler):
             if path == "/privacy" and method == "GET":
                 return self._html(200, pages.privacy_page(svc.s))
             if path == "/static/app.js" and method == "GET":
-                return self._send(200, ui.APP_JS, "text/javascript; charset=utf-8", SCRIPT_HEADERS)
+                return self._asset(ui.APP_JS, "text/javascript; charset=utf-8", ui.JS_URL)
             if path == "/static/app.css" and method == "GET":
-                return self._send(200, ui.APP_CSS, "text/css; charset=utf-8", SCRIPT_HEADERS)
+                return self._asset(ui.APP_CSS, "text/css; charset=utf-8", ui.CSS_URL)
             font = FONT_PATH.match(path)
             if font and method == "GET":
                 return self._font(font.group(1))
             if path == "/health" or path.startswith("/file/"):
-                return self.dispatch(svc.shared, path, False) if method == "GET" else self._send(405, b"")
+                if method != "GET":
+                    return self._send(405, b"")
+                if path != "/health" and not svc.store.keep_texts:
+                    # a store of recipes (public mode's): a copy is rebuilt from a person's own list, under
+                    # their link (/u/<token>/file/), never here
+                    return self._send(404, b"")
+                return self.dispatch(svc.shared, path, False)
             m = USER_PATH.match(path)
             if not m:
                 return self._not_found()
@@ -501,7 +635,7 @@ class PublicHandler(Handler):
                 except SignupError as e:      # the password field is called "refresh" on this page, the link "new_link"
                     return page(e.code, error=e.message,
                                 field={"password": "refresh", "link": "new_link"}.get(e.field, e.field))
-                svc.pool.stop(token)
+                svc.pool.stop(token, reset=True)   # reads start again at once: they may have changed their debrid key
                 svc.checker.forget(token)
                 if result.store_only:          # stored copies only: moved there by this refresh, or still
                     done = ("to-stored" if result.to_store_only else "stored") + ("-manual" if result.manual else "")
@@ -522,7 +656,7 @@ class PublicHandler(Handler):
             if action == "delete-confirm":
                 return self._html(200, pages.delete_confirm_page(stored=store_only(record)), personal=True)
             if action == "delete":
-                svc.pool.stop(token)
+                svc.pool.stop(token, forget=True)
                 svc.checker.forget(token)
                 try:
                     outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
@@ -531,6 +665,10 @@ class PublicHandler(Handler):
                     return self._html(e.code, pages.delete_confirm_page(
                         error=e.message, field="delete" if e.field == "password" else e.field,
                         stored=store_only(record)), personal=True)
+                # a request while it took (its AIOStreams calls) may have opened the record and made an App again: it
+                # stops now that the record is gone (Pool.app opens a record again after a stop, and finds none)
+                svc.pool.stop(token, forget=True)
+                svc.checker.forget(token)
                 return self._html(200, pages.deleted_page(outcome), personal=True)
         except SignupError as e:
             return page(e.code, error=e.message, field=e.field)
@@ -548,9 +686,8 @@ def _chosen(form, limit=MAX_LANGUAGES):
     return None if problem else [three for _, _, three in langs]
 
 
-class _CappedServer(ThreadingHTTPServer):
+class _CappedServer(Server):
     """At most SUBSYNC_MAX_CONNECTIONS connections at once; the next is answered 503 at once and closed."""
-    daemon_threads = True
 
     def __init__(self, address, handler, cap):
         super().__init__(address, handler)

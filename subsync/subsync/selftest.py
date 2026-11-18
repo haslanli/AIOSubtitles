@@ -35,7 +35,7 @@ def run(url, cap_bytes=None, settings=None, size=None):
     cap_bytes = cap_bytes or settings.index_cap
     guard = CapGuard(cap_bytes)
     reader = RangeReader(rewrite(url, settings.url_rewrite), "selftest", guard, timeout=settings.read_timeout,
-                         size=size, size_tolerance=0.0005, size_slack=settings.size_slack)
+                         size=size, size_slack=settings.size_slack)
     t0 = time.time()
     out = {"ok": False}
     try:

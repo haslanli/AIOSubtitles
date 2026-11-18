@@ -35,6 +35,7 @@ import hmac
 import json
 import logging
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -558,8 +559,21 @@ class Handler(BaseHTTPRequestHandler):
         return self._subtitle(no_subtitle_note(lang), "note")
 
 
+class Server(ThreadingHTTPServer):
+    """The HTTP server of both modes: a thread per connection, none of them keeping the process up."""
+    daemon_threads = True
+    # connections waiting to be taken: socketserver's 5 overflow when players and AIOStreams ask together, and the
+    # system then refuses the next ones (macOS) or drops them for the client to try again 1 to 3 s later (Linux)
+    request_queue_size = 128
+
+    def handle_error(self, request, client_address):
+        """A connection that broke between requests (the client reset it, or it timed out) is no failure; anything else
+        is logged by its kind only, as a request's own failure is (socketserver would print a traceback)."""
+        error = sys.exc_info()[1]
+        if not isinstance(error, (ConnectionError, TimeoutError)):
+            log.warning("connection failed: %s", type(error).__name__)
+
+
 def serve(app, port):
     handler = type("BoundHandler", (Handler,), {"app": app})   # this server's app, not every Handler's
-    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
-    server.daemon_threads = True
-    return server
+    return Server(("0.0.0.0", port), handler)

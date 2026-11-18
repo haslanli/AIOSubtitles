@@ -743,6 +743,205 @@ class PoolTest(unittest.TestCase):
         self.pool.housekeeping()
         self.assertIsNone(self.users.open(self.tokens[0]))
 
+    def test_a_new_app_parses_the_environment_once(self):
+        # Twice more, for the instance's own settings, which the Pool has
+        from unittest import mock
+        made, real = [], Settings.__init__
+
+        def counted(settings, *a, **k):
+            made.append(settings)
+            real(settings, *a, **k)
+        with mock.patch.object(Settings, "__init__", counted):
+            app = self.pool.app(self.tokens[1])
+        self.assertEqual(made, [app.s])
+        self.assertEqual(app.s.public_base, "https://subs.test/u/" + self.tokens[1])
+        self.assertEqual(app.s.languages, ["rus", "eng"])
+
+
+SRT_EN = ("1\n00:00:01,000 --> 00:00:02,000\nHello there my friend\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n\n"
+          "3\n00:00:05,000 --> 00:00:06,000\nYou are a bold one\n")
+SYNCED_EN = SRT_EN.replace("00:00:01,000 --> 00:00:02,000", "00:00:01,500 --> 00:00:02,500")
+SRT_FR = ("1\n00:00:01,000 --> 00:00:02,000\nBonjour mon ami\n\n2\n00:00:03,000 --> 00:00:04,000\nGénéral Kenobi\n\n"
+          "3\n00:00:05,000 --> 00:00:06,000\nVous êtes bien audacieux\n")
+FILE_KEY, ALIAS = "0123456789abcdef-1000", "hash:0123456789abcdef|1000"
+FILE = "videoHash=0123456789abcdef&videoSize=1000"
+
+
+class Listing:
+    """The built-in sources' stand-in: every file's list has one English and one French subtitle, served on this
+    machine."""
+    ledger = None
+
+    def __init__(self, base):
+        self.base = base
+
+    def search(self, type_, video_id, langs=None, hints=None, skip=None):
+        return [{"id": "os-en", "url": f"{self.base}/en.srt", "lang": "eng", "source": "stub"},
+                {"id": "os-fr", "url": f"{self.base}/fr.srt", "lang": "fre", "source": "stub"}]
+
+    def headers_for(self, cand):
+        return None
+
+
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+class KeptAppTest(unittest.TestCase):
+    """A person's App is kept between their requests, a worker or not, so the entries of a list download (public mode
+    rebuilds a copy, or gets an original, from the person's own list); their next App starts from what the last
+    one had: the files they asked about and their refusal back-off."""
+
+    def setUp(self):
+        import functools
+        import http.server
+        import threading
+        from helpers import TempDir
+        from subsync.public import Pool
+        from subsync.store import Store
+        from subsync.users import Users
+        self.tmp = TempDir()
+        self.dir = self.tmp.__enter__()
+        self.addCleanup(self.tmp.__exit__, None, None, None)
+        subs = os.path.join(self.dir, "subs")
+        os.makedirs(subs)
+        for name, text in (("en.srt", SRT_EN), ("fr.srt", SRT_FR)):
+            with open(os.path.join(subs, name), "w", encoding="utf-8") as f:
+                f.write(text)
+
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=subs))
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
+                    "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_ACTIVE_WORKERS": "1",
+                    "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off"}
+        self.settings = Settings(self.env)
+        self.clock = Clock()
+        self.store = Store(self.dir, keep_texts=False)      # as public mode keeps it (__main__.public_store)
+        self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.settings.secret_bytes(), clock=self.clock)
+        self.addCleanup(self.users.close)
+        self.pool = Pool(self.settings, self.env, self.store, self.users, clock=self.clock, start_workers=False)
+        self.addCleanup(self.pool.close)
+        self.pool.extra = Listing(f"http://127.0.0.1:{server.server_address[1]}")
+        import hashlib
+        self.key = self.store.put(FILE_KEY, hashlib.sha256(SRT_EN.encode()).hexdigest(), "eng", 0, "synced",
+                                  body=SYNCED_EN, fmt="srt", candidate_id="os-en", original=SRT_EN)
+        self.store.alias(ALIAS, FILE_KEY)
+
+    def person(self, languages=("eng",), **fields):
+        """A signed-up person with nothing to read through (their list is the built-in sources' alone)."""
+        from subsync.users import new_token
+        token = new_token()
+        self.users.create(token, dict({"instance": "https://aios.test", "main_uuid": "0" * 8 + "-0000-0000-0000-" + "0" * 12,
+                                       "languages": list(languages), "version": 1}, **fields))
+        return token
+
+    def listed(self, app):
+        return [e["label"] for e in app.subtitles("movie", "tt1", FILE)]
+
+    def test_stored_copies_only_download_what_they_were_listed(self):
+        # Their App was made again for each request, so the download (the player's next request) reached one
+        # that knew nothing of the file: 404
+        token = self.person(store_only=True)
+        app = self.pool.app(token)
+        self.assertEqual(self.listed(app), ["English (synced)"])
+        again = self.pool.app(token)
+        self.assertIs(again, app)
+        self.assertEqual(again.text_of(self.key), SYNCED_EN)
+        self.assertEqual(self.pool.active(), 0)                   # still no worker of their own
+
+    def test_past_the_cap_their_original_downloads(self):
+        # An "(original)" entry's download got the "No French subtitle was found" note
+        import time
+        self.pool.app(self.person())                              # the only worker
+        token = self.person(languages=("fre",))
+        self.store.kept_original_put(FILE_KEY, "fre", "os-fr", 0.9)   # someone else's judging kept it
+        app = self.pool.app(token)
+        self.assertEqual(self.listed(app), ["French (original)"])
+        again = self.pool.app(token)
+        self.assertIs(again, app)
+        text, why, _ = again.worker.original_for(ALIAS, "fre", time.time() + 10, "os-fr")
+        self.assertEqual((text, why), (SRT_FR, None))
+        self.assertEqual(self.pool.active(), 1)
+
+    def test_past_the_cap_a_worker_once_one_is_free_with_what_it_knew(self):
+        first = self.person()
+        self.pool.app(first)
+        token = self.person()
+        app = self.pool.app(token)
+        self.assertIsNone(app.worker.who)                         # answered from the store only
+        self.assertEqual(self.listed(app), ["English (synced)"])
+        self.pool.stop(first)
+        again = self.pool.app(token)
+        self.assertIsNot(again, app)
+        self.assertIsNotNone(again.worker.who)                    # their own worker now
+        self.assertEqual(self.pool.active(), 1)
+        self.assertEqual(again.text_of(self.key), SYNCED_EN)
+
+    def test_the_next_app_still_downloads_what_was_listed(self):
+        # An App stopped as idle (or by a settings save, the daily check, a restart of theirs) took the files
+        # it knew with it, while players keep the list an hour
+        from subsync.public import SEEN_KEPT_S
+        token = self.person()
+        app = self.pool.app(token)
+        self.assertEqual(self.listed(app), ["English (synced)"])
+        self.clock.t += self.settings.worker_idle_s + 1
+        self.assertEqual(self.pool.reap(), 1)
+        again = self.pool.app(token)
+        self.assertIsNot(again, app)
+        self.assertEqual(again.text_of(self.key), SYNCED_EN)
+        self.pool.stop(token)                                     # a settings save
+        self.assertEqual(self.pool.app(token).text_of(self.key), SYNCED_EN)
+        self.pool.stop(token)
+        self.clock.t += SEEN_KEPT_S + 1                           # not for longer than a player keeps a list
+        self.assertIsNone(self.pool.app(token).text_of(self.key))
+        app = self.pool.app(token)
+        self.listed(app)
+        self.pool.stop(token, forget=True)                        # a delete: nothing of theirs is kept
+        self.assertIsNone(self.pool.app(token).text_of(self.key))
+
+    def test_the_refusal_back_off_outlives_a_stopped_app(self):
+        # A new App started it again at 15 minutes, so it never doubled past the first steps
+        token = self.person()
+        app = self.pool.app(token)
+        self.assertEqual(app.safety.refused(), 900)
+        self.assertEqual(app.safety.refused(), 1800)              # doubling with each refusal in a row
+        self.clock.t += self.settings.worker_idle_s + 1
+        self.assertEqual(self.pool.reap(), 1)
+        again = self.pool.app(token)
+        self.assertIs(again.safety, app.safety)
+        self.assertEqual(again.safety.refused(), 3600)
+        self.pool.stop(token)                                     # a settings save keeps it
+        self.assertIs(self.pool.app(token).safety, app.safety)
+        self.pool.stop(token, reset=True)                         # a refresh: they may have changed their debrid key
+        fresh = self.pool.app(token).safety
+        self.assertIsNot(fresh, app.safety)
+        self.assertEqual((fresh.refusals, fresh.backing_off()), (0, False))
+        fresh.refused()
+        fresh.read_ok()                                           # the run ended: nothing to keep once it stops
+        self.clock.t += self.settings.worker_idle_s + 1
+        self.assertEqual(self.pool.reap(), 1)
+        self.assertNotIn(self.users.user_id(token), self.pool.safeties)
+
+    def test_a_record_deleted_while_it_was_opened_is_not_served(self):
+        # A request that opened the record as a delete ended kept serving the deleted link
+        from unittest import mock
+        token = self.person()
+        real_open = self.users.open
+
+        def open_as_the_delete_ends(t):
+            record = real_open(t)
+            if record is not None:
+                self.users.delete(t)
+                self.pool.stop(t, forget=True)                    # the delete's stop, once the record is gone
+            return record
+        with mock.patch.object(self.users, "open", open_as_the_delete_ends):
+            self.assertIsNone(self.pool.app(token))
+        self.assertIsNone(self.pool.live_app(token))
+        self.assertEqual(self.pool.active(), 0)
+
 
 class HousekeepingTest(unittest.TestCase):
     """Public mode's housekeeping round: idle workers stop every round, the shared store's old rows go every

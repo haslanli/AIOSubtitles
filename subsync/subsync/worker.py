@@ -1295,8 +1295,7 @@ class Worker(threading.Thread):
             return
         guard = JobGuard(self.safety, self.store, self.s.daily_budget, self._cap(job), limits=self.limits)
         reader = RangeReader(rewrite(url, self.s.url_rewrite), job.label, guard, timeout=self.s.read_timeout,
-                             size=None if job.usenet else expected_size(hints, row), size_tolerance=0.0005,
-                             size_slack=self.s.size_slack,
+                             size=None if job.usenet else expected_size(hints, row), size_slack=self.s.size_slack,
                              max_re_resolve=USENET_MAX_RE_RESOLVE if job.usenet else MAX_RE_RESOLVE,
                              first_timeout=USENET_FIRST_READ_S if job.usenet else None,
                              size_ok=usenet_size_ok(expected_size(hints, row)) if job.usenet else None)

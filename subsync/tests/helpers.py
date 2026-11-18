@@ -11,7 +11,8 @@ FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
 
 class RangeServer:
-    """Serves files under root with Range support. fault: None | '403' | 'ignore-range' | 'wrong-size'."""
+    """Serves files under root with Range support. fault: None | '403' | 'ignore-range' | 'wrong-size' | 'aligned'
+    (a proxy that answers whole 4096-byte blocks: from the start of the block that holds the first byte asked)."""
 
     def __init__(self, root):
         self.root, self.fault, self.log, self.headers = root, None, [], []
@@ -42,6 +43,8 @@ class RangeServer:
                 if rng and outer.fault != "ignore-range":
                     a, _, b = rng[6:].partition("-")
                     start, end = int(a), min(int(b) if b else size - 1, size - 1)
+                    if outer.fault == "aligned":
+                        start -= start % 4096
                     self.send_response(206)
                     shown = size + 1000 if outer.fault == "wrong-size" else size
                     self.send_header("Content-Range", f"bytes {start}-{end}/{shown}")

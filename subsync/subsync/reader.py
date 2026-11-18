@@ -9,13 +9,15 @@ refusal like any other. Once the link has redirected, this reader asks it at mos
 after that a read the address can't answer fails without asking AIOStreams again (a connection fault
 at the download address had made 50 calls). The Real-Debrid guard checks every address, that one too. A refusal
 (HTTP 403, most likely a debrid per-account download limit) raises Refused so the worker can back off; a
-reply whose total size differs from the file's raises ReadFailed. A read that got no answer (no connection, a reset, a
-timeout) raises ReadFailed with `connection` set, so the worker can try a file's first read once more.
-Before each read the guard (budget, pause) may stop the job; after each, one that failed too, it is told the bytes
-received and the length the read asked for (guard.after_read).
+reply whose total size differs from the file's, or whose bytes start elsewhere than asked, raises ReadFailed. A read
+that got no answer (no connection, a reset, a timeout, a reply cut short) raises ReadFailed with `connection` set, so
+the worker can try a file's first read once more. Before each read the guard (budget, pause) may stop
+the job; after each, one that failed too, it is told the bytes received and the length the read asked for
+(guard.after_read).
 """
 import http.client
 import logging
+import re
 import threading
 import time
 import urllib.error
@@ -29,6 +31,9 @@ USER_AGENT = "subsync/1"
 
 
 MAX_RE_RESOLVE = 3     # look-ups of a redirecting link per reader after its first
+# how far a served file's size may be from its listed one, as a share of it, besides the listing's rounding (size_slack)
+SIZE_TOLERANCE = 0.0005
+FIRST_BYTE = re.compile(r"\s*bytes\s+([0-9]+)-", re.IGNORECASE)   # a Content-Range's first byte
 
 
 class ReadFailed(Exception):
@@ -41,11 +46,26 @@ class ReadFailed(Exception):
 
 
 def connection_fault(e):
-    """An OSError from a request that got no answer: not an HTTP status, and not one of AIOSubtitles' own refusals of
-    an address (Real-Debrid, one that isn't public), which would refuse it again."""
+    """A request that got no answer it could use, so the same read may work a moment later: an OSError that is not an
+    HTTP status nor one of AIOSubtitles' own refusals of an address (Real-Debrid, one that isn't public), which would
+    refuse it again; or a reply http.client couldn't read (cut short, a garbled status line), but a malformed address."""
+    if isinstance(e, http.client.HTTPException):
+        return not isinstance(e, http.client.InvalidURL)
     reason = e.reason if isinstance(e, urllib.error.URLError) else e
     return isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError) \
         and not isinstance(reason, (realdebrid.Blocked, net.Refused))
+
+
+def reply_range(headers, status):
+    """What a reply says it holds: (the offset of its first byte, the file's total size), each None when it doesn't
+    say. Content-Range ("bytes A-B/T") gives both; a whole file (status 200) without a total there, its Content-Length."""
+    content_range = headers.get("Content-Range") or ""
+    first = FIRST_BYTE.match(content_range)
+    total = content_range.rsplit("/", 1)[1].strip() if "/" in content_range else ""
+    if not (total.isascii() and total.isdigit()):
+        length = headers.get("Content-Length") if status == 200 else None
+        total = length if length and length.isascii() and length.isdigit() else None
+    return (int(first.group(1)) if first else None), (int(total) if total is not None else None)
 
 
 class LinkUsedUp(ReadFailed):
@@ -70,7 +90,8 @@ class CapReached(Stopped):
 
 
 class RangeReader:
-    def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=0.0, opener=None, size_slack=0,
+    def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=SIZE_TOLERANCE, opener=None,
+                 size_slack=0,
                  max_re_resolve=MAX_RE_RESOLVE, first_timeout=None, size_ok=None):
         self.url, self.label, self.guard, self.timeout = url, label, guard, timeout
         # a Usenet file: its link asked at most twice (a fresh look-up could fetch its NZB again), and
@@ -102,9 +123,10 @@ class RangeReader:
     def _open(self, start, length):
         """The response to one range request and its start time: to the address the link pointed to last time,
         else to the link, which is then followed and the address it pointed to kept; reads started together wait for one
-        look-up. When that address doesn't answer (an error status other than 429, no connection), it is dropped and
-        the link asked once more, while look-ups are left (`used_up`); a 429 there, or a failure when none are left,
-        reaches the caller like the link's own errors (urllib.error.HTTPError, OSError), so the worker backs off."""
+        look-up. When that address doesn't answer (an error status other than 429, no connection, a garbled reply), it is
+        dropped and the link asked once more, while look-ups are left (`used_up`); a 429 there, or a failure when none
+        are left, reaches the caller like the link's own errors (urllib.error.HTTPError, OSError,
+        http.client.HTTPException), so the worker backs off."""
         resolved = self.resolved
         if resolved:
             t0 = time.time()
@@ -119,7 +141,7 @@ class RangeReader:
                     raise
                 code = e.code
                 e.close()
-            except (OSError, ValueError) as e:
+            except (OSError, ValueError, http.client.HTTPException) as e:
                 if self.used_up():
                     raise
                 code = type(e).__name__
@@ -159,33 +181,28 @@ class RangeReader:
         if self.guard:
             self.guard.before_read(length)
         t0 = time.time()
-        data, status, total, sent = b"", 0, None, True
+        data, status, first, total, sent = b"", 0, None, None, True
         try:
             r, t0 = self._open(start, length)
             with r:
                 status = getattr(r, "status", 200)
-                content_range = r.headers.get("Content-Range") or ""
-                if "/" in content_range and content_range.rsplit("/", 1)[1].strip().isdigit():
-                    total = int(content_range.rsplit("/", 1)[1])
-                elif status == 200:
-                    length_header = r.headers.get("Content-Length")
-                    total = int(length_header) if length_header and length_header.isdigit() else None
-                # read at most what was asked, even when a server ignores the range (status 200)
-                chunks, left = [], length
-                while left > 0:
-                    chunk = r.read(min(1 << 20, left))
-                    if not chunk:
+                first, total = reply_range(r.headers, status)
+                # read at most what was asked, even when a server ignores the range (status 200), in one call: it fills
+                # one buffer of that size, so a large read (a moov, the Cues, an audio window) isn't held twice while
+                # pieces of it are joined
+                data = r.read(length)
+                while data and len(data) < length:   # a reply that comes in pieces
+                    more = r.read(length - len(data))
+                    if not more:
                         break
-                    chunks.append(chunk)
-                    left -= len(chunk)
-                data = b"".join(chunks)
+                    data += more
         except LinkUsedUp:
             sent = False
             raise
         except urllib.error.HTTPError as e:
             status = e.code
             e.close()
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             self._log(start, length, 0, status, t0, type(e).__name__)
             raise ReadFailed(type(e).__name__, connection=connection_fault(e)) from None
         finally:
@@ -195,29 +212,36 @@ class RangeReader:
                 self.guard.after_read(len(data), length)
         self._count(got=len(data))
         self._log(start, length, len(data), status, t0, None)
+        self._check(status, start, first, total)
+        expected = min(length, self.size - start) if self.size is not None else length
+        if len(data) < expected:
+            raise ReadFailed("short reply")
+        return data
+
+    def _check(self, status, start, first, total):
+        """A reply as get() and stream() take it (reply_range gives `first` and `total`): Refused for a refusal, else
+        ReadFailed for another status, a range ignored or started elsewhere than asked (a proxy's block-aligned answer),
+        or a total size that isn't the file's (the size_ok rule while the size isn't known, else the tolerance and the
+        slack). A total that passes is the file's size from then on."""
         if status in (403, 429):
             raise Refused(f"HTTP {status}")
         if status not in (200, 206):
             raise ReadFailed(f"HTTP {status}")
         if status == 200 and start != 0:
             raise ReadFailed("range ignored")
+        if status == 206 and first is not None and first != start:
+            raise ReadFailed("range differs")
         if total is not None:
             if self.size is None:
                 if self.size_ok is not None and not self.size_ok(total):
                     raise ReadFailed("size differs")
-                self.size = total
             elif abs(total - self.size) > max(self.tolerance * self.size, self.slack):
                 raise ReadFailed("size differs")
-            else:
-                self.size = total
-        expected = min(length, self.size - start) if self.size is not None else length
-        if len(data) < expected:
-            raise ReadFailed("short reply")
-        return data
+            self.size = total
 
     def stream(self, start, length, chunk=256 * 1024):
         """One bounded range request read in chunks as the caller takes them; a caller that stops early (closes the
-        generator) closes the connection, and only the bytes read are counted. The same checks as get()."""
+        generator) closes the connection, and only the bytes read are counted. The same checks as get() (_check)."""
         if length <= 0:
             return
         if self.size is not None and start >= self.size:
@@ -237,7 +261,7 @@ class RangeReader:
             if e.code in (403, 429):
                 raise Refused(f"HTTP {e.code}") from None
             raise ReadFailed(f"HTTP {e.code}") from None
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             self._count(requests=1)
             self._log(start, length, 0, 0, t0, type(e).__name__)
             raise ReadFailed(type(e).__name__, connection=connection_fault(e)) from None
@@ -247,17 +271,7 @@ class RangeReader:
         self._count(requests=1)
         got, status, error = 0, getattr(r, "status", 200), None
         try:
-            if status == 200 and start != 0:
-                raise ReadFailed("range ignored")
-            content_range = r.headers.get("Content-Range") or ""
-            if "/" in content_range and content_range.rsplit("/", 1)[1].strip().isdigit():
-                total = int(content_range.rsplit("/", 1)[1])
-                if self.size is None:
-                    self.size = total
-                elif abs(total - self.size) > max(self.tolerance * self.size, self.slack):
-                    raise ReadFailed("size differs")
-                else:
-                    self.size = total
+            self._check(status, start, *reply_range(r.headers, status))
             left = length
             while left > 0:
                 try:

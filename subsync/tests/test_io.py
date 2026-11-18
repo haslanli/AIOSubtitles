@@ -1615,3 +1615,144 @@ class SelfTestTest(unittest.TestCase):
         from subsync.settings import Settings
         s = Settings({"SUBSYNC_URL_REWRITE": f"https://public.example=http://127.0.0.1:{self.srv.port}"})
         self.assertTrue(run("https://public.example/tiny.mkv", 4 * 1024 * 1024, s)["ok"])
+
+
+import http.client  # noqa: E402
+import tracemalloc  # noqa: E402
+
+
+class Reply:
+    """A 206 from memory as http.client reads one: each read gives what is asked, in a new buffer (`body` None: zero
+    bytes, never held here); `fault`, an exception the body's first read raises."""
+
+    status = 206
+
+    def __init__(self, start, size, body=None, fault=None):
+        self.body, self.left, self.fault = body, size - start, fault
+        self.headers = {"Content-Range": f"bytes {start}-{size - 1}/{size}"}
+
+    def read(self, n=-1):
+        if self.fault is not None:
+            raise self.fault
+        n = self.left if n is None or n < 0 else min(n, self.left)
+        self.left -= n
+        return bytes(n)
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+class Garbled(Flaky):
+    """The link redirected (`moved`) to an address whose replies http.client can't read (a garbled status line)."""
+
+    def __call__(self, request, timeout):
+        if request.full_url != self.link:
+            raise http.client.BadStatusLine("HTTP/1.1 2OO OK")
+        return super().__call__(request, timeout)
+
+
+class ReplyCheckTest(unittest.TestCase):
+    """A reply is checked the same way by get and stream: where its bytes start and its size;
+    http.client's own errors are failed reads; the size tolerance is the reader's; and a large read
+    is held once."""
+
+    def setUp(self):
+        self.srv = RangeServer(FIXTURES)
+        self.link = self.srv.url("tiny.mkv")
+        with open(TINY, "rb") as f:
+            self.data = f.read()
+
+    def tearDown(self):
+        self.srv.close()
+
+    @staticmethod
+    def reads():
+        return (("get", lambda r, start, n: r.get(start, n)),
+                ("stream", lambda r, start, n: b"".join(r.stream(start, n))))
+
+    def test_a_reply_that_starts_elsewhere_than_asked_is_refused(self):
+        # A proxy answering whole 4096-byte blocks sent the bytes from 4096 for a read from 5000, taken as
+        # the bytes from 5000
+        self.srv.fault = "aligned"
+        for name, read in self.reads():
+            with self.subTest(read=name):
+                with self.assertRaises(ReadFailed) as caught:
+                    read(RangeReader(self.link, "t"), 5000, 64)
+                self.assertEqual(str(caught.exception), "range differs")
+                self.assertFalse(caught.exception.connection)
+                self.assertEqual(read(RangeReader(self.link, "t"), 8192, 64), self.data[8192:8256])   # a block's own
+
+    def test_stream_checks_the_size_as_get_does(self):
+        # Stream had its own copy of the checks, without the rule for a size not known yet (a Usenet
+        # release) and without a whole file's Content-Length
+        for name, read in self.reads():
+            with self.subTest(read=name):
+                with self.assertRaises(ReadFailed) as caught:
+                    read(RangeReader(self.link, "t", size_ok=lambda total: False), 0, 64)
+                self.assertEqual(str(caught.exception), "size differs")
+                r = RangeReader(self.link, "t", size_ok=lambda total: total == len(self.data))
+                self.assertEqual(read(r, 0, 64), self.data[:64])
+                self.assertEqual(r.size, len(self.data))
+        self.srv.fault = "ignore-range"            # the whole file, its size in Content-Length
+        for name, read in self.reads():
+            with self.subTest(read=name, whole=True):
+                with self.assertRaises(ReadFailed) as caught:
+                    read(RangeReader(self.link, "t", size=len(self.data) + 10_000), 0, 64)
+                self.assertEqual(str(caught.exception), "size differs")
+
+    def test_http_client_errors_are_failed_reads(self):
+        # A chunked reply cut short (IncompleteRead) or a garbled status line (BadStatusLine) is no OSError:
+        # it came out as itself, past the worker's back-off, its retry and the Usenet stop
+        def cut(request, timeout):
+            return Reply(0, 1000, fault=http.client.IncompleteRead(b"", 100))
+
+        def garbled(request, timeout):
+            raise http.client.BadStatusLine("HTTP/1.1 2OO OK")
+
+        def malformed(request, timeout):
+            raise http.client.InvalidURL("URL can't contain control characters")
+        for opener, connection in ((cut, True), (garbled, True), (malformed, False)):
+            for name, read in self.reads():
+                with self.subTest(opener=opener.__name__, read=name):
+                    guard = Guard()
+                    with self.assertRaises(ReadFailed) as caught:
+                        read(RangeReader("http://127.0.0.1:9/f.mkv", "t", guard, opener=opener), 0, 100)
+                    self.assertIs(caught.exception.connection, connection)
+                    self.assertEqual(guard.calls, 1)
+
+    def test_a_garbled_reply_at_the_address_the_link_pointed_to_asks_the_link_again(self):
+        # As for an address that doesn't answer
+        opener = Garbled(self.link, moved=True)
+        r = RangeReader(self.link, "t", opener=opener)
+        self.assertEqual(r.get(0, 64), self.data[:64])
+        self.assertEqual(r.get(64, 64), self.data[64:128])
+        self.assertEqual(opener.link_calls, 2)
+
+    def test_the_size_tolerance_is_the_readers(self):
+        # The worker and the installer's test read each passed their own 0.0005; now both use the reader's
+        from subsync.reader import SIZE_TOLERANCE
+        listed = len(self.data) + int(len(self.data) * SIZE_TOLERANCE)
+        r = RangeReader(self.link, "t", size=listed)
+        self.assertEqual(r.get(0, 64), self.data[:64])
+        self.assertEqual(r.size, len(self.data))
+        with self.assertRaises(ReadFailed):
+            RangeReader(self.link, "t", size=listed + 100).get(0, 64)
+
+    def test_a_large_read_is_held_once(self):
+        # Its pieces and their join were held together: twice the read (128 MiB for a 64 MiB moov)
+        n = 8 << 20
+        r = RangeReader("http://127.0.0.1:9/f.mp4", "t", opener=lambda request, timeout: Reply(0, n))
+        tracemalloc.start()
+        try:
+            data = r.get(0, n)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(len(data), n)
+        self.assertLess(peak, n * 1.25)

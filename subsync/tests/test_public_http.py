@@ -307,6 +307,132 @@ class PublicHttpTest(Base):
                         b"Content-Length: %d\r\n\r\n" % len(body) + body + hidden)
         self.assertEqual(answers(data), [400, 200])
 
+    def test_a_request_that_trickles_in_is_cut_off(self):
+        # The timeout bounds each wait, not the request: a byte at a time held a connection, and one of
+        # SUBSYNC_MAX_CONNECTIONS, for hours
+        from unittest import mock
+        from subsync import public
+        port = self.server.server_address[1]
+        signup = b"POST /signup HTTP/1.1\r\nHost: x\r\nContent-Length: 30\r\n\r\n"
+        for head, rest, answer in ((signup, b"link=&password=" + b"x" * 15, [500]),        # the form
+                                   (b"GET /health HTTP/1.1\r\n", b"X-Slow: " + b"a" * 21 + b"\r\n\r\n", [])):  # the head
+            with self.subTest(head=head.split(b" ")[0]), mock.patch.object(public, "REQUEST_ARRIVAL_S", 0.5):
+                seconds, data = trickle(port, head, rest, 0.1)
+                self.assertLess(seconds, 2.0)                    # not the 3 s the whole request took to come
+                self.assertEqual(answers(data), answer)
+        self.assertEqual(http(self.base + "/health")[:2], (200, b"ok"))
+        seconds, data = trickle(port, b"GET /health HTTP/1.1\r\n", b"Host: x\r\n\r\n", 0.05)   # slow, but in time
+        self.assertEqual(answers(data), [200])
+
+    def test_the_stylesheet_and_script_are_kept_for_good_at_their_hashed_address(self):
+        # Pages ask for them by their content's hash, yet they were kept an hour
+        from subsync import ui
+        for url in (ui.CSS_URL, ui.JS_URL):
+            path = url.split("?")[0]
+            with self.subTest(path=path):
+                code, _, headers = http(self.base + url)
+                self.assertEqual((code, headers["Cache-Control"]), (200, "public, max-age=31536000, immutable"))
+                for other in (path, path + "?v=0000000000", url + "&v=1"):    # an old page's, or none
+                    code, _, headers = http(self.base + other)
+                    self.assertEqual((code, headers["Cache-Control"]), (200, "public, max-age=3600"))
+
+    def test_a_store_of_recipes_serves_no_copy_at_the_root(self):
+        # Public mode's store keeps how each copy was made, and a copy is rebuilt from a person's own list
+        # under their link; the root /file/ route still read the recipe and the result, then answered 404
+        from unittest import mock
+        key = self.store.put("0123456789abcdef-1000", "a" * 64, "eng", 0, "synced", body="1\n00:00:01,000 --> "
+                             "00:00:02,000\nHi\n", fmt="srt")
+        fid = key.split(":", 1)[1].replace(":", "_")
+        self.store.keep_texts = False                     # as public mode keeps its store (__main__.public_store)
+        with mock.patch.object(self.store, "recipe") as recipe, mock.patch.object(self.store, "get") as get:
+            self.assertEqual(http(f"{self.base}/file/{fid}.srt")[:2], (404, b""))
+        recipe.assert_not_called()
+        get.assert_not_called()
+        self.assertEqual(http(self.base + "/health")[:2], (200, b"ok"))
+
+    def test_a_request_during_the_delete_leaves_nothing_serving(self):
+        # The delete's AIOStreams calls take seconds; a subtitle request then made the person's App again,
+        # and it went on serving the deleted link
+        from unittest import mock
+        from subsync import public
+        _, _, _, _, token = self.sign_up()
+        real = public.delete
+
+        def delete(*a, **k):
+            self.assertEqual(http(f"{self.base}/u/{token}/subtitles/movie/tt1.json")[0], 200)   # their app, meanwhile
+            return real(*a, **k)
+        with mock.patch.object(public, "delete", delete):
+            code, _, _ = http(f"{self.base}/u/{token}/configure", form(action="delete", password=PASSWORD))
+        self.assertEqual(code, 200)
+        self.assertIsNone(self.pool.live_app(token))
+        self.assertEqual(http(f"{self.base}/u/{token}/subtitles/movie/tt1.json")[0], 404)
+
+
+def trickle(port, head, rest, gap):
+    """Sends `head` at once, then `rest` a byte every `gap` seconds until the server answers or closes the connection.
+    Returns the seconds until it did, and what it sent."""
+    import select
+    t0 = time.monotonic()
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(head)
+        for byte in rest:
+            if select.select([sock], [], [], gap)[0]:
+                break
+            try:
+                sock.sendall(bytes([byte]))
+            except OSError:                           # closed already
+                break
+        select.select([sock], [], [], 10)
+        seconds = time.monotonic() - t0
+        sock.shutdown(socket.SHUT_WR)
+        data = b""
+        try:
+            while chunk := sock.recv(65536):
+                data += chunk
+        except OSError:
+            pass
+    return seconds, data
+
+
+class ServerTest(unittest.TestCase):
+    """Both modes' HTTP server (addon.Server): connections that come together wait to be taken, and one
+    that broke between requests is no failure: no traceback."""
+
+    def check(self, server):
+        import contextlib
+        import io
+        self.addCleanup(server.server_close)
+        self.assertGreaterEqual(server.request_queue_size, 128)
+
+        def handled(error):
+            printed = io.StringIO()
+            with contextlib.redirect_stderr(printed):
+                try:
+                    raise error
+                except Exception:
+                    server.handle_error(None, ("127.0.0.1", 1))
+            return printed.getvalue()
+        with self.assertNoLogs("subsync.addon", "WARNING"):
+            for error in (ConnectionResetError(54, "Connection reset by peer"), BrokenPipeError(32, "Broken pipe"),
+                          TimeoutError("timed out")):
+                self.assertEqual(handled(error), "")
+        with self.assertLogs("subsync.addon", "WARNING") as logs:
+            self.assertEqual(handled(ValueError("odd")), "")
+        self.assertEqual(logs.output, ["WARNING:subsync.addon:connection failed: ValueError"])
+
+    def test_the_self_hosted_server(self):
+        from unittest import mock
+        from subsync import addon
+        self.check(addon.Server(("127.0.0.1", 0), addon.Handler))
+        with mock.patch.object(addon, "Server") as made:
+            addon.serve(None, 8080)
+        self.assertEqual(made.call_args.args[0], ("0.0.0.0", 8080))
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+    def test_the_public_server(self):
+        from subsync.public import PublicHandler, _CappedServer
+        self.check(_CappedServer(("127.0.0.1", 0), PublicHandler, 4))
+
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
 class ConnectionCapTest(Base):
