@@ -7,7 +7,8 @@ Each line "lands" under a shift when its start falls within NEAR_S of a release 
 END_WEIGHT more; a line paired by its words counts as landing under its own shift). The cut into sections is the one
 that lands the most lines, less BREAK_PENALTY for each new section, found by dynamic programming over the lines in
 order; a section starts only after a gap of at least GAP_S between lines. Lines that a later section's shift puts
-before the end of the previous line (a scene the release cut) are left out, as on the audio route.
+before the end of the previous line (a scene the release cut) are left out, by the rule the audio route shares
+(moved_back): lines stacked within one section, and the lines under one mistyped end, are kept.
 
 Limits, so a bad section can't pass (D4 1-3; the copy is then judged as any other, section by section and as a whole):
 at most MAX_SECTIONS sections, each at least MIN_SECTION_S long with MIN_SECTION_LINES lines, and each section's shift
@@ -31,7 +32,24 @@ GAP_S = 2.0
 MAX_OFFSETS = 12
 MIN_PEAK = 10            # landings a shift needs to be tried at all
 MAX_OFFSET_S = 600.0     # an extended cut adds scenes of minutes; one shift looks only 120 s either way
-OVERLAP_S = 0.5
+OVERLAP_S = 0.5          # a line moved back this far over the end of the lines before it is left out
+LONGEST_S = 10.0         # a line's end counts at most this long after its start where lines are left out
+
+
+def moved_back(was, now):
+    """The lines a shift change put back over the lines before them (a scene the release cut, its lines moved under
+    the next section's shift): of dialogue lines in time order, `was` their (start, end) as the subtitle has them and
+    `now` re-timed, the positions of those starting more than OVERLAP_S before the end of the kept lines before them
+    where, as the subtitle has them, they didn't. Within one shift nothing is left out: lines stacked on screen stay,
+    and since each end counts at most LONGEST_S after its start, one mistyped end can't take the lines under it.
+    Shared by the sectioned fit and the audio route."""
+    out, end_was, end_now = set(), float("-inf"), float("-inf")
+    for i, ((s0, e0), (s1, e1)) in enumerate(zip(was, now)):
+        if s1 < end_now - OVERLAP_S and s0 >= end_was - OVERLAP_S:
+            out.add(i)
+            continue
+        end_was, end_now = max(end_was, min(e0, s0 + LONGEST_S)), max(end_now, min(e1, s1 + LONGEST_S))
+    return out
 
 
 def offsets(starts, ref, max_offset=MAX_OFFSET_S):
@@ -163,12 +181,8 @@ def fit(lines, ref_cues, anchors=None):
         else:                    # signs and songs: the shift of the section they fall in
             o = shifts[max(0, bisect.bisect_right(firsts, l["s"]) - 1)]
         new[i]["s"], new[i]["e"] = l["s"] + o, l["e"] + o
-    dropped, last_end = 0, float("-inf")
-    for i in dial:
-        if new[i]["s"] < last_end - OVERLAP_S:
-            new[i]["drop"] = True
-            dropped += 1
-            continue
-        last_end = max(last_end, new[i]["e"])
+    dropped = moved_back([(lines[i]["s"], lines[i]["e"]) for i in dial], [(new[i]["s"], new[i]["e"]) for i in dial])
+    for k in dropped:
+        new[dial[k]]["drop"] = True
     return {"lines": new, "groups": [[dial[i] for i in g] for g in groups],
-            "summary": {"sections": summary, "dropped": dropped}}
+            "summary": {"sections": summary, "dropped": len(dropped)}}

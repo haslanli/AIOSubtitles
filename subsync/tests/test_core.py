@@ -719,7 +719,7 @@ class ClearlyBetterTest(unittest.TestCase):
 
 
 class BestShiftTest(unittest.TestCase):
-    """One steady offset (and a 24/25 fps scale) from a histogram of start differences, in milliseconds: most candidates
+    """One steady offset (and a frame-rate scale) from a histogram of start differences, in milliseconds: most subtitles
     differ from the release only by that (Finding Nemo's English: +1.43 s throughout), so they need no alass."""
 
     def setUp(self):
@@ -736,6 +736,24 @@ class BestShiftTest(unittest.TestCase):
         scale, offset, _ = shift.best_shift(pal, self.ref)
         self.assertAlmostEqual(scale, 25 / (24000 / 1001), places=6)
         self.assertAlmostEqual(offset, -3.0 * 25 / (24000 / 1001), delta=0.05)
+
+    def test_a_24_fps_subtitle_of_a_23_976_fps_release(self):
+        # 7 s of drift over two hours; the audio route tried this pair, the one-shift path didn't
+        film = 24000 / 1001
+        for scale in (24 / film, film / 24, 25 / 24, 24 / 25):
+            with self.subTest(scale=scale):
+                cand = [s / scale + 2.0 for s in self.ref]
+                got, offset, votes = shift.best_shift(cand, self.ref)
+                self.assertAlmostEqual(got, scale, places=6)
+                self.assertAlmostEqual(offset, -2.0 * scale, delta=0.05)
+                self.assertEqual(votes, len(self.ref))
+
+    def test_one_list_of_frame_rate_scales_for_both_paths(self):
+        from subsync import audiofit
+        self.assertIs(audiofit.SCALES, shift.SCALES)
+        self.assertEqual((audiofit.END_WEIGHT, audiofit.DT), (shift.END_WEIGHT, shift.BIN_S))
+        self.assertEqual(shift.SCALES[0], 1.0)
+        self.assertEqual(len(set(shift.SCALES)), 7)
 
     def test_another_films_subtitle_gets_few_votes(self):
         _, _, votes = shift.best_shift([s for s, _ in rhythm(900, 1001)], self.ref)

@@ -1,7 +1,7 @@
 """The audio route on a file with no usable subtitle track fits the sound in the title's original language first (a
-track named as a commentary skipped), then the default track, then the second track in another language as before;
-an untagged track counts only for an English original and only after a tagged one; without an original language the
-order is exactly as before."""
+commentary or an audio description never fitted, nor counted), then the default track, then the second track in another
+language as before; an untagged track counts only for an English original and only after a tagged one; without an
+original language the order is exactly as before."""
 import random
 import unittest
 
@@ -41,7 +41,25 @@ class OrderTest(unittest.TestCase):
 
     def test_a_commentary_is_skipped(self):
         tracks = [track(0, "rus", True), track(1, "eng", name="Director's Commentary"), track(2, "eng")]
-        self.assertEqual(self.order(tracks, "eng")[:2], [2, 0])
+        self.assertEqual(self.order(tracks, "eng"), [2, 0])
+
+    def test_a_commentary_or_audio_description_is_never_fitted_nor_counted(self):
+        # The fallback track in another language took a commentary too, and the room estimate counted it
+        shapes = (
+            [track(0, "eng", True, "English"), track(1, "und", name="Commentary", tagged=False)],   # a remux's und one
+            [track(0, "fre", True), track(1, "eng", name="Commentary with the director")],          # Criterion's layout
+            [track(0, "eng", True), track(1, "spa", name="Audio Description")],
+        )
+        for tracks in shapes:
+            with self.subTest(tracks=tracks):
+                main = tracks[0]["language"]
+                for original in (None, main, "kor"):
+                    self.assertEqual(self.order(tracks, original), [0])
+                self.assertIsNone(audiofit.second_track(Index(tracks)))
+                self.assertEqual(audiofit.most_tracks(Index(tracks)), 1)
+                self.assertEqual(audio_facts(Index(tracks))["tracks"], 1)
+        dub = [track(0, "eng", True), track(1, "jpn", name="Commentary"), track(2, "jpn")]
+        self.assertEqual(self.order(dub, None), [0, 2])                # the dialogue track in another language
 
     def test_an_untagged_track_counts_only_for_english_and_after_a_tagged_one(self):
         untagged = track(1, "eng", tagged=False)                  # no Language element: Matroska's default, English

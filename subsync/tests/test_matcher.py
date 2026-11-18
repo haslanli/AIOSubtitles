@@ -915,6 +915,32 @@ class SectionsTest(unittest.TestCase):
         self.assertTrue(pipeline.gate_lines(gate, far)["pass"])
         self.assertEqual(pipeline.gate_lines(gate, far)["n"], 260)
 
+    def test_lines_stacked_in_a_section_or_under_a_wrong_end_are_kept(self):
+        # A second speaker's line and every line under one end typed 100 s late were left out of the copy,
+        # though no section's shift moved them back (one rule with the audio route: sections.moved_back)
+        release, sub = cut_film(900, 7, {450: 8.0})
+        sub = [(st - 55.0, d) for st, d in sub]
+        stacked = sorted(sub + [(sub[i][0] + 0.4, 1.0) for i in range(20, 420, 10)])    # in the first section
+        long_end = list(sub)
+        long_end[200] = (sub[200][0], 100.0)
+        for cues in (stacked, long_end):
+            lines = pipeline.parse(srt([(st, st + d, "x") for st, d in cues]))
+            got = sections.fit(lines, release)
+            self.assertEqual([round(x["offset_s"]) for x in got["summary"]["sections"]], [55, 63])
+            self.assertEqual(got["summary"]["dropped"], 0)
+            self.assertFalse(any(line.get("drop") for line in got["lines"]))
+
+    def test_only_lines_a_later_shift_moves_back_are_left_out(self):
+        was = [(0.0, 2.0), (3.0, 5.0), (6.0, 8.0), (9.0, 11.0), (12.0, 14.0), (15.0, 17.0), (18.0, 20.0)]
+        now = [(s + 10, e + 10) for s, e in was[:3]] + [(s + 2, e + 2) for s, e in was[3:]]   # a scene the file lacks
+        self.assertEqual(sections.moved_back(was, now), {3, 4, 5})
+        stacked = [(0.0, 3.0), (1.0, 2.5), (4.0, 6.0)]                 # on screen together, under one shift
+        self.assertEqual(sections.moved_back(stacked, [(s + 5, e + 5) for s, e in stacked]), set())
+        typo = [(0.0, 3600.0)] + [(3.0 * i, 3.0 * i + 2) for i in range(1, 50)]
+        self.assertEqual(sections.moved_back(typo, typo), set())
+        moved = [(s + 10, e + 10) for s, e in typo[:20]] + [(s - 5, e - 5) for s, e in typo[20:]]
+        self.assertEqual(sections.moved_back(typo, moved), {20, 21, 22, 23, 24})   # an end an hour late hides none
+
     def test_one_steady_shift_is_no_sectioned_fit(self):
         release = rhythm(600, 41)
         _, sect, _ = judge_sections(release, [(st - 20.0, d) for st, d in release])

@@ -24,6 +24,15 @@ class ConsensusGuessTest(unittest.TestCase):
         self.assertGreaterEqual(got["group"], pipeline.CONSENSUS_MIN)
         self.assertAlmostEqual(abs(got["offset_s"]), 9.3, delta=0.2)
 
+    def test_a_guess_at_24_fps_against_an_agreement_at_23_976_is_replaced(self):
+        # The one-shift path now tries the 24/23.976 fps pair too, so such a guess counts as another frame rate
+        # (as a PAL one does), however near its start is to the agreement's
+        scale = 24 / (24000 / 1001)
+        guess = srt_of([(s / scale, d / scale) for s, d in self.ref], jitter=0.04, seed=99)
+        got = pipeline.consensus_guess(guess, self.agreeing)
+        self.assertEqual(got["index"], 0)
+        self.assertAlmostEqual(got["scale"], scale, places=6)
+
     def test_a_small_agreement_replaces_nothing(self):
         guess = srt_of(self.ref, shift=2.4, jitter=0.04, seed=99)
         self.assertIsNone(pipeline.consensus_guess(guess, self.agreeing[:2] + [srt_of(realistic(400, 8))]))

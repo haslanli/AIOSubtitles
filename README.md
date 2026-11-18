@@ -249,7 +249,7 @@ parts it did not use for the fit. A copy is kept when, on those parts, its typic
 90 % of its lines that match speech start within 200 ms of it (and at least 80 % of all its lines do), and at most
 30 % match no speech. A copy that misses that is still kept when it is clearly closer to the speech than the original
 (SUBSYNC_AUDIO_BETTER): its typical error is 150 ms or less, at least 55 % of its lines are within 200 ms of the
-speech, few lines are unmatched, and it moved the lines by at least a second.
+speech, few lines are unmatched, none of those parts is clearly off, and it moved the lines by at least a second.
 
 ## Settings
 

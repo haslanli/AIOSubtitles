@@ -1,7 +1,10 @@
 """The audio fit's own pieces: windows the file's audio can't fill (past its end, none it can decode, decoded short),
-the correlation of a window with only the stretch of the subtitle it can reach, the windows' places on any runtime, and
-a subtitle signal no longer than the windows can read."""
+the correlation of a window with only the stretch of the subtitle it can reach, the windows' places on any runtime, a
+subtitle signal no longer than the windows can read; where a shift change is placed (a scene the subtitle or the file
+lacks) and which lines are left out, held-out windows that no window read for the fit overlaps, each held-out part
+judged, windows without speech, the audio budget while a change is narrowed down, and the record of one segment."""
 import collections
+import math
 import random
 import sys
 import threading
@@ -10,7 +13,7 @@ from unittest import mock
 
 import numpy as np
 
-from helpers import AUDIO_BETTER, FIXTURES, RangeServer, rhythm, truth_fit  # noqa: E402
+from helpers import AUDIO_BETTER, FIXTURES, RangeServer, rhythm, timeline_fit, truth_fit  # noqa: E402
 from subsync import audiofit  # noqa: E402
 from subsync.audiofit import DT, OMAX, AudioFit  # noqa: E402
 from subsync.mp4 import NoAudioThere, NotMp4, open_index  # noqa: E402
@@ -366,6 +369,293 @@ class BetterDefaultTest(unittest.TestCase):
         self.assertIsNone(fit.close_call({"decision": "keep_original", "plan": plan,
                                           "gate_new": dict(near, median_ms=400.0)}))
 
+
+def scene_film(at, scene, sub=None, seed=11, early=9.0):
+    """A subtitle (`sub`, (start, duration); rhythm(1419, seed) by default) `early` s early of a release with a scene of
+    `scene` s more (> 0: the release adds it, with talk of its own) or fewer (< 0: the subtitle's lines of it are
+    missing from the release) at subtitle time `at`. Returns the release's lines, the subtitle's, and where each
+    subtitle line belongs on the release (None: a line of the scene the release lacks)."""
+    sub = sub or rhythm(1419, seed)
+    if scene > 0:
+        r = random.Random(seed + 99)
+        talk, t = [], at + early + 2.0
+        while t < at + early + scene - 3:
+            d = r.uniform(1.0, 4.0)
+            talk.append((t, d))
+            t += d + r.uniform(0.3, 3.0)
+        true = [s + early + (scene if s >= at else 0.0) for s, _ in sub]
+        return sorted([(x, d) for x, (_, d) in zip(true, sub)] + talk), sub, true
+    true = [None if at <= s < at - scene else s + early + (scene if s >= at else 0.0) for s, _ in sub]
+    return [(x, d) for x, (_, d) in zip(true, sub) if x is not None], sub, true
+
+
+def placed(res, true):
+    """(kept lines more than 1 s from where they belong, kept lines of the scene the release lacks, other lines left
+    out) of a copy."""
+    off = scene = dropped = 0
+    for line, x in zip(res["lines"], true):
+        if line.get("drop"):
+            dropped += x is not None
+        elif x is None:
+            scene += 1
+        elif abs(line["s"] - x) > 1.0:
+            off += 1
+    return off, scene, dropped
+
+
+class ShiftChangeTest(unittest.TestCase):
+    """Where the offset changes (a subtitle for another cut), on speech that ends with its lines: the change is placed
+    by the windows that fit one offset or the other, and only the lines of a scene the file lacks are left out."""
+
+    def fit(self, at, scene, **kw):
+        truth, sub, true = scene_film(at, scene)
+        _, res = truth_fit(truth, [s for s, _ in sub], durations=[d for _, d in sub], end_pad=0.0, **kw)
+        return res, true
+
+    def test_a_scene_the_subtitle_lacks_moves_only_the_lines_after_it(self):
+        # A window inside the added scene fit neither offset and stopped the narrowing; the change went to the
+        # earliest line of a bracket minutes wide: 58 to 162 lines published a scene-length late
+        for at, scene in ((1500, 120), (3300, 60), (2600, 90)):
+            with self.subTest(at=at, scene=scene):
+                res, true = self.fit(at, scene)
+                self.assertEqual(res["decision"], "synced")
+                self.assertLessEqual(placed(res, true)[0], 20)
+
+    def test_a_scene_the_file_lacks_is_left_out_and_the_rest_placed(self):
+        # A missing scene over about 90 s found no change at all; every line kept the first offset, and the
+        # rest of the film was published the scene's length late
+        for at, scene in ((3000, -100), (3000, -300), (1500, -300), (4000, -150)):
+            with self.subTest(at=at, scene=scene):
+                res, true = self.fit(at, scene)
+                self.assertEqual(res["decision"], "synced")
+                self.assertEqual(len(res["model"]["segments"]), 1)
+                off, scene_kept, dropped = placed(res, true)
+                self.assertEqual(off, 0)
+                self.assertLessEqual((scene_kept, dropped), (1, 1))
+
+    def test_lines_on_screen_together_and_one_wrong_end_are_kept(self):
+        # With one offset and no change, every line starting under an earlier line's end was left out of the
+        # copy: a second speaker's lines, and the 869 lines under one end typed an hour late
+        truth = rhythm(1700, 11)
+        r = random.Random(1)
+        starts = [s - 9.0 + r.gauss(0, 0.03) for s, _ in truth]
+        stacked = [d for _, d in truth]
+        for i in range(20, 1600, 43):
+            stacked[i] = truth[i + 1][0] - truth[i][0] + 2.0          # on screen 2 s into the next line
+        typo = [d for _, d in truth]
+        typo[30] += 3600.0
+        for durations in (stacked, typo):
+            _, res = truth_fit(truth, starts, durations=durations)
+            self.assertEqual(res["decision"], "synced")
+            self.assertEqual(res["model"]["dropped"], 0)
+            self.assertFalse(any(line.get("drop") for line in res["lines"]))
+
+    def test_one_segment_is_recorded_with_the_offset_applied(self):
+        # With one segment the lines moved by its own offset, while the record and the "under 100 ms is never
+        # published" rule took the overall one (lines moved +9 s, model -291 s)
+        class NoChange(AudioFit):      # a change seen but never placed: every line keeps the first window's offset
+            def narrow(self, lo, hi, oa, ob, avoid, curve):
+                return math.inf, -math.inf, [], []
+        truth, sub, _ = scene_film(1500, -300)
+        _, res = truth_fit(truth, [s for s, _ in sub], durations=[d for _, d in sub], end_pad=0.0, fit_class=NoChange)
+        self.assertEqual(len(res["segment_offsets"]), 1)
+        self.assertEqual(res["model"]["offset"], round(res["segment_offsets"][0], 2))    # not the overall -291 s
+        self.assertAlmostEqual(res["model"]["offset"], 9.0, delta=0.3)
+
+
+class HeldOutTest(unittest.TestCase):
+    """The held-out windows are never used for the fit: no window read for it (a confirmation, a step narrowing
+    down a shift change) overlaps one, the extra held-out windows keep off every window read, and each counts once."""
+
+    @staticmethod
+    def recorded(truth, starts, durations=None, **kw):
+        calls = []
+
+        class Recorded(AudioFit):
+            def read_window(self, start, length):
+                calls.append(start)
+                return super().read_window(start, length)
+        fit, res = truth_fit(truth, starts, durations=durations, fit_class=Recorded, **kw)
+        return fit, res, calls
+
+    def test_no_window_read_for_the_fit_overlaps_a_held_out_one(self):
+        # The second step narrowing down a change landed exactly on a held-out window: it placed the change,
+        # then confirmed it, and the original's check counted it twice
+        truth, sub, _ = scene_film(1050, -40)
+        fit, res, calls = self.recorded(truth, [s for s, _ in sub], [d for _, d in sub], end_pad=0.0)
+        self.assertEqual(len(res["model"]["segments"]), 1)
+        W = res["plan"]["window_s"]
+        for c in res["plan"]["check"]:
+            self.assertEqual([x for x in calls if abs(x - c) < W - 1e-6], [c], c)
+
+    def test_extra_held_out_windows_keep_off_the_fit_windows(self):
+        # On a film under about 17 minutes the extra held-out windows, read when too few lines
+        # match, overlapped fit windows;: they went to the first stretches of the film, not where the copy
+        # matched the fewest lines
+        film = rhythm(215, 11)                                                  # 15 minutes
+        end = film[-1][0] + film[-1][1] + 30
+        margin, vspan = 0.03 * end, (end - 0.06 * end) / 4
+        quiet = (margin + 2 * vspan, margin + 3 * vspan)                        # the third stretch: nothing heard
+        spoken = [(s, d) for s, d in film[::2] if not quiet[0] <= s <= quiet[1]]   # elsewhere half the lines
+        starts = [s - 9.0 + random.Random(i).gauss(0, 0.05) for i, (s, _) in enumerate(film)]
+        fit, res, calls = self.recorded(spoken, starts, [d for _, d in film], end_pad=None)
+        plan, W = res["plan"], res["plan"]["window_s"]
+        held = len(plan["check"])
+        at = max(i for i in range(len(calls) - held + 1) if calls[i:i + held] == plan["check"])
+        extra, fitting = calls[at + held:], calls[:at]
+        self.assertTrue(extra, "no extra held-out window was read")
+        for x in extra:
+            self.assertTrue(all(abs(x - f) >= W - 1e-6 for f in fitting + plan["check"]), (x, fitting))
+        self.assertTrue(quiet[0] <= extra[0] < quiet[1], (extra, quiet))       # where the copy matched nothing
+
+
+class HeldOutPartTest(unittest.TestCase):
+    """The held-out windows judged part by part, beside the pooled numbers. A copy clearly off in one part
+    meets neither way to pass; the verdict is a close call that reads the windows beside that part, and when the part
+    is still off the original is kept."""
+
+    def off_in_one_part(self, extra=12):
+        truth = rhythm(700, 11)
+        end = truth[-1][0] + truth[-1][1] + 30
+        margin, span = 0.03 * end, (end - 0.06 * end) / 8
+        lo, hi = margin + 2.5 * span + 30, margin + 3.5 * span - 45     # around held-out window 1, off every fit window
+        r = random.Random(1)
+        starts = [s - 9.0 + r.gauss(0, 0.03) + (20.0 if lo <= s <= hi else 0.0) for s, _ in truth]
+        fit, res = truth_fit(truth, starts, extra=extra, end_pad=None)
+        return fit, res, (lo, hi)
+
+    def test_a_copy_off_in_one_part_keeps_the_original(self):
+        # 4.5 minutes of the copy 20 s off: pooled, its held-out numbers pass "clearly better", and it was published
+        fit, res, (lo, hi) = self.off_in_one_part()
+        first = res["close_call"]["first"]
+        self.assertEqual((first["decision"], res["close_call"]["why"]), ("keep_original", "close to the bar"))
+        self.assertTrue(fit.meets_better(dict(first["gate_new"], parts_off=[])))     # without the part rule
+        self.assertEqual(res["decision"], "keep_original")
+        self.assertTrue(res["gate_new"]["parts_off"])
+        W = res["plan"]["window_s"]
+        self.assertGreaterEqual(sum(lo <= c and c + W <= hi for c in res["plan"]["check"]), 3)   # read beside it
+        _, alone, _ = self.off_in_one_part(extra=0)                     # no close calls: the first verdict decides
+        self.assertEqual(alone["decision"], "keep_original")
+        self.assertTrue(alone["gate_new"]["parts_off"])
+
+    def test_a_part_the_copy_is_off_in(self):
+        fit = AudioFit(SpeechIndex([], 600.0), [], vad=LoudVad())
+        w = {"start": 100.0, "len": 30.0, "onsets": np.arange(101.0, 129.0, 2.0)}       # 14 onsets
+        original = [x + 0.05 for x in np.arange(101.0, 129.0, 2.0)]                    # the subtitle's 14 lines there
+        self.assertFalse(fit.part_off(original, original, [w]))
+        self.assertTrue(fit.part_off([x + 0.7 for x in original], original, [w]))       # none within 200 ms
+        self.assertTrue(fit.part_off([], original, [w]))         # the copy moved every line away from the speech
+        self.assertFalse(fit.part_off([], original[:4], [w]))    # where the subtitle has few lines itself
+        self.assertFalse(fit.part_off(original[:4], original[:4], [w]))
+
+    def test_copies_by_other_authors_keep_their_verdicts(self):
+        # calibration: a right copy by another author has about 60 % of its lines within 200 ms; the part rule
+        # refuses none of them that the pooled numbers decide (sweeps: 480 copies, 0 changed; wrong parts 64 % of
+        # windows)
+        for seed in range(6):
+            truth = rhythm(700, 11 + seed)
+            r = random.Random(1000 + seed)
+            starts = [s - 9.0 + r.gauss(0, 0.22) for s, _ in truth]
+            with mock.patch.object(AudioFit, "part_off", return_value=False):
+                pooled = truth_fit(truth, starts, extra=12, end_pad=None)[1]
+            res = truth_fit(truth, starts, extra=12, end_pad=None)[1]
+            self.assertEqual((res["decision"], res.get("why")), (pooled["decision"], pooled.get("why")), seed)
+
+
+class SpeechlessWindowTest(unittest.TestCase):
+    """Fit windows where the subtitle has lines but no speech is heard (music, singing, noise) favoured any
+    offset that moved the lines out of them; they now score no offset for the whole film."""
+
+    PAL = 25 / (24000 / 1001)
+
+    def fit(self, seed, scale, off, deaf=5, unrelated=False):
+        truth = rhythm(1600, seed)
+        r = random.Random(seed + 100)
+        end = truth[-1][0] + truth[-1][1] + 30
+        margin, span = 0.03 * end, (end - 0.06 * end) / 8
+        zones = [(margin + (i + 0.5) * span - 40, margin + (i + 0.5) * span + 40) for i in r.sample(range(8), deaf)]
+        heard = [(s, d) for s, d in truth if not any(lo <= s <= hi for lo, hi in zones)]
+        if unrelated:
+            other = rhythm(1600, 5000 + seed)
+            starts, durations = [s for s, _ in other], [d for _, d in other]
+        else:
+            starts = [(s - off) / scale + r.gauss(0, 0.05) for s, _ in truth]
+            durations = [d / scale for _, d in truth]
+        rr = random.Random(5)
+        speech = [(s + rr.gauss(0, 0.08), s + d) for s, d in heard]
+
+        class Index:
+            def duration(self):
+                return end
+        lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, d in zip(starts, durations)]
+        return timeline_fit(speech)(Index(), lines, vad=object(), better=AUDIO_BETTER).run()
+
+    def test_a_pal_subtitle_on_a_film_of_music_parts(self):
+        # 5 of 8 fit windows deaf: the overall offset ran minutes away and no speed change won (seeds 1, 2, 3, 5 of 6)
+        for seed in (1, 2, 3):
+            with self.subTest(seed=seed):
+                res = self.fit(seed, self.PAL, 2.0)
+                self.assertEqual(res["decision"], "synced")
+                self.assertAlmostEqual(res["model"]["scale"], self.PAL, places=4)
+
+    def test_another_films_subtitle_is_still_never_accepted(self):
+        self.assertEqual([seed for seed in range(8) if self.fit(seed, 1.0, 0.0, unrelated=True)["decision"]
+                          != "keep_original"], [])
+
+
+class RuleRevisionTest(unittest.TestCase):
+    def test_verdicts_of_the_old_rules_are_judged_again(self):
+        # the held-out parts, the shift changes, the lines left out and the one-shift path's pairs came in revision 11
+        from subsync import RULE_REVISION
+        self.assertGreaterEqual(RULE_REVISION, 11)
+
+
+class NarrowingBudgetTest(unittest.TestCase):
+    """Windows read while a shift change is narrowed down count toward the file's audio budget like any other;
+    when the next one would pass it, the change is placed from the windows read and the copy judged as usual."""
+
+    def test_the_window_length_is_rounded_down(self):
+        # Rounded to the nearest tenth, the planned windows could cost 0.3 % over the budget
+        rate = 1_000_000
+        budget = 14.96 * (8 + 4 + audiofit.PLANNED) * audiofit.COST * rate
+        length = audiofit.planned_window(budget, rate)
+        self.assertEqual(length, 14.9)
+        self.assertLessEqual((8 + 4 + audiofit.PLANNED) * audiofit.COST * rate * length, budget)
+
+    def test_a_short_window_fit_keeps_what_it_read(self):
+        # Windows shortened to fit the budget (15 s on a 24 Mbit/s file) take 5 or 6 steps to narrow a change
+        # down, not the 4 planned: the read that would pass the budget threw the whole fit away ("audio budget reached")
+        r = random.Random(3)
+        truth, t = [], 20.0
+        for _ in range(2800):                       # a line every ~2 s: 15 s held-out windows still hear enough
+            d = r.uniform(0.8, 1.6)
+            truth.append((t, d))
+            t += d + r.uniform(0.2, 0.7)
+        end = truth[-1][0] + truth[-1][1] + 30
+        rate = 3_000_000
+        budget = int(15.0 * (8 + 4 + audiofit.PLANNED) * audiofit.COST * rate) + 1
+
+        class Index:
+            size = rate * end
+            audio_bytes = 0
+
+            def duration(self):
+                return end
+        r = random.Random(5)
+        speech = [(s + r.gauss(0, 0.08), s + d) for s, d in truth]
+        half = len(truth) // 2                      # the subtitle 9 s early, then 17 s: another cut
+        lines = [{"s": s - (9.0 if i < half else 17.0), "e": s + d - (9.0 if i < half else 17.0), "text": "x",
+                  "kind": "dialogue"} for i, (s, d) in enumerate(truth)]
+        index = Index()
+        fit = timeline_fit(speech, rate=audiofit.COST * rate, ends=True)(index, lines, vad=object(),
+                                                                        better=AUDIO_BETTER, budget=budget)
+        res = fit.run()
+        self.assertEqual(fit.W, 15.0)
+        self.assertLessEqual(index.audio_bytes, budget)
+        self.assertEqual(res["decision"], "synced", res.get("why"))     # it was "audio budget reached (900 MB)"
+        self.assertEqual(len(res["model"]["segments"]), 1)
+        off = sum(not line.get("drop") and abs(line["s"] - s) > 1.0 for line, (s, _) in zip(res["lines"], truth))
+        self.assertLessEqual(off, 20)               # the change placed within the windows read
 
 if __name__ == "__main__":
     unittest.main()

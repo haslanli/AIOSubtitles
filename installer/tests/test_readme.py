@@ -113,8 +113,8 @@ class HowTheSyncWorks(unittest.TestCase):
                       f"{pct(c['GATE_MISS'])} match no speech. A copy that misses that is still kept when it is "
                       'clearly closer to the speech than the original (SUBSYNC_AUDIO_BETTER): its typical error is '
                       f"{better['median_ms']:.0f} ms or less, at least {pct(better['within'])} of its lines are within "
-                      f"{c['WITHIN_MS']} ms of the speech, few lines are unmatched, and it moved the lines by at least "
-                      'a second.', section('How the sync works'))
+                      f"{c['WITHIN_MS']} ms of the speech, few lines are unmatched, none of those parts is clearly "
+                      'off, and it moved the lines by at least a second.', section('How the sync works'))
         self.assertEqual(better['min_shift_s'], 1.0)              # "at least a second"
 
 

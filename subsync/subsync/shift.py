@@ -1,9 +1,11 @@
-"""One steady offset, and the 24/25 fps scales, between a subtitle and the release's own line starts.
+"""One steady offset, and the frame-rate scales, between a subtitle and the release's own line starts.
 
-Most subtitles differ from a release only by a constant offset, sometimes with a PAL speed-up (Finding Nemo's English:
-+1.43 s throughout). That offset is the peak of a histogram of start differences (each candidate start against the
-reference starts within MAX_OFFSET_S), found in milliseconds; the copy it gives is then judged by the same gate as an alass
-copy (pipeline.shift_sync), so alass only runs where one offset is not enough (another cut, ads, drift).
+Most subtitles differ from a release only by a constant offset, sometimes with a frame-rate change: a PAL speed-up
+(Finding Nemo's English: +1.43 s throughout), or a subtitle timed at 24 fps on a 23.976 release (7 s of drift over two
+hours). That offset is the peak of a histogram of start differences (each candidate start against the reference starts
+within MAX_OFFSET_S), found in milliseconds; the copy it gives is then judged by the same gate as an alass copy
+(pipeline.shift_sync), so alass only runs where one offset is not enough (another cut, ads, drift). SCALES, BIN_S and
+END_WEIGHT are the audio route's too (audiofit).
 
 Line ends (D3) vote only where starts can't decide: when several start peaks are within PEAK_TIE of the best
 (dialogue in a steady rhythm, a short subtitle), each is scored by its start votes plus END_WEIGHT times its end votes.
@@ -17,7 +19,10 @@ import numpy as np
 
 from .relgate import lands
 
-SCALES = (1.0, 25 / (24000 / 1001), (24000 / 1001) / 25)
+FILM = 24000 / 1001     # 23.976 fps
+# the frame-rate scales tried, none first, then each pair both ways: 25 against 23.976 (PAL), 24 against 23.976, 25
+# against 24
+SCALES = (1.0, 25 / FILM, FILM / 25, 24 / FILM, FILM / 24, 25 / 24, 24 / 25)
 MAX_OFFSET_S = 120.0
 BIN_S = 0.05
 NEAR_S = 0.1            # a candidate start "lands" on a reference start within this
