@@ -744,6 +744,43 @@ class PoolTest(unittest.TestCase):
         self.assertIsNone(self.users.open(self.tokens[0]))
 
 
+class HousekeepingTest(unittest.TestCase):
+    """Public mode's housekeeping round: idle workers stop every round, the shared store's old rows go every
+    EXPIRE_EVERY_S, and a failure of one skips neither the other nor the next round."""
+
+    def test_each_part_runs_on_its_own(self):
+        import sqlite3
+        from subsync.__main__ import housekeeping_round
+        from subsync.worker import EXPIRE_EVERY_S
+        calls, fail = [], set()
+
+        class Part:
+            def __init__(self, name):
+                self.name = name
+
+            def __call__(self):
+                calls.append(self.name)
+                if self.name in fail:
+                    raise sqlite3.OperationalError("database is locked")
+
+        pool, store = type("P", (), {})(), type("S", (), {})()
+        pool.housekeeping, store.expire = Part("reap"), Part("expire")
+        t = 1_800_000_000.0
+        with self.assertLogs("subsync", "WARNING") as logs:
+            fail.add("reap")
+            self.assertEqual(housekeeping_round(pool, store, 0.0, t), t)        # a failed reap: the store expires
+            self.assertEqual(calls, ["reap", "expire"])
+            fail.clear()
+            self.assertEqual(housekeeping_round(pool, store, t, t + 60), t)     # not due: the workers only
+            self.assertEqual(calls[2:], ["reap"])
+            fail.add("expire")
+            later = t + EXPIRE_EVERY_S + 60
+            self.assertEqual(housekeeping_round(pool, store, t, later), later)  # tried again an hour later, as before
+            self.assertEqual(calls[3:], ["reap", "expire"])
+        self.assertEqual([line.split(":", 2)[2] for line in logs.output],
+                         ["housekeeping failed: OperationalError", "store expiry failed: OperationalError"])
+
+
 class StartupTest(unittest.TestCase):
     def run_main(self, env):
         from unittest import mock

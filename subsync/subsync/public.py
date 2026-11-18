@@ -177,13 +177,11 @@ class Pool:
 
     def _build(self, token, record, limits, start):
         s = user_settings(self.env, record, token)
-        aios = Aios(s.source_manifest, own_bases=(self.s.public_base,), skip_addons=s.skip_addons,
-                    size_slack=s.size_slack, password=s.source_password)
+        aios = Aios.from_settings(s, s.source_manifest, s.source_password, self.s.public_base)
         usenet = gate = None
         if self.s.usenet and self.s.usenet_listings_per_day > 0 and s.usenet_manifest and \
                 isinstance(limits, UserLimits):
-            usenet = Aios(s.usenet_manifest, own_bases=(self.s.public_base,), skip_addons=s.skip_addons,
-                          size_slack=s.size_slack, password=s.usenet_password)
+            usenet = Aios.from_settings(s, s.usenet_manifest, s.usenet_password, self.s.public_base)
             gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(), who=limits.who)
         safety = Safety(backoff_s=s.backoff_s)
         worker = Worker(s, self.store, aios, safety, vad_factory=self.vad, extra=self.extra, turn=self.turn,

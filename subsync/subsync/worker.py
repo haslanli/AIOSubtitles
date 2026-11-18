@@ -35,7 +35,7 @@ UNLISTED_S = 3600   # a file the listing didn't have (uncached, or another relea
 USENET_ROW_KEPT_S = 3600   # a file found on Usenet: a retry or its audio job reuses its row and address this long
 PICKED_EARLY_S = 3600   # an entry downloaded while the file's first pass ran still counts as its pick this long
 LIST_TTL_S = 600    # a text pass's subtitle list and downloads, reused by the audio job that follows a pick
-EXPIRE_EVERY_S = 3600   # the store's old rows are removed this often (Store.expire)
+EXPIRE_EVERY_S = 3600   # the store's old rows are removed this often (Store.expire; in public mode by __main__)
 IDLE_POLL_S = 5.0   # an idle lane looks at the queue again this often (a job deferred by not_before comes due)
 BACKOFF_MAX_S = 6 * 3600   # the refusal back-off doubles up to this (Safety)
 READ_RETRY_S = 10   # a first read that got no answer is tried once more this much later
@@ -949,7 +949,9 @@ class Worker(threading.Thread):
                 self._run(job, lane)
             except Exception as e:   # raised while its end was handled: the job is over all the same
                 log.warning("failed %s: %s", job.label, type(e).__name__)
-            if time.time() - self.last_expire > EXPIRE_EVERY_S:
+            # the store's old rows: in public mode the shared store's own housekeeping removes them (__main__), not
+            # every person's worker
+            if not self.s.public and time.time() - self.last_expire > EXPIRE_EVERY_S:
                 self.last_expire = time.time()
                 try:
                     self.store.expire()

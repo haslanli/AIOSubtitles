@@ -187,6 +187,13 @@ class Aios:
         self.password = password         # of the config behind the link, to read it for the Real-Debrid check
         self.config_sources = set()      # built-in sources the config has as subtitle addons (srclimits.config_sources)
 
+    @classmethod
+    def from_settings(cls, settings, manifest_url, password, own_base):
+        """The service's client of one of its configs (the sync config, the Usenet config): the addons it skips and
+        the size slack from its settings, and the service's own address (own_base), whose rows are never read."""
+        return cls(manifest_url, own_bases=(own_base,), skip_addons=settings.skip_addons,
+                   size_slack=settings.size_slack, password=password)
+
     CONFIG_RETRY_MAX_S = 5   # AIOStreams' user API answers 429 past a few calls in 5 s: one wait and a second try
 
     def _read_config(self):

@@ -1061,6 +1061,22 @@ class StartLineTest(unittest.TestCase):
                       "listings a day", start_line(s, True))
         self.assertIn("; audio route off;", start_line(Settings({}), False))
 
+    def test_the_lines_name_the_original_languages_source(self):
+        # By explain.lookup_kind, the privacy page's own decision, in the start lines' words; never the key
+        from subsync import explain
+        from subsync.__main__ import ORIGINAL_LANGUAGE_WORDS, public_start_line, start_line
+        self.assertEqual(set(ORIGINAL_LANGUAGE_WORDS), set(explain.PRIVACY_LOOKUP))
+        for env, words in (({"SUBSYNC_ORIGINAL_LANGUAGE": "off", "SUBSYNC_TMDB_KEY": "KEY-1"}, "off"),
+                           ({"SUBSYNC_TMDB_KEY": "KEY-1"}, "from TMDB and Wikidata"),
+                           ({"SUBSYNC_TMDB_PERSONAL": "on"}, "from Wikidata only")):     # personal keys: public only
+            line = start_line(Settings(env), False)
+            self.assertTrue(line.endswith(f"; original language {words}"), line)
+            self.assertNotIn("KEY-1", line)
+        self.assertTrue(public_start_line(self.public(SUBSYNC_TMDB_PERSONAL="on"), 1, 1).endswith(
+            "; original language from TMDB with each person's own key, and Wikidata"))
+        self.assertTrue(public_start_line(self.public(SUBSYNC_TMDB_KEY="KEY-1", SUBSYNC_TMDB_PERSONAL="on"), 1, 1)
+                        .endswith("; original language from TMDB and Wikidata"))
+
 
 if __name__ == "__main__":
     unittest.main()

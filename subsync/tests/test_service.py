@@ -162,6 +162,14 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(Aios("", skip_addons=[" Private Map", ""]).skip, ("private map",))
         self.assertEqual(Settings({"SUBSYNC_SKIP_ADDONS": "Private Map, Other"}).skip_addons, ("Private Map", "Other"))
 
+    def test_a_config_client_takes_the_services_settings(self):
+        # One place builds the service's clients of its configs (self-hosted and public mode alike)
+        s = Settings({"SUBSYNC_SKIP_ADDONS": "Private Map", "SUBSYNC_SIZE_SLACK_MB": "2"})
+        a = Aios.from_settings(s, "https://aios.test/stremio/u1/E1/manifest.json", "p1", "https://subs.test/")
+        self.assertEqual((a.base, a.password, a.own, a.skip, a.size_slack),
+                         ("https://aios.test/stremio/u1/E1", "p1", ("https://subs.test",), ("private map",),
+                          2 * 1024 * 1024))
+
     def test_extras_round_trip(self):
         h = {"videoHash": "0123456789abcdef", "videoSize": 123, "filename": "A B [x].mkv"}
         self.assertEqual(parse_extras(extras(h)), h)
@@ -1305,6 +1313,69 @@ class LanesTest(unittest.TestCase):
             self.assertFalse(w.busy_with("name:a.mkv|1"))
             self.assertTrue(any("store expiry failed: OperationalError" in line for line in logs.output))
 
+    def test_a_public_worker_leaves_the_store_expiry_to_the_housekeeping(self):
+        # In public mode the shared store is expired by the housekeeping thread (__main__.housekeeping_round)
+        # alone, not again by each person's worker after its first job; self-hosted, the worker expires its own store
+        for public, expiries in ((True, 0), (False, 1)):
+            with self.subTest(public=public), TempDir() as d:
+                store, ran, expired = Store(d), [], []
+                store.expire = lambda: expired.append(1)
+
+                class W(Worker):
+                    def process(self, job):
+                        ran.append(job.alias)
+                env = dict({"SUBSYNC_DATA": d}, **({"SUBSYNC_PUBLIC": "on"} if public else {}))
+                w = W(Settings(env), store, FakeAios(), Safety())
+                w.submit(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1}))
+                w.start()
+                t0 = time.time()
+                while not ran and time.time() - t0 < 3:
+                    time.sleep(0.05)
+                w.stop()
+                w.join(3)
+                self.assertFalse(w.is_alive())
+                self.assertEqual((ran, len(expired)), (["name:a.mkv|1"], expiries))
+
+
+class StopTest(unittest.TestCase):
+    """The self-hosted service's SIGTERM (docker stop) stops its worker as Worker.stop does, as public mode's
+    does: its idle lanes end at once, and a pick queued but not started yet waits for another pick."""
+
+    def test_sigterm_stops_the_worker_through_its_stop(self):
+        import signal
+        from unittest import mock
+        from subsync import __main__ as entry
+        pick = Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1})
+        pick.audio, pick.not_before = True, time.time() + 600     # queued, not started before the stop
+        handlers, servers = {}, []
+
+        class Server:
+            def __init__(self, app, port):
+                self.app = app
+                servers.append(self)
+
+            def serve_forever(self):
+                time.sleep(0.3)                     # both lanes wait for a job
+                self.app.worker.submit(pick)
+                handlers[signal.SIGTERM]()          # docker stop
+
+            def shutdown(self):
+                pass
+
+        with TempDir() as d:
+            env = {"SUBSYNC_DATA": d, "SUBSYNC_SOURCE_MANIFEST": "http://127.0.0.1:9/stremio/u1/E1/manifest.json",
+                   "SUBSYNC_SOURCE_PASSWORD": "p1", "SUBSYNC_PUBLIC_BASE": "http://127.0.0.1:9"}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch("logging.basicConfig"), \
+                    mock.patch("signal.signal", lambda sig, handler: handlers.__setitem__(sig, handler)), \
+                    mock.patch.object(entry, "serve", Server), local_network_only(), \
+                    self.assertLogs("subsync", "INFO"):
+                entry.main()
+            worker = servers[0].app.worker
+            self.assertIn(pick.alias, worker.pickable)
+            for lane in (worker, worker.audio_worker):
+                lane.join(2)
+                self.assertFalse(lane.is_alive())
+
 
 class AddonKeyTest(unittest.TestCase):
     """The routes that start work or show status answer only under the private key; files and /health don't
@@ -1363,6 +1434,43 @@ class AddonKeyTest(unittest.TestCase):
             self.assertEqual(http(self.base + p)[0], 200, p)
         for p in ("/health", "/subsync/health", "/k3y/health"):
             self.assertEqual(http(self.base + p)[:2], (200, b"ok"), p)
+
+    def test_the_images_health_check_asks_the_port_the_service_listens_on(self):
+        # SUBSYNC_PORT moves the service (./setup sets it with host networking when 8790 is taken); the image's
+        # HEALTHCHECK, run as Docker runs it (sh -c, in the container's environment), must ask that port
+        import re
+        import subprocess
+        import tempfile
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        dockerfile = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Dockerfile")
+        if not os.path.exists(dockerfile):
+            self.skipTest("the Dockerfile is in the source, not in the image")
+        with open(dockerfile) as f:
+            command = re.search(r"\nHEALTHCHECK [^\n]*\\\n\s*CMD (.+)\n", f.read()).group(1)
+
+        class Unwell(BaseHTTPRequestHandler):      # another program, on another port, that isn't well
+            def do_GET(self):
+                self.send_response(503)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        other = HTTPServer(("127.0.0.1", 0), Unwell)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.server_close)
+        self.addCleanup(other.shutdown)
+        with tempfile.TemporaryDirectory() as bin_:
+            python = os.path.join(bin_, "python")
+            with open(python, "w") as f:
+                f.write(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+            os.chmod(python, 0o755)
+
+            def check(port):
+                env = {"PATH": f"{bin_}:/usr/bin:/bin", "SUBSYNC_PORT": str(port), "PYTHONDONTWRITEBYTECODE": "1"}
+                return subprocess.run(["sh", "-c", command], env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                      timeout=30).returncode
+            self.assertEqual(check(self.server.server_address[1]), 0)
+            self.assertNotEqual(check(other.server_address[1]), 0)
 
     def test_no_key_keeps_the_old_routes(self):
         app = App(Settings({"SUBSYNC_DATA": self.s.data}), self.store, self.worker, Safety())

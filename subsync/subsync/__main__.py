@@ -5,11 +5,15 @@ import sys
 import threading
 import time
 
+from . import explain
 from .addon import App, serve
 from .settings import Settings
 from .sources import Aios
 from .store import Store
-from .worker import Safety, StoreUsenetCounts, UsenetGate, Worker
+from .worker import EXPIRE_EVERY_S, Safety, StoreUsenetCounts, UsenetGate, Worker
+
+HOUSEKEEPING_EVERY_S = 60   # public mode's housekeeping runs this often (housekeeping_round)
+log = logging.getLogger("subsync")
 
 
 def main():
@@ -17,19 +21,17 @@ def main():
     s = Settings()
     missing = s.missing()
     if missing:
-        logging.getLogger("subsync").error("not started: set %s%s", ", ".join(missing),
-                                           "" if s.public else " (./setup writes them)")
+        log.error("not started: set %s%s", ", ".join(missing), "" if s.public else " (./setup writes them)")
         sys.exit(2)
     for conflict in s.conflicts():
-        logging.getLogger("subsync").error("not started: %s", conflict)
+        log.error("not started: %s", conflict)
     if s.conflicts():
         sys.exit(2)
     if s.public:
         return main_public(s)
     store = Store(s.data, s.cap_bytes)
     safety = Safety(backoff_s=s.backoff_s)
-    aios = Aios(s.source_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack,
-                password=s.source_password)
+    aios = Aios.from_settings(s, s.source_manifest, s.source_password, s.public_base)
 
     def vad_factory():
         from .vad import SileroVad
@@ -41,26 +43,27 @@ def main():
     lookup = make_lookup(s, store)
     usenet = gate = None
     if s.usenet and s.usenet_manifest and s.usenet_listings_per_day > 0:
-        usenet = Aios(s.usenet_manifest, own_bases=(s.public_base,), skip_addons=s.skip_addons, size_slack=s.size_slack,
-                      password=s.usenet_password)
+        usenet = Aios.from_settings(s, s.usenet_manifest, s.usenet_password, s.public_base)
         gate = UsenetGate(store, s.usenet_listings_per_day, StoreUsenetCounts(store))
     worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra, usenet=usenet, usenet_gate=gate,
                     lookup=lookup)
     worker.start()
     server = serve(App(s, store, worker, safety), s.port)
+
     def stop(*_):
-        worker.stop_flag = True
+        worker.stop()
         if lookup is not None:     # lookups still waiting are dropped, so stopping isn't held up by them
             lookup.close()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
-    logging.getLogger("subsync").info("%s", start_line(s, usenet is not None))
+    log.info("%s", start_line(s, usenet is not None))
     server.serve_forever()
 
 
 def _audio_limit(s):
-    return f"{s.audio_budget / 1e9:g} GB" if s.audio_budget else "no limit"
+    """The per-file audio limit as the start lines say it: as the pages do (explain), or "no limit"."""
+    return explain.audio_limit_words(s) if s.audio_budget else "no limit"
 
 
 def start_line(s, usenet):
@@ -78,16 +81,14 @@ def start_line(s, usenet):
             + f"; original language {_original_language(s)}")
 
 
-def _original_language(s):
-    """Where titles' original languages come from, never the key."""
-    if not s.original_language:
-        return "off"
-    if s.tmdb_key:
-        return "from TMDB and Wikidata"
-    if s.public and s.tmdb_personal:
-        return "from TMDB with each person's own key, and Wikidata"
-    return "from Wikidata only"
+# where titles' original languages come from, by explain.lookup_kind, as the start lines say it (never the key)
+ORIGINAL_LANGUAGE_WORDS = {"off": "off", "tmdb": "from TMDB and Wikidata",
+                           "personal": "from TMDB with each person's own key, and Wikidata",
+                           "wikidata": "from Wikidata only"}
 
+
+def _original_language(s):
+    return ORIGINAL_LANGUAGE_WORDS[explain.lookup_kind(s)]
 
 
 def public_store(s):
@@ -115,6 +116,23 @@ def public_start_line(s, places, audio_places):
             f"{', '.join(s.trusted_proxy) or 'none'}; original language {_original_language(s)}")
 
 
+def housekeeping_round(pool, store, last_expire, now):
+    """Public mode's housekeeping, every HOUSEKEEPING_EVERY_S: idle workers stop (Pool.housekeeping), and every
+    EXPIRE_EVERY_S the shared store's old rows go (only here: the workers leave it to this). Neither failure skips the
+    other or stops the service. Returns when the store's expiry last ran."""
+    try:
+        pool.housekeeping()
+    except Exception as e:   # never let housekeeping stop the service
+        log.warning("housekeeping failed: %s", type(e).__name__)
+    if now - last_expire > EXPIRE_EVERY_S:
+        last_expire = now
+        try:
+            store.expire()
+        except Exception as e:
+            log.warning("store expiry failed: %s", type(e).__name__)
+    return last_expire
+
+
 def main_public(s):
     """Public mode: the sign-up pages and every person's own service in one process (public.py)."""
     import os
@@ -127,19 +145,12 @@ def main_public(s):
     env = dict(os.environ)
     pool = Pool(s, env, store, users)
     server = serve_public(PublicService(s, env, store, users, pool), s.port)
-    log = logging.getLogger("subsync")
 
     def housekeeping():
         last_expire = 0.0
         while True:
-            time.sleep(60)
-            try:
-                pool.housekeeping()
-                if time.time() - last_expire > 3600:
-                    last_expire = time.time()
-                    store.expire()
-            except Exception as e:   # never let housekeeping stop the service
-                log.warning("housekeeping failed: %s", type(e).__name__)
+            time.sleep(HOUSEKEEPING_EVERY_S)
+            last_expire = housekeeping_round(pool, store, last_expire, time.time())
     threading.Thread(target=housekeeping, daemon=True, name="subsync-housekeeping").start()
 
     def stop(*_):
