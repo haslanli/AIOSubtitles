@@ -1,15 +1,15 @@
 """In public mode the shared store keeps how a subtitle was synced (its new timings), never its text; each
 person's copy is made from the original, downloaded again from its source, with the stored timings. No network."""
+import gzip
 import hashlib
 import os
 import shutil
 import tempfile
-import threading
 import unittest
 import urllib.error
 import urllib.request
 
-from helpers import closed_after, local_network_only, RangeServer  # noqa: E402
+from helpers import closed_after, local_network_only, RangeServer, start_server, stop_server  # noqa: E402
 from subsync.addon import App, file_id, serve  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -77,14 +77,17 @@ class TextlessStoreTest(unittest.TestCase):
         key = store.put(FILE, sha(SRT), "eng", 0, "synced", body=SYNCED, fmt="srt", candidate_id="c1", original=SRT)
         self.assertIsNone(store.body(key))
         self.assertEqual(apply_recipe(SRT, store.recipe(key)), SYNCED)
-        found = []
+        # every file the store wrote, the database and its journal included (only the .gz files were read),
+        # holds none of the subtitle's lines; the recipe, gzipped, is one of them
+        files = {}
         for root, _, names in os.walk(self.dir):
             for n in names:
-                if n.endswith(".gz"):
-                    import gzip
-                    with gzip.open(os.path.join(root, n), "rt", encoding="utf-8") as f:
-                        found.append(f.read())
-        self.assertTrue(found and not any("Kenobi" in x for x in found))
+                with open(os.path.join(root, n), "rb") as f:
+                    files[n] = gzip.decompress(f.read()) if n.endswith(".gz") else f.read()
+        self.assertTrue([n for n in files if n.endswith(".gz")], sorted(files))
+        for line in (b"Hello", b"Kenobi", b"bold one"):
+            with self.subTest(line=line):
+                self.assertEqual([n for n, data in files.items() if line in data], [])
         self.assertEqual([r["key"] for r in store.offers(FILE, ["eng"])], [key])
         key2 = store.put(FILE, sha("x"), "eng", 1, "synced", body="nope", fmt="srt", candidate_id="c2")   # no original
         store.set_offers(FILE, "eng", [key2])
@@ -136,11 +139,9 @@ class ServingTest(unittest.TestCase):
         s = Settings({"SUBSYNC_DATA": os.path.join(self.dir, "store"), "SUBSYNC_PUBLIC_BASE": "http://x"})
         self.worker = Worker(s, self.store, Listing(), Safety())
         self.worker.seen["name:a.mkv|1000"] = ("movie", "tt1", {"filename": "a.mkv", "videoSize": 1000})
-        self.server = serve(App(s, self.store, self.worker, Safety()), 0)
+        self.server = start_server(serve(App(s, self.store, self.worker, Safety()), 0))
+        self.addCleanup(stop_server, self.server)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
 
     def get(self, path):
         try:

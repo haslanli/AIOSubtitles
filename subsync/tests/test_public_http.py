@@ -1,27 +1,16 @@
 """Public mode over HTTP: the pages, the router in front of each person's own service, and the limits on requests."""
 import json
 import logging
-import os
 import socket
-import threading
 import time
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from helpers import answers, closed_after, exchange, FakeAiostreams, TempDir, wait_until  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
+from helpers import (HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, PublicParts, answers, closed_after,  # noqa: E402
+                     exchange, start_server, stop_server, wait_until)
 
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
-
-KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
-INSTANCE = "https://aios.test"
-PASSWORD = "the-viewers-own-Password-1"
 VIEWER = {"services": [{"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}],
           "presets": [{"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}},
                       {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
@@ -46,51 +35,24 @@ def form(**fields):
     return urllib.parse.urlencode(fields).encode()
 
 
-class Logs(logging.Handler):
-    def __init__(self):
-        super().__init__(logging.DEBUG)
-        self.lines = []
-
-    def emit(self, record):
-        self.lines.append(record.getMessage())
-
-
-class Base(unittest.TestCase):
+class Base(PublicParts, unittest.TestCase):
     """A public service on this machine, with a stand-in AIOStreams; workers are not started (jobs stay queued)."""
 
     def start(self, **env):
-        from subsync.aiosconfig import AiosApi
         from subsync.public import Pool, PublicService, serve_public
         from subsync.store import Store
-        from subsync.users import Users
-        self.tmp = TempDir()
-        self.dir = self.tmp.__enter__()
-        self.env = dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                         "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
-                         "SUBSYNC_RECHECK_HOURS": "0"}, **env)
-        self.s = Settings(self.env)
+        self.start_public(**dict({"SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
+                                  "SUBSYNC_RECHECK_HOURS": "0"}, **env))
         self.store = closed_after(self, Store(self.dir))
-        self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes())
         self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
-        self.fake = FakeAiostreams()
-        api = lambda base, timeout: AiosApi(base.replace(INSTANCE, self.fake.url), timeout=timeout,  # noqa: E731
-                                            max_timeout=timeout, retry_wait_cap=5)
-        self.service = PublicService(self.s, self.env, self.store, self.users, self.pool, api_factory=api)
-        self.server = serve_public(self.service, 0, host="127.0.0.1")
+        self.service = PublicService(self.s, self.env, self.store, self.users, self.pool, api_factory=self.api)
+        self.server = start_server(serve_public(self.service, 0, host="127.0.0.1"))
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.logs = Logs()
-        logging.getLogger().addHandler(self.logs)
-        logging.getLogger().setLevel(logging.DEBUG)
 
     def tearDown(self):
-        logging.getLogger().removeHandler(self.logs)
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
         self.pool.close()
-        self.fake.close()
-        self.users.close()
-        self.tmp.__exit__(None, None, None)
+        self.stop_public()
 
     def sign_up(self, **extra):
         uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
@@ -106,7 +68,7 @@ class Base(unittest.TestCase):
         return uuid, code, text, headers, token
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class PublicHttpTest(Base):
     def setUp(self):
         self.start()
@@ -196,9 +158,12 @@ class PublicHttpTest(Base):
         self.assertIn(b"Hi", body)
 
     def test_odd_form_input(self):
+        from subsync.public import MAX_FORM
         uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
         link = f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json"
-        self.assertEqual(http(self.base + "/signup", b"link=" + b"x" * 9000)[0], 413)
+        for size, code in ((MAX_FORM, 400), (MAX_FORM + 1, 413)):          # read up to the limit, refused past it
+            with self.subTest(size=size):
+                self.assertEqual(http(self.base + "/signup", b"link=" + b"x" * (size - len(b"link=")))[0], code)
         code, body, _ = http(self.base + "/signup", b"link=\xff\xfe&password=x")
         self.assertEqual(code, 400)
         for fields in (dict(link=link, password="a\x00b", languages="English"),
@@ -268,6 +233,14 @@ class PublicHttpTest(Base):
             for line in self.logs.lines:
                 self.assertNotIn(secret, line)
 
+    def test_the_log_lines_read_hold_a_logged_exceptions_traceback(self):
+        # Only each record's message was kept, so a secret in a logged exception never reached the check above
+        try:
+            raise ValueError("held by the exception only")
+        except ValueError:
+            logging.getLogger("subsync.public").warning("request failed", exc_info=True)
+        self.assertIn("ValueError: held by the exception only", self.logs.lines[-1])
+
     def test_forwarded_for_only_from_the_trusted_proxy(self):
         handler = self.service
 
@@ -280,7 +253,7 @@ class PublicHttpTest(Base):
         self.assertEqual(handler.client_ip(Request("9.9.9.9", "1.2.3.4")), "9.9.9.9")   # not the proxy: ignored
 
     def test_signup_attempts_are_limited_per_address(self):
-        for _ in range(5):
+        for _ in range(self.s.signups_per_hour):
             self.assertEqual(http(self.base + "/signup", form(link="", password="x"))[0], 400)
         code, body, _ = http(self.base + "/signup", form(link="", password="x"))
         self.assertEqual(code, 429)
@@ -425,13 +398,13 @@ class ServerTest(unittest.TestCase):
             addon.serve(None, 8080)
         self.assertEqual(made.call_args.args[0], ("0.0.0.0", 8080))
 
-    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
     def test_the_public_server(self):
         from subsync.public import PublicHandler, _CappedServer
         self.check(_CappedServer(("127.0.0.1", 0), PublicHandler, 4))
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class ConnectionCapTest(Base):
     def setUp(self):
         self.start(SUBSYNC_MAX_CONNECTIONS="1")
@@ -451,7 +424,7 @@ class ConnectionCapTest(Base):
         self.assertTrue(wait_until(lambda: http(self.base + "/health")[0] == 200, timeout=10))   # the slot is free again
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class PublicCheckTest(Base):
     """The daily check as people see it: a note on the settings page, one "action needed" entry in their subtitle
     lists while only they can fix something, the kept-password box, and Refresh with a new link."""
@@ -559,7 +532,7 @@ class PublicCheckTest(Base):
         self.service.checker.join(5)
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class AudioChoiceHttpTest(Base):
     """over HTTP: the answer for files with no subtitles of their own, chosen at sign-up, shown and changed on
     the settings page with the "audio" action, read back by the person's worker; nothing of it on an instance with
@@ -605,7 +578,7 @@ class AudioChoiceHttpTest(Base):
         self.assertEqual(self.users.count(), 0)
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class AudioOffHttpTest(Base):
     def setUp(self):
         self.start()

@@ -8,8 +8,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, Limits, Listing, RangeServer, row,
-                     TempDir, wait_until)
+from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, HAVE_CRYPTOGRAPHY, KEY, Limits, Listing,
+                     NEEDS, RangeServer, row, start_server, stop_server, TempDir, wait_until)
 from subsync import sources
 from subsync import worker as worker_mod
 from subsync.reader import ReadFailed, Refused
@@ -17,13 +17,6 @@ from subsync.settings import Settings
 from subsync.store import Store
 from subsync.worker import Job, Safety, StoreAudioCounts, Worker, audio_places
 
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
-NEEDS = "cryptography is not installed (the image has it; tests run it in a venv)"
-KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
 
 # ---------------------------------------------------------------------------------------------------- the settings
@@ -830,14 +823,11 @@ class Redirect:
                 self.send_header("Location", outer.target)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.server.daemon_threads = True
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}/playback/1"
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class UsenetTest(Base):

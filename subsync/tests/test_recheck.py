@@ -3,26 +3,16 @@ AIOStreams on this machine. Without a kept password the check sees only what nee
 still exist; AIOSubtitles' own config, with its own password) and repairs what it can; with the password a person chose
 to let AIOSubtitles keep, it also rebuilds AIOSubtitles' config from theirs. It never changes the person's own config."""
 import json
-import logging
 import os
 import threading
 import time
 import unittest
 from unittest import mock
 
-from helpers import Clock, FakeAiostreams, TempDir  # noqa: E402
+from helpers import HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, Clock, PublicParts  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
-
-KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
-INSTANCE = "https://aios.test"
 OTHER = "https://other-aios.test"
-PASSWORD = "the-viewers-own-Password-1"
 TORBOX = {"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}
 REALDEBRID = {"id": "realdebrid", "enabled": True, "credentials": {"apiKey": "rd-key"}}
 TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
@@ -30,49 +20,26 @@ COMET = {"type": "comet", "instanceId": "cmt", "enabled": True, "options": {"nam
 HOUR = 3600
 
 
-class Logs(logging.Handler):
-    def __init__(self):
-        super().__init__(logging.DEBUG)
-        self.lines = []
-
-    def emit(self, record):
-        self.lines.append(record.getMessage())
-
-
-class Base(unittest.TestCase):
+class Base(PublicParts, unittest.TestCase):
     def setUp(self):
         from subsync import signup
-        from subsync.aiosconfig import AiosApi
-        from subsync.users import Users
         self.signup = signup
-        self.tmp = TempDir()
-        self.dir = self.tmp.__enter__()
         self.clock = Clock()
-        self.s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                           "SUBSYNC_PUBLIC_BASE": "https://subs.test"})
-        self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes(), clock=self.clock)
-        self.fake = FakeAiostreams()
+        self.start_public(clock=self.clock)
         self.dead = False      # True: every AIOStreams answers nothing (a closed port)
-
-        def api(base, timeout):
-            url = "http://127.0.0.1:9" if self.dead else base.replace(INSTANCE, self.fake.url).replace(OTHER, self.fake.url)
-            return AiosApi(url, timeout=timeout, max_timeout=timeout, retry_wait_cap=5)
-        self.api = api
         self.changed = []
-        self.logs = Logs()
-        logging.getLogger().addHandler(self.logs)
-        logging.getLogger().setLevel(logging.DEBUG)
 
     def tearDown(self):
-        logging.getLogger().removeHandler(self.logs)
-        self.fake.close()
-        self.users.close()
-        self.tmp.__exit__(None, None, None)
+        self.stop_public()
+
+    def api(self, base, timeout):
+        from subsync.aiosconfig import AiosApi
+        url = "http://127.0.0.1:9" if self.dead else base.replace(INSTANCE, self.fake.url).replace(OTHER, self.fake.url)
+        return AiosApi(url, timeout=timeout, max_timeout=timeout, retry_wait_cap=5)
 
     def checker(self, **env):
         from subsync.recheck import Checker
-        s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                           "SUBSYNC_PUBLIC_BASE": "https://subs.test"}, **env))
+        s = Settings(dict(self.env, **env))
         return Checker(s, self.users, on_change=self.changed.append, api_factory=self.api, clock=self.clock, timeout=5)
 
     def sign_up(self, keep=False, presets=(TORRENTIO,)):
@@ -89,7 +56,7 @@ class Base(unittest.TestCase):
         return self.users.open(token)
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class RecheckTest(Base):
     # -- the check without a kept password ------------------------------------------------------------------------
     def test_a_new_record_says_when_its_config_was_copied(self):
@@ -188,11 +155,21 @@ class RecheckTest(Base):
         checker = self.checker()
         self.fake.fault, self.fake.hang_s = "hang", 0.2
         self.fake.max_inflight = 0
-        threads = [threading.Thread(target=checker.check, args=(t,)) for t in tokens]
+        self.clock.t += HOUR                          # so each record shows its own check ran
+        outcomes = {}
+
+        def check(token):                            # a check that failed or never ran also kept it at 1
+            try:
+                outcomes[token] = checker.check(token)
+            except Exception as e:
+                outcomes[token] = e
+        threads = [threading.Thread(target=check, args=(t,)) for t in tokens]
         for t in threads:
             t.start()
         for t in threads:
             t.join(20)
+        self.assertEqual(outcomes, dict.fromkeys(tokens))          # all three ran to the end, each "all well"
+        self.assertEqual([self.record(t)["checked_at"] for t in tokens], [self.clock.t] * 3)
         self.assertEqual(self.fake.max_inflight, 1)
 
     def test_a_refresh_during_a_check_wins(self):
@@ -354,7 +331,7 @@ class RecheckTest(Base):
         self.assertIsNot(checker._instance(OTHER), checker._instance(INSTANCE))
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class RefreshTest(Base):
     """Refresh after the check found something: a new sync config when it is gone, a new config link, the kept
     password ticked or unticked."""

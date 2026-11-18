@@ -11,7 +11,7 @@ import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from helpers import closed_after
+from helpers import closed_after, start_server, stop_server
 from subsync import choose
 from subsync.extra import ExtraSources
 from subsync.settings import Settings
@@ -105,13 +105,11 @@ class Fake:
                     return self.send(200, SRT.encode(), "text/plain")
                 return self.send(404, {})
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class ExtraSourcesTest(unittest.TestCase):
@@ -296,14 +294,12 @@ class PacingTest(unittest.TestCase):
                     with lock:
                         st["now"] -= 1
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def tearDown(self):
         self.sources.PACED_HOSTS = self.saved
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
     def test_at_most_two_at_a_time(self):
         from concurrent.futures import ThreadPoolExecutor

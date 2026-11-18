@@ -11,7 +11,8 @@ import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from helpers import closed_after, dialogue_srt, FakeDownloads, FakeIndex, local_network_only, RangeServer, realistic, srt_of  # noqa: E402
+from helpers import (closed_after, dialogue_srt, FakeDownloads, FakeIndex, local_network_only,  # noqa: E402
+                     RangeServer, realistic, srt_of, start_server, stop_server)
 from subsync import choose, pipeline, srclimits  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.sourcestate import Ledger  # noqa: E402
@@ -181,11 +182,9 @@ class FetchTest(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(body)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.addCleanup(stop_server, self.server)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
 
     def test_a_download_carries_the_sources_key_and_is_counted(self):
         ledger = Ledger(keyed={"subsource": True, "subdl": True})

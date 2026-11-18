@@ -2,16 +2,10 @@
 languages explanation and the too-many error take its number, and the sign-up and the settings save enforce it."""
 import unittest
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+from helpers import HAVE_CRYPTOGRAPHY, NEEDS  # (first: it puts the package on the import path)
 from subsync import explain  # noqa: E402
 from subsync.aiosconfig import parse_languages  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
-
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
 
 # the approved text, rewritten with the installer plan
 MAX_LANGUAGES_TEXT = (
@@ -105,7 +99,7 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(len(parse_languages("English", limit=1)[0]), 1)
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class EnforcedTest(unittest.TestCase):
     """The sign-up's and the settings save's checks (signup._languages) take the instance's limit."""
 

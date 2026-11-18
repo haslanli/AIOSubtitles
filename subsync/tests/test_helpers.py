@@ -1,18 +1,22 @@
 """The tests' own stand-ins and set-up (helpers.py, imagesubs.py): what other tests rely on them for."""
 import ast
 import http.client
+import http.server
 import logging
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import threading
+import time
 import unittest
 import urllib.request
 from unittest import mock
 
 import imagesubs as I
-from helpers import local_lookup, RangeServer, SOURCE, TempDir, watch_the_log
+from helpers import (BACKLOG, HAVE_CRYPTOGRAPHY, local_lookup, Logs, NEEDS, RangeServer, SOURCE, start_server,
+                     stop_server, TempDir, watch_the_log)
 from subsync import net
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +82,46 @@ class RangeServerLogTest(unittest.TestCase):
             self.addCleanup(answer.close)
             self.assertEqual((answer.status, len(answer.read(1))), (206, 1))
             self.assertEqual(srv.log, [(0, size)])               # the rest of the answer not sent yet
+
+
+class StartServerTest(unittest.TestCase):
+    """start_server serves a stand-in, stop_server returns at once, and a burst of connections all get in
+    (socketserver's listen queue of 5 reset the rest)."""
+
+    def test_a_burst_of_connections_waits_for_the_server_and_is_answered(self):
+        class Answer(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+        server, held = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer), threading.Event()
+        take = server.get_request
+        server.get_request = lambda: (held.wait(10), take())[1]      # takes no connection until the burst is in
+        start_server(server)
+        burst = []
+        try:
+            for _ in range(BACKLOG // 2):
+                burst.append(socket.create_connection(server.server_address, timeout=2))
+        finally:
+            held.set()
+            answered = [exchange_on(sock) for sock in burst]
+            started = time.monotonic()
+            stop_server(server)
+        self.assertEqual(answered, [b"HTTP/1.0 200"] * (BACKLOG // 2))
+        self.assertLess(time.monotonic() - started, 0.3)           # not up to serve_forever's half second
+
+
+def exchange_on(sock):
+    """The status line of the answer to a GET sent on `sock`, which is then closed."""
+    with sock:
+        sock.sendall(b"GET / HTTP/1.0\r\n\r\n")
+        data = b""
+        while chunk := sock.recv(65536):
+            data += chunk
+    return data.split(b"\r\n", 1)[0][:12]
 
 
 class PgsShowTest(unittest.TestCase):
@@ -167,6 +211,51 @@ class WatchTheLogTest(unittest.TestCase):
         self.assertTrue(clean.wasSuccessful())
         self.assertIs(logging.getLogRecordFactory(), factory)
         self.assertEqual(logging.getLogger("subsync").level, level)
+
+
+class LogsTest(unittest.TestCase):
+    """The log lines a public harness reads are every line made meanwhile, a logged exception's
+    traceback included, and the harness leaves the root logger as it found it (it was left at DEBUG for the rest of
+    the run)."""
+
+    def setUp(self):
+        root = logging.getLogger()
+        self.addCleanup(root.setLevel, root.level)
+        root.setLevel(logging.WARNING)
+        self.handlers = list(root.handlers)
+
+    def left_as_found(self):
+        root = logging.getLogger()
+        self.assertEqual((root.level, root.handlers), (logging.WARNING, self.handlers))
+
+    def test_every_line_with_its_traceback_then_logging_put_back(self):
+        logs = Logs().on()
+        try:
+            logging.getLogger("test.logs").debug("a debug line")
+            try:
+                raise ValueError("held by the exception only")
+            except ValueError:
+                logging.getLogger("test.logs").warning("failed", exc_info=True)
+        finally:
+            logs.off()
+        self.assertEqual(logs.lines[0], "a debug line")
+        self.assertTrue(logs.lines[1].startswith("failed\nTraceback"), logs.lines[1])
+        self.assertIn("ValueError: held by the exception only", logs.lines[1])
+        self.left_as_found()
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_each_public_harness_leaves_the_root_logger_as_it_found_it(self):
+        import test_public_http
+        import test_recheck
+        import test_signup
+        for case in (test_public_http.PublicHttpTest("test_user_manifest"),
+                     test_recheck.RecheckTest("test_off_with_zero_hours"),
+                     test_signup.SignupTest("test_real_debrid_with_torbox_warns_and_leaves_it_out")):
+            with self.subTest(harness=type(case).__module__):
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual((result.testsRun, result.errors, result.failures), (1, [], []))
+                self.left_as_found()
 
 
 class LocalLookupTest(unittest.TestCase):

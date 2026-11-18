@@ -8,9 +8,8 @@ import urllib.error
 import urllib.request
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import threading
 
-from helpers import local_network_only  # noqa: E402
+from helpers import local_network_only, start_server, stop_server  # noqa: E402
 from subsync import net, realdebrid  # noqa: E402
 
 
@@ -46,14 +45,11 @@ class Server:
                 self.end_headers()
                 self.wfile.write(b"ok")
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.server.daemon_threads = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.port = self.server.server_address[1]
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 def refused(test, call):

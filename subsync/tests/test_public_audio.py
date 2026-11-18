@@ -7,20 +7,14 @@ import threading
 import time
 import unittest
 
-from helpers import (closed_after, dialogue_srt, FakeDownloads, FIXTURES, have, Limits as CountedLimits, Listing,
-                     local_network_only, RangeServer, TempDir, wait_until)
+from helpers import (closed_after, dialogue_srt, FakeDownloads, FIXTURES, HAVE_CRYPTOGRAPHY, have, KEY,
+                     Limits as CountedLimits, Listing, local_network_only, NEEDS, RangeServer, start_server,
+                     stop_server, TempDir, wait_until)
 from subsync import audiofit  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
 from subsync.worker import Job, OverLimit, Safety, Turn, Worker, audio_places  # noqa: E402
 
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
-NEEDS = "cryptography is not installed (the image has it; tests run it in a venv)"
-KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
 
 class Limits(CountedLimits):
@@ -424,15 +418,13 @@ class OriginalEntryPublicTest(Base):
     def download(self, app, url):
         import urllib.request
         from subsync.addon import serve
-        server = serve(app, 0)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        server = start_server(serve(app, 0))
         try:
             path = url.replace("http://x.test", f"http://127.0.0.1:{server.server_address[1]}")
             with urllib.request.urlopen(path, timeout=10) as r:
                 return r.read().decode()
         finally:
-            server.shutdown()
-            server.server_close()
+            stop_server(server)
 
     def person_b(self, *subs):
         from subsync.addon import App

@@ -3,14 +3,13 @@ original-language lookups, and (when the instance asks each person for one) a pe
 page, checked with TMDB once when saved, kept only in their encrypted record and never shown."""
 import html as htmllib
 import json
-import threading
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+from helpers import HAVE_CRYPTOGRAPHY, NEEDS, start_server, stop_server  # (first: it puts the package on the path)
 from subsync import explain, origlang, pages, ui  # noqa: E402
-from test_public_ui import HAVE_CRYPTOGRAPHY, LINK, NEEDS, RECORD, USAGE, settings  # noqa: E402
+from test_public_ui import LINK, RECORD, USAGE, settings  # noqa: E402
 
 PERSON_KEY = "fedcba9876543210fedcba9876543210"
 
@@ -139,13 +138,11 @@ class FakeTmdb:
                 self.send_header("content-length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}/3"
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     def close(self):
-        self.srv.shutdown()
-        self.srv.server_close()
+        stop_server(self.srv)
 
 
 class KeyCheckTest(unittest.TestCase):

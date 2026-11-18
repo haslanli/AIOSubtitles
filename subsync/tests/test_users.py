@@ -5,13 +5,7 @@ import sqlite3
 import threading
 import unittest
 
-from helpers import Clock, TempDir  # noqa: E402
-
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
+from helpers import Clock, HAVE_CRYPTOGRAPHY, NEEDS, TempDir  # noqa: E402
 
 SECRET = bytes(range(32))
 RECORD = {"instance": "https://aios.test", "sync_uuid": "11111111-2222-3333-4444-555555555555",
@@ -20,7 +14,7 @@ RECORD = {"instance": "https://aios.test", "sync_uuid": "11111111-2222-3333-4444
 DAY = 86400
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class UsersTest(unittest.TestCase):
     def setUp(self):
         from subsync import users

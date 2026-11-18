@@ -4,7 +4,6 @@ read with a size cap and a time limit; a password is never sent on through a red
 import gc
 import json
 import os
-import threading
 import time
 import unittest
 import types
@@ -12,15 +11,9 @@ import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import TempDir, local_network_only  # noqa: E402
+from helpers import HAVE_CRYPTOGRAPHY, NEEDS, TempDir, local_network_only, start_server, stop_server  # noqa: E402
 from subsync import aiosconfig, net  # noqa: E402
 from subsync.aiosconfig import BAD_ANSWER, AiosApi, AiosError  # noqa: E402
-
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
 
 UUID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 CONFIG = {"services": [], "presets": []}
@@ -111,14 +104,11 @@ class Stand:
 
             do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = handle_any
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.server.daemon_threads = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class ClientCase(unittest.TestCase):
@@ -183,7 +173,7 @@ class IdsAndLinksTest(unittest.TestCase):
         self.assertEqual(aiosconfig.install_link("https://aios.test", UUID, "ENC"),
                          f"https://aios.test/stremio/{UUID}/ENC/manifest.json")
 
-    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
     def test_the_public_sign_up_and_routes_use_the_same_shapes(self):
         from subsync import public, signup, users
         self.assertIs(signup.WRONG_PASSWORD_CODES, aiosconfig.WRONG_PASSWORD_CODES)
@@ -392,7 +382,7 @@ class EveryFailureIsAnAiosErrorTest(ClientCase):
         self.assertEqual((status, waits), (429, [aiosconfig.SLOW_DOWN_WAIT] * (aiosconfig.TRIES - 1)))
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class SignupCallersTest(ClientCase):
     """The public sign-up's steps meet the client's AiosError only, and the public client waits out a short
     "too many requests" that names no wait."""

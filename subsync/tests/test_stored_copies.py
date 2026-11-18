@@ -4,17 +4,16 @@ the same release. Refresh and the daily check (with a kept password) move a pers
 import os
 import unittest
 
-from helpers import closed_after, TempDir  # noqa: E402
+from helpers import closed_after, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD, TempDir  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
-from test_recheck import (HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, KEY, PASSWORD, REALDEBRID, TORBOX, TORRENTIO,  # noqa: E402
-                          Base)
+from test_recheck import HOUR, REALDEBRID, TORBOX, TORRENTIO, Base  # noqa: E402
 
 OSV3 = {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
         "options": {"name": "OpenSubtitles V3+", "resources": ["subtitles"]}}
 SYNC_FIELDS = ("sync_uuid", "sync_link", "sync_password", "sync_fp")
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class StoredCopiesTest(Base):
     def sign_up_rd(self, keep=False, **extra):
         viewer = {"services": [dict(REALDEBRID)], "presets": [dict(TORRENTIO), dict(OSV3)]}
@@ -176,7 +175,7 @@ class StoredCopiesTest(Base):
         self.assertNotIn("AIOSubtitles", self.names(uuid))
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class StoredCopiesServedTest(unittest.TestCase):
     """A stored-copies-only person's requests are answered from the shared store, by the request's own file details,
     and never start a read."""

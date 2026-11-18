@@ -2,13 +2,12 @@
 only; nothing here reaches a debrid service)."""
 import base64
 import json
-import threading
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import local_network_only  # noqa: E402
+from helpers import local_network_only, start_server, stop_server  # noqa: E402
 from subsync import realdebrid  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -156,13 +155,11 @@ class Redirector:
                 self.send_header('Content-Length', '0')
                 self.end_headers()
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), H)
+        self.server = start_server(ThreadingHTTPServer(('127.0.0.1', 0), H))
         self.url = f'http://127.0.0.1:{self.server.server_address[1]}/file.mkv'
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class GateTest(unittest.TestCase):
@@ -235,8 +232,11 @@ class GateTest(unittest.TestCase):
                 fetch_subtitle(self.redirector.url, timeout=5)
 
 
-class FakeAiostreams:
-    """Just enough of AIOStreams: its user API (Basic auth) and one config's stream and subtitle routes."""
+class OneConfigAiostreams:
+    """Just enough of AIOStreams for the listing check: one config (a fixed id and password) behind its user API (Basic
+    auth), read before every listing; a listing with one Real-Debrid and one TorBox row and one subtitle list; faults:
+    `limited` (that many reads answer 429, retry at once) and `moved` (the user API redirects on the same host). Not
+    helpers.FakeAiostreams, which makes configs and answers their listings; `calls` names each route asked, in order."""
     UUID = '9aaaaaaa-1234-4abc-8def-0123456789ab'
     PASSWORD = 'sync-config-password'
 
@@ -291,14 +291,12 @@ class FakeAiostreams:
                     return self._json(200, {'subtitles': [{'id': 's1', 'url': 'http://subs/1.srt', 'lang': 'eng'}]})
                 return self._json(404, {})
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), H)
+        self.server = start_server(ThreadingHTTPServer(('127.0.0.1', 0), H))
         self.base = f'http://127.0.0.1:{self.server.server_address[1]}'
         self.manifest = f'{self.base}/stremio/{self.UUID}/ENCRYPTED/manifest.json'
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class ListingCheckTest(unittest.TestCase):
@@ -311,8 +309,8 @@ class ListingCheckTest(unittest.TestCase):
         guard.start()
         self.addCleanup(guard.stop)
 
-    def aios(self, config, password=FakeAiostreams.PASSWORD):
-        self.fake = FakeAiostreams(config)
+    def aios(self, config, password=OneConfigAiostreams.PASSWORD):
+        self.fake = OneConfigAiostreams(config)
         self.addCleanup(self.fake.close)
         return Aios(self.fake.manifest, password=password, timeout=5)
 
@@ -358,7 +356,7 @@ class ListingCheckTest(unittest.TestCase):
                 aios.streams('movie', 'tt1')
         self.assertEqual(self.fake.calls, ['config'])
         self.assertIn("can't read", logs.output[0])
-        self.assertNotIn(FakeAiostreams.PASSWORD, logs.output[0])
+        self.assertNotIn(OneConfigAiostreams.PASSWORD, logs.output[0])
 
     def test_without_its_password_nothing_is_listed(self):
         aios = self.aios(self.SAFE, password='')

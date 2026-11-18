@@ -11,7 +11,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import Clock, closed_after, TempDir  # noqa: E402
+from helpers import Clock, closed_after, start_server, stop_server, TempDir  # noqa: E402
 from subsync import origlang  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -109,17 +109,15 @@ class Services:
             def do_POST(self):
                 self.handle_any("POST")
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     def of(self, service):
         with self.lock:
             return [c for c in self.calls if c["service"] == service]
 
     def close(self):
-        self.srv.shutdown()
-        self.srv.server_close()
+        stop_server(self.srv)
 
 
 class Base(unittest.TestCase):
@@ -308,13 +306,11 @@ class Elsewhere:
                 self.send_header("content-length", "2")
                 self.end_headers()
                 self.wfile.write(b"{}")
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     def close(self):
-        self.srv.shutdown()
-        self.srv.server_close()
+        stop_server(self.srv)
 
 
 class KeySafetyTest(Base):

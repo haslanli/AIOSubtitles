@@ -52,6 +52,35 @@ from subsync.subs import to_srt, ts  # noqa: E402
 BETTER = Settings({}).better
 AUDIO_BETTER = Settings({}).audio_better
 
+# public mode keeps each person's record encrypted: its tests need the cryptography package, which the image has
+try:
+    import cryptography  # noqa: F401
+    HAVE_CRYPTOGRAPHY = True
+except ImportError:
+    HAVE_CRYPTOGRAPHY = False
+NEEDS = "cryptography is not installed (the image has it; tests run it in a venv)"
+
+POLL_S = 0.05    # how often a test's server looks for stop_server
+BACKLOG = 64     # connections a test's server holds until it takes them
+
+
+def start_server(server):
+    """Serves `server` (a socketserver server) from a daemon thread and returns it. It looks for a stop every POLL_S
+    seconds, not serve_forever's default half second, which every stop_server waited out. A stand-in with
+    socketserver's listen queue of 5 gets room for BACKLOG: a test that opens more connections at once (six sources
+    asked together) had one of them reset now and then, more often once the run got faster."""
+    if server.request_queue_size < BACKLOG:
+        server.request_queue_size = BACKLOG
+        server.socket.listen(BACKLOG)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": POLL_S}, daemon=True).start()
+    return server
+
+
+def stop_server(server):
+    """Stops a server start_server serves and closes its socket."""
+    server.shutdown()
+    server.server_close()
+
 
 class RangeServer:
     """Serves files under root with Range support. fault: None | '403' | 'ignore-range' | 'wrong-size' | 'aligned'
@@ -113,17 +142,14 @@ class RangeServer:
                     except (BrokenPipeError, ConnectionResetError):    # the client went: so does the connection
                         self.close_connection = True
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.server.daemon_threads = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.port = self.server.server_address[1]
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def url(self, name):
         return f"http://127.0.0.1:{self.port}/{name}"
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class TempDir:
@@ -384,10 +410,8 @@ class FakeAiostreams:
 
             do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = handle_any
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.server.daemon_threads = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def enc(self, uuid):
         return self.encrypted.get(uuid, "ENC" + uuid[:8])
@@ -443,8 +467,66 @@ class FakeAiostreams:
         return [r for r in self.requests if r[0] in ("POST", "PUT", "DELETE")]
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
+
+
+# -- public mode: its made-up values, the log lines a test reads, and the parts every public harness starts from --------
+KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"   # SUBSYNC_SECRET_KEY
+INSTANCE = "https://aios.test"                        # a person's AIOStreams: the stand-in answers (PublicParts.api)
+PASSWORD = "the-viewers-own-Password-1"               # their config's password
+
+
+class Logs(logging.Handler):
+    """The log lines made while it is on, by any logger, DEBUG and up, each as a formatter writes it, so a logged
+    exception's traceback is part of its line. on hangs it on the root logger and sets the root to DEBUG;
+    off takes it off and sets the root's level back (it was left at DEBUG for the rest of the run)."""
+
+    def __init__(self):
+        super().__init__(logging.DEBUG)
+        self.lines, self.level_before = [], None
+
+    def emit(self, record):
+        self.lines.append(self.format(record))
+
+    def on(self):
+        root = logging.getLogger()
+        self.level_before = root.level
+        root.addHandler(self)
+        root.setLevel(logging.DEBUG)
+        return self
+
+    def off(self):
+        root = logging.getLogger()
+        root.removeHandler(self)
+        root.setLevel(self.level_before)
+
+
+class PublicParts:
+    """What each public-mode harness starts from (test_public_http, test_recheck, test_signup): a data folder, public
+    mode's settings (`env` added to them), the people's records, a stand-in AIOStreams that answers for INSTANCE through
+    api(), and the log lines (Logs). start_public() makes them; stop_public() closes them and puts the logging back."""
+
+    def start_public(self, clock=time.time, **env):
+        from subsync.users import Users
+        self.tmp = TempDir()
+        self.dir = self.tmp.__enter__()
+        self.env = dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
+                         "SUBSYNC_PUBLIC_BASE": "https://subs.test"}, **env)
+        self.s = Settings(self.env)
+        self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes(), clock=clock)
+        self.fake = FakeAiostreams()
+        self.logs = Logs().on()
+
+    def api(self, base, timeout):
+        """The service's AIOStreams client for `base` (an api_factory), INSTANCE answered by the stand-in."""
+        from subsync.aiosconfig import AiosApi
+        return AiosApi(base.replace(INSTANCE, self.fake.url), timeout=timeout, max_timeout=timeout, retry_wait_cap=5)
+
+    def stop_public(self):
+        self.logs.off()
+        self.fake.close()
+        self.users.close()
+        self.tmp.__exit__(None, None, None)
 
 
 # Ten lines of everyday dialogue per language, written for these tests (the language check)

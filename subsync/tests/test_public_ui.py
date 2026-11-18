@@ -7,20 +7,10 @@ import os
 import re
 import types
 import unittest
-import urllib.parse
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+from helpers import HAVE_CRYPTOGRAPHY, KEY, NEEDS  # (first: it puts the package on the import path)
 from subsync.settings import Settings  # noqa: E402
 
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
-NEEDS = "cryptography is not installed (the image has it; tests run it in a venv)"
-
-
-KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 BASE = "https://subs.test"
 TOKEN = "T" * 43
 LINK = f"{BASE}/u/{TOKEN}/manifest.json"
@@ -164,12 +154,13 @@ def every_page():
     return out
 
 
-def approved_corpus():
+def approved_texts():
     """Every approved text the pages may show, formatted with the made-up values every_page uses."""
     from subsync import explain, pages
     from subsync.aiosconfig import LANGUAGES
     texts = list(explain.PUBLIC_FIELDS.values()) + list(explain.PUBLIC_BEFORE) + list(explain.PUBLIC_MANUAL_STEPS)
     texts += list(explain.PUBLIC_DELETE_LIST.values()) + list(explain.PUBLIC_STORE_ONLY) + list(explain.PUBLIC_HEADLINE)
+    texts += list(explain.PUBLIC_REAL_DEBRID_WARNING)       # its title and text apart (the result page); joined below
     texts += [explain.PUBLIC_REAL_DEBRID_NOTICE, explain.CONTACT] + [explain.languages_help(n) for n in (1, 2, 3, 4)]
     texts.append(explain.PUBLIC_MANUAL_LEAD)
     texts += [h for h, _ in explain.PRIVACY_PARTS]
@@ -200,7 +191,20 @@ def approved_corpus():
     for lead in ("not_added", "refresh_manual"):          # a note's text with the manual steps after it
         texts.append(" ".join((explain.PUBLIC_TEXTS[lead],) + explain.PUBLIC_MANUAL_STEPS))
     texts += [name for name, _, _ in LANGUAGES] + list(pages.UI_WORDS)
-    return "\n".join(texts)
+    return texts
+
+
+def approved_corpus():
+    """The approved texts in one string."""
+    return "\n".join(approved_texts())
+
+
+def split_pieces():
+    """The pieces the pages' inline markup cuts out of an approved text, each shown on its own: the headline's last part
+    either side of its line break (pages._headline), and the full stop after the Privacy link."""
+    from subsync import explain
+    word, _, rest = explain.PUBLIC_HEADLINE[-1].partition(" ")
+    return {word, rest, "."}
 
 
 DYNAMIC = re.compile(r"^(\d+ of \d+|[\d.]+ MB of \d+ MB|English, Spanish(, French)?|Wrong\.|Detail\.|https://subs\.test/\S*"
@@ -367,11 +371,19 @@ class LookTest(unittest.TestCase):
                 self.assertEqual([a["role"] for a in Tree(text).all("form") if "role" in a], [])
 
     def test_every_text_is_an_approved_text(self):
-        corpus = approved_corpus()
+        # each piece a whole approved text, not a part of one (any fragment passed, even a single word), a
+        # value, or one of the few pieces inline markup cuts an approved text into
+        approved = set(approved_texts()) | split_pieces()
         for name, text in every_page().items():
             for piece in Visible(text).found:
                 with self.subTest(page=name, text=piece[:60]):
-                    self.assertTrue(piece in corpus or DYNAMIC.match(piece), piece)
+                    self.assertTrue(piece in approved or DYNAMIC.match(piece), piece)
+
+    def test_the_pieces_cut_by_inline_markup_are_parts_of_approved_texts(self):
+        texts = approved_texts()
+        for piece in split_pieces():
+            with self.subTest(piece=piece):
+                self.assertTrue(any(piece in text and piece != text for text in texts), piece)
 
     def test_personal_pages_ask_not_to_be_indexed(self):
         pages = every_page()
@@ -491,11 +503,9 @@ class SignupPageTest(unittest.TestCase):
 
 
 class ResultPageTest(unittest.TestCase):
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
     def test_the_stand_in_has_the_real_results_fields(self):
-        try:
-            from subsync.signup import SignupResult
-        except ImportError:
-            self.skipTest(NEEDS)
+        from subsync.signup import SignupResult      # a broken import fails the test (it skipped)
         import dataclasses
         self.assertEqual({f.name for f in dataclasses.fields(SignupResult)}, set(vars(result())))
 
@@ -1163,7 +1173,7 @@ class RoutesTest(unittest.TestCase):
 
     def test_too_many_attempts_says_when(self):
         from test_public_http import form, http
-        for _ in range(5):
+        for _ in range(self.b.s.signups_per_hour):
             http(self.b.base + "/signup", form(link="", password="x"))
         code, body, _ = http(self.b.base + "/signup", form(link="", password="x"))
         self.assertEqual(code, 429)

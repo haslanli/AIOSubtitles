@@ -2,23 +2,14 @@
 and never stored or logged; Real-Debrid is warned about and left out, or, when it is the only service, the sign-up is
 for stored copies only."""
 import copy
-import logging
 import os
 import time
 import unittest
 
-from helpers import FakeAiostreams, TempDir  # noqa: E402
+from helpers import (FakeAiostreams, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD, PublicParts,  # noqa: E402
+                     TempDir)
 from subsync.settings import Settings  # noqa: E402
 
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
-
-KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
-INSTANCE = "https://aios.test"
-PASSWORD = "the-viewers-own-Password-1"
 TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
 OSV3 = {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
         "options": {"name": "OpenSubtitles V3+", "resources": ["subtitles"]}}
@@ -47,39 +38,15 @@ def viewer(services=(TORBOX,), presets=(TORRENTIO, OSV3, NEWZNAB)):
             "failover": {"enabled": True}, "preloadStreams": {"enabled": True}}
 
 
-class Logs(logging.Handler):
-    def __init__(self):
-        super().__init__(logging.DEBUG)
-        self.lines = []
-
-    def emit(self, record):
-        self.lines.append(record.getMessage())
-
-
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
-class SignupTest(unittest.TestCase):
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+class SignupTest(PublicParts, unittest.TestCase):
     def setUp(self):
         from subsync import signup
-        from subsync.aiosconfig import AiosApi
-        from subsync.users import Users
         self.signup = signup
-        self.tmp = TempDir()
-        self.dir = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                           "SUBSYNC_PUBLIC_BASE": "https://subs.test"})
-        self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes())
-        self.fake = FakeAiostreams()
-        self.api = lambda base, timeout: AiosApi(base.replace(INSTANCE, self.fake.url), timeout=timeout,
-                                                 max_timeout=timeout, retry_wait_cap=5)
-        self.logs = Logs()
-        logging.getLogger().addHandler(self.logs)
-        logging.getLogger().setLevel(logging.DEBUG)
+        self.start_public()
 
     def tearDown(self):
-        logging.getLogger().removeHandler(self.logs)
-        self.fake.close()
-        self.users.close()
-        self.tmp.__exit__(None, None, None)
+        self.stop_public()
 
     def form(self, uuid, **extra):
         return dict({"link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "password": PASSWORD,
@@ -718,7 +685,7 @@ class UsenetServicesInAddonsTest(unittest.TestCase):
         self.assertEqual([p["options"]["services"] for p in made["presets"] if p["type"] == "prowlarr"], [["torbox"]])
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class GateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = TempDir()

@@ -11,7 +11,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import Clock, local_network_only, wait_until
+from helpers import Clock, local_network_only, start_server, stop_server, wait_until
 from subsync import srclimits
 from subsync.extra import ExtraSources, split_id
 from subsync.settings import Settings
@@ -163,17 +163,14 @@ class Fake:
                         return self.send(200, zipped(["Show.S01E01.srt", "Show.S01E02.srt"]), "application/zip")
                 return self.send(404, {})
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.server.daemon_threads = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def asked(self, prefix):
         return [p for p, _ in self.calls if p.startswith(prefix)]
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class Ticking:

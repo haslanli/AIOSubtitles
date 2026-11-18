@@ -5,7 +5,7 @@ import re
 import os
 import unittest
 
-from helpers import Clock, closed_after, wait_until  # noqa: E402
+from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, wait_until  # noqa: E402
 from subsync.settings import Settings, available_cpus  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -623,19 +623,12 @@ class WorkerHooksTest(unittest.TestCase):
         self.assertFalse(w.is_alive())
 
 
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
-
-
 def record(link="https://aios.test/stremio/u1/E1/manifest.json", languages=("eng",)):
     return {"instance": "https://aios.test", "sync_uuid": "u1", "sync_link": link, "sync_password": "p1",
             "languages": list(languages), "version": 1}
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class PoolTest(unittest.TestCase):
     def setUp(self):
         from helpers import TempDir
@@ -812,7 +805,7 @@ class Listing:
         return None
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class KeptAppTest(unittest.TestCase):
     """A person's App is kept between their requests, a worker or not, so the entries of a list download (public mode
     rebuilds a copy, or gets an original, from the person's own list); their next App starts from what the last
@@ -821,8 +814,7 @@ class KeptAppTest(unittest.TestCase):
     def setUp(self):
         import functools
         import http.server
-        import threading
-        from helpers import TempDir
+        from helpers import start_server, stop_server, TempDir
         from subsync.public import Pool
         from subsync.store import Store
         from subsync.users import Users
@@ -838,11 +830,9 @@ class KeptAppTest(unittest.TestCase):
         class Quiet(http.server.SimpleHTTPRequestHandler):
             def log_message(self, *a):
                 pass
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=subs))
-        server.daemon_threads = True
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
+        server = start_server(http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                                              functools.partial(Quiet, directory=subs)))
+        self.addCleanup(stop_server, server)
         self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
                     "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_ACTIVE_WORKERS": "1",
                     "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off"}

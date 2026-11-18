@@ -9,19 +9,14 @@ import threading
 import time
 import unittest
 
-from helpers import closed_after, Counts, FakeDebrid, FakeUsenet, row  # noqa: E402
+from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, HAVE_CRYPTOGRAPHY, INSTANCE, KEY,  # noqa: E402
+                     NEEDS, PASSWORD, row)
 from test_resolve_once import Debrid  # noqa: E402
 from subsync import aiosconfig, realdebrid, sources, worker as worker_mod  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
 from subsync.worker import Job, Worker  # noqa: E402
-
-try:
-    import cryptography  # noqa: F401
-    HAVE_CRYPTOGRAPHY = True
-except ImportError:
-    HAVE_CRYPTOGRAPHY = False
 
 URL = "https://aiosubtitles.example/u/TOKEN/manifest.json"
 PROXIED = {"url": "http://nzbdav:3000", "apiKey": "k", "aiostreamsAuth": "user:pass"}
@@ -260,7 +255,7 @@ class GateTest(TempDirTest):
         self.assertEqual(store.day_count("usenet"), 10)
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class UsageTest(TempDirTest):
     """Each person's Usenet listings and the day's stop, in a table of their own."""
 
@@ -583,10 +578,7 @@ class UsenetJobTest(TempDirTest):
 
 # --------------------------------------------------------------------------------------------------------- public mode
 
-KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
-INSTANCE = "https://aios.test"
 OTHER = "https://other.test"
-PASSWORD = "the-viewers-own-Password-1"
 TORRENTIO_P = dict(TORRENTIO)
 
 
@@ -594,7 +586,7 @@ def setup_of(services, presets):
     return {"services": copy.deepcopy(services), "presets": copy.deepcopy(presets), "failover": {"enabled": True}}
 
 
-@unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class PublicUsenetTest(TempDirTest):
     def setUp(self):
         super().setUp()

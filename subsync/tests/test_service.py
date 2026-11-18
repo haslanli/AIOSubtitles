@@ -20,7 +20,7 @@ from http.client import HTTPConnection
 from unittest import mock
 
 from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only,  # noqa: E402
-                     TempDir, watch_the_log)
+                     start_server, stop_server, TempDir, watch_the_log)
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -531,13 +531,11 @@ class AddonFixture(unittest.TestCase):
         self.safety = Safety()
         self.downloads = fake_downloads(self)
         self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
-        self.server = serve(App(self.s, self.store, self.worker, self.safety), 0)
+        self.server = start_server(serve(App(self.s, self.store, self.worker, self.safety), 0))
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
         self.tmp.__exit__(None, None, None)
 
 
@@ -1316,11 +1314,9 @@ class OriginalEntryFixture(unittest.TestCase):
         aios = FakeAios()
         aios.subtitles = lambda *a: [dict(c) for c in self.cands]
         self.worker = Worker(self.s, self.store, aios, Safety())       # not started: jobs stay queued
-        self.server = serve(App(self.s, self.store, self.worker, Safety()), 0)
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
+        self.server = start_server(serve(App(self.s, self.store, self.worker, Safety()), 0))
+        self.addCleanup(stop_server, self.server)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
         from unittest import mock
         from subsync import pipeline
@@ -1677,13 +1673,11 @@ class AddonKeyTest(unittest.TestCase):
         self.store = closed_after(self, Store(d))
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started
         self.app = App(self.s, self.store, self.worker, Safety())
-        self.server = serve(self.app, 0)
+        self.server = start_server(serve(self.app, 0))
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
         self.tmp.__exit__(None, None, None)
 
     def test_settings_normalised(self):
@@ -1743,10 +1737,8 @@ class AddonKeyTest(unittest.TestCase):
 
             def log_message(self, *a):
                 pass
-        other = HTTPServer(("127.0.0.1", 0), Unwell)
-        threading.Thread(target=other.serve_forever, daemon=True).start()
-        self.addCleanup(other.server_close)
-        self.addCleanup(other.shutdown)
+        other = start_server(HTTPServer(("127.0.0.1", 0), Unwell))
+        self.addCleanup(stop_server, other)
         with tempfile.TemporaryDirectory() as bin_:
             python = os.path.join(bin_, "python")
             with open(python, "w") as f:
@@ -1845,12 +1837,10 @@ class ConnectionTest(unittest.TestCase):
         self.safety = Safety()
         self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
         self.app = App(self.s, self.store, self.worker, self.safety)
-        self.server = serve(self.app, 0)
+        self.server = start_server(serve(self.app, 0))
+        self.addCleanup(stop_server, self.server)
         self.port = self.server.server_address[1]
         self.base = f"http://127.0.0.1:{self.port}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
 
     def queued(self):
         """The hints of the jobs queued since the last call."""
@@ -2085,13 +2075,11 @@ class AudioOffEntryTest(unittest.TestCase):
         self.store = closed_after(self, Store(d))
         fake_downloads(self)
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())  # not started: jobs stay queued
-        self.server = serve(App(self.s, self.store, self.worker, Safety()), 0)
+        self.server = start_server(serve(App(self.s, self.store, self.worker, Safety()), 0))
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
         self.tmp.__exit__(None, None, None)
 
     def get(self, path):
@@ -2178,13 +2166,11 @@ class ListFixture(unittest.TestCase):
         self.aios = FakeAios()
         self.aios.row = {"url": "http://127.0.0.1:9/never"}
         self.worker = Worker(self.s, self.store, self.aios, Safety())   # not started
-        self.server = serve(App(self.s, self.store, self.worker, Safety()), 0)
+        self.server = start_server(serve(App(self.s, self.store, self.worker, Safety()), 0))
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
         self.tmp.__exit__(None, None, None)
 
 

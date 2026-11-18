@@ -8,7 +8,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from helpers import FIXTURES  # noqa: E402
+from helpers import FIXTURES, start_server, stop_server  # noqa: E402
 from subsync.reader import MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused  # noqa: E402
 
 TINY = os.path.join(FIXTURES, "tiny.mkv")
@@ -71,9 +71,7 @@ class Debrid:
                     return
                 self.empty(404)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.server.daemon_threads = True
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
         self.link = f"http://127.0.0.1:{self.server.server_address[1]}/link/tiny.mkv"
 
     def expire(self):
@@ -82,8 +80,7 @@ class Debrid:
         self.token += 1
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        stop_server(self.server)
 
 
 class ResolveOnceTest(unittest.TestCase):
@@ -150,7 +147,7 @@ class ResolveOnceTest(unittest.TestCase):
         with self.assertRaises(Refused):
             for k in range(10):
                 r.get(100 * k, 50)
-        self.assertLessEqual(self.d.link_hits, 1 + 3)       # at most three fresh look-ups per reader
+        self.assertLessEqual(self.d.link_hits, 1 + MAX_RE_RESOLVE)    # at most MAX_RE_RESOLVE fresh look-ups per reader
 
     def test_a_dead_address_asks_the_link_a_few_times_in_all(self):
         # The download address stops answering (no reply at all); the link still redirects to it, so
