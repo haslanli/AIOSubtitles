@@ -1,11 +1,12 @@
 """Public mode's records of the people signed up: encrypted with a key from the service's secret and the person's own
 link, so the database alone, or the database and the secret, opens nothing."""
+import contextlib
 import os
 import sqlite3
 import threading
 import unittest
 
-from helpers import Clock, HAVE_CRYPTOGRAPHY, NEEDS, TempDir  # noqa: E402
+from helpers import Clock, files_bytes, HAVE_CRYPTOGRAPHY, NEEDS, TempDir  # noqa: E402
 
 SECRET = bytes(range(32))
 RECORD = {"instance": "https://aios.test", "sync_uuid": "11111111-2222-3333-4444-555555555555",
@@ -58,7 +59,7 @@ class UsersTest(unittest.TestCase):
         self.users.create(self.token, RECORD)
         self.users.add_usage(self.token, files=1, nbytes=1000)
         self.users.close()
-        data = b"".join(open(os.path.join(self.dir, f), "rb").read() for f in os.listdir(self.dir))
+        data = files_bytes(self.dir)
         for secret in [self.token, RECORD["sync_link"], RECORD["sync_password"], RECORD["sync_uuid"], RECORD["instance"],
                        "ENCRYPTEDPART"]:
             with self.subTest(secret=secret[:12]):
@@ -81,7 +82,8 @@ class UsersTest(unittest.TestCase):
         self.assertTrue(self.users.delete(self.token))
         self.assertIsNone(self.users.open(self.token))
         self.assertEqual(self.users.usage(self.token), {"files": 0, "bytes": 0})
-        self.assertEqual(sqlite3.connect(self.path).execute("SELECT COUNT(*) FROM usage").fetchone()[0], 0)
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM usage").fetchone()[0], 0)
         self.assertFalse(self.users.delete(self.token))
 
     def test_expire_after_keep_days(self):

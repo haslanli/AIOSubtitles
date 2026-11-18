@@ -6,6 +6,7 @@ import json
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 from helpers import HAVE_CRYPTOGRAPHY, NEEDS, start_server, stop_server  # (first: it puts the package on the path)
 from subsync import explain, origlang, pages, ui  # noqa: E402
@@ -208,9 +209,16 @@ class PersonsKeyTest(unittest.TestCase):
         self.assertIn(htmllib.escape(explain.PUBLIC_TEXTS["tmdb_unreachable"]), body.decode())
         self.assertNotIn("tmdb_key", c.users.open(token))
 
-    def test_closing_the_service_cancels_queued_lookups(self):
-        self.case.pool.close()
-        self.assertTrue(self.case.pool.lookup.pool._shutdown)
+    def test_closing_the_service_closes_its_lookups(self):
+        # what is checked here is that the service closes its one Lookup, whose pool then takes no more lookups; that
+        # closing it drops the lookups still queued is test_origlang's KeySafetyTest (this read a private flag
+        # of ThreadPoolExecutor instead)
+        lookup = self.case.pool.lookup
+        with mock.patch.object(lookup, "close", wraps=lookup.close) as close:
+            self.case.pool.close()
+        close.assert_called_once_with()
+        with self.assertRaises(RuntimeError):            # "cannot schedule new futures after shutdown"
+            lookup.pool.submit(lambda: None)
 
     def test_refused_when_the_instance_doesnt_ask(self):
         self.case.tearDown()

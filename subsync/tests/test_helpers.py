@@ -54,6 +54,14 @@ class OnePathSetupTest(unittest.TestCase):
                          and isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) == "sys.path"]
                 self.assertEqual(edits, [])
 
+    def test_a_modules_main_guard_comes_after_all_its_tests(self):
+        # `python3 test_x.py` runs unittest.main where the guard stands; classes defined after it never ran
+        for name, tree in self.modules():
+            with self.subTest(module=name):
+                guards = [i for i, node in enumerate(tree.body) if isinstance(node, ast.If)
+                          and ast.unparse(node.test) in ("__name__ == '__main__'", '__name__ == "__main__"')]
+                self.assertIn(guards, ([], [len(tree.body) - 1]))
+
     def test_a_module_also_runs_from_the_package_folder(self):
         # `python3 -m unittest tests.test_x` in subsync/ (the folder above this one) finds helpers too
         env = {k: v for k, v in os.environ.items() if k != "AIOSUBTITLES_IMAGE_BUILD"}

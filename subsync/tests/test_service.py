@@ -17,10 +17,11 @@ import urllib.parse
 import urllib.request
 import zipfile
 from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only,  # noqa: E402
-                     start_server, stop_server, TempDir, watch_the_log)
+                     RangeServer, start_server, stop_server, TempDir, watch_the_log)
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -503,40 +504,70 @@ class FakeAios(Aios):
         return []
 
 
-def http(url, data=None, headers=None, method=None):
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status, r.read(), dict(r.headers)
-    except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers)
-
-
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):
         return None
 
 
-class AddonFixture(unittest.TestCase):
-    """The addon's server over a worker that is not started (its jobs stay queued), the audio route off. No tests of its
-    own: each class below has its own."""
+def http(url, data=None, headers=None, method=None, follow=True):
+    """One request's answer: (status, body, headers). An error status is an answer like any other, read and then closed
+; with `follow` off, so is a redirect, as a player that doesn't follow it gets it (its Location)."""
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    open_ = urllib.request.urlopen if follow else urllib.request.build_opener(NoRedirect).open
+    try:
+        with open_(req, timeout=10) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        with e:
+            return e.code, e.read(), dict(e.headers)
+
+
+def no_file_server(test):
+    """A file server on this machine that holds no file, closed when the test ends: a read of it fails at once (HTTP
+    404, not tried again), and its `headers` record each request made of it."""
+    tmp = TempDir()
+    test.addCleanup(tmp.__exit__, None, None, None)
+    files = RangeServer(tmp.__enter__())
+    test.addCleanup(files.close)
+    return files
+
+
+class AddonCase(unittest.TestCase):
+    """The self-hosted service's parts over a worker that is not started (its jobs stay queued): make_addon() makes them
+    in a data folder of the test's own, serve_addon() serves the app on a port of this machine. Each is closed by the
+    test's cleanups, the server first, also when the set-up fails half-way. No tests of its own."""
+
+    def make_addon(self, env, aios=None, clock=time.time):
+        tmp = TempDir()
+        data = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        self.s = Settings(dict({"SUBSYNC_DATA": data}, **env))
+        self.store = closed_after(self, Store(data, clock=clock))
+        self.safety = Safety()
+        self.worker = Worker(self.s, self.store, FakeAios() if aios is None else aios, self.safety)
+        self.app = App(self.s, self.store, self.worker, self.safety)
+
+    def serve_addon(self):
+        self.server = start_server(serve(self.app, 0))
+        self.addCleanup(stop_server, self.server)
+        self.port = self.server.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def get(self, path):
+        """A route's answer as a player that doesn't follow redirects gets it: (status, body, headers)."""
+        return http(self.base + path, follow=False)
+
+
+class AddonFixture(AddonCase):
+    """The addon's server over a worker that is not started (its jobs stay queued), the audio route off, subtitles
+    downloaded from ORIGINALS. No tests of its own: each class below has its own."""
 
     def setUp(self):
         watch_the_log(self)
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_PENDING_ENTRY": "on",
-                           "SUBSYNC_PENDING_WAIT_MS": "200"})
-        self.store = closed_after(self, Store(d))
-        self.safety = Safety()
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_PENDING_ENTRY": "on",
+                         "SUBSYNC_PENDING_WAIT_MS": "200"})
         self.downloads = fake_downloads(self)
-        self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
-        self.server = start_server(serve(App(self.s, self.store, self.worker, self.safety), 0))
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def tearDown(self):
-        stop_server(self.server)
-        self.tmp.__exit__(None, None, None)
+        self.serve_addon()
 
 
 class AddonTest(AddonFixture):
@@ -557,6 +588,10 @@ class AddonTest(AddonFixture):
         self.assertEqual(rest, b"")
 
     def test_known_file_lists_labelled_entries_and_serves_them(self):
+        # the store's clock, moved by hand after the listing, shows each file request's mark of the copy as served
+        # (put writes last_served as created and the listing marks it too, so a file route that stopped
+        # marking it went unseen)
+        clock = self.store.clock = Clock(time.time())
         ass = ("[Script Info]\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
                "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hi\n")
         key = self.store.put(FILE, SHA_A, "eng", 0, "synced", body=ass, fmt="ass", candidate_id="os-123")
@@ -570,12 +605,16 @@ class AddonTest(AddonFixture):
         self.assertEqual(subs[0]["variantOf"], "os-123")      # marked as a variant of the original
         self.assertTrue(subs[0]["url"].startswith(f"http://subsync:8790/file/{ALGO_VERSION}_"))
         path = subs[0]["url"].replace("http://subsync:8790", "")
+        clock.t += 60
         code, body, headers = http(self.base + path)
         self.assertEqual(code, 200)
         self.assertIn(b"Dialogue: 0,0:00:01.00", body)
+        self.assertEqual(self.store.get(key)["last_served"], clock.t)   # the file route marked it served
+        clock.t += 60
         code, body, _ = http(self.base + path.replace(".ass", ".srt"))
         self.assertIn(b"00:00:01,000 --> 00:00:02,000", body)
-        self.assertGreaterEqual(self.store.get(key)["last_served"], self.store.get(key)["created"])
+        self.assertEqual(self.store.get(key)["last_served"], clock.t)   # its SRT form too
+        self.assertGreater(self.store.get(key)["last_served"], self.store.get(key)["created"])
 
     def test_unknown_file_queues_a_job_and_lists_pending_entries(self):
         # subtitle list not known yet: nothing to list (no entry for a language that may have no subtitle at all)
@@ -624,9 +663,16 @@ class AddonTest(AddonFixture):
         self.assertEqual(len(self.worker.jobs), 1)                       # another file of the title is looked for
 
     def test_no_subtitle_to_sync_reads_nothing(self):
-        self.worker.aios.row = {"url": "http://127.0.0.1:9/never"}     # the file is listed, but no subtitle is
-        self.worker.process(Job("movie", "tt7", {"filename": "f.mkv", "videoSize": 9}))
-        self.assertEqual(self.store.day_count("read"), 0)
+        # the file is listed, but no subtitle is, or none in English: nothing of it is asked for (listed at an
+        # address that never answers, a read counted no bytes and went unseen)
+        files = no_file_server(self)
+        self.worker.aios.row = {"url": files.url("f.mkv")}
+        for name, listed in (("f.mkv", []), ("g.mkv", [{"id": "os-s", "url": "http://opensubs/s.srt", "lang": "spa"}])):
+            with self.subTest(listed=listed):
+                self.worker.aios.subtitles = lambda *a, listed=listed: [dict(c) for c in listed]
+                self.worker.process(Job("movie", "tt7", {"filename": name, "videoSize": 9}))
+                self.assertEqual(files.headers, [])
+                self.assertEqual(self.store.day_count("read"), 0)
 
 
 class PickTest(AddonFixture):
@@ -644,13 +690,6 @@ class PickTest(AddonFixture):
     def waiting(self):
         self.worker.pickable[self.ALIAS] = self.job
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
-
-    def get(self, path):
-        try:
-            r = urllib.request.build_opener(NoRedirect).open(self.base + path, timeout=10)
-            return r.status, r.read(), dict(r.headers)
-        except urllib.error.HTTPError as e:
-            return e.code, e.read(), dict(e.headers)
 
     def test_a_plain_request_may_not_use_the_audio_route(self):
         self.assertFalse(self.worker.audio_allowed(self.job))
@@ -803,6 +842,7 @@ class PickTest(AddonFixture):
         self.worker.submit(picked)
         got = []
         t = threading.Thread(target=lambda: got.append(self.worker._next("audio")), daemon=True)
+        self.addCleanup(self.worker.stop)       # the lane's wait ends as the test does, as it passes or not
         t.start()
         t.join(0.3)
         self.assertEqual(got, [])                                                # never both at once on one file
@@ -811,7 +851,6 @@ class PickTest(AddonFixture):
             self.worker.cv.notify_all()
         t.join(6.0)
         self.assertEqual(got, [picked])
-        self.worker.stop_flag = True
 
     def test_a_language_the_audio_route_judged_gets_no_anchored_guess(self):
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
@@ -1001,11 +1040,14 @@ class PickTest(AddonFixture):
 
     def test_a_synced_copy_is_served_from_the_same_link(self):
         self.waiting()
-        key = self.store.put("f" * 16 + "-5", SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
+        copy = "1\n00:00:01,000 --> 00:00:02,000\nthe copy\n"
+        key = self.store.put("f" * 16 + "-5", SHA_A, "eng", 0, "synced", body=copy, fmt="srt")
         self.store.alias(self.ALIAS, "f" * 16 + "-5")
-        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        code, body, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual(code, 200)
         self.assertIn(b"00:00:01,000", body)
+        # the copy, not the original the pick serves otherwise, whose first line has the same time
+        self.assertEqual((body.decode(), headers.get(SERVED)), (copy, "copy"))
         self.assertIsNotNone(key)
 
     def test_a_language_without_any_subtitle_gets_a_one_line_note_not_an_error(self):
@@ -1066,6 +1108,7 @@ class PickTest(AddonFixture):
         # review: a file judged before (a rule change, a list asked again) is queued anew; a pick must wait for the new
         # job's final result, not return at once with the old one
         self.worker._publish(self.ALIAS, "eng", None, final=True)       # the earlier job kept the original
+        self.assertIn("eng", self.worker.judged.get(self.ALIAS, set()))   # judged: a pick now wouldn't wait
         self.worker.submit(Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5}))
         self.assertNotIn("eng", self.worker.judged.get(self.ALIAS, set()))
 
@@ -1286,7 +1329,7 @@ class NoTrack:
         return []
 
 
-class OriginalEntryFixture(unittest.TestCase):
+class OriginalEntryFixture(AddonCase):
     """A file with English, Spanish and Russian subtitles, each kept as its original by a stub judging that measures it
     as CANDS says, behind the addon's server over a worker that is not started. No tests of its own."""
     URL = "/subtitles/movie/tt9/filename=b.mp4&videoSize=5.json"
@@ -1298,25 +1341,18 @@ class OriginalEntryFixture(unittest.TestCase):
 
     def setUp(self):
         watch_the_log(self)
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.addCleanup(self.tmp.__exit__, None, None, None)
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_AUDIO_ROUTE": "on",
-                           "SUBSYNC_LANGUAGES": "eng,spa,rus", "SUBSYNC_PICK_WAIT_MS": "2000",
-                           "SUBSYNC_PARALLEL_LANGUAGES": "off"})
-        self.store = closed_after(self, Store(d))
+        aios = FakeAios()
+        aios.subtitles = lambda *a: [dict(c) for c in self.cands]
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_AUDIO_ROUTE": "on",
+                         "SUBSYNC_LANGUAGES": "eng,spa,rus", "SUBSYNC_PICK_WAIT_MS": "2000",
+                         "SUBSYNC_PARALLEL_LANGUAGES": "off"}, aios)
         self.texts = {cid: dialogue_srt(lang, start=start) for cid, (lang, start, _) in self.CANDS.items()}
         self.measures = {self.texts[cid]: m for cid, (_, _, m) in self.CANDS.items()}
         self.downloads = fake_downloads(self)
         self.downloads.files.update({f"http://subs.test/{cid}.srt": t.encode() for cid, t in self.texts.items()})
         self.cands = [{"id": cid, "url": f"http://subs.test/{cid}.srt", "lang": lang, "release": ""}
                       for cid, (lang, _, _) in self.CANDS.items()]
-        aios = FakeAios()
-        aios.subtitles = lambda *a: [dict(c) for c in self.cands]
-        self.worker = Worker(self.s, self.store, aios, Safety())       # not started: jobs stay queued
-        self.server = start_server(serve(App(self.s, self.store, self.worker, Safety()), 0))
-        self.addCleanup(stop_server, self.server)
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.serve_addon()
         self.job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
         from unittest import mock
         from subsync import pipeline
@@ -1332,11 +1368,9 @@ class OriginalEntryFixture(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def get(self, url):
-        try:
-            r = urllib.request.build_opener(NoRedirect).open(url.replace("http://subsync:8790", self.base), timeout=10)
-            return r.status, r.read(), dict(r.headers)
-        except urllib.error.HTTPError as e:
-            return e.code, e.read(), dict(e.headers)
+        """A link's answer as a player that doesn't follow redirects gets it: a link the app gave out, or one on its
+        server."""
+        return http(url.replace("http://subsync:8790", self.base), follow=False)
 
     def listed(self):
         return json.loads(http(self.base + self.URL)[1])["subtitles"]
@@ -1551,6 +1585,9 @@ class LanesTest(unittest.TestCase):
             audio.audio = True
             w.submit(audio)
             w.start()
+            # Both lanes stopped as the test ends, as it passes or not, the audio job one holds let go first
+            self.addCleanup(w.stop)
+            self.addCleanup(release.set)
             time.sleep(0.3)                                    # the audio job is running
             w.submit(Job("movie", "tt2", {"filename": "b.mkv", "videoSize": 2}))
             t0 = time.time()
@@ -1563,9 +1600,6 @@ class LanesTest(unittest.TestCase):
             while len(order) < 2 and time.time() - t0 < 3:
                 time.sleep(0.05)
             self.assertEqual(order, ["name:b.mkv|2", "name:a.mkv|1"])
-            w.stop_flag = True
-            with w.cv:
-                w.cv.notify_all()
 
     def test_a_lane_goes_on_when_the_store_fails_as_a_job_ends(self):
         # A store write that fails while a job's end is handled (a refused file's mark) or in the hourly
@@ -1661,24 +1695,14 @@ class StopTest(unittest.TestCase):
                 self.assertFalse(lane.is_alive())
 
 
-class AddonKeyTest(unittest.TestCase):
+class AddonKeyTest(AddonCase):
     """The routes that start work or show status answer only under the private key; files and /health don't
     need it; a base path a reverse proxy forwards as is is removed first."""
 
     def setUp(self):
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "https://example.org/subsync",
-                           "SUBSYNC_ADDON_KEY": "/k3y/", "SUBSYNC_BASE_PATH": "subsync/"})
-        self.store = closed_after(self, Store(d))
-        self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started
-        self.app = App(self.s, self.store, self.worker, Safety())
-        self.server = start_server(serve(self.app, 0))
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def tearDown(self):
-        stop_server(self.server)
-        self.tmp.__exit__(None, None, None)
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "https://example.org/subsync", "SUBSYNC_ADDON_KEY": "/k3y/",
+                         "SUBSYNC_BASE_PATH": "subsync/"})
+        self.serve_addon()
 
     def test_settings_normalised(self):
         self.assertEqual((self.s.addon_key, self.s.base_path), ("k3y", "/subsync"))
@@ -1758,19 +1782,11 @@ class AddonKeyTest(unittest.TestCase):
         self.assertEqual(app.route("/k3y/manifest.json"), ("/k3y/manifest.json", True))
 
 
-class NameOnlyTest(unittest.TestCase):
+class NameOnlyTest(AddonCase):
     """A request with a file name but no size names that file, never just the title."""
 
     def setUp(self):
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = closed_after(self, Store(d))
-        self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started
-        self.app = App(self.s, self.store, self.worker, Safety())
-
-    def tearDown(self):
-        self.tmp.__exit__(None, None, None)
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
 
     def test_alias(self):
         self.assertEqual(Job("movie", "tt1", {"filename": "a.mkv"}).alias, "name:a.mkv|None")
@@ -1800,19 +1816,13 @@ class NameOnlyTest(unittest.TestCase):
         self.assertEqual(self.app.subtitles("movie", "tt1", ""), [])
 
 
-class ReadLatelyTest(unittest.TestCase):
+class ReadLatelyTest(AddonCase):
     """Whether a file was read lately is asked of the store, on its own clock (the addon read store.db itself,
     outside the store's lock, and compared with time.time())."""
 
     def setUp(self):
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.addCleanup(self.tmp.__exit__, None, None, None)
         self.clock = Clock()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = closed_after(self, Store(d, clock=self.clock))
-        self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started: jobs stay queued
-        self.app = App(self.s, self.store, self.worker, Safety())
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790"}, clock=self.clock)
 
     def test_a_file_read_a_day_ago_on_the_stores_clock_is_read_again(self):
         self.store.alias("name:a.mkv|1000", FILE)
@@ -1825,22 +1835,12 @@ class ReadLatelyTest(unittest.TestCase):
         self.assertEqual(list(self.worker.jobs), ["name:a.mkv|1000"])
 
 
-class ConnectionTest(unittest.TestCase):
+class ConnectionTest(AddonCase):
     """The self-hosted service's HTTP: what a request may carry and what its connection does."""
 
     def setUp(self):
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.addCleanup(self.tmp.__exit__, None, None, None)
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = closed_after(self, Store(d))
-        self.safety = Safety()
-        self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
-        self.app = App(self.s, self.store, self.worker, self.safety)
-        self.server = start_server(serve(self.app, 0))
-        self.addCleanup(stop_server, self.server)
-        self.port = self.server.server_address[1]
-        self.base = f"http://127.0.0.1:{self.port}"
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
+        self.serve_addon()
 
     def queued(self):
         """The hints of the jobs queued since the last call."""
@@ -2055,39 +2055,42 @@ class PlayerAddressTest(unittest.TestCase):
 
 class StreamDataTest(unittest.TestCase):
     def test_listing_user_agent_gets_stream_data_from_stock_aios(self):
-        # Stock AIOStreams sends streamData only to clients whose User-Agent starts with "AIO"
-        from subsync import sources
+        # Stock AIOStreams sends streamData only to clients whose User-Agent starts with "AIO": the listings and the
+        # subtitle lists are asked with it (only the constant was checked, not what the requests send)
         self.assertTrue(sources.USER_AGENT.startswith("AIO"))
+        asked = []
+
+        class Listings(BaseHTTPRequestHandler):
+            def do_GET(self):
+                asked.append((self.path.split("/")[4], self.headers.get("User-Agent")))
+                body = b'{"streams": [], "subtitles": []}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), Listings))
+        self.addCleanup(stop_server, server)
+        aios = Aios(f"http://127.0.0.1:{server.server_address[1]}/stremio/u1/E1/manifest.json")
+        aios.check_config = lambda: None
+        self.assertEqual((aios.streams("movie", "tt1"), aios.subtitles("movie", "tt1", {"videoSize": 3})), ([], []))
+        self.assertEqual(asked, [("stream", sources.USER_AGENT), ("subtitles", sources.USER_AGENT)])
 
 
-class AudioOffEntryTest(unittest.TestCase):
+class AudioOffEntryTest(AddonCase):
     """With the audio option off, subsync answers at once; while it works on a file it lists one
     "<Language> (Subsync)" entry per language, whose download serves the synced copy when ready, else the original."""
     URL = "/subtitles/movie/tt9/filename=b.mkv&videoSize=5.json"
     ALIAS = "name:b.mkv|5"
 
     def setUp(self):
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus",
-                           "SUBSYNC_PENDING_WAIT_MS": "3000", "SUBSYNC_PICK_WAIT_MS": "3000"})
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus",
+                         "SUBSYNC_PENDING_WAIT_MS": "3000", "SUBSYNC_PICK_WAIT_MS": "3000"})
         self.assertFalse(self.s.audio_route or self.s.pending_entry)    # the stock defaults
-        self.store = closed_after(self, Store(d))
         fake_downloads(self)
-        self.worker = Worker(self.s, self.store, FakeAios(), Safety())  # not started: jobs stay queued
-        self.server = start_server(serve(App(self.s, self.store, self.worker, Safety()), 0))
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def tearDown(self):
-        stop_server(self.server)
-        self.tmp.__exit__(None, None, None)
-
-    def get(self, path):
-        try:
-            r = urllib.request.build_opener(NoRedirect).open(self.base + path, timeout=10)
-            return r.status, r.read(), dict(r.headers)
-        except urllib.error.HTTPError as e:
-            return e.code, e.read(), dict(e.headers)
+        self.serve_addon()
 
     def test_the_first_answer_comes_at_once_with_an_entry_per_language(self):
         t0 = time.time()
@@ -2152,26 +2155,18 @@ class AudioOffEntryTest(unittest.TestCase):
         self.assertEqual([s["label"] for s in subs], ["English (synced)"])
 
 
-class ListFixture(unittest.TestCase):
-    """The addon's server over a worker that is not started, whose file is listed at an address that never answers.
-    No tests of its own."""
+class ListFixture(AddonCase):
+    """The addon's server over a worker that is not started, whose file is listed at a server that holds no file: a read
+    of it fails at once (HTTP 404), and `files.headers` records it. No tests of its own."""
 
     def setUp(self):
         watch_the_log(self)
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus",
-                           "SUBSYNC_PICK_WAIT_MS": "300"})
-        self.store = closed_after(self, Store(d))
+        self.files = no_file_server(self)
         self.aios = FakeAios()
-        self.aios.row = {"url": "http://127.0.0.1:9/never"}
-        self.worker = Worker(self.s, self.store, self.aios, Safety())   # not started
-        self.server = start_server(serve(App(self.s, self.store, self.worker, Safety()), 0))
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def tearDown(self):
-        stop_server(self.server)
-        self.tmp.__exit__(None, None, None)
+        self.aios.row = {"url": self.files.url("b.mkv")}
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus",
+                         "SUBSYNC_PICK_WAIT_MS": "300"}, self.aios)
+        self.serve_addon()
 
 
 class EmptyListTest(ListFixture):
@@ -2187,6 +2182,7 @@ class EmptyListTest(ListFixture):
         self.worker.process(job)                                        # the list comes back empty
         self.assertIsNone(self.worker.known_originals(self.ALIAS))
         self.assertIsNone(self.store.originals_get(self.ALIAS))
+        self.assertEqual(self.files.headers, [])                        # nothing of the file asked for
         self.assertEqual(self.store.day_count("read"), 0)
 
     def test_a_pick_after_an_empty_list_asks_for_the_list_again(self):
@@ -2195,11 +2191,8 @@ class EmptyListTest(ListFixture):
         self.worker.jobs.clear()
         self.worker.queue.clear()
         self.worker.process(job)
-        try:
-            urllib.request.build_opener(NoRedirect).open(self.base + "/pick/" + token(self.ALIAS) + "/eng.srt", timeout=10)
-            self.fail("expected 503")
-        except urllib.error.HTTPError as e:
-            self.assertEqual((e.code, e.headers.get("Retry-After")), (503, "1"))   # not the "none found" note
+        code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, headers.get("Retry-After")), (503, "1"))   # not the "none found" note
         self.assertEqual([(j.alias, j.type, j.video_id) for j in self.worker.jobs.values()], [(self.ALIAS, "movie", "tt9")])
 
 
@@ -2221,7 +2214,9 @@ class BestGuessFallbackTest(ListFixture):
         for k, v in env.items():
             setattr(self.s, k, v)
         job = Job("series", "tt9:1:1", dict({"filename": self.NAME, "videoSize": 5}, **hints))
-        self.worker.process(job)                                       # the list is known; the read then fails
+        # the list is known; the read then fails, at once (at an address that never answered, each read was
+        # tried again after READ_RETRY_S, 30 s of the module's run)
+        self.worker.process(job)
         return {lang: (o or {}).get("id") for lang, o in self.worker.known_originals(job.alias).items()}
 
     def test_the_likeliest_fit_is_served_while_there_is_no_copy(self):
@@ -2232,20 +2227,12 @@ class BestGuessFallbackTest(ListFixture):
         self.assertEqual(self.originals({}, rank_by_release=False), {"eng": "os-dvd", "rus": "os-rus"})
 
 
-class BestFitOffersTest(unittest.TestCase):
+class BestFitOffersTest(AddonCase):
     """(2), (3), (6): the passing results of a file and language are offered best fit first; the main language
     lists up to 3 of them, the others 1; a pick (the "(Subsync)" entry) waits up to 14 s for the result."""
 
     def setUp(self):
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus"})
-        self.store = closed_after(self, Store(d))
-        self.worker = Worker(self.s, self.store, FakeAios(), Safety())
-        self.app = App(self.s, self.store, self.worker, Safety())
-
-    def tearDown(self):
-        self.tmp.__exit__(None, None, None)
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus"})
 
     def put(self, sha, lang, rank):
         return self.store.put(FILE, sha * 64, lang, rank, "synced", body=f"1\n00:00:0{rank + 1},000 --> 00:00:09,000\n{sha}\n",
@@ -2340,19 +2327,11 @@ class BestFitOffersTest(unittest.TestCase):
         self.assertEqual(sorted([far_worse, layered], key=Worker.fit_rank), [layered, far_worse])   # not after a far worse one
 
 
-class RuleChangeTest(unittest.TestCase):
+class RuleChangeTest(AddonCase):
     """A verdict judged under another pass rule (or other rule settings) is judged again."""
 
     def setUp(self):
-        self.tmp = TempDir()
-        d = self.tmp.__enter__()
-        self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = closed_after(self, Store(d))
-        self.worker = Worker(self.s, self.store, FakeAios(), Safety())
-        self.app = App(self.s, self.store, self.worker, Safety())
-
-    def tearDown(self):
-        self.tmp.__exit__(None, None, None)
+        self.make_addon({"SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
 
     def test_the_rule_id_follows_the_pass_rule_settings(self):
         base = Settings({}).rule_id

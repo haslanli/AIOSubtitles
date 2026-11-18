@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest import mock
 
-from helpers import HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, Clock, PublicParts  # noqa: E402
+from helpers import files_bytes, HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, Clock, PublicParts  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 
 OTHER = "https://other-aios.test"
@@ -316,8 +316,7 @@ class RecheckTest(Base):
         uuid, token = self.sign_up(keep=True)
         self.checker().check(token)
         self.users.close()
-        data = b"".join(open(os.path.join(self.dir, f), "rb").read() for f in os.listdir(self.dir)
-                        if f.startswith("users.sqlite3"))
+        data = files_bytes(self.dir, "users.sqlite3")
         from subsync.users import Users
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes(), clock=self.clock)
         self.assertNotIn(PASSWORD.encode(), data)

@@ -166,9 +166,21 @@ def have(tool):
 
 
 def closed_after(test, resource):
-    """`resource` (a Store), closed when the test ends, so no test leaves its database open."""
+    """`resource` (a Store, the people's records, a database connection), closed when the test ends, so no test leaves
+    its database open."""
     test.addCleanup(resource.close)
     return resource
+
+
+def files_bytes(folder, prefix=""):
+    """The bytes of every file in `folder` whose name starts with `prefix`, one after the other: what the scans for a
+    secret on disk look through, each file closed once read."""
+    data = []
+    for name in os.listdir(folder):
+        if name.startswith(prefix):
+            with open(os.path.join(folder, name), "rb") as f:
+                data.append(f.read())
+    return b"".join(data)
 
 
 LINK_MARKS = ("127.0.0.1", "/stremio/")   # every link the tests' servers give out is http://127.0.0.1:<port>/...

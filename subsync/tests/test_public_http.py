@@ -8,8 +8,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from helpers import (HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, PublicParts, answers, closed_after,  # noqa: E402
-                     exchange, start_server, stop_server, wait_until)
+from helpers import (HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, PublicParts, answers, exchange,  # noqa: E402
+                     start_server, stop_server, wait_until)
 
 VIEWER = {"services": [{"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}],
           "presets": [{"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}},
@@ -28,7 +28,8 @@ def http(url, data=None, headers=None, method=None):
         with urllib.request.build_opener(NoRedirect).open(req, timeout=15) as r:
             return r.status, r.read(), dict(r.headers)
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers)
+        with e:                                  # an error answer is closed once read, as any other
+            return e.code, e.read(), dict(e.headers)
 
 
 def form(**fields):
@@ -43,15 +44,18 @@ class Base(PublicParts, unittest.TestCase):
         from subsync.store import Store
         self.start_public(**dict({"SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
                                   "SUBSYNC_RECHECK_HOURS": "0"}, **env))
-        self.store = closed_after(self, Store(self.dir))
+        self.store = Store(self.dir)
         self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
         self.service = PublicService(self.s, self.env, self.store, self.users, self.pool, api_factory=self.api)
         self.server = start_server(serve_public(self.service, 0, host="127.0.0.1"))
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def tearDown(self):
+        # everything start() made is closed here, the store too, not by cleanups: the harness is also used as a plain
+        # object (test_audio_choice, test_public_ui, test_tmdb_pages), whose cleanups never run
         stop_server(self.server)
         self.pool.close()
+        self.store.close()
         self.stop_public()
 
     def sign_up(self, **extra):

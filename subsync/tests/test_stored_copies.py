@@ -223,10 +223,6 @@ class StoredCopiesServedTest(unittest.TestCase):
         self.assertEqual(app.s.source_manifest, "")              # and nothing to read through
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TextsTest(unittest.TestCase):
     """The approved words for stored copies, word for word."""
 
@@ -259,3 +255,7 @@ class TextsTest(unittest.TestCase):
         self.assertNotIn("sign-up stops", rule)
         self.assertIn("With Real-Debrid as your only debrid service, AIOSubtitles reads nothing for you: you get only "
                       "the copies already synced for someone else who played the same release.", rule)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,5 +1,6 @@
 """Usenet support: the Usenet config, which services it reads through, and the rules that keep indexer
 calls near zero. Plain Python; every run bounded (ulimit -t), no network beyond 127.0.0.1."""
+import contextlib
 import copy
 import os
 import shutil
@@ -15,7 +16,7 @@ from test_resolve_once import Debrid  # noqa: E402
 from subsync import aiosconfig, realdebrid, sources, worker as worker_mod  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
-from subsync.store import Store  # noqa: E402
+from subsync.store import day_of, Store  # noqa: E402
 from subsync.worker import Job, Worker  # noqa: E402
 
 URL = "https://aiosubtitles.example/u/TOKEN/manifest.json"
@@ -178,8 +179,10 @@ class SettingsTest(unittest.TestCase):
 
     def test_no_new_cap_or_memory_setting(self):
         # Usenet reads take the index cap; the 24 h memory is a fixed rule
+        with open(os.path.join(os.path.dirname(worker_mod.__file__), "settings.py"), encoding="utf-8") as f:
+            settings = f.read()
         for name in ("SUBSYNC_USENET_FILE_MB", "SUBSYNC_USENET_UNLISTED_H"):
-            self.assertNotIn(name, open(os.path.join(os.path.dirname(worker_mod.__file__), "settings.py")).read())
+            self.assertNotIn(name, settings)
 
 
 class TempDirTest(unittest.TestCase):
@@ -265,7 +268,7 @@ class UsageTest(TempDirTest):
 
     def test_counted_per_person_and_day(self):
         now = [1_000_000.0]
-        users = self.users(now)
+        users = closed_after(self, self.users(now))
         a, b = "a" * 43, "b" * 43
         users.create(a, {"x": 1})
         users.create(b, {"x": 1})
@@ -283,12 +286,18 @@ class UsageTest(TempDirTest):
         db.close()
 
     def test_the_old_image_still_writes_its_usage(self):
-        # the way back is the old image: its usage insert names no columns, so the usage table keeps its four
-        self.users([1_000_000.0]).close()
-        db = sqlite3.connect(os.path.join(self.dir, "users.sqlite3"))
-        db.execute("INSERT INTO usage VALUES (?,?,?,?) ON CONFLICT(id, day) DO UPDATE SET files=files+excluded.files, "
-                   "bytes=bytes+excluded.bytes", ("id", "2026-11-13", 1, 2))
-        db.close()
+        # the way back is the old image: its usage insert names no columns, so the usage table keeps its four, in the
+        # order that insert gives them: a person's usage it writes is read back as such (the row, never
+        # committed, was not read back, so columns in another order went unseen)
+        now, token = [1_000_000.0], "a" * 43
+        users = self.users(now)
+        who = users.user_id(token)
+        users.close()
+        with contextlib.closing(sqlite3.connect(os.path.join(self.dir, "users.sqlite3"))) as db:
+            db.execute("INSERT INTO usage VALUES (?,?,?,?) ON CONFLICT(id, day) DO UPDATE SET "
+                       "files=files+excluded.files, bytes=bytes+excluded.bytes", (who, day_of(now[0]), 1, 2))
+            db.commit()
+        self.assertEqual(closed_after(self, self.users(now)).usage(token), {"files": 1, "bytes": 2})
 
 
 class RowsTest(unittest.TestCase):
@@ -621,8 +630,7 @@ class PublicUsenetTest(TempDirTest):
     def config(self, uuid, fake=None):
         return (fake or self.fake).configs[uuid]["config"]
 
-    def refresh(self, token, settings=None, fake=None, **extra):
-        uuid = self.users.open(token)["main_uuid"]
+    def refresh(self, token, settings=None, **extra):
         form = {"password": PASSWORD, "add_addon": "on", "usenet": "on"}
         form.update(extra)
         return self.signup.refresh(settings or self.s, self.users, token, form, api_factory=self.api, timeout=10)

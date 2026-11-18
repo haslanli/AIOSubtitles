@@ -230,10 +230,6 @@ class JudgedAgainTest(Base):
         self.assertEqual(len(w.jobs), 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RealLookupTest(Base):
     """The real lookup inside a worker (stand-in TMDB and Wikidata): the second request of a file finds the answer."""
 
@@ -258,3 +254,7 @@ class RealLookupTest(Base):
         d = self.detail()
         self.assertEqual(d["original_language"]["lang"], "jpn")
         self.assertEqual(d["rule"], self.s.rule_id + ":jpn")
+
+
+if __name__ == "__main__":
+    unittest.main()

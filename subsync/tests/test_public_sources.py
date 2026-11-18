@@ -148,6 +148,7 @@ class ServingTest(unittest.TestCase):
             with urllib.request.urlopen(self.base + path, timeout=10) as r:
                 return r.status, r.read().decode()
         except urllib.error.HTTPError as e:
+            e.close()                            # its answer let go at once
             return e.code, ""
 
     def test_the_copy_is_rebuilt_from_a_fresh_download(self):

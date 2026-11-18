@@ -6,8 +6,8 @@ import os
 import time
 import unittest
 
-from helpers import (FakeAiostreams, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD, PublicParts,  # noqa: E402
-                     TempDir)
+from helpers import (FakeAiostreams, files_bytes, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD,  # noqa: E402
+                     PublicParts, TempDir)
 from subsync.settings import Settings  # noqa: E402
 
 TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
@@ -62,8 +62,7 @@ class SignupTest(PublicParts, unittest.TestCase):
 
     def assert_no_secret_anywhere(self, *secrets):
         self.users.close()
-        data = b"".join(open(os.path.join(self.dir, f), "rb").read() for f in os.listdir(self.dir)
-                        if f.startswith("users.sqlite3"))
+        data = files_bytes(self.dir, "users.sqlite3")
         from subsync.users import Users
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes())
         for secret in secrets:
@@ -467,7 +466,7 @@ class SignupTest(PublicParts, unittest.TestCase):
 
     def test_refresh_with_a_wrong_password_changes_nothing(self):
         uuid, result = self.run_signup(viewer())
-        before = dict(self.fake.configs)
+        before = copy.deepcopy(self.fake.configs)       # a shallow copy held the very configs a save changes
         with self.assertRaises(self.signup.SignupError):
             self.signup.refresh(self.s, self.users, result.token, {"password": "wrong"}, api_factory=self.api)
         self.assertEqual(self.fake.configs, before)

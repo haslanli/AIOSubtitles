@@ -6,7 +6,6 @@ import os
 import shutil
 import tempfile
 import threading
-import time
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,7 +16,7 @@ from subsync import choose, pipeline, srclimits  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.sourcestate import Ledger  # noqa: E402
 from subsync.store import Store  # noqa: E402
-from subsync.subs import fingerprint  # noqa: E402
+from subsync.subs import decode, fingerprint  # noqa: E402
 from subsync.worker import Job, Worker  # noqa: E402
 
 RU = "1\n00:00:01,000 --> 00:00:02,000\nПривет\n\n2\n00:00:03,500 --> 00:00:04,000\nКак дела?\n"
@@ -28,7 +27,9 @@ class FingerprintTest(unittest.TestCase):
         a = fingerprint(RU)
         b = fingerprint(("﻿" + RU.replace("\n", "\r\n")))
         c = fingerprint(RU + "\n3\n00:00:05,000 --> 00:00:06,000\nSubtitles downloaded from www.example.org\n")
-        d = fingerprint(RU.encode("cp1251").decode("cp1251"))
+        # another encoding: its bytes decoded as the worker decodes a download (the test round-tripped the
+        # text itself, so decode() was never part of it)
+        d = fingerprint(decode(RU.encode("cp1251"), "rus"))
         self.assertEqual(len({a, b, c, d}), 1)
 
     def test_the_same_subtitle_through_opensubtitles_v3_plus(self):
@@ -140,6 +141,7 @@ class LimitsTest(unittest.TestCase):
 
     def test_near_the_limit_only_the_likeliest_and_at_the_limit_none(self):
         ledger = Ledger(keyed={"subdl": True})
+        closed_after(self, ledger.db)                        # its database in memory
         ledger.count("subdl", "download", 200, who="me")
         ledger.count("subdl", "download", 45, who="other")
         kept = self.worker(ledger, who="me")._within_limits(self.tries(), "a.mkv", None, None)
@@ -188,6 +190,7 @@ class FetchTest(unittest.TestCase):
 
     def test_a_download_carries_the_sources_key_and_is_counted(self):
         ledger = Ledger(keyed={"subsource": True, "subdl": True})
+        closed_after(self, ledger.db)                        # its database in memory
         w = Worker(Settings({"SUBSYNC_DATA": self.dir}), closed_after(self, Store(self.dir)), FakeAios(), None,
                    extra=FakeExtra(ledger=ledger))
         w.who = "me"
