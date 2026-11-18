@@ -3,6 +3,7 @@ link, so the database alone, or the database and the secret, opens nothing."""
 import os
 import sqlite3
 import sys
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -124,6 +125,38 @@ class UsersTest(unittest.TestCase):
         self.assertEqual(self.users.usage(self.token), {"files": 2, "bytes": 750})
         self.clock.t += DAY
         self.assertEqual(self.users.usage(self.token), {"files": 0, "bytes": 0})
+
+    def free(self, token):
+        """Whether the person's record lock can be taken at once (it is let go again)."""
+        lock = self.users.locked(token)
+        if not lock.acquire(blocking=False):
+            return False
+        lock.release()
+        return True
+
+    def test_each_person_has_their_own_record_lock(self):
+        # Everyone shared 64 locks, so one person's refresh on a slow AIOStreams held up other people's saves;
+        # of 65 people, two shared one
+        people = [self.users_module.new_token() for _ in range(65)]
+        for token in people:
+            with self.users.locked(token):
+                self.assertFalse(self.free(token))                     # the same person's next action waits
+                self.assertEqual(sum(not self.free(other) for other in people if other != token), 0)
+        self.assertEqual(len(self.users._record_locks), 0)             # none kept once nobody holds one
+
+    def test_a_person_gets_one_lock_however_many_ask_at_once(self):
+        barrier, got = threading.Barrier(16), []
+
+        def ask():
+            barrier.wait(5)
+            got.append(self.users.locked(self.token))
+        threads = [threading.Thread(target=ask, daemon=True) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual(len(got), 16)
+        self.assertEqual(len({id(lock) for lock in got}), 1)
 
 
 if __name__ == "__main__":

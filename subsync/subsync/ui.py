@@ -129,8 +129,8 @@ def top(contact, start="/", privacy=True):
 
 # ------------------------------------------------------------------------------------------- buttons
 
-def button(label, kind="primary", type="button", attrs="", arrow=False, icon=""):
-    return (f"<button class=\"btn {kind}\" type=\"{type}\"{(' ' + attrs) if attrs else ''}>{icon}{e(label)}"
+def button(label, kind="primary", type="button", attrs="", arrow=False):
+    return (f"<button class=\"btn {kind}\" type=\"{type}\"{(' ' + attrs) if attrs else ''}>{e(label)}"
             f"{ARROW if arrow else ''}</button>")
 
 
@@ -146,12 +146,12 @@ def described(*ids):
 
 
 def field(id, label, help_text, name=None, kind="text", mono=False, error=None, attrs="", reveal=False, question=False,
-          code=False, help_id=None, error_ref=None):
+          code=False, error_ref=None):
     """A label, the box, an error under the label when there is one, the explanation. `question`: the label is the
     screen's question (the sign-up). `reveal`: a Show/Hide button inside a password box (shown by the script).
     `error_ref`: the id of the problem's message shown elsewhere (a summary right above the field): the box is marked
     and described by it, and the message isn't repeated under the label."""
-    help_id = help_id or f"{id}-help"
+    help_id = f"{id}-help"
     error_id = f"{id}-error" if error and not error_ref else error_ref
     classes = "input" + (" mono" if mono else "") + (" code" if code else "")
     box = (f"<input class=\"{classes}\" id=\"{e(id)}\" name=\"{e(name or id)}\" type=\"{kind}\" "
@@ -231,11 +231,11 @@ def dots(items):
     return "<ul class=\"dots\">" + "".join(f"<li>{e(item)}</li>" for item in items) + "</ul>"
 
 
-def link_block(url, help_text, label="Your personal addon link"):
+def link_block(url, help_text):
     """The personal link in the accent block, with Copy link (shown by the script where copying works). The label's id
     is personal-l, for the block's aria-labelledby."""
-    return (f"<label id=\"personal-l\" for=\"personal\">{e(label)}</label><textarea class=\"link\" id=\"personal\" rows=\"3\" readonly "
-            f"spellcheck=\"false\" aria-describedby=\"personal-help\">{e(url)}</textarea>"
+    return ("<label id=\"personal-l\" for=\"personal\">Your personal addon link</label><textarea class=\"link\" id=\"personal\" "
+            f"rows=\"3\" readonly spellcheck=\"false\" aria-describedby=\"personal-help\">{e(url)}</textarea>"
             f"<button class=\"btn light\" type=\"button\" data-copy=\"personal\" data-done=\"Copied\" hidden>{COPY}"
             f"<span>Copy link</span></button><span class=\"sr\" id=\"personal-status\" role=\"status\"></span>"
             f"<p class=\"help\" id=\"personal-help\">{e(help_text)}</p>")
@@ -362,9 +362,10 @@ def config_changes(sections):
     return "<div class=\"changes\">" + "".join(out) + "</div>"
 
 
-def update_panel(heading, about, running_html, ready, action, hid="up-h"):
+def update_panel(heading, about, running_html, ready, action):
     """The update panel: what updating does, the version running (HTML the caller built from escaped parts),
-    the one ready (None: up to date), and the action."""
+    the one ready (None: up to date), and the action. The heading's id is up-h, for the section's aria-labelledby."""
+    hid = "up-h"
     lines = f"<p>{running_html}</p>" + (f"<p class=\"new\">{e(ready)}</p>" if ready else "")
     return (f"<section class=\"grid12 row\" aria-labelledby=\"{e(hid)}\"><div class=\"about\"><h2 id=\"{e(hid)}\">"
             f"{e(heading)}</h2><p class=\"help\">{e(about)}</p></div><div class=\"controls\"><div class=\"version\">{lines}"

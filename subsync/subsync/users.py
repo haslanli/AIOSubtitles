@@ -17,6 +17,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import weakref
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -62,12 +63,17 @@ class Users:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self.lock = threading.RLock()
-        self._record_locks = [threading.Lock() for _ in range(64)]
+        # one lock per person, kept only while someone holds it or waits for it
+        self._record_locks = weakref.WeakValueDictionary()
+        self._record_locks_guard = threading.Lock()
 
     def locked(self, token):
-        """A lock for one person's record, held around reading it, asking AIOStreams and writing it back, so a refresh
-        and the daily check never write over each other's changes."""
-        return self._record_locks[int(self.user_id(token)[:8], 16) % len(self._record_locks)]
+        """The lock of one person's record, held around reading it, asking AIOStreams and writing it back, so a refresh
+        and the daily check never write over each other's changes. Each person has their own: one person's slow
+        AIOStreams never holds up anyone else."""
+        uid = self.user_id(token)
+        with self._record_locks_guard:
+            return self._record_locks.setdefault(uid, threading.Lock())
 
     def close(self):
         with self.lock:

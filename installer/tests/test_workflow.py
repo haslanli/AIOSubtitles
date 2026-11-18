@@ -8,7 +8,9 @@ import re
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+from subsync import ui
+
+ROOT =Path(__file__).resolve().parents[2]
 FLOWS = ROOT / '.github' / 'workflows'
 PUBLISHERS = ('publish-amd64', 'publish-arm64', 'manifest')
 ON_PUSH_ONLY = ("github.event_name == 'push' && (github.ref == 'refs/heads/main' || "
@@ -190,6 +192,12 @@ class WorkflowRules(unittest.TestCase):
 
     def test_the_version_rule_covers_every_input_of_the_image(self):
         self.assertIn('! git diff --quiet "v$version" HEAD -- subsync/ installer/ .dockerignore', self.main)
+
+    def test_the_start_check_loads_the_typefaces_the_pages_use(self):
+        # the check keeps its own list of the files, as a check independent of the image's code; it names the same ones
+        check = self.build.split('- name: Start it once and check that it answers', 1)[1].split('\n      - name:', 1)[0]
+        loops = re.findall(r'^\s*for font in (.+); do$', check, re.M)
+        self.assertEqual([sorted(names.split()) for names in loops], [sorted(ui.FONT_FILES)])
 
     def test_the_start_check_runs_setups_own_checks(self):
         check = self.build.split('- name: Start it once and check that it answers', 1)[1].split('\n      - name:', 1)[0]
