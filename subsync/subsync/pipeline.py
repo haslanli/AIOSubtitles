@@ -728,7 +728,7 @@ def sync_subtitle(index, text, ext, lang, alass="alass", audio=True, audio_lead=
                         return r
                     out["sections"] = dict(sect["summary"], why=r.get("reason"))
         try:   # every line, signs and songs too, so the count and order match parse(text)
-            retimed = parse(alass_mod.run(timing_srt(ref["cues"]), plain_srt(lines), "srt", alass=alass))
+            retimed = parse(alass_mod.run(timing_srt(ref["cues"]), plain_srt(lines), alass=alass))
         except (alass_mod.AlassFailed, OSError) as e:
             retimed = None
             out["alass_error"] = str(e)

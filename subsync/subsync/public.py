@@ -23,7 +23,7 @@ from .recheck import Checker
 from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh,
                      remove_tmdb_key, set_audio, set_languages, set_tmdb_key, signup, store_only)
 from .sources import Aios
-from .users import day_of
+from .users import TOKEN, day_of
 from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 
 log = logging.getLogger("subsync.public")
@@ -293,7 +293,7 @@ FONT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, m
 FONT_PATH = re.compile(r"^/static/fonts/([A-Za-z0-9-]+\.ttf)$")
 MAX_FORM = 8192
 MAX_FIELDS = 50          # the sign-up form with every language chip ticked fits
-USER_PATH = re.compile(r"^/u/([A-Za-z0-9_-]{43})(/.*)?$")
+USER_PATH = re.compile(f"^/u/({TOKEN})(/.*)?$")
 PUBLIC_MANIFEST = {
     "id": "org.aiosubtitles.public",
     "version": "1.0.0",

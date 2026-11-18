@@ -24,7 +24,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (MAX_ALIAS, AiosApi, AiosError, is_subsync_preset, new_key, parse_languages, sync_config,
+from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, PUBLIC_RETRY_WAIT_CAP, UUID_RE, WRONG_PASSWORD_CODES, AiosApi,
+                         AiosError, install_link, is_subsync_preset, new_key, parse_languages, sync_config,
                          sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins,
                          without_subsync)
 from .settings import AUDIO_CHOICES
@@ -38,7 +39,6 @@ USER_AGENT = "AIOSubtitles/1.0 (public)"
 MAX_LINK = 2000
 MAX_PASSWORD = 500
 HOUR = 3600
-_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -69,7 +69,8 @@ class SignupResult:
 
 
 def public_api(instance, timeout):
-    return AiosApi(instance, timeout=timeout, user_agent=USER_AGENT, max_timeout=timeout, retry_wait_cap=5,
+    return AiosApi(instance, timeout=timeout, user_agent=USER_AGENT, max_timeout=timeout,
+                   retry_wait_cap=PUBLIC_RETRY_WAIT_CAP,
                    on_wait=lambda s: log.info("AIOStreams asked to slow down; waiting %d s", s))
 
 
@@ -124,7 +125,8 @@ def parse_link(text):
         if len(alias) > MAX_ALIAS or _CONTROL.search(alias):
             raise SignupError(UNKNOWN_ALIAS, field="link")
         return instance, None, alias
-    if not sep or len(pieces) < 2 or not _UUID.match(pieces[0]) or not pieces[1] or not _install_tail(pieces[2:], True):
+    if (not sep or len(pieces) < 2 or not UUID_RE.fullmatch(pieces[0]) or not pieces[1]
+            or not _install_tail(pieces[2:], True)):
         raise SignupError(NOT_A_LINK, field="link")
     return instance, pieces[0].lower(), None
 
@@ -196,7 +198,6 @@ def form_languages(form):
     return ", ".join(dict.fromkeys(order + chosen))
 
 
-WRONG_PASSWORD_CODES = ("USER_INVALID_DETAILS", "USER_INVALID_PASSWORD", "USER_NOT_FOUND")
 WRONG_PASSWORD = ("Your AIOStreams didn't accept this password for this link. Type the password of this config: the one "
                   "you set on AIOStreams' configure page, not the one you sign in to AIOStreams with.")
 
@@ -251,11 +252,10 @@ def _read_viewer(api, uuid, password):
         status = api.status()
         viewer, _ = api.get_config(uuid, password)
     except AiosError as e:
+        if e.code == BAD_ANSWER:
+            raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Is the link from "
+                              "AIOStreams?") from None
         raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True), field=_field_of(e)) from None
-    except (KeyError, TypeError, ValueError, AttributeError):
-        raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Is the link from AIOStreams?")
-    if not isinstance(viewer, dict) or not isinstance(status, dict):
-        raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Is the link from AIOStreams?")
     presets = (status.get("settings") or {}).get("presets") if isinstance(status.get("settings"), dict) else None
     metadata = {p["ID"]: p for p in presets or [] if isinstance(p, dict) and "ID" in p}
     return viewer, metadata
@@ -387,20 +387,21 @@ def _new_sync(api, instance, sync):
     try:
         sync_uuid, sync_encrypted = api.create_config(sync, sync_password)
     except AiosError as e:
+        if e.code == BAD_ANSWER:
+            raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know when making its config.") \
+                from None
         raise SignupError(_plain(e, "Making AIOSubtitles' config on your AIOStreams"), refused=_refused(e)) from None
-    except (KeyError, TypeError, ValueError):
-        raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know when making its config.")
     try:
         api.addon_get(f"/stremio/{sync_uuid}/{sync_encrypted}", "/manifest.json")
-    except (AiosError, KeyError, TypeError, ValueError) as e:
+    except AiosError as e:
         try:   # don't leave a config behind that nothing uses
             api.delete_config(sync_uuid, sync_password)
         except AiosError:
             pass
-        message = _plain(e, "Checking AIOSubtitles' config on your AIOStreams") if isinstance(e, AiosError) else \
-            "Your AIOStreams answered in a way AIOSubtitles doesn't know when checking its config."
+        message = "Your AIOStreams answered in a way AIOSubtitles doesn't know when checking its config." \
+            if e.code == BAD_ANSWER else _plain(e, "Checking AIOSubtitles' config on your AIOStreams")
         raise SignupError(message) from None
-    return sync_uuid, f"{instance}/stremio/{sync_uuid}/{sync_encrypted}/manifest.json", sync_password
+    return sync_uuid, install_link(instance, sync_uuid, sync_encrypted), sync_password
 
 
 def _put_sync(api, record, sync, gone=False, kind="sync"):
@@ -801,10 +802,11 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=30):
         try:
             viewer, _ = api.get_config(record["main_uuid"], password)
         except AiosError as e:
+            if e.code == BAD_ANSWER:
+                raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Nothing was deleted.") \
+                    from None
             raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True) + " Nothing was deleted.",
                               field=_field_of(e)) from None
-        if not isinstance(viewer, dict):
-            raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Nothing was deleted.")
     removed = True
     for kind in ("sync", "usenet"):          # no sync config for stored copies only or Usenet only
         if record.get(f"{kind}_uuid"):

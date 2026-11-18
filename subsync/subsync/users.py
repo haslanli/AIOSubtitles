@@ -23,7 +23,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+TOKEN = r"[A-Za-z0-9_-]{43}"     # a personal token: secrets.token_urlsafe(32), 43 base64url characters
+TOKEN_RE = re.compile(f"^{TOKEN}$")
 _SALT = b"aiosubtitles users v1"
 _FORMAT = b"\x01"
 _NONCE = 12

@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 
-from .aiosconfig import AiosError
+from .aiosconfig import AiosError, install_link
 from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, drop_sync,
                      public_api, rebuild, store_only)
 
@@ -247,7 +247,7 @@ class Checker:
             if found[kind] != "ok" or found.get(f"{kind}_checked") != record.get(f"{kind}_uuid"):
                 opened = False
                 continue
-            link = f"{record['instance']}/stremio/{record[f'{kind}_uuid']}/{found[f'{kind}_encrypted']}/manifest.json"
+            link = install_link(record["instance"], record[f"{kind}_uuid"], found[f"{kind}_encrypted"])
             if found[f"{kind}_encrypted"] and link != record[f"{kind}_link"]:
                 record[f"{kind}_link"] = link    # their AIOStreams changed the link: repaired, nothing for them to do
         return opened and any(record.get(f"{k}_uuid") for k in KINDS)
