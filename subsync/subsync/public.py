@@ -25,6 +25,7 @@ from .signup import (SignupError, SignupGate, delete, forget_password, form_lang
                      remove_tmdb_key, set_audio, set_languages, set_tmdb_key, signup, store_only)
 from .sources import Aios
 from .store import day_of
+from .ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS   # the setup page sends the same
 from .users import TOKEN
 from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 
@@ -361,18 +362,7 @@ class Pool:
 
 # ------------------------------------------------------------------------------------------- the router
 
-PAGE_HEADERS = {
-    # only this service's own script, stylesheet and two typefaces, nothing inline
-    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
-                               "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-    "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "no-store"}
 PERSONAL_HEADERS = dict(PAGE_HEADERS, **{"X-Robots-Tag": "noindex"})   # pages under a personal link
-SCRIPT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600",
-                  "Referrer-Policy": "no-referrer"}
-# the typefaces never change under their names (a new version would get a new name)
-FONT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=31536000, immutable",
-                "Referrer-Policy": "no-referrer"}
 FONT_PATH = re.compile(r"^/static/fonts/([A-Za-z0-9-]+\.ttf)$")
 MAX_FORM = 8192
 MAX_FIELDS = 50          # the sign-up form (its language slots and every other field) fits with room to spare

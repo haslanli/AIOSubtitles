@@ -5,9 +5,11 @@
   source  the source folder's own ./setup, which builds the image here first: only its state/ at /folder/state.
 
 Setup reads its own container through Docker's socket: the image it runs from (the service then runs exactly that
-image, pinned by digest), the machine's port for the page, the folder's path on the machine and its owner. On the
-machine's own network (the source route on Linux) setup works as it did outside a container; on Docker's bridge
-network it reaches the machine through its gateway.
+image, pinned by digest, or a local build without one by its image ID), the machine's port for the page, the folder's path on the machine and its owner. It names
+that container by its hostname, which Docker sets to the container's short ID; on the machine's own network (the source
+route on Linux) the hostname is the machine's, so the source route's ./setup gives its container a label to be found
+by. On the machine's own network setup works as it did outside a container; on Docker's bridge network it reaches the
+machine through its gateway.
 """
 import json
 import os
@@ -22,13 +24,17 @@ MOUNT = '/folder'          # where the folder is in setup's container
 FOLDER = Path(MOUNT)
 PAGE_PORT = 8789          # the setup page's port inside the container
 SCRIPT_MARK = '# AIOSubtitles setup, written by setup:'
+# the source route's ./setup gives its container this label, with the value it also puts in SELF_VARIABLE
+SELF_LABEL = 'org.aiosubtitles.setup'
+SELF_VARIABLE = 'AIOSUBTITLES_SETUP_ID'
+_SOCKET_MOUNT = f'-v {dockerenv.SOCKET}:{dockerenv.SOCKET}'
 # what the docker run command lacks (README, Install)
-NO_SOCKET = ('Setup needs Docker\'s socket to start and update AIOSubtitles: add -v '
-             '/var/run/docker.sock:/var/run/docker.sock to the docker run command (README, Install).')
-NO_FOLDER = ('Setup needs a folder for its files: add -v "$PWD:/folder" to the docker run command, in the folder you '
+NO_SOCKET = (f'Setup needs Docker\'s socket to start and update AIOSubtitles: add {_SOCKET_MOUNT} to the docker run '
+             'command (README, Install).')
+NO_FOLDER = (f'Setup needs a folder for its files: add -v "$PWD:{MOUNT}" to the docker run command, in the folder you '
              'made for it (README, Install).')
-NO_PAGE_PORT = ('The setup page needs a port on this machine: add -p 127.0.0.1:8789:8789 to the docker run command '
-                '(README, Install), or give every answer with --answers FILE --yes.')
+NO_PAGE_PORT = (f'The setup page needs a port on this machine: add -p 127.0.0.1:{PAGE_PORT}:{PAGE_PORT} to the docker '
+                'run command (README, Install), or give every answer with --answers FILE --yes.')
 
 Place = namedtuple('Place', 'route network container image local run_as page_port host_folder owner gateway')
 
@@ -55,10 +61,11 @@ def place_from(info, image, version, route, owner):
     if run_as.startswith('sha256:') and mine:
         run_as = f'{repo}:{version}'
     # a name without a registry (aiosubtitles:local-1.4.0) is a build of this machine's: never pulled. Docker 29's
-    # image store gives such a build a digest too: it pins this very build, under its own tag
+    # image store gives such a build a digest too: it pins this very build, under its own tag. Docker's classic image
+    # store gives it none, and its tag moves to the next build of the same version: its image ID pins it then
     local = not _registry(repo)
     if not digest:
-        pinned = run_as
+        pinned = (info.get('Image') or run_as) if local else run_as
     elif local:
         pinned = f"{run_as.split('@', 1)[0]}@{digest}"
     else:
@@ -86,12 +93,23 @@ def missing(info, route):
     return [] if any(m.get('Destination') == target for m in info.get('Mounts') or []) else [NO_FOLDER]
 
 
+def _own_container(environ):
+    """How to name setup's own container to Docker: by the source route's label when it has one, else by its hostname
+    (its short ID)."""
+    mark = environ.get(SELF_VARIABLE)
+    if mark:
+        code, out, _ = dockerenv.run(['docker', 'ps', '--quiet', '--no-trunc', '--filter',
+                                      f'label={SELF_LABEL}={mark}'])
+        if code == 0 and out.split():
+            return out.split()[0]
+    return environ.get('HOSTNAME') or socket.gethostname()
+
+
 def discover(version, environ=None):
     """The Place of this setup, read through the socket. Raises RuntimeError with the reason when it can't."""
     environ = os.environ if environ is None else environ
     route = 'source' if environ.get('AIOSUBTITLES_ROUTE') == 'source' else 'image'
-    me = environ.get('HOSTNAME') or socket.gethostname()
-    code, out, err = dockerenv.run(['docker', 'inspect', me])
+    code, out, err = dockerenv.run(['docker', 'inspect', '--type', 'container', _own_container(environ)])
     if code != 0:
         raise RuntimeError(((err or out).strip().splitlines() or ['docker inspect failed'])[-1])
     info = json.loads(out)[0]
@@ -114,7 +132,7 @@ def setup_script(place):
             '# Setup rewrites this file; edits here are replaced.\n'
             'cd "$(dirname "$0")" || exit 1\n'
             't=; [ -t 0 ] && [ -t 1 ] && t=-t\n'
-            f'exec docker run --rm -i $t{pull} -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/folder" '
+            f'exec docker run --rm -i $t{pull} {_SOCKET_MOUNT} -v "$PWD:{MOUNT}" '
             f'-p 127.0.0.1:{port}:{PAGE_PORT} {place.run_as} setup "$@"\n')
 
 

@@ -234,7 +234,7 @@ def saved_aios(s):
         except AiosError:
             continue
         return Aios(url)
-    return Aios(s.get('aios_url') or 'http://127.0.0.1:3000')
+    return Aios(s.get('aios_url') or plan.AIOS_DEFAULT_URL)
 
 
 def guard(install_id):
@@ -486,7 +486,7 @@ class Engine:
                 self.out.warn(f"The container \"{container['name']}\" looks like AIOStreams, but I can't reach it from here.")
             url = self.ask.text('AIOS_URL', screens.LABELS['AIOS_URL'], current=self.prev.get('aios_url'),
                                 default=None if (self.prev.get('aios_url') or self.page or bridge())
-                                else 'http://127.0.0.1:3000', check=self._check_aios)
+                                else plan.AIOS_DEFAULT_URL, check=self._check_aios)
         self.aios = Aios(url)
         settings = self.status['settings']
         public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
@@ -558,17 +558,22 @@ class Engine:
                 return False, 'There is no config with that ID on this AIOStreams. Check it, or paste your Stremio link.', value
             return True, '', uuid
 
+        found = {}
+
         def check_password(value):
             try:
-                self.viewer, self.viewer_encrypted = self.aios.get_config(self.uuid, value)
+                found['config'] = self.aios.get_config(config_id, value)
             except AiosError as e:
                 return False, e.message, value
             return True, 'Config found', value
         current = self.keys.get('VIEWER_UUID')
-        self.uuid = self.ask.text('AIOS_CONFIG_ID', screens.LABELS['AIOS_CONFIG_ID'], current=current,
+        config_id = self.ask.text('AIOS_CONFIG_ID', screens.LABELS['AIOS_CONFIG_ID'], current=current,
                                   shown=short(current or ''), check=check_id)
-        self.password = self.ask.text('AIOS_CONFIG_PASSWORD', screens.LABELS['AIOS_CONFIG_PASSWORD'], secret=True,
-                                      check=check_password)
+        password = self.ask.text('AIOS_CONFIG_PASSWORD', screens.LABELS['AIOS_CONFIG_PASSWORD'], secret=True,
+                                 check=check_password)
+        # the config changes only once both are right: an ID whose password is wrong leaves the last one as it was
+        self.uuid, self.password = config_id, password
+        self.viewer, self.viewer_encrypted = found['config']
         names = plan.debrid_names(self.viewer)
         subs = plan.subtitle_sources(self.viewer)
         self.out.say()

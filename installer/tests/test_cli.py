@@ -20,17 +20,17 @@ class CommandLine(FlowFixture):
 
     def serve(self, *argv, env=None):
         served = []
-        with mock.patch.object(web, 'serve', lambda app, say=print, opener=None: served.append((app, opener)) or 0):
+        with mock.patch.object(web, 'serve', lambda app, say=print, **more: served.append((app, more)) or 0):
             code, out = self.run_main(*argv, env=env)
         return code, out, served
 
     def test_setup_with_no_flag_opens_the_page(self):
         code, _, served = self.serve()
         self.assertEqual(code, 0)
-        app, opener = served[0]
+        app, more = served[0]
         self.assertIsInstance(app, web.App)
         self.assertEqual((app.bind, app.port, app.public_port), ('127.0.0.1', 0, None))   # setup's own network
-        self.assertIsNone(opener)                                # in a container: no browser to open, the address shows
+        self.assertEqual(more, {})              # in a container: no browser to open (no opener), the address shows
 
     def test_on_dockers_bridge_the_page_is_at_the_machines_port(self):
         place = self.place._replace(network='bridge', page_port=8899)

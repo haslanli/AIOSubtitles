@@ -22,10 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from installer import dockerenv, engine, plan, web, where  # noqa: E402
 from installer.aios import AiosError  # noqa: E402
-from installer.ui import Asker, Stop, bad, note, ok, paint, say, stop, warn, wrap  # noqa: E402
-from installer.engine import backup, load_settings, short, subsync_status  # noqa: E402,F401
-
-CONTAINER = engine.CONTAINER
+from installer.ui import Asker, Stop, bad, note, ok, paint, say, stop, warn  # noqa: E402
+from installer.engine import backup, load_settings, short  # noqa: E402
 
 
 # ------------------------------------------------------------------------------------------- other commands
@@ -69,7 +67,7 @@ def cmd_uninstall(args):
 
 # ------------------------------------------------------------------------------------------- main
 
-def open_page(args):
+def open_page():
     """The setup page. Inside a container nothing opens a browser: the address is printed. On Docker's bridge network
     the page listens inside the container, and the machine's port given in the docker run command reaches it."""
     place = engine.PLACE
@@ -130,7 +128,7 @@ def main(argv=None):
         if args.rollback:
             return 0 if engine.Engine({}).rollback(restore=args.restore_databases) else 3
         if not (args.answers or args.yes):
-            return open_page(args)
+            return open_page()
         say()
         say(paint('1', '  AIOSubtitles · subsync setup'))
         answers = plan.parse_env(Path(args.answers).read_text()) if args.answers else {}   # KEY= is an answer too

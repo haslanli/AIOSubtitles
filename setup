@@ -57,6 +57,10 @@ else
 fi
 t=
 if [ -t 0 ] && [ -t 1 ]; then t=-t; fi
+# setup finds its own container by this mark (installer/where.py): on this machine's network it has the machine's
+# hostname, not its own ID
+mark="$$-$RANDOM$RANDOM"
 # shellcheck disable=SC2086  # $t and $net are options, split on purpose
 exec docker run --rm -i $t $net -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/state:/folder/state" \
-  -e AIOSUBTITLES_ROUTE=source "$image" setup "$@"
+  --label "org.aiosubtitles.setup=$mark" -e "AIOSUBTITLES_SETUP_ID=$mark" -e AIOSUBTITLES_ROUTE=source \
+  "$image" setup "$@"

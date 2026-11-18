@@ -6,7 +6,8 @@ address and only to a Host of 127.0.0.1 or localhost at the machine's port (a pa
 guess it, and DNS rebinding gets nothing). Every page has the public site's security header and nothing inline. Passwords and keys typed in stay
 in this process's memory for the run and are never sent back in a page. The work of each step is installer/engine.py;
 long work (installing, checking, updating) runs in the background once, and its page loads itself again every 2
-seconds until it is done. The page stops when setup is done, after 60 minutes without a request, or with Ctrl-C.
+seconds until it is done. The page stops when setup is done, after 60 minutes without a request under its key,
+or with Ctrl-C.
 """
 import os
 import re
@@ -20,13 +21,8 @@ from installer import dockerenv, engine, limits, plan, screens, update
 from installer.aios import AiosError
 from installer.ui import Stop
 from subsync import ui
+from subsync.ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS    # the public site's own (subsync/subsync/public.py)
 
-# the public site's pages' header (subsync/subsync/public.py PAGE_HEADERS; a test keeps them equal)
-PAGE_HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
-                               "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-    "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "no-store"}
 STATIC_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 MAX_BODY = 16 * 1024
 IDLE_S = 3600
@@ -55,6 +51,7 @@ class Session:
         self.saved = self.test_read = False
         self.jobs = {}
         self.lock = threading.Lock()
+        self.busy = threading.Lock()        # one request at a time works on the engine (a double click on Save waits)
 
     @property
     def ids(self):
@@ -70,7 +67,10 @@ class Session:
             work()
             ok = True
         except engine.Problem as p:
-            (self.asks.__setitem__(step, p.field) if p.missing else self.problems.__setitem__(step, (p.field, p.message)))
+            if p.missing:
+                self.asks[step] = p.field
+            else:
+                self.problems[step] = (p.field, p.message)
         except Stop as s:
             self.stops[step] = (s.message, s.page_fix)
         except AiosError as a:
@@ -82,8 +82,10 @@ class Session:
         self.rows[step] = [tuple(r) for r in out.rows[start:]]
         if ok:
             self.done.add(step)
-            if step in self.ids:      # a step done again: the ones after it are to be done again too
-                self.done -= set(self.ids[self.ids.index(step) + 1:])
+        else:           # a step that stopped half way isn't done, even when it was before (its answers changed)
+            self.done.discard(step)
+        if step in self.ids:      # a step run again: the ones after it are to be done again too
+            self.done -= set(self.ids[self.ids.index(step) + 1:])
         return ok
 
     def start_job(self, step, work):
@@ -126,11 +128,11 @@ class App:
         self.finishing = None
         self.session = None
         self.after = None            # the page after setup's own engine and work (updating, removing)
+        self.after_lock = threading.Lock()
         self.changing = False
 
     # ------------------------------------------------------------------------------------- HTTP
     def handle(self, method, path, headers, body):
-        self.last = time.monotonic()
         host = headers.get('Host') or headers.get('host') or ''
         port = self.public_port or self.port
         if host not in (f'127.0.0.1:{port}', f'localhost:{port}'):
@@ -141,6 +143,7 @@ class App:
         prefix = f'/{self.key}/'
         if not parsed.path.startswith(prefix):
             return self.page(screens.ended(), 404)
+        self.last = time.monotonic()        # only a request with the key keeps the page up (its files come with one)
         if method == 'POST' and len(body) > MAX_BODY:
             return 413, dict(PAGE_HEADERS, **{'Content-Type': 'text/plain'}), b'Too large'
         form = urllib.parse.parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True) if method == 'POST' else {}
@@ -157,16 +160,18 @@ class App:
         return 303, dict(PAGE_HEADERS, **{'Location': f'/{self.key}/{name}', 'Content-Length': '0'}), b''
 
     def static(self, path):
+        """The stylesheet and script (their addresses carry their hash) and the typefaces are cached as the public site
+        caches them: the install, check and update pages load themselves again every 2 seconds."""
         if path == '/static/app.css':
-            return 200, dict(STATIC_HEADERS, **{'Content-Type': 'text/css; charset=utf-8'}), ui.APP_CSS.encode()
+            return 200, dict(SCRIPT_HEADERS, **{'Content-Type': 'text/css; charset=utf-8'}), ui.APP_CSS.encode()
         if path == '/static/app.js':
-            return 200, dict(STATIC_HEADERS, **{'Content-Type': 'text/javascript; charset=utf-8'}), ui.APP_JS.encode()
+            return 200, dict(SCRIPT_HEADERS, **{'Content-Type': 'text/javascript; charset=utf-8'}), ui.APP_JS.encode()
         m = FONT.match(path)
         file = os.path.join(ui.STATIC, 'fonts', m.group(1)) if m else None    # the typefaces and their licence (image)
         if file and os.path.isfile(file):
-            with open(file, 'rb') as f:
-                kind = 'font/ttf' if file.endswith('.ttf') else 'text/plain; charset=utf-8'
-                return 200, dict(STATIC_HEADERS, **{'Content-Type': kind}), f.read()
+            if file.endswith('.ttf'):
+                return 200, dict(FONT_HEADERS, **{'Content-Type': 'font/ttf'}), ui.font_bytes(file)
+            return 200, dict(STATIC_HEADERS, **{'Content-Type': 'text/plain; charset=utf-8'}), ui.font_bytes(file)
         return 404, dict(STATIC_HEADERS, **{'Content-Type': 'text/plain'}), b''
 
     # ------------------------------------------------------------------------------------- the routes
@@ -189,11 +194,12 @@ class App:
         s = self.session
         if not s or name not in s.ids + ('done',):
             return self.page(screens.ended(), 404)
-        # a step before its turn goes back to the first one not done
-        for earlier in s.ids[:s.ids.index(name) if name in s.ids else len(s.ids)]:
-            if earlier not in s.done:
-                return self.go(earlier)
-        return getattr(self, f'step_{name}')(s, method, form, one)
+        with s.busy:
+            # a step before its turn goes back to the first one not done
+            for earlier in s.ids[:s.ids.index(name) if name in s.ids else len(s.ids)]:
+                if earlier not in s.done:
+                    return self.go(earlier)
+            return getattr(self, f'step_{name}')(s, method, form, one)
 
     # ------------------------------------------------------------------------------------- both routes
     def step_machine(self, s, method, form, one):
@@ -220,7 +226,7 @@ class App:
         containers = [(c['name'], f"{c['name']}  ({c['image']})") for c in getattr(e, 'found', [])]
         value = e.answers.get(ask or '', '') or e.prefill().get(ask or '', '')
         if ask == 'AIOS_URL' and not value:
-            value = 'http://127.0.0.1:3000'
+            value = plan.AIOS_DEFAULT_URL
         return self.page(screens.aios(s.rows.get('aios', []), ask=ask, value=value, problem=problem,
                                       containers=containers, stop=s.stops.get('aios')))
 
@@ -464,17 +470,24 @@ class App:
         return self.page(screens.removed('Removing subsync', [tuple(r) for r in e.out.rows], getattr(e, 'stays', [])))
 
     def after_update(self, method, one):
-        if method == 'POST' and (not self.after or not self.after.running('update')):   # again after a failure
-            self.after = Session(engine.load_settings().get('route') or 'yourself', {})
-            self.after.start_job('update', self.after.e.update)
+        if method == 'POST':
+            self.start_after(lambda e: e.update())
         return self.go('updating')
 
     def after_rollback(self, method, one):
-        if method == 'POST' and (not self.after or not self.after.running('update')):
+        if method == 'POST':
             restore = one.get('RESTORE_DATABASES') == 'yes'
-            self.after = Session(engine.load_settings().get('route') or 'yourself', {})
-            self.after.start_job('update', lambda: self.after.e.rollback(restore=restore))
+            self.start_after(lambda e: e.rollback(restore=restore))
         return self.go('updating')
+
+    def start_after(self, work):
+        """An update or a rollback, `work(engine)`, in a Session of its own: never while one runs (again after one
+        that failed)."""
+        with self.after_lock:
+            if self.after and self.after.running('update'):
+                return
+            after = self.after = Session(engine.load_settings().get('route') or 'yourself', {})
+            after.start_job('update', lambda: work(after.e))
 
     def after_updating(self, method, one):
         if not self.after:
@@ -495,14 +508,27 @@ class App:
 class Handler(BaseHTTPRequestHandler):
     server_version = 'AIOSubtitles-setup'
     sys_version = ''
+    timeout = 30        # a connection that sends nothing, or a body that never ends, gives its thread back
 
     def log_message(self, *args):       # nothing is logged: the address carries the key
         pass
 
+    def _length(self, method):
+        """The body's length: 0 for a GET that gives none, None when a POST gives none or it isn't a number."""
+        given = self.headers.get('Content-Length')
+        if not given and method == 'GET':
+            return 0
+        try:
+            return int(given)
+        except (TypeError, ValueError):
+            return None
+
     def _answer(self, method):
-        length = int(self.headers.get('Content-Length') or 0)
-        if length > MAX_BODY:
-            status, headers, body = 413, dict(PAGE_HEADERS, **{'Content-Type': 'text/plain'}), b'Too large'
+        length = self._length(method)
+        if length is None or not 0 <= length <= MAX_BODY:
+            self.close_connection = True          # the body, if any, is never read
+            status, body = (411, b'') if length is None else (413, b'Too large')
+            headers = dict(PAGE_HEADERS, **{'Content-Type': 'text/plain'})
         else:
             body_in = self.rfile.read(length) if length else b''
             status, headers, body = self.server.app.handle(method, self.path, dict(self.headers.items()), body_in)

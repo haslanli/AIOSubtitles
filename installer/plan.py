@@ -17,6 +17,7 @@ from subsync.aiosconfig import (  # noqa: F401  (the rules live in subsync, shar
 
 SUBSYNC_PORT = 8790
 SUBSYNC_HOST = 'aiosubtitles-subsync'   # its name on AIOStreams' Docker network(s)
+AIOS_DEFAULT_URL = 'http://127.0.0.1:3000'   # AIOStreams' own default address on its machine
 
 
 # ------------------------------------------------------------------------------------------- addresses

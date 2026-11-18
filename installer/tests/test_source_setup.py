@@ -2,6 +2,7 @@
 fetches the folder's newer commit with git, and a failed build puts the folder back. Real git in throwaway folders
 (the "origin" is a local folder, so nothing leaves this machine); docker and uname are stand-ins."""
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -73,6 +74,18 @@ class SourceSetup(unittest.TestCase):
         self.assertIn('-e AIOSUBTITLES_ROUTE=source', run)
         self.assertTrue(run.endswith('aiosubtitles:local-1.4.0 setup --status'), run)
         self.assertTrue((self.folder / 'state').is_dir())
+
+    def test_setups_container_carries_a_mark_of_its_own_to_be_found_by(self):
+        # on Linux setup runs on the machine's network, where its container has the machine's hostname, not its ID
+        marks = []
+        for system in ('Linux', 'Darwin', 'Linux'):
+            with self.subTest(system=system):
+                _, _, calls = self.run_setup('--status', system=system)
+                mark = re.search(r' --label org\.aiosubtitles\.setup=(\S+) ', calls[1])
+                self.assertTrue(mark, calls[1])
+                self.assertIn(f' -e AIOSUBTITLES_SETUP_ID={mark.group(1)} ', calls[1])
+                marks.append(mark.group(1))
+        self.assertEqual(len(set(marks)), len(marks))                         # each run its own
 
     def test_on_a_mac_the_page_is_on_a_published_port(self):
         _, _, calls = self.run_setup(system='Darwin')

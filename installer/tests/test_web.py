@@ -4,6 +4,7 @@ through the real engine (a stand-in AIOStreams, Docker faked)."""
 import ast
 import html
 import re
+import socket
 import tempfile
 import threading
 import time
@@ -16,17 +17,22 @@ from unittest import mock
 from installer import engine, update, web
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
+from subsync import ui
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
 
 def site_headers():
-    """subsync's public pages' security header, read from its source (public.py needs cryptography to import)."""
+    """subsync's public pages' security header: public.py's PAGE_HEADERS, which it takes from subsync/ui.py (its
+    source is read: public.py needs cryptography to import)."""
     tree = ast.parse((REPO / 'subsync' / 'subsync' / 'public.py').read_text())
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', None) == 'PAGE_HEADERS':
-            return ast.literal_eval(node.value)
-    raise AssertionError('PAGE_HEADERS not found')
+    imported = any(isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == 'ui'
+                   and any(a.name == 'PAGE_HEADERS' and a.asname is None for a in node.names) for node in tree.body)
+    assigned = any(isinstance(node, ast.Name) and node.id == 'PAGE_HEADERS' and isinstance(node.ctx, ast.Store)
+                   for node in ast.walk(tree))
+    if not imported or assigned:
+        raise AssertionError("public.py's PAGE_HEADERS is not subsync/ui.py's")
+    return ui.PAGE_HEADERS
 
 
 class Browser:
@@ -118,6 +124,40 @@ class Security(unittest.TestCase):
                 for path in ('/static/fonts/../secret.txt', '/static/fonts/secret.txt', '/static/fonts/Face-wght.otf'):
                     with self.subTest(path=path):
                         self.assertEqual(self.b.request('GET', path)[0], 404)
+
+    def test_the_hashed_stylesheet_and_script_and_the_typefaces_are_cached(self):
+        # sent with no-store once, so the install, check and update pages, which load themselves again every 2 seconds,
+        # fetched them all each time, and the typeface was read from disk again for each
+        for path in ('/static/app.css', '/static/app.js'):
+            with self.subTest(path=path):
+                self.assertEqual(self.b.request('GET', path)[1]['Cache-Control'], 'public, max-age=3600')
+        host = {'Host': f'127.0.0.1:{self.app.port}'}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'fonts').mkdir()
+            font = Path(tmp) / 'fonts' / 'Face-wght.ttf'
+            font.write_bytes(b'face')
+            with mock.patch.object(web.ui, 'STATIC', tmp):
+                first = self.app.handle('GET', '/static/fonts/Face-wght.ttf', host, b'')
+                font.write_bytes(b'read again')
+                again = self.app.handle('GET', '/static/fonts/Face-wght.ttf', host, b'')
+        self.assertEqual(first[1]['Cache-Control'], 'public, max-age=31536000, immutable')
+        self.assertEqual((first[2], again[2]), (b'face', b'face'))                     # read once
+
+    def test_only_a_request_with_the_key_keeps_the_page_up(self):
+        # any request at all, even with no key and another Host, once kept the page (and its root process holding
+        # Docker's socket) up past its idle time
+        app = web.App(port=8807, idle_s=0.5)
+        b = Browser(app)
+        time.sleep(0.6)
+        self.assertTrue(app.should_stop())
+        for method, path, host in (('GET', '/', 'evil.example'), ('GET', f'/{app.key}/', 'evil.example:8807'),
+                                   ('GET', '/not-the-key/', None), ('POST', '/not-the-key/', None),
+                                   ('GET', '/static/app.css', None)):
+            with self.subTest(method=method, path=path, host=host):
+                b.request(method, path, host=host)
+                self.assertTrue(app.should_stop())
+        b.get('')
+        self.assertFalse(app.should_stop())
 
     def test_a_body_over_16_kb_is_refused(self):
         status, _, _ = self.b.request('POST', f'/{self.app.key}/', form={'ROUTE': 'x' * 17000})
@@ -252,6 +292,50 @@ class Personal(FlowFixture):
         _, _, text = self.b.get('install')                                             # a reload shows the progress
         self.assertIn('subsync is running', text)
 
+    def test_a_double_click_on_save_saves_once(self):
+        # two Saves at once once both ran: AIOStreams got two copies of the config (with its services), and one of them
+        # was left there, unknown to setup
+        self.walk_to_review()
+        create = engine.Aios.create_config
+
+        def slow(aios, *args):
+            time.sleep(0.3)
+            return create(aios, *args)
+        answers = []
+        with mock.patch.object(engine.Aios, 'create_config', slow):
+            posts = [threading.Thread(target=lambda: answers.append(self.b.post('review', {'CONFIRM': 'yes'})[:2]))
+                     for _ in range(2)]
+            for post in posts:
+                post.start()
+            for post in posts:
+                post.join(30)
+        self.assertEqual([(status, headers['Location']) for status, headers in answers],
+                         [(303, f'/{self.app.key}/install')] * 2)
+        self.b.settle('install')
+        created = [p for m, p, _ in self.aios.log if m == 'POST' and p == '/api/v1/user']
+        self.assertEqual(len(created), 1)
+
+    def test_another_configs_id_with_a_wrong_password_leads_nowhere(self):
+        # its ID was taken while its password was refused, and the step stayed done: Continue then went on, and the save
+        # wrote this config's content into the other one, whose backup held this one's
+        other = '2b3c4d5e-1234-4abc-8def-0123456789ab'
+        self.aios.users[other] = {'password': PASSWORD, 'config': {
+            'services': [], 'presets': [{'type': 'zilean', 'instanceId': 'B-ONLY', 'enabled': True,
+                                         'options': {'name': 'Zilean'}}]}}
+        self.walk_to_review()
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': other, 'AIOS_CONFIG_PASSWORD': 'wrong', 'go': 'next'})
+        self.assertIn("don't match", text)
+        self.assertEqual(self.app.session.e.uuid, UUID)                 # the config read before stays whole
+        status, _, text = self.b.post('config', {'AIOS_CONFIG_ID': other, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
+        self.assertEqual(status, 200)                                   # no way on: its password is asked again
+        self.assertIn('"Its password" needs an answer.', text)
+        for step in ('choices', 'review', 'install'):
+            with self.subTest(step=step):
+                status, headers, _ = self.b.get(step)
+                self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/config'))
+        self.assertFalse(any(m == 'PUT' and who == other for m, who, _ in self.aios.log))
+        self.assertEqual(self.aios.users[other]['config']['presets'][0]['instanceId'], 'B-ONLY')
+
     def test_a_later_step_before_its_turn_goes_back_to_the_first_one_left(self):
         self.b.post('', {'ROUTE': 'yourself'})
         status, headers, _ = self.b.get('review')
@@ -314,6 +398,30 @@ class Pieces(unittest.TestCase):
         app.finish_in(0)
         self.assertEqual(web.stop_line(app), 'Setup is done; the page has stopped.')
 
+    def test_a_step_keeps_a_missing_answer_apart_from_a_wrong_one(self):
+        s = web.Session('yourself', {})
+
+        def missing():
+            raise engine.Problem('AIOS_URL', missing=True)
+
+        def wrong():
+            raise engine.Problem('AIOS_URL', 'Not an address.')
+        self.assertFalse(s.run('aios', missing))
+        self.assertEqual((s.asks, s.problems), ({'aios': 'AIOS_URL'}, {}))
+        self.assertFalse(s.run('aios', wrong))
+        self.assertEqual((s.asks, s.problems), ({}, {'aios': ('AIOS_URL', 'Not an address.')}))
+
+    def test_a_step_run_again_undoes_the_steps_after_it_and_itself_when_it_stops(self):
+        s = web.Session('yourself', {})
+        s.done.update(s.ids[:5])                                        # machine to limits
+
+        def refused():
+            raise engine.Problem('AIOS_CONFIG_PASSWORD', "That config ID and password don't match.")
+        self.assertFalse(s.run('config', refused))
+        self.assertEqual(s.done, {'machine', 'aios'})
+        self.assertTrue(s.run('machine', lambda: None))
+        self.assertEqual(s.done, {'machine'})
+
     def test_a_stopped_step_leaves_no_turning_ring(self):
         s = web.Session('yourself', {})
 
@@ -370,8 +478,41 @@ class Hosting(RouteFixture):
         self.assertFalse(any(env['SUBSYNC_SECRET_KEY'] in page for page in b.pages))     # never on a page
 
 
-if __name__ == '__main__':
-    unittest.main()
+class Lengths(unittest.TestCase):
+    """A body's length, on a real socket on 127.0.0.1: refused before the page reads anything."""
+
+    def setUp(self):
+        self.app = web.App()
+        server = web.start(self.app)
+
+        def stop():
+            self.app.finish_in(0)
+            self.app.finished.wait(5)
+            server.server_close()
+        self.addCleanup(stop)
+
+    def status(self, length, body=b'ROUTE=host'):
+        """The answer's status code, the connection left open after the body (as a slow client leaves it)."""
+        head = f'POST / HTTP/1.1\r\nHost: 127.0.0.1:{self.app.port}\r\n'
+        if length is not None:
+            head += f'Content-Length: {length}\r\n'
+        with socket.create_connection(('127.0.0.1', self.app.port), timeout=3) as c:
+            c.sendall(head.encode() + b'\r\n' + body)
+            return c.recv(1024).split(b'\r\n', 1)[0].split()[1:2]
+
+    def test_a_length_that_is_missing_or_isnt_a_number_is_refused(self):
+        # a non-number once ended the request with a traceback on setup's terminal and no answer
+        for length in ('abc', '', None):
+            with self.subTest(length=length):
+                self.assertEqual(self.status(length), [b'411'])
+
+    def test_a_negative_length_is_refused_at_once(self):
+        # read once as "everything until the client closes": past the 16 KB cap, and the thread held meanwhile
+        self.assertEqual(self.status(-1), [b'413'])
+        self.assertEqual(self.status(web.MAX_BODY + 1), [b'413'])
+
+    def test_a_connection_that_sends_nothing_gives_its_thread_back(self):
+        self.assertTrue(web.Handler.timeout and web.Handler.timeout <= 60)
 
 
 class Rollback(FlowFixture):
@@ -399,8 +540,35 @@ class Rollback(FlowFixture):
         self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/updating'))
         self.assertEqual(calls, [True])
 
+    def test_two_rollbacks_sent_at_once_run_once(self):
+        # both once got past the check that one runs, and both ran on the later one's engine
+        b = Browser(web.App(port=8810))
+        ran = []
+
+        class Slow(web.Session):
+            def __init__(self, *args):
+                time.sleep(0.2)
+                super().__init__(*args)
+
+        def rollback(e, restore=False):
+            ran.append(e)
+            time.sleep(0.3)
+            return True
+        with mock.patch.object(web, 'Session', Slow), mock.patch.object(engine.Engine, 'rollback', rollback):
+            posts = [threading.Thread(target=b.post, args=('rollback', {})) for _ in range(2)]
+            for post in posts:
+                post.start()
+            for post in posts:
+                post.join(30)
+            b.settle('updating')
+        self.assertEqual(ran, [b.app.after.e])
+
     def test_no_copy_no_restore_choice(self):
         b = Browser(web.App(port=8809))
         _, _, text = b.get('')
         self.assertIn('action="rollback"', text)
         self.assertNotIn('name="RESTORE_DATABASES"', text)
+
+
+if __name__ == '__main__':
+    unittest.main()

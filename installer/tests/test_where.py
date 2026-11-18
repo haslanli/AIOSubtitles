@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, where
+from installer import dockerenv, update, where
 
+REPO = Path(__file__).resolve().parent.parent.parent
 DIGEST = 'sha256:' + 'b' * 64
 
 
@@ -52,10 +53,26 @@ class Place(unittest.TestCase):
         mounts = [{'Type': 'bind', 'Source': '/srv/AIOSubtitles/state', 'Destination': '/folder/state'}]
         p = where.place_from(inspect(image='aiosubtitles:local-1.4.0', network='host', mounts=mounts, ports={}),
                              BUILT, '1.4.0', 'source', (1000, 1000))
-        self.assertEqual((p.route, p.image, p.local, p.network), ('source', 'aiosubtitles:local-1.4.0', True, 'host'))
+        self.assertEqual((p.route, p.image, p.local, p.network), ('source', 'sha256:' + 'e' * 64, True, 'host'))
+        self.assertEqual(p.run_as, 'aiosubtitles:local-1.4.0')
         self.assertEqual(p.host_folder, '/srv/AIOSubtitles')
         self.assertIsNone(p.page_port)
         self.assertEqual(p.gateway, '')
+
+    def test_a_rebuild_of_the_same_version_without_a_digest_is_another_image(self):
+        # Docker's classic image store gives a local build no digest, and the next build of the same version takes its
+        # tag: pinned by the tag, the rebuild looked like the running build ("the newest version"), and the next
+        # compose up started it without the update's copy of the databases and its checks
+        mounts = [{'Type': 'bind', 'Source': '/srv/AIOSubtitles/state', 'Destination': '/folder/state'}]
+        running, rebuilt = (where.place_from(dict(inspect(image='aiosubtitles:local-1.7.0', network='host',
+                                                          mounts=mounts, ports={}), Image=image_id),
+                                             dict(BUILT, Id=image_id), '1.7.0', 'source', (1000, 1000))
+                            for image_id in ('sha256:' + '1' * 64, 'sha256:' + '2' * 64))
+        self.assertEqual((running.image, rebuilt.image), ('sha256:' + '1' * 64, 'sha256:' + '2' * 64))
+        self.assertEqual(update.compare({'version': '1.7.0', 'image': running.image}, rebuilt.image, '1.7.0').how,
+                         'ready')
+        self.assertEqual(update.compare({'version': '1.7.0', 'image': running.image}, running.image, '1.7.0').how,
+                         'newest')
 
     def test_a_local_build_with_a_digest_is_still_local(self):
         # Docker 29's image store gives a local build a digest too; it must never be looked for on a registry
@@ -91,9 +108,48 @@ class Discover(unittest.TestCase):
                 mock.patch.object(where, 'FOLDER', Path(tmp)):
             p = where.discover('1.4.0', {'HOSTNAME': 'c0ffeec0ffee'})
             self.assertEqual(p.owner, (os.stat(tmp).st_uid, os.stat(tmp).st_gid))
-        self.assertEqual(calls[0], ['docker', 'inspect', 'c0ffeec0ffee'])
+        self.assertEqual(calls[0], ['docker', 'inspect', '--type', 'container', 'c0ffeec0ffee'])
         self.assertEqual(calls[1], ['docker', 'image', 'inspect', 'sha256:' + 'e' * 64])
         self.assertEqual(p.container, 'c0ffee' * 10 + 'c0ff')
+
+    def test_on_the_machines_own_network_setup_finds_its_container_by_its_mark(self):
+        # there the container has the machine's hostname: looked up by it, setup stopped at once on Linux's source route
+        full = 'c0ffee' * 10 + 'c0ff'
+        mounts = [{'Type': 'bind', 'Source': '/srv/AIOSubtitles/state', 'Destination': '/folder/state'}]
+
+        def run(cmd, timeout=60, stdin=None):
+            if cmd == ['docker', 'ps', '--quiet', '--no-trunc', '--filter', 'label=org.aiosubtitles.setup=4242-17']:
+                return 0, full + '\n', ''
+            if cmd == ['docker', 'inspect', '--type', 'container', full]:
+                return 0, json.dumps([inspect(image='aiosubtitles:local-1.4.0', network='host', mounts=mounts,
+                                              ports={})]), ''
+            if cmd[:2] == ['docker', 'inspect']:
+                return 1, '', f'Error: No such object: {cmd[-1]}'
+            if cmd[:3] == ['docker', 'image', 'inspect']:
+                return 0, json.dumps([BUILT]), ''
+            return 1, '', 'unexpected'
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(dockerenv, 'run', run), \
+                mock.patch.object(where, 'FOLDER', Path(tmp)):
+            (Path(tmp) / 'state').mkdir()
+            p = where.discover('1.4.0', {'HOSTNAME': 'vps1', 'AIOSUBTITLES_ROUTE': 'source',
+                                         'AIOSUBTITLES_SETUP_ID': '4242-17'})
+        self.assertEqual((p.route, p.network, p.container, p.host_folder),
+                         ('source', 'host', full, '/srv/AIOSubtitles'))
+
+
+class Scripts(unittest.TestCase):
+    def test_the_texts_and_the_scripts_name_the_same_socket_folder_port_and_mark(self):
+        # the bash ./setup and the image's entry can't import these: their words are kept equal here
+        socket_mount = f'-v {dockerenv.SOCKET}:{dockerenv.SOCKET}'
+        self.assertIn(socket_mount, where.NO_SOCKET)
+        self.assertIn(f'-v "$PWD:{where.MOUNT}"', where.NO_FOLDER)
+        self.assertIn(f'-p 127.0.0.1:{where.PAGE_PORT}:{where.PAGE_PORT}', where.NO_PAGE_PORT)
+        source = (REPO / 'setup').read_text()
+        self.assertIn(socket_mount, source)
+        self.assertIn(f'/state:{where.MOUNT}/state"', source)
+        self.assertIn(f':{where.PAGE_PORT}"', source)
+        self.assertIn(f'--label "{where.SELF_LABEL}=$mark" -e "{where.SELF_VARIABLE}=$mark"', source)
+        self.assertIn(f'AIOSUBTITLES_STATE={where.MOUNT}/state', (REPO / 'installer' / 'image-entry.sh').read_text())
 
 
 class SetupScript(unittest.TestCase):

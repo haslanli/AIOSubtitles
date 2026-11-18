@@ -31,6 +31,19 @@ APP_JS = _read("app.js")
 CSS_URL = "/static/app.css?v=" + hashlib.sha256(APP_CSS.encode()).hexdigest()[:10]
 JS_URL = "/static/app.js?v=" + hashlib.sha256(APP_JS.encode()).hexdigest()[:10]
 
+# the HTTP headers of the public site's pages and files, and of the installer's setup page
+PAGE_HEADERS = {
+    # only this service's own script, stylesheet and two typefaces, nothing inline
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+                               "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store"}
+SCRIPT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600",
+                  "Referrer-Policy": "no-referrer"}
+# the typefaces never change under their names (a new version would get a new name)
+FONT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=31536000, immutable",
+                "Referrer-Policy": "no-referrer"}
+
 
 def font_path(name):
     """The file of one of the two typefaces, or None when the name is not one of them or the file is missing

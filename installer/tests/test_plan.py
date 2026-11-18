@@ -242,6 +242,10 @@ class Addresses(unittest.TestCase):
         self.assertEqual(plan.public_default('http://localhost:3000', '192.168.1.5'), ('port', 'http://192.168.1.5:8790'))
         self.assertEqual(plan.public_default('https://nas.local', '192.168.1.5'), ('port', 'http://nas.local:8790'))
 
+    def test_aiostreams_default_address_is_the_one_its_explanation_gives(self):
+        self.assertEqual(explain.QUESTIONS['AIOS_URL'][0], plan.AIOS_DEFAULT_URL)
+        self.assertIn(f'like {plan.AIOS_DEFAULT_URL} or', explain.QUESTIONS['AIOS_URL'][1])
+
     def test_checks_and_rules(self):
         self.assertEqual(plan.check_public('https://a.example.com/subsync/'), (True, '', 'https://a.example.com/subsync'))
         self.assertFalse(plan.check_public('a.example.com')[0])
