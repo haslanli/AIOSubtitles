@@ -488,7 +488,8 @@ html:not(.js) .screens{margin-top:24px}
   .segs li[aria-current=step]{background:var(--accent)}
   .steparea h1{font-size:36px;margin-top:16px}
   .steparea .actions{margin:32px calc(var(--page) * -1) 0;padding:12px var(--page) max(16px,env(safe-area-inset-bottom))}
-  .steparea .actions .secondary{display:none}
+  /* the Back link only (the top bar has the back arrow): a secondary button there, like Check again, stays */
+  .steparea .actions a.secondary{display:none}
   .steparea .actions .primary{width:100%;height:56px}
   .num{display:flex;width:100%}
   .num input{flex:1;width:auto}

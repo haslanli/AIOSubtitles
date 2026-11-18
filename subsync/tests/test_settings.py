@@ -1,0 +1,138 @@
+"""A self-hosted install's settings written by hand (state/subsync.env): every number read one way, with the range its
+explanation implies, the languages and the addon key. A value that can't work
+is one plain line at the start, which then stops, never a traceback or a service that fails far from the cause."""
+import re
+import unittest
+
+import helpers  # noqa: F401  (first: it puts the package on the import path)
+from subsync import explain, settings as settings_module  # noqa: E402
+from subsync.settings import GB, MB, Settings  # noqa: E402
+
+PUBLIC = {"SUBSYNC_PUBLIC": "on"}
+
+
+def number_settings():
+    """{name: "whole" or "number"} of every setting Settings reads as a number through its one reader."""
+    with open(settings_module.__file__, encoding="utf-8") as f:
+        source = f.read()
+    return {name: kind for kind, name in re.findall(r'read\.(whole|number)\("(SUBSYNC_[A-Z0-9_]+)"', source)}
+
+
+class NumbersTest(unittest.TestCase):
+    def test_a_number_written_wrong_is_one_plain_line_naming_its_setting(self):
+        # Empty, a decimal where a whole number is needed, an exponent, nan or inf raised out of Settings, so
+        # the service stopped with a traceback and restarted in a loop; the owner's lines, word for word
+        for name, value, line in (
+                ("SUBSYNC_MAX_TRIES", "6.0", "SUBSYNC_MAX_TRIES must be a whole number from 1, like 6."),
+                ("SUBSYNC_MAX_TRIES", "", "SUBSYNC_MAX_TRIES must be a whole number from 1, like 6."),
+                ("SUBSYNC_USENET_LISTINGS_PER_DAY", "1e3",
+                 "SUBSYNC_USENET_LISTINGS_PER_DAY must be a whole number from 0, like 10."),
+                ("SUBSYNC_PORT", "", "SUBSYNC_PORT must be a whole number from 1 to 65535."),
+                ("SUBSYNC_READ_TIMEOUT_S", "nan", "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60."),
+                ("SUBSYNC_DAILY_BUDGET_GB", "inf", "SUBSYNC_DAILY_BUDGET_GB must be a number from 0, like 100."),
+                ("SUBSYNC_STORE_CAP_MB", "lots", "SUBSYNC_STORE_CAP_MB must be a number from 0, like 2048."),
+                ("SUBSYNC_403_BACKOFF_S", "1e3", "SUBSYNC_403_BACKOFF_S must be a whole number from 1, like 900."),
+                ("SUBSYNC_BACKUP_DAYS", "a month", "SUBSYNC_BACKUP_DAYS must be a whole number from 0.")):
+            with self.subTest(name=name, value=value):
+                s = Settings({name: value})
+                self.assertEqual(s.conflicts(), [line])
+                self.assertEqual(s.wrong_numbers, [line])
+
+    def test_a_value_its_explanation_rules_out_is_refused(self):
+        # An impossible value started the service and failed far from the cause (every read failed with a
+        # 0 s timeout, every file stopped on a day's budget of -1 GB); a size whose bytes no number holds crashed it
+        for name, value, line in (
+                ("SUBSYNC_PORT", "99999", "SUBSYNC_PORT must be a whole number from 1 to 65535."),
+                ("SUBSYNC_PORT", "0", "SUBSYNC_PORT must be a whole number from 1 to 65535."),
+                ("SUBSYNC_READ_TIMEOUT_S", "0", "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60."),
+                ("SUBSYNC_PICK_WAIT_MS", "-5", "SUBSYNC_PICK_WAIT_MS must be a number above 0, like 14000."),
+                ("SUBSYNC_WORKER_IDLE_MIN", "0", "SUBSYNC_WORKER_IDLE_MIN must be a number above 0, like 30."),
+                ("SUBSYNC_DAILY_BUDGET_GB", "-1", "SUBSYNC_DAILY_BUDGET_GB must be a number from 0, like 100."),
+                ("SUBSYNC_FILE_CAP_GB", "1e300", "SUBSYNC_FILE_CAP_GB must be a number from 0, like 6."),
+                ("SUBSYNC_MAX_USERS", "-5", "SUBSYNC_MAX_USERS must be a whole number from 0, like 200."),
+                ("SUBSYNC_MAIN_ALTERNATIVES", "0", "SUBSYNC_MAIN_ALTERNATIVES must be a whole number from 1, like 3."),
+                ("SUBSYNC_MAX_CONNECTIONS", "0", "SUBSYNC_MAX_CONNECTIONS must be a whole number from 1, like 256.")):
+            with self.subTest(name=name, value=value):
+                self.assertEqual(Settings({name: value}).conflicts(), [line])
+
+    def test_every_documented_zero_keeps_its_meaning(self):
+        # "0 removes the limit" (the audio and per-file limits), "0 turns Usenet off", "0 turns the check off", "0 stops
+        # new audio syncs", "0: the first check decides", nothing read in a day
+        zeros = {"SUBSYNC_AUDIO_BUDGET_GB": ("audio_budget", None), "SUBSYNC_FILE_CAP_GB": ("file_cap", None),
+                 "SUBSYNC_USENET_LISTINGS_PER_DAY": ("usenet_listings_per_day", 0),
+                 "SUBSYNC_RECHECK_HOURS": ("recheck_hours", 0), "SUBSYNC_USER_AUDIO_PER_DAY": ("user_audio_per_day", 0),
+                 "SUBSYNC_USER_OPENED_PER_DAY": ("user_opened_per_day", 0),
+                 "SUBSYNC_AUDIO_EXTRA_WINDOWS": ("audio_extra", 0), "SUBSYNC_DAILY_BUDGET_GB": ("daily_budget", 0),
+                 "SUBSYNC_ACTIVE_WORKERS": ("active_workers", 0), "SUBSYNC_AUDIO_LEAD_MS": ("audio_lead", 0)}
+        for name, (attribute, value) in zeros.items():
+            with self.subTest(name=name):
+                s = Settings({name: "0"})
+                self.assertEqual((getattr(s, attribute), s.conflicts()), (value, []))
+
+    def test_every_number_setting_is_read_by_the_one_reader_with_a_default_it_accepts(self):
+        names = number_settings()
+        self.assertGreaterEqual(len(names), 40)
+        self.assertEqual(Settings({}).wrong_numbers, [])
+        with open(settings_module.__file__, encoding="utf-8") as f:
+            self.assertNotRegex(f.read(), r"(int|float)\(g\(")        # no number parsed beside it
+        for name in names:
+            with self.subTest(name=name):
+                wrong = Settings({name: "x"})
+                self.assertEqual(len(wrong.wrong_numbers), 1)
+                self.assertTrue(wrong.wrong_numbers[0].startswith(f"{name} must be a "))
+                # read as its default: the same settings as an install without the line
+                self.assertEqual({k: v for k, v in vars(wrong).items() if k != "wrong_numbers"},
+                                 {k: v for k, v in vars(Settings({})).items() if k != "wrong_numbers"})
+
+    def test_values_that_work_today_still_do(self):
+        s = Settings({"SUBSYNC_PORT": " 8791 ", "SUBSYNC_STORE_CAP_MB": "2.5", "SUBSYNC_DAILY_BUDGET_GB": "0.5",
+                      "SUBSYNC_PICK_WAIT_MS": "9500", "SUBSYNC_WORKER_IDLE_MIN": "1.5", "SUBSYNC_BACKUP_DAYS": "30",
+                      "SUBSYNC_SNAP_WITHIN": "0.9", "SUBSYNC_FILE_CAP_GB": "1e3"})
+        self.assertEqual(s.conflicts(), [])
+        self.assertEqual((s.port, s.cap_bytes, s.daily_budget, s.pick_wait, s.worker_idle_s, s.backup_days,
+                          s.snap_within, s.file_cap),
+                         (8791, int(2.5 * MB), int(0.5 * GB), 9.5, 90.0, 30, 0.9, int(1e3 * GB)))
+        self.assertEqual(Settings({"SUBSYNC_BACKUP_DAYS": " "}).backup_days, 0)         # empty: not said
+        for name, kind in number_settings().items():
+            with self.subTest(name=name):
+                default = explain.SETTINGS[name][0]
+                self.assertEqual(Settings({name: default}).conflicts(), [], default)
+                if kind == "whole" and default:          # SUBSYNC_BACKUP_DAYS has none: empty is "not said"
+                    self.assertTrue(default.isdecimal(), default)
+
+
+class LanguagesTest(unittest.TestCase):
+    def test_repeats_are_dropped_quietly(self):
+        # En,eng gave English twice, its pick entry twice in the app and needless work on every request
+        s = Settings({"SUBSYNC_LANGUAGES": "en,eng, English ,rus,ru"})
+        self.assertEqual((s.languages, s.conflicts()), (["eng", "rus"], []))
+        self.assertEqual(Settings({"SUBSYNC_FALLBACK_REFERENCE": "eng,en"}).fallback_reference, ("eng",))
+
+    def test_an_unknown_code_or_an_empty_list_stops_a_self_hosted_start(self):
+        lead = "SUBSYNC_LANGUAGES must be language codes separated by commas, like eng,rus: "
+        self.assertEqual(Settings({"SUBSYNC_LANGUAGES": "eng,xx"}).conflicts(), [lead + "xx isn't one."])
+        self.assertEqual(Settings({"SUBSYNC_LANGUAGES": " xx , Klingon"}).conflicts(),
+                         [lead + "xx isn't one.", lead + "Klingon isn't one."])
+        for empty in ("", " , "):
+            with self.subTest(value=empty):
+                self.assertEqual(Settings({"SUBSYNC_LANGUAGES": empty}).conflicts(),
+                                 ["SUBSYNC_LANGUAGES must name at least one language, like eng."])
+
+    def test_a_public_instance_uses_each_persons_own_languages(self):
+        for value in ("", "xx"):
+            with self.subTest(value=value):
+                self.assertEqual(Settings(dict(PUBLIC, SUBSYNC_LANGUAGES=value)).conflicts(), [])
+
+
+class AddonKeyTest(unittest.TestCase):
+    def test_a_key_with_a_slash_stops_a_self_hosted_start(self):
+        # It can't be one part of an address, so every keyed route answered "not found" for good
+        self.assertEqual(Settings({"SUBSYNC_ADDON_KEY": "my/key"}).conflicts(), ["SUBSYNC_ADDON_KEY can't contain /."])
+        for key in ("/k3y/", "my key", "clé", "ab_DE-12", ""):
+            with self.subTest(key=key):
+                self.assertEqual(Settings({"SUBSYNC_ADDON_KEY": key}).conflicts(), [])
+        self.assertEqual(Settings(dict(PUBLIC, SUBSYNC_ADDON_KEY="my/key")).conflicts(), [])    # not used there
+
+
+if __name__ == "__main__":
+    unittest.main()

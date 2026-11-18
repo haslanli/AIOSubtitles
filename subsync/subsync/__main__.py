@@ -42,7 +42,7 @@ def main():
     extra = make_sources(s)
     lookup = make_lookup(s, store)
     usenet = gate = None
-    if s.usenet and s.usenet_manifest and s.usenet_listings_per_day > 0:
+    if s.usenet_usable:
         usenet = Aios.from_settings(s, s.usenet_manifest, s.usenet_password, s.public_base)
         gate = UsenetGate(store, s.usenet_listings_per_day, StoreUsenetCounts(store))
     worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra, usenet=usenet, usenet_gate=gate,

@@ -321,13 +321,18 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
     return step('yourself', 'choices', body, _back_and_continue('yourself', 'choices'), problem=problem)
 
 
+# the keyboard phones show for a limit's box, by its kind: one with a decimal point for a decimal, the normal
+# one where the word auto is taken too, else digits
+KEYPADS = {'decimal': 'decimal', 'auto': 'text'}
+
+
 def _limit(lim, value, problem):
     """A limit's field, with its problem under its label, tied to the box or the row of buttons."""
     text, error = _explanation(lim.setting), _error(problem, lim.setting)
     if lim.kind == 'segmented':
         return ui.segmented(lim.setting, lim.label, lim.options, value, text, lim.unit, error=error)
     return ui.number_field(lim.setting, lim.label, limit_list.shown(lim, value), text, lim.unit,
-                           auto=lim.kind == 'auto', error=error)
+                           keypad=KEYPADS.get(lim.kind, 'numeric'), error=error)
 
 
 def _choose(problem, asked):

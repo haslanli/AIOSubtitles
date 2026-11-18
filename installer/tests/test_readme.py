@@ -152,6 +152,12 @@ class Folder(unittest.TestCase):
         self.assertIn('set -- -s /src/installer/tests -t /src;', build)
         self.assertIn('`python3 -m unittest discover -s installer/tests -t .`', rows['installer/'])
 
+    def test_the_installers_tests_name_the_python_they_need(self):
+        # Three modules use an f-string only Python 3.12 parses, and on an older python3 the tests stopped
+        # with "f-string expression part cannot include a backslash"
+        self.assertIn('Its tests run with Python 3.12 or newer (`python3 -m unittest discover -s installer/tests -t .`), '
+                      "and inside the image's build;", self.rows()['installer/'])
+
 
 if __name__ == '__main__':
     unittest.main()

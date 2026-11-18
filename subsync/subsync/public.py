@@ -205,8 +205,7 @@ class Pool:
         s = user_settings(self.env, record, token, self.s)
         aios = Aios.from_settings(s, s.source_manifest, s.source_password, self.s.public_base)
         usenet = gate = None
-        if self.s.usenet and self.s.usenet_listings_per_day > 0 and s.usenet_manifest and \
-                isinstance(limits, UserLimits):
+        if s.usenet_usable and isinstance(limits, UserLimits):
             usenet = Aios.from_settings(s, s.usenet_manifest, s.usenet_password, self.s.public_base)
             gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(), who=limits.who)
         safety = self.safeties.get(uid)

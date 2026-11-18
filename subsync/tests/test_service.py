@@ -1843,6 +1843,18 @@ class AddonKeyTest(AddonCase):
             self.assertEqual(check(self.server.server_address[1]), 0)
             self.assertNotEqual(check(other.server_address[1]), 0)
 
+    def test_a_key_is_compared_as_the_address_carries_it_decoded(self):
+        # A hand-set key with a space or an accent arrives percent-encoded and never matched: every keyed route
+        # answered "not found" for good (a key with a slash stops the start: test_settings)
+        for key, segment in (("my key", "my%20key"), ("clé", "cl%C3%A9"), ("k3y", "k3y"), ("k3y", "k%33y")):
+            with self.subTest(key=key, segment=segment):
+                app = App(Settings({"SUBSYNC_DATA": self.s.data, "SUBSYNC_ADDON_KEY": key}), self.store, self.worker,
+                          Safety())
+                self.assertEqual(app.route(f"/{segment}/manifest.json"), ("/manifest.json", True))
+                self.assertEqual(app.route("/my%20kez/manifest.json"), ("/my%20kez/manifest.json", False))
+        code, body, _ = http(self.base + "/%6B3y/manifest.json")              # over HTTP too
+        self.assertEqual((code, json.loads(body)["resources"]), (200, ["subtitles"]))
+
     def test_no_key_keeps_the_old_routes(self):
         app = App(Settings({"SUBSYNC_DATA": self.s.data}), self.store, self.worker, Safety())
         self.assertEqual(app.route("/manifest.json"), ("/manifest.json", True))

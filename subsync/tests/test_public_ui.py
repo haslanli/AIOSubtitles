@@ -62,9 +62,34 @@ class Tree(html.parser.HTMLParser):
         return re.sub(r"\s+", " ", " ".join(self.words))
 
 
+# The signed-up page's lines for the changes to a person's config, as the owner approved them
+CHANGES = ("Adds 1 subtitle source: AIOSubtitles (synced copies of the subtitles you already get)",
+           "Removes 2 subtitle addons AIOSubtitles now searches itself: SubDL, OpenSubtitles",
+           "Updates the subtitle source \"AIOSubtitles\" (new address)",
+           "Moves \"AIOSubtitles\" before your other subtitle sources (apps that list only a few subtitles per language "
+           "keep its entries)")
+
+
+def change_lines():
+    """The lines aiosconfig.viewer_change writes for a sign-up, as the signed-up page gets them: AIOSubtitles added with
+    the subtitle addons it now searches itself removed, then its address updated, then moved before another subtitle
+    source (a shortened stand-in kept the real lines out of the approved-words test)."""
+    from subsync.aiosconfig import viewer_change
+    ours = {"type": "custom", "instanceId": "a", "enabled": True,
+            "options": {"name": "AIOSubtitles", "manifestUrl": LINK, "resources": ["subtitles"]}}
+    twins = [{"type": "subdl", "instanceId": "d", "enabled": True, "options": {"name": "SubDL"}},
+             {"type": "opensubtitles", "instanceId": "o", "enabled": True, "options": {"name": "OpenSubtitles"}}]
+    old = dict(ours, options=dict(ours["options"], manifestUrl=f"{BASE}/u/{'O' * 43}/manifest.json"))
+    other = {"type": "subhero", "instanceId": "h", "enabled": True, "options": {"name": "SubHero"}}
+    lines = []
+    for presets, clean_up in ((twins, ("subdl", "opensubtitles")), ([old], ()), ([other, ours], ())):
+        lines += viewer_change({"presets": presets}, LINK, name="AIOSubtitles", clean_up=clean_up)[1]
+    return lines
+
+
 def result(**kw):
     # the fields of signup.SignupResult, without importing signup (it needs cryptography), so the page tests run anywhere
-    base = dict(token=TOKEN, manifest_url=LINK, changes=["adds 1 subtitle source: AIOSubtitles"], warning=None,
+    base = dict(token=TOKEN, manifest_url=LINK, changes=change_lines()[:2], warning=None,
                 added=True, manual=False, languages=["eng", "spa"], store_only=False, to_store_only=False,
                 usenet=False, usenet_why=None, sync_made=True)
     base.update(kw)
@@ -106,6 +131,7 @@ def every_page():
         "result-unticked": pages.result_page(result(added=False, manual=False, changes=[])),
         "result-rd": pages.result_page(result(warning=explain.PUBLIC_REAL_DEBRID_WARNING)),
         "result-stored": pages.result_page(result(store_only=True)),
+        "result-again": pages.result_page(result(changes=change_lines()[2:])),
         "settings": pages.settings_page(s, RECORD, USAGE, LINK, now=0),
         "settings-kept": pages.settings_page(s, dict(RECORD, auto_password="x"), USAGE, LINK, now=0),
         "settings-full": pages.settings_page(s, RECORD, {"files": 40, "bytes": 0}, LINK, now=0),
@@ -233,7 +259,7 @@ def approved_texts():
     texts.append(explain.PUBLIC_TEXTS["password_once"] + " What AIOSubtitles reads and keeps:")
     for lead in ("not_added", "refresh_manual"):          # a note's text with the manual steps after it
         texts.append(" ".join((explain.PUBLIC_TEXTS[lead],) + explain.PUBLIC_MANUAL_STEPS))
-    texts += [name for name, _, _ in LANGUAGES] + list(pages.UI_WORDS)
+    texts += [name for name, _, _ in LANGUAGES] + list(pages.UI_WORDS) + list(CHANGES)
     return texts
 
 
@@ -251,7 +277,7 @@ def split_pieces():
 
 
 DYNAMIC = re.compile(r"^(\d+ of \d+|[\d.]+ MB of \d+ MB|English, Spanish(, French)?|Wrong\.|Detail\.|https://subs\.test/\S*"
-                     r"|Changed in your AIOStreams config: adds 1 subtitle source: AIOSubtitles|Remove: \w+)$")
+                     r"|Remove: \w+)$")
 
 
 class InLabels(html.parser.HTMLParser):
@@ -492,6 +518,11 @@ class SignupPageTest(unittest.TestCase):
         self.assertNotIn("checked", tree.all("input", id="keep_password")[0])
         self.assertEqual(tree.all("input", id="link")[0]["class"], "input mono")
 
+    def test_the_invite_box_asks_phones_for_no_capitals(self):
+        # It asked for capitals (autocapitalize="characters"), and a suggested code typed on a phone was refused
+        box = Tree(self.page()).all("input", id="invite")[0]
+        self.assertEqual((box["autocapitalize"], box["autocomplete"], box["spellcheck"]), ("none", "off", "false"))
+
     def test_the_clean_up_names_what_this_instance_takes_out_and_is_gone_when_nothing_is(self):
         # The box removes only the addons whose site the instance asks itself, and says which
         from subsync import explain, pages
@@ -593,6 +624,19 @@ class ResultPageTest(unittest.TestCase):
         self.assertIn(explain.PUBLIC_TEXTS["made_config"], text)
         self.assertIn("Languages: English, Spanish.", text)
         self.assertIn(f"{BASE}/u/{TOKEN}/configure", [a.get("href") for a in tree.all("a")])
+
+    def test_the_config_changes_are_listed_under_one_item(self):
+        # Each change line came after "Changed in your AIOStreams config: ", two colons in one line ("…config:
+        # adds 1 subtitle source: …"); the item is said once, each change under it as its own sentence
+        from subsync import pages
+        from subsync.ui import e
+        page = pages.result_page(result(changes=change_lines()))
+        self.assertIn("<li>Changed in your AIOStreams config:<ul class=\"dots\">"
+                      + "".join(f"<li>{e(line)}</li>" for line in CHANGES) + "</ul></li>", page)
+        self.assertNotIn("Changed in your AIOStreams config: ", page)
+        already = Tree(pages.result_page(result(changes=[]))).text()
+        self.assertIn("AIOSubtitles is in your AIOStreams config already.", already)
+        self.assertNotIn("Changed in your AIOStreams config", already)
 
     def test_manual_steps_when_the_addon_could_not_be_added(self):
         from subsync import explain, pages
@@ -1092,14 +1136,22 @@ class PartsTest(unittest.TestCase):
         self.assertFalse([a for a in done.all("li") if a.get("aria-current")])
         self.assertFalse(done.all("button"))
 
-    def test_the_number_field_takes_auto(self):
+    def test_the_number_field_asks_for_its_keypad_and_has_no_pattern(self):
+        # Every box asked for digits only and had a digits-only pattern, so a decimal couldn't be typed on a
+        # phone, and a correct "10,000" was invalid to the browser (and to screen readers)
         from subsync import ui
-        tree = Tree(ui.number_field("files", "Files", "auto", help_text="h.", unit="files", auto=True))
+        tree = Tree(ui.number_field("files", "Files", "auto", help_text="h.", unit="files", keypad="text"))
         box = tree.all("input", id="files")[0]
-        self.assertEqual((box["value"], box["pattern"], box["inputmode"]), ("auto", "auto|[0-9]+", "text"))
+        self.assertEqual((box["value"], box["inputmode"]), ("auto", "text"))
         self.assertEqual(tree.text_of["files-help"], "h.")
+        for keypad, value in (("decimal", "2.5"), ("numeric", "10,000")):
+            with self.subTest(keypad=keypad):
+                box = Tree(ui.number_field("n", "N", value, keypad=keypad)).all("input", id="n")[0]
+                self.assertEqual((box["value"], box["inputmode"]), (value, keypad))
         plain = Tree(ui.number_field("gb", "GB", "50", unit="GB")).all("input", id="gb")[0]
-        self.assertEqual((plain["pattern"], plain["inputmode"]), ("[0-9]+", "numeric"))
+        self.assertEqual(plain["inputmode"], "numeric")
+        for box in (tree.all("input", id="files")[0], plain):
+            self.assertNotIn("pattern", box)
 
     def test_the_segmented_choice(self):
         from subsync import ui
@@ -1243,6 +1295,21 @@ class RoutesTest(unittest.TestCase):
                         self.assertIn("max-age=31536000", headers["Cache-Control"])
                         self.assertTrue(body.endswith(name.encode()))
 
+    def test_every_page_asks_a_proxy_in_front_to_pass_it_unchanged(self):
+        # R3-10: Cloudflare added its analytics script to a page; with no-transform a proxy passes every page
+        # (and the answer after a save) through as it is, whatever its own settings
+        from test_public_http import form, http
+        _, _, _, signed_up, token = self.b.sign_up()
+        answers = {"signed up": signed_up}
+        for path in ("/", "/privacy", f"/u/{token}/configure"):
+            answers[path] = http(self.b.base + path)[2]
+        code, _, answers["after a save"] = http(f"{self.b.base}/u/{token}/configure",
+                                                form(action="languages", languages="English"))
+        self.assertEqual(code, 303)
+        for name, headers in answers.items():
+            with self.subTest(page=name):
+                self.assertEqual(headers["Cache-Control"], "no-store, no-transform")
+
     def test_personal_pages_send_noindex(self):
         from test_public_http import http
         _, _, text, headers, token = self.b.sign_up()
@@ -1259,7 +1326,7 @@ class RoutesTest(unittest.TestCase):
         for code, body, headers in (a, b, c):
             self.assertEqual(code, 404)
             self.assertIn(b"This page doesn", body)
-            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(headers["Cache-Control"], "no-store, no-transform")    # R3-10
         self.assertEqual(a[1], b[1])
         self.assertEqual(a[1], c[1])
         self.assertEqual(http(f"{self.b.base}/u/{new_token()}/manifest.json")[1], b"")     # apps: as before

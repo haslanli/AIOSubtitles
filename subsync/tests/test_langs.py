@@ -135,6 +135,8 @@ class DefaultLanguageTest(unittest.TestCase):
         self.assertEqual(langs.lang_list(" en , ja,,rus "), ["eng", "jpn", "rus"])
         self.assertEqual(langs.lang_list(""), [])
         self.assertEqual(langs.lang_list(None), [])
+        # each once (en,eng was English twice)
+        self.assertEqual(langs.lang_list("en,eng, English ,ja,jpn"), ["eng", "jpn"])
 
 
 if __name__ == "__main__":

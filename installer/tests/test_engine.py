@@ -82,6 +82,15 @@ class StateFiles(TmpState):
         engine.write_kv(self.state / 'secrets.env', {'ADDON_KEY': 'k' * 32, 'GONE': None, 'EMPTY': ''}, 'header')
         self.assertEqual(engine.read_kv(self.state / 'secrets.env'), {'ADDON_KEY': 'k' * 32})
 
+    def test_a_number_written_wrong_in_subsync_env_reads_as_its_default_and_the_others_as_written(self):
+        # subsync's settings read every number one way and never raise; one line written wrong had every
+        # question that states a setting fall back to the defaults
+        self.state.mkdir()
+        (self.state / 'subsync.env').write_text('SUBSYNC_MAX_TRIES=6.0\nSUBSYNC_USER_FILES_PER_DAY=150\n')
+        s = engine.env_settings()
+        self.assertEqual((s.max_tries, s.user_files_per_day), (6, 150))
+        self.assertEqual(s.wrong_numbers, ['SUBSYNC_MAX_TRIES must be a whole number from 1, like 6.'])
+
 
 class Terminal(TmpState):
     def said(self, *texts):

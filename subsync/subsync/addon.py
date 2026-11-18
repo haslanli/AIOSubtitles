@@ -201,14 +201,15 @@ class App:
                 f"2\n00:00:09,500 --> 00:00:16,000\n{explain.PUBLIC_TEXTS['notice_where']}\n")
 
     def route(self, path):
-        """(path without the base path and key, keyed) for a request path."""
+        """(path without the base path and key, keyed) for a request path. The key is compared as the address carries
+        it, decoded, so a key with a space or an accent matches too."""
         base = self.s.base_path
         if base and (path == base or path.startswith(base + "/")):
             path = path[len(base):] or "/"
         key = self.s.addon_key
         if key:
             first, sep, rest = path[1:].partition("/")
-            if sep and hmac.compare_digest(first.encode(), key.encode()):
+            if sep and hmac.compare_digest(urllib.parse.unquote(first).encode(), key.encode()):
                 return "/" + rest, True
         return path, not key
 

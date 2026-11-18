@@ -677,6 +677,25 @@ class PoolTest(unittest.TestCase):
         self.assertIs(self.pool.app(self.tokens[0]), a)          # the same person keeps their app
         self.assertEqual(self.pool.active(), 2)
 
+    def test_a_persons_usenet_config_is_used_by_the_one_rule(self):
+        # One rule (Settings.usenet_usable) at the start, in the self-hosted service and here; a record's Usenet
+        # config without its password was used anyway, and every Usenet search through it was blocked
+        from subsync.public import Pool
+        from subsync.users import new_token
+        env = dict(self.env, SUBSYNC_USENET="on")
+        link = "https://aios.test/stremio/n1/N1/manifest.json"
+        both, no_password = new_token(), new_token()
+        self.users.create(both, dict(record(), usenet_link=link, usenet_password="np"))
+        self.users.create(no_password, dict(record(), usenet_link=link))
+        pool = Pool(Settings(env), env, self.store, self.users, clock=self.clock)
+        try:
+            usenet = pool.app(both).worker.usenet
+            self.assertEqual((usenet.base, usenet.password), ("https://aios.test/stremio/n1/N1", "np"))
+            self.assertIsNone(pool.app(no_password).worker.usenet)
+        finally:
+            pool.close()
+        self.assertIsNone(self.pool.app(self.tokens[0]).worker.usenet)          # Usenet off on the instance
+
     def test_workers_share_one_turn(self):
         a, b = self.pool.app(self.tokens[0]), self.pool.app(self.tokens[1])
         self.assertIs(a.worker.turn, b.worker.turn)
@@ -1042,6 +1061,31 @@ class StartupTest(unittest.TestCase):
     def test_main_refuses_public_mode_without_a_secret(self):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test"})
         self.assertIn("SUBSYNC_SECRET_KEY", out)
+
+    def test_main_refuses_a_setting_that_cant_work_with_one_plain_line(self):
+        # A number written wrong raised out of Settings before main's checks, a traceback in a restart loop
+        # ("ValueError: invalid literal for int with base 10: '6.0'");: these started
+        own = {"SUBSYNC_SOURCE_MANIFEST": "https://aios.test/stremio/u/e/manifest.json", "SUBSYNC_SOURCE_PASSWORD": "p",
+               "SUBSYNC_PUBLIC_BASE": "http://subsync.test:8790"}
+        usenet_only = {"SUBSYNC_PUBLIC_BASE": "http://subsync.test:8790", "SUBSYNC_USENET": "on",
+                       "SUBSYNC_USENET_MANIFEST": "https://aios.test/stremio/n/e/manifest.json",
+                       "SUBSYNC_USENET_PASSWORD": "p", "SUBSYNC_USENET_LISTINGS_PER_DAY": "0"}
+        public = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test", "SUBSYNC_SECRET_KEY": KEY}
+        for env, line in (
+                (dict(own, SUBSYNC_MAX_TRIES="6.0"), "SUBSYNC_MAX_TRIES must be a whole number from 1, like 6."),
+                (dict(public, SUBSYNC_PORT="99999"), "SUBSYNC_PORT must be a whole number from 1 to 65535."),
+                (dict(own, SUBSYNC_READ_TIMEOUT_S="0"), "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60."),
+                (dict(own, SUBSYNC_LANGUAGES="eng,xx"),
+                 "SUBSYNC_LANGUAGES must be language codes separated by commas, like eng,rus: xx isn't one."),
+                (dict(own, SUBSYNC_LANGUAGES=""), "SUBSYNC_LANGUAGES must name at least one language, like eng."),
+                (dict(own, SUBSYNC_ADDON_KEY="a/b"), "SUBSYNC_ADDON_KEY can't contain /."),
+                (usenet_only, "Usenet is this install's only source, so SUBSYNC_USENET_LISTINGS_PER_DAY must be a whole "
+                              "number from 1."),
+                (dict(own, SUBSYNC_USENET="on", SUBSYNC_USENET_MANIFEST="https://aios.test/stremio/n/e/manifest.json"),
+                 "SUBSYNC_USENET_MANIFEST needs its password: set SUBSYNC_USENET_PASSWORD (./setup writes both).")):
+            with self.subTest(env=env):
+                out = self.run_main(env)
+                self.assertEqual(out.splitlines(), [f"ERROR:subsync:not started: {line}"])
 
     def test_a_main_past_its_checks_fails_the_test_at_once(self):
         for env in ({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test", "SUBSYNC_SECRET_KEY": KEY},

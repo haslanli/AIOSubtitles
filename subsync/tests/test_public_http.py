@@ -89,7 +89,7 @@ class PublicHttpTest(Base):
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(headers["X-Frame-Options"], "DENY")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Cache-Control"], "no-store, no-transform")
         self.assertNotIn("http://", text.replace("http://www.w3.org", ""))   # no outside resources
         self.assertEqual(http(self.base + "/privacy")[0], 200)
         self.assertEqual(http(self.base + "/health")[:2], (200, b"ok"))
@@ -106,7 +106,7 @@ class PublicHttpTest(Base):
         self.assertEqual(code, 200, text)
         self.assertEqual(text.count(f"https://subs.test/u/{token}/manifest.json"), 1)    # the link, shown once
         self.assertNotIn(PASSWORD, text)
-        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Cache-Control"], "no-store, no-transform")
         self.assertIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
         # an error page repeats neither the link nor the password
         code, body, _ = http(self.base + "/signup", form(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json",
@@ -187,7 +187,7 @@ class PublicHttpTest(Base):
         text = body.decode()
         self.assertEqual(code, 200)
         self.assertIn("3 of 200", text)                  # 200 new files a day
-        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Cache-Control"], "no-store, no-transform")
         code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="languages", languages="Russian, en"))
         self.assertEqual(code, 303)                      # saved, then the page again, so a reload sends nothing
         self.assertEqual(self.users.open(token)["languages"], ["rus", "eng"])

@@ -176,12 +176,9 @@ def env_values(as_written=False):
 
 
 def env_settings():
-    """subsync's settings as state/subsync.env starts it, for the questions that state one (explain.setup_help); its
-    defaults while a line there is one subsync couldn't start with."""
-    try:
-        return Settings(env_values())
-    except (ValueError, OverflowError):
-        return Settings({})
+    """subsync's settings as state/subsync.env starts it, for the questions that state one (explain.setup_help); a
+    number written wrong there reads as its default (Settings.wrong_numbers)."""
+    return Settings(env_values())
 
 
 def load_settings():

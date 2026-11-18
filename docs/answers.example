@@ -155,8 +155,8 @@ HOST_ADDRESS=
 SUBSYNC_TRUSTED_PROXY=gateway
 
 # When set, the sign-up page asks for this code, so only people you gave it to can sign up, for example while you
-# and your testers try the service. Empty lets anyone sign up. It doesn't affect people who already signed up.
-# Recommended while testing; remove it to open the service.
+# and your testers try the service. Capitals don't matter. Empty lets anyone sign up. It doesn't affect people who
+# already signed up. Recommended while testing; remove it to open the service.
 SUBSYNC_PUBLIC_INVITE=
 
 # Optional: a free SubSource API key (create one under API in your account on subsource.net). With it, AIOSubtitles

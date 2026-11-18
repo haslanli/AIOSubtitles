@@ -26,7 +26,7 @@ UI_WORDS = (
     "Add AIOSubtitles to my AIOStreams config", "Remove the subtitle addons AIOSubtitles now searches itself",
     "Add language", "First", "Second", "Third", "Fourth", "None", "Remove: ", "Sign-up didn't go through",
     "What AIOSubtitles reads and keeps: ", "Your personal addon link", "Copy link", "Copied", "You're signed up",
-    "Done on your AIOStreams", "Changed in your AIOStreams config: ", "AIOSubtitles is in your AIOStreams config already.",
+    "Done on your AIOStreams", "Changed in your AIOStreams config:", "AIOSubtitles is in your AIOStreams config already.",
     "One step left", "Add AIOSubtitles to your AIOStreams config yourself:", "What happens next",
     "Open your settings page", "Your AIOSubtitles", "Today", "new files", "read", "Today's limit is reached",
     "Save languages", "Refresh after changing your AIOStreams config", "A new AIOStreams link (optional)", "Refresh",
@@ -152,7 +152,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None):
     if settings.invite:
         screens.append(_screen("invite", steps, 100, ui.field(
             "invite", "Invite code", explain.PUBLIC_FIELDS["invite"], mono=True, code=True, question=True,
-            error_ref=err("invite"), attrs="required autocomplete=\"off\" autocapitalize=\"characters\" spellcheck=\"false\"")))
+            error_ref=err("invite"), attrs="required autocomplete=\"off\" autocapitalize=\"none\" spellcheck=\"false\"")))
     screens.append(_screen("link", steps, 50, ui.field(
         "link", "Your AIOStreams link", explain.PUBLIC_FIELDS["link"], kind="url", mono=True, question=True,
         error_ref=err("link"), attrs=f"required autocomplete=\"off\" spellcheck=\"false\" inputmode=\"url\" "
@@ -226,8 +226,10 @@ def result_page(result, settings=None):
     if result.usenet:
         done.append(texts["usenet_made"])
     if result.added:
-        done += [f"Changed in your AIOStreams config: {c}" for c in result.changes] or \
-                ["AIOSubtitles is in your AIOStreams config already."]
+        # the change lines are written for ./setup's review (aiosconfig.viewer_change): here each is its own sentence
+        # under one item
+        done.append(("Changed in your AIOStreams config:", [c[:1].upper() + c[1:] for c in result.changes])
+                    if result.changes else "AIOSubtitles is in your AIOStreams config already.")
     if result.languages:
         done.append(texts["languages_chosen"].format(names=language_names(result.languages)))
     notes = []

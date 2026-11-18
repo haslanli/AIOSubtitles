@@ -37,7 +37,9 @@ PAGE_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
                                "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "no-store"}
+    # no-transform: a proxy in front passes every page through unchanged (Cloudflare added its analytics script to
+    # one)
+    "Cache-Control": "no-store, no-transform"}
 SCRIPT_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600",
                   "Referrer-Policy": "no-referrer"}
 # the typefaces never change under their names (a new version would get a new name)
@@ -257,7 +259,11 @@ def problem_summary(error, title, field=None, extra=""):
 
 
 def dots(items):
-    return "<ul class=\"dots\">" + "".join(f"<li>{e(item)}</li>" for item in items) + "</ul>"
+    """A list with square dots; an item given as (text, [items]) has those listed under it."""
+    def item(entry):
+        text, under = entry if isinstance(entry, tuple) else (entry, ())
+        return f"<li>{e(text)}{dots(under) if under else ''}</li>"
+    return "<ul class=\"dots\">" + "".join(item(entry) for entry in items) + "</ul>"
 
 
 def link_block(url, help_text):
@@ -341,15 +347,15 @@ def _limit_error(id, error, help_text):
     return (f"<p class=\"field-error\" id=\"{e(error_id)}\">{e(error)}</p>" if error else ""), attrs
 
 
-def number_field(id, label, value, help_text=None, unit=None, auto=False, error=None):
-    """A number with its unit inside the box. `auto`: the box also takes the word auto. `error`: the problem with the
-    value, under the label, as field() shows it."""
-    pattern = "auto|[0-9]+" if auto else "[0-9]+"
-    mode = "text" if auto else "numeric"
+def number_field(id, label, value, help_text=None, unit=None, keypad="numeric", error=None):
+    """A number with its unit inside the box. `keypad`: the keyboard phones show (inputmode): numeric for a whole
+    number, decimal for one with a decimal point, text for a box that also takes the word auto. No pattern: the value
+    is checked where it is sent, and a pattern called a correct "10,000" invalid. `error`: the problem with
+    the value, under the label, as field() shows it."""
     error_html, attrs = _limit_error(id, error, help_text)
     return (f"<div class=\"limit field\"><label for=\"{e(id)}\">{e(label)}</label>{error_html}<div class=\"num"
-            f"{' has-unit' if unit else ''}\"><input id=\"{e(id)}\" name=\"{e(id)}\" type=\"text\" inputmode=\"{mode}\" "
-            f"pattern=\"{pattern}\" value=\"{e(value)}\" autocomplete=\"off\" spellcheck=\"false\"{attrs}>"
+            f"{' has-unit' if unit else ''}\"><input id=\"{e(id)}\" name=\"{e(id)}\" type=\"text\" inputmode=\"{keypad}\" "
+            f"value=\"{e(value)}\" autocomplete=\"off\" spellcheck=\"false\"{attrs}>"
             + (f"<span class=\"unit\">{e(unit)}</span>" if unit else "") + "</div>"
             + (f"<p class=\"help\" id=\"{e(id)}-help\">{e(help_text)}</p>" if help_text else "") + "</div>")
 

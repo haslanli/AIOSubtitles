@@ -255,6 +255,17 @@ class Rules(unittest.TestCase):
                     self.assertNotIn('http-equiv="refresh"', html)
                     self.assertNotIn('data-refresh', html)
 
+    def test_on_phones_only_the_back_link_is_hidden_and_check_again_stays(self):
+        # Below 1024 px wide or 600 px tall the rule that hides the Back link (the top bar has the back arrow)
+        # hid every secondary button of a step, "Check again" of a public instance's last check with it
+        phone = ui.APP_CSS.split('@media (max-width:1023px),(max-height:599px){', 1)[1]
+        self.assertEqual(re.findall(r'\.steparea \.actions ([^{]*)\{display:none\}', phone), ['a.secondary'])
+        actions = screens.check('host', [], running=False).split('<div class="actions">', 1)[1]
+        self.assertTrue(actions.startswith('<button class="btn secondary" type="submit" name="go" value="again">'
+                                           'Check again</button>'))
+        back = screens.limits('host', {}).split('<div class="actions">', 1)[1]
+        self.assertTrue(back.startswith('<a class="btn secondary" href="hostchoices">Back</a>'))
+
     def test_a_saved_key_has_the_box_that_removes_it_under_its_field(self):
         states = samples.every_state()
         html, _ = states['choices-saved-keys']
@@ -585,6 +596,25 @@ class LimitProblems(unittest.TestCase):
         self.assertEqual(limits.NOT_AN_AUDIO_LIMIT, 'Type 0.5, 1, 2 or 4 (GB per file).')
         self.assertEqual([limits.choose(lim) for lim in limits.hosting(audio=True) if lim.kind == 'segmented'],
                          ['Choose 1, 2, 3 or 4.', 'Choose 0.5, 1, 2 or 4 GB.'])
+
+    def test_each_limits_box_asks_phones_for_the_keypad_of_its_kind_and_has_no_pattern(self):
+        # Every box asked for digits only, so "Data a day in total" (2.5 GB) couldn't be typed on an iPhone,
+        # and carried a digits-only pattern that called its own "10,000" invalid
+        keypads = {'number': 'numeric', 'count': 'numeric', 'decimal': 'decimal', 'auto': 'text'}
+        for route, asked in (('host', limits.hosting(usenet=True, audio=True)),
+                             ('yourself', limits.personal(audio=True, usenet=True))):
+            html = screens.limits(route, {}, audio=True, usenet=True)
+            boxes = [lim for lim in asked if lim.kind != 'segmented']
+            self.assertLessEqual({lim.kind for lim in boxes}, set(keypads))
+            for lim in boxes:
+                with self.subTest(route=route, setting=lim.setting):
+                    box = self.tag(html, rf'<input id="{lim.setting}"[^>]*>')
+                    self.assertIn(f'inputmode="{keypads[lim.kind]}"', box)
+                    self.assertNotIn('pattern=', box)
+        daily = self.tag(screens.limits('yourself', {}), r'<input id="SUBSYNC_DAILY_BUDGET_GB"[^>]*>')
+        self.assertIn('inputmode="decimal"', daily)
+        per_person = self.tag(screens.limits('host', {}), r'<input id="SUBSYNC_USER_DAILY_MB"[^>]*>')
+        self.assertIn('value="10,000"', per_person)
 
     def test_without_a_problem_the_rows_of_buttons_are_as_they_were(self):
         html, _ = samples.every_state()['host-limits-audio']

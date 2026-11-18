@@ -174,6 +174,8 @@ class Security(unittest.TestCase):
         wanted = dict(site_headers())
         self.assertNotIn('connect-src', wanted['Content-Security-Policy'])
         wanted['Content-Security-Policy'] += "; connect-src 'self'"
+        # and kept equal to the site's pages: a proxy in front passes them through unchanged (R3-10)
+        self.assertEqual(wanted['Cache-Control'], 'no-store, no-transform')
         for path in (f'/{self.app.key}/', '/nope', f'/{self.app.key}/nothing-here'):
             _, headers, _ = self.b.request('GET', path)
             for name, value in wanted.items():

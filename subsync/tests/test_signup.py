@@ -762,6 +762,23 @@ class GateTest(unittest.TestCase):
         gate.check("1.2.3.4", "letmein")
         self.gate().check("1.2.3.4", "")             # no code set: anyone
 
+    def test_capitals_dont_matter_in_an_invite_code(self):
+        # A phone typed setup's suggested code in capitals, and it was refused, every try counting
+        from subsync import explain
+        from subsync.signup import SignupError
+        gate = self.gate(SUBSYNC_PUBLIC_INVITE="k7mq-3xtd-p9wa", SUBSYNC_SIGNUPS_PER_HOUR="10")
+        for typed in ("K7MQ-3XTD-P9WA", " k7mq-3XTD-p9wa ", "k7mq-3xtd-p9wa"):
+            gate.check("1.2.3.4", typed)
+        gate = self.gate(SUBSYNC_PUBLIC_INVITE="LetMeIn")
+        gate.check("1.2.3.4", "letmein")
+        with self.assertRaises(SignupError):
+            gate.check("1.2.3.4", "letmeout")
+        self.assertEqual(explain.SETTINGS["SUBSYNC_PUBLIC_INVITE"][1],
+                         "When set, the sign-up page asks for this code, so only people you gave it to can sign up, for "
+                         "example while you and your testers try the service. Capitals don't matter. Empty lets anyone "
+                         "sign up. It doesn't affect people who already signed up. Recommended while testing; remove it "
+                         "to open the service.")
+
     def test_wrong_invite_codes_count_as_attempts(self):
         from subsync.signup import SignupError
         gate = self.gate(SUBSYNC_PUBLIC_INVITE="letmein")

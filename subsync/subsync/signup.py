@@ -265,7 +265,9 @@ class SignupGate:
                 raise SignupError("Too many sign-up attempts from your address in the last hour. Try again in an hour.",
                               429)
             seen.append(now)   # every attempt counts, wrong invite codes included
-        if self.s.invite and not hmac.compare_digest(str(invite or "").strip().encode(), self.s.invite.encode()):
+        # capitals don't matter: phones may type the code in capitals, setup suggests it in small letters
+        if self.s.invite and not hmac.compare_digest(str(invite or "").strip().casefold().encode(),
+                                                     self.s.invite.casefold().encode()):
             raise SignupError("That invite code isn't right. AIOSubtitles is open only to invited people for now.", 403,
                               field="invite")
         if self.count_users() >= self.s.max_users:

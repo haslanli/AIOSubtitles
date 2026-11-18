@@ -94,8 +94,9 @@ def lang3(code):
 
 
 def lang_list(text):
-    """Comma-separated codes (a setting's value) as three-letter codes, in their order."""
-    return [lang3(x) for x in (text or "").split(",") if x.strip()]
+    """Comma-separated codes (a setting's value) as three-letter codes, in their order, each once (en,eng is English
+    once:)."""
+    return list(dict.fromkeys(lang3(x) for x in (text or "").split(",") if x.strip()))
 
 
 def lang2(code):

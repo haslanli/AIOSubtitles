@@ -865,8 +865,8 @@ GROUPS = [
         "SUBSYNC_PUBLIC_INVITE": (
             "",
             "When set, the sign-up page asks for this code, so only people you gave it to can sign up, for example "
-            "while you and your testers try the service. Empty lets anyone sign up. It doesn't affect people who "
-            "already signed up. Recommended while testing; remove it to open the service."),
+            "while you and your testers try the service. Capitals don't matter. Empty lets anyone sign up. It "
+            "doesn't affect people who already signed up. Recommended while testing; remove it to open the service."),
         "SUBSYNC_MAX_USERS": (
             "200",
             "How many people can be signed up at once; past it the sign-up page says the service is full. Each person "

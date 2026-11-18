@@ -13,7 +13,7 @@ import struct
 
 from . import ALGO_VERSION, RULE_REVISION, explain
 from .aiosconfig import MAX_LANGUAGES
-from .langs import lang_list
+from .langs import known, lang_list
 
 # The units of the size settings, each chosen once and kept (changing one would change every limit set in it): a *_MB
 # setting counts MiB, a *_GB setting 10^9 bytes. A figure shown for a setting is shown in that setting's unit.
@@ -81,9 +81,9 @@ def available_cpus(cpu_max=None, cfs_dir=None, processors=None):
     return max(1, n)
 
 
-def _whole(value, at_most=None):
-    """A whole number from 1 (to `at_most`) written in digits; None otherwise. isdecimal, not isdigit, which also takes
-    the superscripts int() refuses ("2²")."""
+def _whole(value, least=1, most=None):
+    """A whole number from `least` (to `most`) written in digits; None otherwise. isdecimal, not isdigit, which also
+    takes the superscripts int() refuses ("2²")."""
     value = str(value).strip()
     if not value.isdecimal():
         return None
@@ -91,7 +91,47 @@ def _whole(value, at_most=None):
         n = int(value)
     except ValueError:                      # more digits than int() converts
         return None
-    return n if n >= 1 and (at_most is None or n <= at_most) else None
+    return n if n >= least and (most is None or n <= most) else None
+
+
+def _number(value, above_zero=False, scale=1):
+    """A number from 0 (above 0 with `above_zero`) times `scale`, finite; None otherwise ("nan", "inf", or a value too
+    large to count in `scale`'s unit)."""
+    try:
+        n = float(str(value).strip()) * scale
+    except ValueError:
+        return None
+    return n if math.isfinite(n) and (n > 0 if above_zero else n >= 0) else None
+
+
+def _like(name):
+    """", like <the setting's default>" for the sentence of a value written wrong; "" for a setting with none."""
+    return f", like {_default(name)}" if _default(name) else ""
+
+
+class _Numbers:
+    """The number settings, each read one way: a value that isn't a number in the setting's range
+    (written wrong, or one its explanation rules out) is noted in `wrong`, in the sentence conflicts() says, and read as
+    the setting's default (0 for one with none)."""
+
+    def __init__(self, get):
+        self.get, self.wrong = get, []
+
+    def whole(self, name, least=0, most=None):
+        words = f"a whole number from {least}" + (f" to {most}" if most is not None else _like(name))
+        return self._read(name, lambda v: _whole(v, least, most), words)
+
+    def number(self, name, above_zero=False, scale=1):
+        """The number times `scale` (a size's unit, or a time's)."""
+        words = ("a number above 0" if above_zero else "a number from 0") + _like(name)
+        return self._read(name, lambda v: _number(v, above_zero, scale), words)
+
+    def _read(self, name, parse, words):
+        value = parse(self.get(name))
+        if value is None:
+            self.wrong.append(f"{name} must be {words}.")
+            value = parse(_default(name) or "0")
+        return value
 
 
 def _places(value):
@@ -124,7 +164,7 @@ AUDIO_CHOICES = ("off", "pick", "open")
 def _language_limit(value):
     """SUBSYNC_MAX_LANGUAGES: a whole number from 1 to MAX_LANGUAGES (the pages name four places at most); None
     otherwise."""
-    return _whole(value, MAX_LANGUAGES)
+    return _whole(value, most=MAX_LANGUAGES)
 
 
 def _overrides(value):
@@ -137,39 +177,43 @@ class Settings:
     def __init__(self, env=None):
         e = env if env is not None else os.environ
         g = lambda k: e.get(k, _default(k))  # noqa: E731
-        self.port = int(g("SUBSYNC_PORT"))
+        read = _Numbers(g)
+        self.port = read.whole("SUBSYNC_PORT", 1, 65535)
         self.bind = g("SUBSYNC_BIND").strip()      # the address it listens on (127.0.0.1 behind a host-network proxy)
         self.data = g("SUBSYNC_DATA")
         # where players fetch the synced files, and the AIOStreams config subsync finds files through: no defaults
         self.public_base = g("SUBSYNC_PUBLIC_BASE").rstrip("/")
         self.source_manifest = g("SUBSYNC_SOURCE_MANIFEST")
         self.source_password = g("SUBSYNC_SOURCE_PASSWORD")  # subsync reads its config with it: the Real-Debrid check
-        self.languages = lang_list(g("SUBSYNC_LANGUAGES"))
-        self.max_tries = int(g("SUBSYNC_MAX_TRIES"))  # subtitles tried per language and file
-        self.cap_bytes = int(float(g("SUBSYNC_STORE_CAP_MB")) * MB)
-        self.daily_budget = int(float(g("SUBSYNC_DAILY_BUDGET_GB")) * GB)
-        self.backoff_s = int(g("SUBSYNC_403_BACKOFF_S"))
-        self.retry_stopped_s = int(g("SUBSYNC_RETRY_STOPPED_S"))
+        languages = g("SUBSYNC_LANGUAGES")
+        self.languages = lang_list(languages)
+        # the codes there that name no language: a self-hosted install doesn't start with one (conflicts)
+        self.unknown_languages = [c.strip() for c in languages.split(",") if c.strip() and not known(c)]
+        self.max_tries = read.whole("SUBSYNC_MAX_TRIES", 1)  # subtitles tried per language and file
+        self.cap_bytes = int(read.number("SUBSYNC_STORE_CAP_MB", scale=MB))
+        self.daily_budget = int(read.number("SUBSYNC_DAILY_BUDGET_GB", scale=GB))
+        self.backoff_s = read.whole("SUBSYNC_403_BACKOFF_S", 1)
+        self.retry_stopped_s = read.whole("SUBSYNC_RETRY_STOPPED_S", 1)
         # the audio route: a file with no text or image subtitle track is timed from its speech, reading audio windows
         # within SUBSYNC_AUDIO_BUDGET_GB per file (shorter windows on high-bitrate files, none when they would be
         # too short); off, every file is read index only (SUBSYNC_INDEX_CAP_MB)
         self.audio_route = _on(g("SUBSYNC_AUDIO_ROUTE"))
-        self.audio_budget = int(float(g("SUBSYNC_AUDIO_BUDGET_GB")) * GB) or None
-        self.file_cap = int(float(g("SUBSYNC_FILE_CAP_GB")) * GB) or None
+        self.audio_budget = int(read.number("SUBSYNC_AUDIO_BUDGET_GB", scale=GB)) or None
+        self.file_cap = int(read.number("SUBSYNC_FILE_CAP_GB", scale=GB)) or None
         # when a file with no usable track starts its audio sync: pick, only when the viewer downloads subsync's
         # own entry for the file (proof of play: a plain subtitle request also comes for files nobody played, as
         # AIOMetadata asks for the first listed version); open, as soon as it is opened, within the checks of
         # Worker._may_open. In public mode each person's own choice replaces it (public.user_settings), "off" included
         self.audio_when = _audio_when(e)
         # Audio syncs one viewer may start a UTC day, picked or opened, and of those, opened
-        self.user_audio_per_day = max(0, int(g("SUBSYNC_USER_AUDIO_PER_DAY")))
-        self.user_opened_per_day = max(0, int(g("SUBSYNC_USER_OPENED_PER_DAY")))
+        self.user_audio_per_day = read.whole("SUBSYNC_USER_AUDIO_PER_DAY")
+        self.user_opened_per_day = read.whole("SUBSYNC_USER_OPENED_PER_DAY")
         # a pick (the "(Subsync)" entry's download) waits this long for the file's result, like AutoSync; AIOMetadata
         # gives up on a subtitle after 15 s
-        self.pick_wait = float(g("SUBSYNC_PICK_WAIT_MS")) / 1000
+        self.pick_wait = read.number("SUBSYNC_PICK_WAIT_MS", above_zero=True) / 1000
         # Every candidate judged, the best fit offered first (up to SUBSYNC_MAIN_ALTERNATIVES for the first language)
         self.best_fit = _on(g("SUBSYNC_BEST_FIT"))
-        self.alternatives = max(1, int(g("SUBSYNC_MAIN_ALTERNATIVES")))
+        self.alternatives = read.whole("SUBSYNC_MAIN_ALTERNATIVES", 1)
         self.skip_ai = _on(g("SUBSYNC_SKIP_AI"))                  # AI-made, machine-translated, forced: never tried
         self.prefer_plain = _on(g("SUBSYNC_PREFER_PLAIN_TRACK"))  # the plain track as the reference, not the SDH one
         # Sources subsync searches itself (extra.py): the keyless ones by default; SubDL,
@@ -181,7 +225,7 @@ class Settings:
         self.subsource_key = g("SUBSYNC_SUBSOURCE_KEY").strip()
         self.tsdb_key = g("SUBSYNC_TSDB_KEY").strip()
         self.wyzie_key = g("SUBSYNC_WYZIE_KEY").strip()
-        self.source_timeout = float(g("SUBSYNC_SOURCE_TIMEOUT_S"))
+        self.source_timeout = read.number("SUBSYNC_SOURCE_TIMEOUT_S", above_zero=True)
         # a source the AIOStreams config already has as a subtitle addon is asked once, through the config
         self.skip_config_sources = _on(g("SUBSYNC_SKIP_CONFIG_SOURCES"))
         self.osv3_url = g("SUBSYNC_OSV3_URL").rstrip("/")
@@ -205,35 +249,35 @@ class Settings:
         self.kitsu_url = g("SUBSYNC_KITSU_URL").rstrip("/")
         self.anilist_url = g("SUBSYNC_ANILIST_URL")
         # best fit: originals checked (no alass) for up to this many candidates; alass only on SUBSYNC_MAX_TRIES of them
-        self.gate_tries = max(1, int(g("SUBSYNC_GATE_TRIES")))
-        self.index_cap = int(float(g("SUBSYNC_INDEX_CAP_MB")) * MB)
-        self.audio_lead = float(g("SUBSYNC_AUDIO_LEAD_MS")) / 1000
+        self.gate_tries = read.whole("SUBSYNC_GATE_TRIES", 1)
+        self.index_cap = int(read.number("SUBSYNC_INDEX_CAP_MB", scale=MB))
+        self.audio_lead = read.number("SUBSYNC_AUDIO_LEAD_MS") / 1000
         # a "(synced)" entry for a file still being worked on, served as the original until the copy is ready
         self.pending_entry = _on(g("SUBSYNC_PENDING_ENTRY"))
-        self.pending_wait = float(g("SUBSYNC_PENDING_WAIT_MS")) / 1000
+        self.pending_wait = read.number("SUBSYNC_PENDING_WAIT_MS", above_zero=True) / 1000
         self.url_rewrite = g("SUBSYNC_URL_REWRITE")
-        self.read_timeout = float(g("SUBSYNC_READ_TIMEOUT_S"))
-        self.size_slack = int(float(g("SUBSYNC_SIZE_SLACK_MB")) * MB)  # listed sizes are rounded to 0.01 GiB
+        self.read_timeout = read.number("SUBSYNC_READ_TIMEOUT_S", above_zero=True)
+        self.size_slack = int(read.number("SUBSYNC_SIZE_SLACK_MB", scale=MB))  # listed sizes are rounded to 0.01 GiB
         self.alass = g("SUBSYNC_ALASS")
         self.ffmpeg = g("SUBSYNC_FFMPEG")
-        self.snap = _on(g("SUBSYNC_SNAP"))                  # per-line snap after alass
-        self.snap_within = float(g("SUBSYNC_SNAP_WITHIN"))  # a snapped copy's bar for "within 200 ms"
+        self.snap = _on(g("SUBSYNC_SNAP"))                     # per-line snap after alass
+        self.snap_within = read.number("SUBSYNC_SNAP_WITHIN")  # a snapped copy's bar for "within 200 ms"
         # the second way to pass: a re-timed copy clearly closer to the release's track than the original
-        self.better = {"paired": float(g("SUBSYNC_BETTER_PAIRED")),
-                       "median_ms": float(g("SUBSYNC_BETTER_MEDIAN_MS")),
-                       "ratio": float(g("SUBSYNC_BETTER_RATIO")),
+        self.better = {"paired": read.number("SUBSYNC_BETTER_PAIRED"),
+                       "median_ms": read.number("SUBSYNC_BETTER_MEDIAN_MS"),
+                       "ratio": read.number("SUBSYNC_BETTER_RATIO"),
                        # against another language's track: the alignment's median error (relgate.aligned)
-                       "cross_median_ms": float(g("SUBSYNC_BETTER_CROSS_MEDIAN_MS")),
-                       "cross_paired": float(g("SUBSYNC_BETTER_CROSS_PAIRED"))} \
+                       "cross_median_ms": read.number("SUBSYNC_BETTER_CROSS_MEDIAN_MS"),
+                       "cross_paired": read.number("SUBSYNC_BETTER_CROSS_PAIRED")} \
             if _on(g("SUBSYNC_BETTER")) else None
         # with no track in a subtitle's language, a track in one of these languages is its reference first
         self.fallback_reference = tuple(lang_list(g("SUBSYNC_FALLBACK_REFERENCE")))
         # the audio route's second way to pass: a re-timed copy clearly closer to the speech than the original
-        self.audio_better = {"matched": int(g("SUBSYNC_AUDIO_BETTER_MATCHED")),
-                             "miss": float(g("SUBSYNC_AUDIO_BETTER_MISS")),
-                             "median_ms": float(g("SUBSYNC_AUDIO_BETTER_MEDIAN_MS")),
-                             "within": float(g("SUBSYNC_AUDIO_BETTER_WITHIN")),
-                             "min_shift_s": float(g("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S"))} \
+        self.audio_better = {"matched": read.whole("SUBSYNC_AUDIO_BETTER_MATCHED"),
+                             "miss": read.number("SUBSYNC_AUDIO_BETTER_MISS"),
+                             "median_ms": read.number("SUBSYNC_AUDIO_BETTER_MEDIAN_MS"),
+                             "within": read.number("SUBSYNC_AUDIO_BETTER_WITHIN"),
+                             "min_shift_s": read.number("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S")} \
             if _on(g("SUBSYNC_AUDIO_BETTER")) else None
         self.gate_splits = _on(g("SUBSYNC_GATE_SPLITS"))          # a line that splits a release line counts as paired
         self.rank_by_release = _on(g("SUBSYNC_RANK_BY_RELEASE"))  # subtitles made for this release tried first
@@ -246,7 +290,7 @@ class Settings:
         # Lines paired by their words where timing hasn't settled a language (textpair.py; D1, D2)
         self.text_pairing = _on(g("SUBSYNC_TEXT_PAIRING"))
         self.sections = _on(g("SUBSYNC_SECTIONS"))                        # D4: other cuts fitted in sections
-        self.audio_extra = max(0, int(g("SUBSYNC_AUDIO_EXTRA_WINDOWS")))  # D5: windows a close call may add
+        self.audio_extra = read.whole("SUBSYNC_AUDIO_EXTRA_WINDOWS")      # D5: windows a close call may add
         self.parallel_languages = _on(g("SUBSYNC_PARALLEL_LANGUAGES"))    # languages at the same time
         # a private path key for the routes that start work or show status (manifest, subtitles, status), so a published
         # port or a reverse-proxy route can't be used to make subsync read files; the synced files, /health and the
@@ -261,23 +305,23 @@ class Settings:
         self.public = _on(g("SUBSYNC_PUBLIC"))
         self.secret_key = g("SUBSYNC_SECRET_KEY").strip()  # encrypts users' records; never logged
         self.invite = g("SUBSYNC_PUBLIC_INVITE").strip()
-        self.max_users = int(g("SUBSYNC_MAX_USERS"))
-        self.signups_per_hour = int(g("SUBSYNC_SIGNUPS_PER_HOUR"))  # per address
-        self.user_files_per_day = int(g("SUBSYNC_USER_FILES_PER_DAY"))
-        self.user_daily_bytes = int(float(g("SUBSYNC_USER_DAILY_MB")) * MB)
-        self.user_queue = int(g("SUBSYNC_USER_QUEUE"))
+        self.max_users = read.whole("SUBSYNC_MAX_USERS")
+        self.signups_per_hour = read.whole("SUBSYNC_SIGNUPS_PER_HOUR")  # per address
+        self.user_files_per_day = read.whole("SUBSYNC_USER_FILES_PER_DAY")
+        self.user_daily_bytes = int(read.number("SUBSYNC_USER_DAILY_MB", scale=MB))
+        self.user_queue = read.whole("SUBSYNC_USER_QUEUE")
         # the most languages a person may choose on the sign-up and settings pages
         self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES"))
-        self.active_workers = int(g("SUBSYNC_ACTIVE_WORKERS"))
-        self.worker_idle_s = float(g("SUBSYNC_WORKER_IDLE_MIN")) * 60
-        self.user_keep_days = int(g("SUBSYNC_USER_KEEP_DAYS"))
+        self.active_workers = read.whole("SUBSYNC_ACTIVE_WORKERS")
+        self.worker_idle_s = read.number("SUBSYNC_WORKER_IDLE_MIN", above_zero=True, scale=60)
+        self.user_keep_days = read.whole("SUBSYNC_USER_KEEP_DAYS")
         # what the pages say about the host's own setup: the Questions link, the service in front that sees
         # every request, how many days backups keep records; empty, words true of any host instead (0 days: empty)
         self.contact = g("SUBSYNC_CONTACT").strip()
         self.front_proxy = g("SUBSYNC_FRONT_PROXY").strip()
-        self.backup_days = max(0, int(g("SUBSYNC_BACKUP_DAYS").strip() or 0))
+        self.backup_days = read.whole("SUBSYNC_BACKUP_DAYS") if g("SUBSYNC_BACKUP_DAYS").strip() else 0
         # each person's AIOStreams checked again, at most this often, while they use the service (recheck.py); 0: never
-        self.recheck_hours = float(g("SUBSYNC_RECHECK_HOURS"))
+        self.recheck_hours = read.number("SUBSYNC_RECHECK_HOURS")
         # the web server's addresses; "gateway" is this container's default gateway, found at start (the address a
         # web server reaching subsync through a port Docker publishes comes from), so no fixed Docker network is needed
         proxies = [a.strip() for a in g("SUBSYNC_TRUSTED_PROXY").split(",") if a.strip()]
@@ -291,7 +335,7 @@ class Settings:
             if proxy and proxy not in trusted:
                 trusted.append(proxy)
         self.trusted_proxy = tuple(trusted)
-        self.max_connections = int(g("SUBSYNC_MAX_CONNECTIONS"))
+        self.max_connections = read.whole("SUBSYNC_MAX_CONNECTIONS", 1)
         # files worked on at once for everyone (each person's worker takes a place of one shared turn)
         self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE"))
         # audio syncs at once for everyone (public mode's audio places, worker.audio_places): auto is half the places
@@ -301,9 +345,10 @@ class Settings:
         # person in public mode, where "on" lets each person turn it on for themselves and their record holds the
         # Usenet config's link); a file with no usable track takes the audio route like a debrid one
         self.usenet = _on(g("SUBSYNC_USENET"))
-        self.usenet_listings_per_day = max(0, int(g("SUBSYNC_USENET_LISTINGS_PER_DAY")))
+        self.usenet_listings_per_day = read.whole("SUBSYNC_USENET_LISTINGS_PER_DAY")
         self.usenet_manifest = g("SUBSYNC_USENET_MANIFEST")
         self.usenet_password = g("SUBSYNC_USENET_PASSWORD")
+        self.wrong_numbers = read.wrong     # the number settings written wrong, as conflicts() says them
 
     def secret_bytes(self):
         """The public mode's secret: base64url of at least 32 random bytes. ValueError otherwise."""
@@ -340,6 +385,13 @@ class Settings:
                 "text_pairing": self.text_pairing, "sections": self.sections, "audio_extra": self.audio_extra}
         return hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdigest()[:12]
 
+    @property
+    def usenet_usable(self):
+        """Whether files are also looked for through the Usenet config: Usenet on, the config's link and
+        password set, and at least one search a day. The one rule for the start, the self-hosted service and each
+        person's worker in public mode."""
+        return bool(self.usenet and self.usenet_manifest and self.usenet_password and self.usenet_listings_per_day > 0)
+
     def missing(self):
         """What must be set before the service can work. In public mode each user's record holds their sync config's
         link and password, so the service needs its secret and its address instead."""
@@ -351,15 +403,16 @@ class Settings:
                 secret_ok = False
             return [name for name, ok in (("SUBSYNC_SECRET_KEY", secret_ok),
                                           ("SUBSYNC_PUBLIC_BASE", bool(self.public_base))) if not ok]
-        # a setup with Usenet only finds files and subtitles through its Usenet config alone
-        usenet_only = bool(self.usenet and self.usenet_manifest and self.usenet_password)
+        # a setup with Usenet only finds files and subtitles through its Usenet config alone (conflicts() says when
+        # that config can't be used)
+        usenet_only = bool(self.usenet and self.usenet_manifest)
         return [name for name, value in (("SUBSYNC_SOURCE_MANIFEST", self.source_manifest or usenet_only),
                                          ("SUBSYNC_SOURCE_PASSWORD", self.source_password or usenet_only),
                                          ("SUBSYNC_PUBLIC_BASE", self.public_base)) if not value]
 
     def conflicts(self):
-        """Settings that can't go together, in plain sentences (empty: none)."""
-        out = []
+        """Settings written wrong or that can't go together, in plain sentences (empty: none)."""
+        out = list(self.wrong_numbers)
         if self.audio_when is None:
             out.append("SUBSYNC_AUDIO_WHEN must be pick or open.")
         if self.audio_at_once is None:
@@ -381,4 +434,24 @@ class Settings:
         if self.public and self.gateway_missing:
             out.append("SUBSYNC_TRUSTED_PROXY says gateway, but this machine has no default gateway to trust: give your "
                        "web server's address instead.")
+        if not self.public:     # a public instance uses each person's own languages and configs, and no addon key
+            out += self._own_conflicts()
+        return out
+
+    def _own_conflicts(self):
+        """A self-hosted install's languages, addon key and Usenet config, in plain sentences."""
+        out = []
+        if not self.languages:
+            out.append("SUBSYNC_LANGUAGES must name at least one language, like eng.")
+        out += [f"SUBSYNC_LANGUAGES must be language codes separated by commas, like eng,rus: {code} isn't one."
+                for code in self.unknown_languages]
+        if "/" in self.addon_key:          # the key is one part of an address
+            out.append("SUBSYNC_ADDON_KEY can't contain /.")
+        if self.usenet and self.usenet_manifest and not self.usenet_usable:
+            if not self.usenet_password:
+                out.append("SUBSYNC_USENET_MANIFEST needs its password: set SUBSYNC_USENET_PASSWORD (./setup writes "
+                           "both).")
+            if not self.source_manifest and self.usenet_listings_per_day < 1:
+                out.append("Usenet is this install's only source, so SUBSYNC_USENET_LISTINGS_PER_DAY must be a whole "
+                           "number from 1.")
         return out

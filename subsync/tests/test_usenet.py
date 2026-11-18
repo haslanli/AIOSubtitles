@@ -177,6 +177,38 @@ class SettingsTest(unittest.TestCase):
                                        SUBSYNC_USENET_PASSWORD="p")).missing(),
                          ["SUBSYNC_SOURCE_MANIFEST", "SUBSYNC_SOURCE_PASSWORD"])
 
+    def test_one_rule_says_whether_the_usenet_config_is_used(self):
+        # The start, the self-hosted service and public mode each had their own rule
+        usable = {"SUBSYNC_USENET": "on", "SUBSYNC_USENET_MANIFEST": "m", "SUBSYNC_USENET_PASSWORD": "p"}
+        self.assertTrue(Settings(usable).usenet_usable)
+        for name, value in (("SUBSYNC_USENET", "off"), ("SUBSYNC_USENET_MANIFEST", ""), ("SUBSYNC_USENET_PASSWORD", ""),
+                            ("SUBSYNC_USENET_LISTINGS_PER_DAY", "0")):
+            with self.subTest(name=name):
+                self.assertFalse(Settings(dict(usable, **{name: value})).usenet_usable)
+
+    def test_a_usenet_config_that_cant_be_used_stops_the_start(self):
+        # A Usenet-only install with no search a day started and never found a file; a Usenet config without
+        # its password was used anyway, every search blocked with a warning
+        only = ("Usenet is this install's only source, so SUBSYNC_USENET_LISTINGS_PER_DAY must be a whole number "
+                "from 1.")
+        password = "SUBSYNC_USENET_MANIFEST needs its password: set SUBSYNC_USENET_PASSWORD (./setup writes both)."
+        usenet = {"SUBSYNC_PUBLIC_BASE": "http://x", "SUBSYNC_USENET": "on", "SUBSYNC_USENET_MANIFEST": "m",
+                  "SUBSYNC_USENET_PASSWORD": "p"}
+        debrid = dict(usenet, SUBSYNC_SOURCE_MANIFEST="s", SUBSYNC_SOURCE_PASSWORD="q")
+        for env, lines in ((dict(usenet, SUBSYNC_USENET_LISTINGS_PER_DAY="0"), [only]),
+                           (dict(debrid, SUBSYNC_USENET_PASSWORD=""), [password]),
+                           (dict(usenet, SUBSYNC_USENET_PASSWORD=""), [password]),
+                           (dict(usenet, SUBSYNC_USENET_PASSWORD="", SUBSYNC_USENET_LISTINGS_PER_DAY="0"),
+                            [password, only]),
+                           (dict(debrid, SUBSYNC_USENET_LISTINGS_PER_DAY="0"), []),   # 0 turns Usenet off beside debrid
+                           (usenet, []), (debrid, [])):
+            with self.subTest(env=env):
+                s = Settings(env)
+                self.assertEqual((s.missing(), s.conflicts()), ([], lines))
+        # a public instance's Usenet configs are each person's own
+        self.assertEqual(Settings(dict(usenet, SUBSYNC_PUBLIC="on", SUBSYNC_USENET_PASSWORD="",
+                                       SUBSYNC_USENET_LISTINGS_PER_DAY="0")).conflicts(), [])
+
     def test_no_new_cap_or_memory_setting(self):
         # Usenet reads take the index cap; the 24 h memory is a fixed rule
         with open(os.path.join(os.path.dirname(worker_mod.__file__), "settings.py"), encoding="utf-8") as f:
