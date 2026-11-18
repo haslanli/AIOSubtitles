@@ -615,7 +615,8 @@ class Flow(FlowFixture):
     def test_closing_text(self):
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
-        self.assertNotIn(f'/stremio/{UUID}/ENC-', out)                 # no install links with the encrypted password
+        self.assertNotIn(f'/stremio/{UUID}/ENC-', out)                 # none of the install links setup makes
+        self.assertNotIn(f'/stremio/{UUID}/', out)                     # nor the one pasted in the answers file
         self.assertIn('JELLYFIN_SUBTITLE_TTL', out)                    # AIOMetadata users are told
         self.assertIn('docker restart', out)
         self.assertIn('Starting subsync', out)

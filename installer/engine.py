@@ -65,6 +65,11 @@ NO_DEBRID_WAY_OUT = ("Add a debrid service other than Real-Debrid (TorBox, ...) 
 PLAIN_HTTP = ("AIOStreams at {address} uses plain http, so the config's password would go over the network "
               "unencrypted. Use its https address if it has one.")
 KEY_REMOVED = 'Removed the saved {name}'
+# The closing title when a check warned: the terminal printed the warnings above it, the page shows them under it
+WARNED = 'Installed, with warnings'
+WARNED_ABOVE = 'Installed, with warnings (see above)'
+# Docker failing to take the service down: nothing of setup's is deleted, so removing it again finishes the job
+REMOVE_FAILED = "Removing the subsync container failed; setup's files were kept, so removing it again finishes the job."
 # Setup never turns an installed folder into the other route: it is removed first
 ROUTE_STOPS = {
     'yourself': ("A public instance runs here; setup can't turn it into an install for yourself.",
@@ -284,6 +289,17 @@ def short(uuid):
     return f'{uuid[:8]}…' if uuid else '(none)'
 
 
+def config_shown(value):
+    """A config ID, or a link with one, as setup shows it: its ID's first 8 characters (a pasted install link holds the
+    config's encrypted password); an alias link only as one."""
+    return 'an alias link' if plan.alias_from(value) else short(plan.config_id_from(value) or '')
+
+
+def last_lines(out, err):
+    """What Docker said last, as a failed start or removal shows it."""
+    return '\n'.join((err or out).strip().splitlines()[-10:])
+
+
 # ------------------------------------------------------------------------------------------- asking and output
 
 class Problem(Exception):
@@ -367,10 +383,17 @@ class Terminal:
 
 
 class Rows:
-    """Output for the page: check rows (ok, warn, bad), notes under the row before them, and progress lines."""
+    """Output for the page: check rows (ok, warn, bad), notes under the row before them in the same step, and progress
+    lines."""
 
     def __init__(self):
         self.rows = []
+        self.step_start = 0     # where the step being run starts: a note never joins an earlier step's row
+
+    def begin(self):
+        """A step starts here: returns where its rows start."""
+        self.step_start = len(self.rows)
+        return self.step_start
 
     def _add(self, kind, text):
         self.rows.append([kind, text, None])
@@ -388,7 +411,7 @@ class Rows:
         self._add('bad', text)
 
     def note(self, text):
-        if self.rows and self.rows[-1][0] in ('ok', 'warn', 'bad'):
+        if len(self.rows) > self.step_start and self.rows[-1][0] in ('ok', 'warn', 'bad'):
             last = self.rows[-1]
             last[2] = f'{last[2]} {text.strip()}' if last[2] else text.strip()
         else:
@@ -425,11 +448,12 @@ class Rows:
 
 class Engine:
     def __init__(self, answers=None, page=False, out=None, yes=True):
-        """`yes`: in a terminal, nothing is asked (./setup --yes); False asks what `answers` leaves out."""
+        """`answers`: the page's, or the answers file's lines (None: no file given). `yes`: in a terminal, nothing is
+        asked (./setup --yes); False asks what `answers` leaves out."""
         self.answers = dict(answers or {})
         self.page = page
         self.out = out or (Rows() if page else Terminal())
-        self.ask = PageAsk(self.answers, self.out) if page else Asker(self.answers, yes=yes)
+        self.ask = PageAsk(self.answers, self.out) if page else Asker(answers, yes=yes)
         self.prev = load_settings()
         self.keys = read_kv(STATE / 'secrets.env')
         self.s = {}            # this run's settings (saved as state/settings.json)
@@ -594,7 +618,7 @@ class Engine:
             if not uuid:
                 return False, 'That has no config ID in it (it looks like 1a2b3c4d-1234-…).', value
             if self.aios.config_exists(uuid) is False:
-                return False, 'There is no config with that ID on this AIOStreams. Check it, or paste your Stremio link.', value
+                return False, 'There is no config with that ID on this AIOStreams. Check it, or paste your install link.', value
             return True, '', uuid
 
         found = {}
@@ -607,7 +631,7 @@ class Engine:
             return True, 'Config found', value
         current = self.keys.get('VIEWER_UUID')
         config_id = self.ask.text('AIOS_CONFIG_ID', screens.LABELS['AIOS_CONFIG_ID'], current=current,
-                                  shown=short(current or ''), check=check_id)
+                                  shown=config_shown, check=check_id)
         password = self.ask.text('AIOS_CONFIG_PASSWORD', screens.LABELS['AIOS_CONFIG_PASSWORD'], secret=True,
                                  check=check_password)
         # the config changes only once both are right: an ID whose password is wrong leaves the last one as it was
@@ -1014,7 +1038,7 @@ class Engine:
         self.out.working(STARTING.format(name=name))
         code, out, err = dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
         if code != 0:
-            stop(f'Starting {name} failed.', '\n'.join((err or out).strip().splitlines()[-10:]))
+            stop(f'Starting {name} failed.', last_lines(out, err))
         if not self.wait_healthy():
             stop(f'{name} started but does not answer.', f'See its log: docker logs {CONTAINER}')
         self.out.ok(running)
@@ -1046,14 +1070,17 @@ class Engine:
         self.web_server_rule = plan.proxy_snippets(self.s['public_base'], target_host)
         self.rule_intro = (f"Your web server needs one rule so {self.s['public_base']}/... reaches subsync. Add it next to "
                            'your AIOStreams rule (keep the path as it is; don\'t strip it):')
+        # the rule's note, under it in the terminal and on the page (which shows the rule's words, not as rows)
+        self.rule_note = (f'Web server running in Docker on AIOStreams\' network: use {plan.SUBSYNC_HOST}:'
+                          f'{plan.SUBSYNC_PORT} instead of {target_host}.') if self.s['mode'] == 'network' else None
         self.out.say()
         self.out.wrap(self.rule_intro)
         for name, lines in self.web_server_rule.items():
             self.out.say(f'    {self.out.paint("1", name)}')
             for line in lines:
                 self.out.say(f'      {line}')
-        if self.s['mode'] == 'network':
-            self.out.note(f'Web server running in Docker on AIOStreams\' network: use {plan.SUBSYNC_HOST}:{plan.SUBSYNC_PORT} instead of {target_host}.')
+        if self.rule_note:
+            self.out.say(self.out.paint('2', f'     {self.rule_note}'))     # as a note prints, with the rule's lines
         self.ask.pause('Add the rule and reload your web server, then press Enter (or press Enter now and add it later):')
 
     # 8 -------------------------------------------------------------------------------------------------------
@@ -1205,7 +1232,10 @@ class Engine:
         if self.add_os:
             after.append(('p', 'Your config had no subtitles before: in Stremio, install the addon once more with the '
                                'same link, so Stremio starts asking it for subtitles.'))
-        return ('Done' if good else 'Installed, with warnings (see above)'), lines, after
+        return self.closing_title(good), lines, after
+
+    def closing_title(self, good):
+        return 'Done' if good else WARNED if self.page else WARNED_ABOVE
 
     def summary(self, good):
         title, lines, after = self.summary_parts(good)
@@ -1377,7 +1407,7 @@ class Engine:
                   'AIOStreams link.'),
                  'Keep the folder state/ in your backups: it holds the secret key, and without it everyone has to '
                  'sign up again.']
-        return ('Done' if good else 'Installed, with warnings (see above)'), lines, []
+        return self.closing_title(good), lines, []
 
     def run_hosting(self):
         self.check_machine()
@@ -1434,26 +1464,26 @@ class Engine:
         return rows, details
 
     def remove(self):
-        """Takes subsync out of the config your apps use, deletes subsync's own config and removes the container with
-        its stored copies (./setup --uninstall, and Remove subsync on the page). `self.stays`: what is left."""
+        """Takes subsync out of the config your apps use, deletes subsync's own configs and removes the container with
+        its stored copies (./setup --uninstall, and Remove subsync on the page). A removal stopped half way is finished
+        by the next one. `self.stays`: what is left."""
         s, keys = self.prev, self.keys
         if not s:
             stop('subsync is not set up here.')
-        aios = saved_aios(s)
+        self.aios = saved_aios(s)
         self.out.say(self.out.paint('1', '  Removing subsync'))
         uuid = keys.get('VIEWER_UUID')
 
         def check_password(value):
             try:
-                self.viewer, _ = aios.get_config(uuid, value)
+                self.viewer, _ = self.aios.get_config(uuid, value)
             except AiosError as e:
                 return False, e.message, value
             return True, '', value
         password = self.ask.text('AIOS_CONFIG_PASSWORD', screens.CONFIG_PASSWORD.format(config=short(uuid)),
                                  secret=True, check=check_password)
         new, removed = plan.without_subsync(self.viewer, s.get('manifest_url'))
-        self.out.say(f'  This takes subsync out of your config ({removed} entr{"y" if removed == 1 else "ies"}), deletes subsync\'s own config,')
-        self.out.say('  and removes the subsync container with its stored copies. Your other subtitle sources stay.')
+        self.out.wrap(screens.remove_text(keys, f' ({removed} entr{"y" if removed == 1 else "ies"})'))
         added = s.get('added_opensubtitles')
         if added and any(p.get('instanceId') == added for p in new.get('presets') or []):
             if self.ask.yesno('REMOVE_OPENSUBTITLES', screens.LABELS['REMOVE_OPENSUBTITLES'], True):
@@ -1465,18 +1495,18 @@ class Engine:
             guard(s.get('install_id'))
         if removed:
             path = backup(self.viewer, uuid)
-            aios.save_config(uuid, password, new)
+            self.with_sign_in(lambda: self.aios.save_config(uuid, password, new))
             self.out.ok(f'Your config no longer lists subsync (copy before: {shown(path)})')
         for kind, done in (('SYNC', 'Deleted subsync\'s own config'), ('USENET', "Deleted subsync's Usenet config")):
             if keys.get(f'{kind}_UUID'):
                 try:
-                    aios.delete_config(keys[f'{kind}_UUID'], keys[f'{kind}_PASSWORD'])
+                    self.with_sign_in(lambda: self.aios.delete_config(keys[f'{kind}_UUID'], keys[f'{kind}_PASSWORD']))
                     self.out.ok(done)
                 except AiosError as e:
-                    self.out.warn(e.message)
+                    if str(e.code) not in WRONG_PASSWORD_CODES:     # else already gone: an earlier removal deleted it
+                        self.out.warn(e.message)
         if (STATE / 'compose.yaml').exists():
-            dockerenv.compose(STATE, 'down', '-v', timeout=300)
-            self.out.ok('Removed the subsync container and its stored copies')
+            self.take_down()
         if s.get('cache_before'):
             self.out.note('AIOStreams\' subtitle cache setting for subsync stays; it does nothing without subsync.')
         for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
@@ -1486,29 +1516,47 @@ class Engine:
         if s.get('public_kind') == 'path':
             self.stays.append(f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server")
         self.stays.append(f'this folder, {host_folder()}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)')
-        self.out.say()
-        self.out.say('  These stay, in case you set it up again; remove them when you no longer need them:')
-        for line in self.stays:
-            self.out.say(f'    • {line}')
+        self.say_what_stays()
 
     def remove_host(self):
         """Stops a public instance and removes its container with everyone's records and stored copies, once the box
-        saying so is ticked; the sync configs it made on people's AIOStreams stay (opening a record needs their link)."""
+        saying so is ticked (in a terminal: answered yes); the sync configs it made on people's AIOStreams stay
+        (opening a record needs their link)."""
         s = self.prev
         if not s:
             stop('subsync is not set up here.')
         if not self.ask.yesno('CONFIRM', screens.DELETE_RECORDS, False):
-            raise Problem('CONFIRM', '', missing=True)
+            if self.page:
+                raise Problem('CONFIRM', screens.TICK_TO_REMOVE)
+            stop('Nothing was changed.')
         if (STATE / 'compose.yaml').exists():
             guard(s.get('install_id'))
-            dockerenv.compose(STATE, 'down', '-v', timeout=300)
-            self.out.ok('Removed the subsync container and its stored copies')
+            self.take_down()
         for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
             (STATE / name).unlink(missing_ok=True)
         self.out.ok('Done.')
+        folder = f'this folder, {host_folder()}'
+        # a public instance's state/backups/ holds the databases' copies made before updates, never a config's
+        if any(real_folder(path) for path in (STATE / 'backups').glob('databases-*')):
+            folder += ", with the database copies made before updates in state/backups/, which hold everyone's records"
         self.stays = [f"the subsync image (about 1 GB): docker image rm {image_handle(s.get('image'))}",
                       f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server",
-                      f'this folder, {host_folder()}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)']
+                      folder]
+        self.say_what_stays()
+
+    def take_down(self):
+        """The service's container removed with its stored copies. When Docker fails, setup stops before any of its
+        files is deleted, so removing it again finishes the job."""
+        code, out, err = dockerenv.compose(STATE, 'down', '-v', timeout=300)
+        if code != 0:
+            stop(REMOVE_FAILED, last_lines(out, err))
+        self.out.ok('Removed the subsync container and its stored copies')
+
+    def say_what_stays(self):
+        self.out.say()
+        self.out.say('  These stay, in case you set it up again; remove them when you no longer need them:')
+        for line in self.stays:
+            self.out.say(f'    • {line}')
 
     # ------------------------------------------------------------------------------------- updates
     def update(self):

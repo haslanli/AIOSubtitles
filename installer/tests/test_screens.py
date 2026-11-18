@@ -315,5 +315,107 @@ class Rules(unittest.TestCase):
                                            'Installing AIOSubtitles', 'Checking that it works'))
 
 
+class Removal(unittest.TestCase):
+    """The page after setup's removing: its words by route and by the configs an install has, the box's problem tied to
+    it, and the sign-in an AIOStreams may ask for."""
+
+    def test_the_text_names_the_configs_this_install_has(self):
+        # one sentence for the page and the terminal; it said "(1 entry), deletes subsync's own config" whatever the
+        # install had
+        ends = 'and removes the subsync container with its stored copies. Your other subtitle sources stay.'
+        for keys, configs in (({'SYNC_UUID': 'x'}, "subsync's own config,"),
+                              ({'SYNC_UUID': 'x', 'USENET_UUID': 'y'}, "subsync's own config and its Usenet config,"),
+                              ({'USENET_UUID': 'y'}, "subsync's Usenet config,")):
+            with self.subTest(keys=keys):
+                self.assertEqual(screens.remove_text(keys), f'This takes subsync out of your config, deletes {configs} '
+                                                            f'{ends}')
+                self.assertIn(screens.remove_text(keys), screens.INSTALLER_WORDS)
+                self.assertEqual(screens.remove_text(keys, ' (2 entries)'),
+                                 f'This takes subsync out of your config (2 entries), deletes {configs} {ends}')
+        html, _ = samples.every_state()['after-usenet']
+        self.assertIn(htmllib.escape(screens.remove_text({'SYNC_UUID': 'x', 'USENET_UUID': 'y'})), html)
+
+    def test_a_public_instance_has_its_own_words_and_the_warning_once(self):
+        states = samples.every_state()
+        tree = Tree(states['after-host'][0])
+        self.assertIn('AIOSubtitles status', tree.texts)
+        self.assertIn('Removing AIOSubtitles', tree.texts)
+        self.assertNotIn('AIOSubtitles · subsync status', tree.texts)
+        self.assertNotIn('Removing subsync', tree.texts)
+        self.assertEqual(tree.texts.count(screens.REMOVE_HOST_TEXT), 1)
+        tree = Tree(states['after'][0])                                   # a personal install's: as they were
+        self.assertIn('AIOSubtitles · subsync status', tree.texts)
+        self.assertIn('Removing subsync', tree.texts)
+        self.assertIn('Removing AIOSubtitles', Tree(states['removed-host'][0]).texts)
+
+    def test_the_unticked_box_says_so_and_is_tied_to_its_problem(self):
+        html, _ = samples.every_state()['after-host-not-ticked']
+        box = re.search(r'<input type="checkbox" id="confirm"[^>]*>', html).group(0)
+        self.assertIn('aria-describedby="confirm-error confirm-help" aria-invalid="true"', box)
+        self.assertIn('<p class="field-error" id="confirm-error">Tick &quot;Delete everyone&#x27;s records and stored '
+                      'copies&quot; to remove AIOSubtitles.</p>', html)
+        self.assertNotIn('aria-invalid', samples.every_state()['after-host'][0])
+
+    def test_the_sign_in_shows_under_why_it_is_asked(self):
+        html, _ = samples.every_state()['after-sign-in']
+        asks = 'Saving the config: This AIOStreams asks you to sign in before configs can be saved.'
+        names = re.findall(r'name="([A-Z_]+)"', html)
+        self.assertEqual(names[names.index('AIOS_CONFIG_PASSWORD'):][:3],
+                         ['AIOS_CONFIG_PASSWORD', 'AIOS_USERNAME', 'AIOS_PASSWORD'])
+        self.assertLess(html.index(htmllib.escape(asks)), html.index('AIOStreams sign-in to save configs: username'))
+        self.assertIn('value="admin"', html)
+        self.assertNotIn('field-error', html)                             # asked, not marked wrong
+        self.assertNotIn('name="AIOS_USERNAME"', samples.every_state()['after'][0])
+
+    def test_the_new_values_are_escaped(self):
+        rows = [('warn', HOSTILE, HOSTILE)]
+        shown = [screens.after_setup('yourself', rows, [], '1.0.0', None, config=HOSTILE, removing=HOSTILE,
+                                     sign_in=True, username=HOSTILE, written=rows),
+                 screens.review([], rows=rows, stop=(HOSTILE, HOSTILE), sign_in=True, username=HOSTILE),
+                 screens.installing('yourself', rows, running=False, rule={HOSTILE: [HOSTILE]}, rule_intro=HOSTILE,
+                                    rule_note=HOSTILE),
+                 screens.done('yourself', HOSTILE, [HOSTILE], [], warnings=rows)]
+        for html in shown:
+            self.assertNotIn('<script>alert', html)
+            self.assertNotIn('"&gt;&lt;script', html)
+
+
+class StepsAndEnd(unittest.TestCase):
+    """The sign-in's label by why AIOStreams asks, a stop while saving, the web server rule's note and the end's
+    warnings."""
+
+    def test_the_sign_in_label_says_why_it_is_asked(self):
+        # it always said "(admin)", which only the cache setting needs
+        states = samples.every_state()
+        self.assertIn('AIOStreams sign-in to save configs: username', Tree(states['review-sign-in-to-save'][0]).texts)
+        self.assertNotIn('AIOStreams sign-in (admin): username', Tree(states['review-sign-in-to-save'][0]).texts)
+        self.assertIn('AIOStreams sign-in (admin): username', Tree(states['review-sign-in'][0]).texts)
+
+    def test_a_stop_while_saving_shows_first_with_what_was_written(self):
+        html, _ = samples.every_state()['review-stopped']
+        texts = Tree(html).texts
+        stop = texts.index('Creating the sync config: AIOStreams is limiting requests from this machine (it allows 10 '
+                           'new configs an hour); try again later.')
+        self.assertLess(texts.index('Signed in'), stop)
+        self.assertLess(stop, texts.index('Your config 1a2b3c4d…'))
+        self.assertRegex(html, r'<input[^>]*name="CACHE"[^>]*checked')
+        self.assertIn('name="AIOS_USERNAME"', html)
+
+    def test_the_rules_note_is_under_the_rule(self):
+        html, _ = samples.every_state()['install-rule-note']
+        note = htmllib.escape("Web server running in Docker on AIOStreams' network: use aiosubtitles-subsync:8790 "
+                              'instead of 127.0.0.1:8790.')
+        self.assertGreater(html.index(note), html.rindex('</pre>'))
+        self.assertNotIn('Web server running in Docker', samples.every_state()['install-done'][0])
+
+    def test_the_end_shows_the_checks_warnings_under_its_heading(self):
+        texts = Tree(samples.every_state()['done-warned'][0]).texts
+        heading = texts.index('Installed, with warnings')
+        self.assertEqual(texts[heading + 2:heading + 4],          # after the problem mark's spoken word
+                         ['AIOStreams did not reach subsync.',
+                          'It calls http://aiosubtitles-subsync:8790/…; check that address works from AIOStreams.'])
+        self.assertNotIn('<ul class="checks">', samples.every_state()['done'][0])
+
+
 if __name__ == '__main__':
     unittest.main()

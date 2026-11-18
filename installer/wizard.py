@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""AIOSubtitles setup: adds subsync to the AIOStreams you already run. Start it with ./setup, which runs it inside the
-AIOSubtitles image (`docker run ... setup`); the work of each step is in installer/engine.py, this is the
-command line.
+"""AIOSubtitles setup: adds subsync to the AIOStreams you already run, or hosts a public instance. Start it with
+./setup, which runs it inside the AIOSubtitles image (`docker run ... setup`); the work of each step is in
+installer/engine.py, this is the command line.
 
   ./setup                  the setup page: install, or change your answers, update, remove (safe to run again)
   ./setup --status         is it running, and what has it done
@@ -20,17 +20,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from installer import dockerenv, engine, plan, web, where  # noqa: E402
+from installer import dockerenv, engine, plan, screens, web, where  # noqa: E402
 from installer.aios import AiosError  # noqa: E402
-from installer.ui import Asker, Stop, bad, note, ok, paint, say, stop, warn  # noqa: E402
-from installer.engine import backup, load_settings, short  # noqa: E402
+from installer.ui import Stop, answers_advice, bad, note, ok, paint, say, stop, warn  # noqa: E402
+from installer.engine import backup, short  # noqa: E402
+
+
+def answers_from(args):
+    """The answers file's lines (KEY= is an answer too), or None when no answers file was given."""
+    return plan.parse_env(Path(args.answers).read_text()) if args.answers else None
 
 
 # ------------------------------------------------------------------------------------------- other commands
 
 def cmd_status():
-    rows, details = engine.Engine({}).status_parts()
-    say(paint('1', '  AIOSubtitles · subsync status'))
+    e = engine.Engine({})
+    rows, details = e.status_parts()
+    say(paint('1', f"  {screens.STATUS['host' if e.prev.get('route') == 'host' else 'yourself']}"))
     for kind, text, more in rows:
         {'ok': ok, 'warn': warn, 'bad': bad}[kind](text)
         if more:
@@ -45,22 +51,21 @@ def cmd_status():
 
 def cmd_restore(args, path):
     data = json.loads(Path(path).read_text())
-    aios = engine.saved_aios(load_settings())
-    ask = Asker(plan.parse_env(Path(args.answers).read_text()) if args.answers else {}, args.yes)
+    e = engine.Engine(answers_from(args), yes=args.yes)
+    e.aios = engine.saved_aios(e.prev)
     uuid = data['uuid']
-    password = ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)
-    if not ask.yesno('CONFIRM', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):
+    password = e.ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)
+    if not e.ask.yesno('CONFIRM', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):
         stop('Nothing was changed.')
-    current, _ = aios.get_config(uuid, password)
+    current, _ = e.aios.get_config(uuid, password)
     backup(current, uuid, 'before-restore')
-    aios.save_config(uuid, password, data['config'])
+    e.with_sign_in(lambda: e.aios.save_config(uuid, password, data['config']))    # asks a sign-in AIOStreams wants
     ok('Restored.')
     return 0
 
 
 def cmd_uninstall(args):
-    answers = plan.parse_env(Path(args.answers).read_text()) if args.answers else {}
-    e = engine.Engine(answers, yes=args.yes)
+    e = engine.Engine(answers_from(args), yes=args.yes)
     e.remove_host() if e.prev.get('route') == 'host' else e.remove()
     return 0
 
@@ -98,7 +103,8 @@ def in_image():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog='./setup', description='Add subsync (synced subtitles) to your AIOStreams.')
+    parser = argparse.ArgumentParser(prog='./setup', description='Set up AIOSubtitles: add subsync (synced subtitles) '
+                                                                 'to your AIOStreams, or host a public instance.')
     parser.add_argument('--answers', help='answers from a KEY=value file')
     parser.add_argument('--yes', action='store_true', help='ask nothing: answers file, current values and defaults')
     parser.add_argument('--status', action='store_true', help='is it running, and what has it done')
@@ -131,8 +137,7 @@ def main(argv=None):
             return open_page()
         say()
         say(paint('1', '  AIOSubtitles · subsync setup'))
-        answers = plan.parse_env(Path(args.answers).read_text()) if args.answers else {}   # KEY= is an answer too
-        e = engine.Engine(answers, yes=args.yes)
+        e = engine.Engine(answers_from(args), yes=args.yes)
         if e.prev:
             say(paint('2', '  Already set up here: your answers are kept unless you change them.'))
         return 0 if e.run_answers() else 3
@@ -143,10 +148,10 @@ def main(argv=None):
             say(f'      {line}')
         say()
         return 1
-    except engine.Problem as e:     # an answer the answers file gave wrong, or didn't give
+    except engine.Problem as e:     # an answer refused (a port taken, say), or not given
         say()
         bad(e.message or f'{e.field} needs an answer.')
-        say(f'      Add {e.field}=... to the answers file.')
+        say(f'      {answers_advice(e.field, answers_from(args))}')
         say()
         return 1
     except AiosError as e:

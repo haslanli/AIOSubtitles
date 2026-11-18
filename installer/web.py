@@ -32,6 +32,7 @@ FONT = re.compile(r'^/static/fonts/([A-Za-z0-9-]+\.(?:ttf|txt))$')
 STOPS = ('Setup is done; the page has stopped.',)
 PERSONAL_KEYS = ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY')          # the optional keys each route asks
 HOST_KEYS = ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY')
+SIGN_IN = ('AIOS_USERNAME', 'AIOS_PASSWORD')                     # AIOStreams' own sign-in
 
 
 def terminal_lines(port, url):
@@ -78,7 +79,7 @@ class Session:
 
     def run(self, step, work):
         """Runs one step's work; keeps its rows and how it ended. True when it went through."""
-        out, start = self.e.out, len(self.e.out.rows)
+        out, start = self.e.out, self.e.out.begin()
         ok = False
         for kept in (self.problems, self.stops, self.asks):
             kept.pop(step, None)
@@ -311,8 +312,10 @@ class App:
                   limits.AUDIO.setting: e.answers.get('AUDIO_BUDGET') or e.known_audio_budget() or '1',
                   limits.USENET.setting: e.answers.get(limits.USENET.setting)
                   or limits.current(limits.USENET, engine.env_values())}
-        return self.page(screens.limits('yourself', values, s.problems.get('limits'), audio=e.audio,
-                                        usenet=getattr(e, 'usenet', False)))
+        problem = s.problems.get('limits')
+        if problem and problem[0] == 'AUDIO_BUDGET':        # the engine's key for the page's audio limit
+            problem = (limits.AUDIO.setting, problem[1])
+        return self.page(screens.limits('yourself', values, problem, audio=e.audio, usenet=getattr(e, 'usenet', False)))
 
     def step_review(self, s, method, form, one):
         e = s.e
@@ -330,13 +333,12 @@ class App:
                 return self.go('install')
         sections = e.plan_changes()
         problem = s.problems.get('review')
-        sign_in = s.asks.get('review') in ('AIOS_USERNAME', 'AIOS_PASSWORD') or (problem or ('',))[0] in (
-            'AIOS_USERNAME', 'AIOS_PASSWORD')
-        body = screens.review(sections, cache=e.answers.get('CACHE') == 'yes', sign_in=sign_in, problem=problem,
-                              username=e.answers.get('AIOS_USERNAME', ''))
-        if s.stops.get('review'):
-            body = screens.review(sections, problem=('CONFIRM', s.stops['review'][0]))
-        return self.page(body)
+        # the sign-in fields while AIOStreams asks for them, and once given (a stop after signing in keeps them)
+        sign_in = (s.asks.get('review') in SIGN_IN or (problem or ('',))[0] in SIGN_IN
+                   or bool(e.answers.get('AIOS_USERNAME')))
+        return self.page(screens.review(sections, cache=e.answers.get('CACHE') == 'yes', sign_in=sign_in,
+                                        problem=problem, username=e.answers.get('AIOS_USERNAME', ''),
+                                        rows=s.rows.get('review', []), stop=s.stops.get('review')))
 
     def step_install(self, s, method, form, one):
         return self.installing(s, 'install', method, 'check')
@@ -347,7 +349,8 @@ class App:
         running = s.running(step)
         rule = getattr(s.e, 'web_server_rule', None)
         return self.page(screens.installing(s.route, s.live(step), running, s.stops.get(step), rule=rule,
-                                            rule_intro=getattr(s.e, 'rule_intro', None)))
+                                            rule_intro=getattr(s.e, 'rule_intro', None),
+                                            rule_note=getattr(s.e, 'rule_note', None)))
 
     def step_check(self, s, method, form, one):
         e = s.e
@@ -369,11 +372,14 @@ class App:
     def step_done(self, s, method, form, one):
         e = s.e
         if s.route == 'host':
-            title, lines, after = e.host_summary_parts(getattr(e, 'good', False))
+            good, checks = getattr(e, 'good', False), ('hostcheck',)
+            title, lines, after = e.host_summary_parts(good)
         else:
-            title, lines, after = e.summary_parts(getattr(e, 'good', False) and getattr(e, 'read_good', True))
+            good, checks = getattr(e, 'good', False) and getattr(e, 'read_good', True), ('check', 'check-read')
+            title, lines, after = e.summary_parts(good)
+        warnings = [] if good else [row for step in checks for row in s.live(step) if row[0] in ('warn', 'bad')]
         self.finish_in(DONE_S)
-        return self.page(screens.done(s.route, title, lines, after))
+        return self.page(screens.done(s.route, title, lines, after, warnings=warnings))
 
     # ------------------------------------------------------------------------------------- host a public instance
     def step_address(self, s, method, form, one):
@@ -449,7 +455,8 @@ class App:
         return self.page(screens.check('host', s.live('hostcheck'), running, stop=s.stops.get('hostcheck')))
 
     # ------------------------------------------------------------------------------------- after setup
-    def after_setup(self, problem=None):
+    def after_setup(self, problem=None, sign_in=False, username='', written=()):
+        """The page after setup; after a removal that asks AIOStreams' sign-in, its form with the sign-in fields."""
         e = engine.Engine({}, page=True)
         rows, details = e.status_parts()
         prev = e.prev
@@ -463,7 +470,9 @@ class App:
         return self.page(screens.after_setup(prev.get('route') or 'yourself', rows, details,
                                              prev.get('version') or engine.setup_version(), ready, problem,
                                              offer_opensubtitles=offer,
-                                             config=engine.short(e.keys.get('VIEWER_UUID', '')), rollback=rollback))
+                                             config=engine.short(e.keys.get('VIEWER_UUID', '')), rollback=rollback,
+                                             removing=screens.remove_text(e.keys), sign_in=sign_in, username=username,
+                                             written=written))
 
     def after_answers(self, method, one):
         """Change your answers: the installed route's own steps, filled in."""
@@ -482,18 +491,23 @@ class App:
         if method != 'POST':
             return self.go('')
         e = engine.Engine({k: v for k, v in one.items() if k in ('AIOS_CONFIG_PASSWORD', 'REMOVE_OPENSUBTITLES',
-                                                                    'CONFIRM')}, page=True)
+                                                                    'CONFIRM', *SIGN_IN)}, page=True)
         host = e.prev.get('route') == 'host'
+        heading = screens.REMOVING['host' if host else 'yourself']
         if not host and 'REMOVE_OPENSUBTITLES' not in one:
             e.answers['REMOVE_OPENSUBTITLES'] = 'no'
         try:
             e.remove_host() if host else e.remove()
         except engine.Problem as p:
-            return self.after_setup(problem=(p.field, p.message or '"Its password" needs an answer.'))
-        except (Stop, AiosError) as s:
-            return self.after_setup(problem=('AIOS_CONFIG_PASSWORD', s.message))
+            # a question the form didn't have yet (AIOStreams' sign-in) is asked, not marked wrong
+            return self.after_setup(problem=(p.field, '' if p.missing else p.message),
+                                    sign_in=p.field in SIGN_IN or bool(one.get('AIOS_USERNAME')),
+                                    username=one.get('AIOS_USERNAME', ''), written=[tuple(r) for r in e.out.rows])
+        except (Stop, AiosError) as s:      # what it did before it stopped, and the way out (Docker's last lines)
+            return self.page(screens.working(heading, [tuple(r) for r in e.out.rows], False,
+                                             stop=(s.message, getattr(s, 'page_fix', s.fix))))
         self.finish_in(DONE_S)
-        return self.page(screens.removed('Removing subsync', [tuple(r) for r in e.out.rows], getattr(e, 'stays', [])))
+        return self.page(screens.removed(heading, [tuple(r) for r in e.out.rows], getattr(e, 'stays', [])))
 
     def after_update(self, method, one):
         if method == 'POST':

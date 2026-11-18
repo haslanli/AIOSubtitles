@@ -1,8 +1,10 @@
 """The hosting route: a public instance set up by ./setup."""
 import ast
 import base64
+import contextlib
 import gc
 import http.server
+import io
 import json
 import os
 import stat
@@ -13,7 +15,7 @@ import warnings
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, hosting, limits, plan
+from installer import dockerenv, engine, hosting, limits, plan, wizard
 from installer.tests.test_flow import AnswersRun
 
 ADDRESS = 'https://subs.example.com'
@@ -367,6 +369,54 @@ class Route(RouteFixture):
         e.remove_host()
         self.assertFalse((self.state / 'subsync.env').exists())
         self.assertFalse(self.up)
+
+    def test_removing_in_a_terminal_says_what_stays_naming_the_database_copies(self):
+        # it printed no list; the page's said "with copies of your config in state/backups/ (./setup --restore FILE puts
+        # one back)", though a public instance keeps only the databases' copies there, with everyone's records
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        (self.state / 'backups' / 'databases-20261114-061500').mkdir(parents=True)
+        code, out = self.run_setup({'CONFIRM': 'yes'}, '--uninstall')
+        self.assertEqual(code, 0, out)
+        self.assertIn('These stay, in case you set it up again; remove them when you no longer need them:\n'
+                      '    • the subsync image (about 1 GB): docker image rm ', out)
+        self.assertIn(f'    • this folder, {self.tmp.name}, with the database copies made before updates in '
+                      "state/backups/, which hold everyone's records\n", out)
+        self.assertNotIn('--restore', out)
+        self.assertFalse((self.state / 'subsync.env').exists())
+
+    def test_removing_answered_no_in_a_terminal_changes_nothing(self):
+        # it ended "CONFIRM needs an answer." and "Add CONFIRM=... to the answers file."
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        code, out = self.run_setup({'CONFIRM': 'no'}, '--uninstall')
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out.rstrip().endswith('Nothing was changed.'), out[-200:])
+        self.assertNotIn('CONFIRM needs an answer', out)
+        self.assertTrue((self.state / 'subsync.env').exists())
+        with self.assertRaises(engine.Problem) as caught:                   # the page: the box not ticked
+            engine.Engine({}, page=True).remove_host()
+        self.assertEqual((caught.exception.field, caught.exception.message),
+                         ('CONFIRM', 'Tick "Delete everyone\'s records and stored copies" to remove AIOSubtitles.'))
+
+    def test_a_failed_container_removal_keeps_the_public_instances_files(self):
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        with mock.patch.object(dockerenv, 'compose', lambda state, *args, **kw: (1, 'still running', '')):
+            with self.assertRaises(engine.Stop) as caught:
+                engine.Engine({'CONFIRM': 'yes'}, page=True).remove_host()
+        self.assertEqual((caught.exception.message, caught.exception.fix), (engine.REMOVE_FAILED, 'still running'))
+        for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
+            self.assertTrue((self.state / name).exists(), name)
+
+    def test_the_status_heading_names_aiosubtitles(self):
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(wizard.main(['--status']), 0)
+        self.assertIn('AIOSubtitles status', out.getvalue())
+        self.assertNotIn('subsync status', out.getvalue())
 
     def test_the_address_not_answering_is_a_warning_with_the_rule(self):
         with mock.patch.object(hosting, 'fetch', side_effect=OSError('refused')):

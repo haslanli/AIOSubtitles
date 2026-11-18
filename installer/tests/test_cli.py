@@ -107,6 +107,24 @@ class CommandLine(FlowFixture):
         self.assertEqual(code, 1)
         self.assertIn('Port 8790 on this machine is already in use.', out)
 
+    def test_help_names_both_routes(self):
+        # it said only "Add subsync (synced subtitles) to your AIOStreams."
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            wizard.main(['--help'])
+        self.assertIn('Set up AIOSubtitles: add subsync (synced subtitles) to your AIOStreams, or host a public '
+                      'instance.', ' '.join(out.getvalue().split()))
+
+    def test_the_readme_says_what_uninstall_deletes(self):
+        # it left out the Usenet config, the stored copies and a public instance's records
+        readme = ' '.join((REPO / 'README.md').read_text().split())
+        self.assertIn("```bash ./setup --uninstall ``` Takes subsync out of your config, deletes subsync's own configs "
+                      'on your AIOStreams (its Usenet config too) and removes the container with its stored copies. It '
+                      "then lists what stays: the subsync image, your web server's rule for subsync, and this folder "
+                      'with the copies of your config. On a public instance it removes AIOSubtitles with everyone\'s '
+                      "records and stored copies, after you confirm; the sync configs it made on people's AIOStreams "
+                      'stay.', readme)
+
     def test_the_readme_says_how_setup_and_updates_work_now(self):
         readme = (REPO / 'README.md').read_text()
         install = readme.split('## Install', 1)[1].split('\n## ', 1)[0]

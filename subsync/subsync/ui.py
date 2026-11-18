@@ -182,14 +182,16 @@ def field(id, label, help_text, name=None, kind="text", mono=False, error=None, 
     return f"<div class=\"field\">{label_html}{error_html}{box}{help_html}</div>"
 
 
-def choice(id, title, help_text, name=None, checked=False, needs=None, value="on"):
+def choice(id, title, help_text, name=None, checked=False, needs=None, value="on", error_id=None):
     """A choice row: the whole row is a checkbox; a ticked row takes the chosen blue. `needs`: the id of the choice it
-    works only with (the script greys it out while that one is unticked). Inside the label only phrasing content: its
+    works only with (the script greys it out while that one is unticked). `error_id`: the id of the problem's message
+    shown with it: the box is marked and described by it, read first. Inside the label only phrasing content: its
     words are spans the stylesheet lays out as blocks."""
+    refs = described(error_id, f"{id}-help")
     return (f"<label class=\"choice\"{f' data-needs=\"{e(needs)}\"' if needs else ''}><input type=\"checkbox\" "
             f"id=\"{e(id)}\" name=\"{e(name or id)}\" value=\"{e(value)}\"{' checked' if checked else ''} "
-            f"aria-describedby=\"{e(id)}-help\"><span><b>{e(title)}</b><span id=\"{e(id)}-help\">{e(help_text)}</span>"
-            "</span></label>")
+            f"aria-describedby=\"{e(refs)}\"" + (" aria-invalid=\"true\"" if error_id else "")
+            + f"><span><b>{e(title)}</b><span id=\"{e(id)}-help\">{e(help_text)}</span></span></label>")
 
 
 def choices(*rows):

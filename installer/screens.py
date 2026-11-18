@@ -40,7 +40,7 @@ LABELS = {
     'ROUTE': QUESTION,
     'AIOS_CONTAINER': 'More than one AIOStreams runs here. Which one do your apps use?',
     'AIOS_URL': 'What address do you open AIOStreams at?',
-    'AIOS_CONFIG_ID': 'Config ID (or paste your Stremio link)',
+    'AIOS_CONFIG_ID': 'Config ID (or paste your install link)',
     'AIOS_CONFIG_PASSWORD': 'Its password',
     'LANGUAGES': 'Which subtitle languages should be synced?',
     'AUDIO': plan.AUDIO_QUESTION,
@@ -70,14 +70,21 @@ RUN_AGAIN = 'Run ./setup again to see its status, update it, change your answers
 ENDED = 'This setup page has ended. Run ./setup again for a new address.'
 CHECK_AGAIN = 'Check again'
 DELETE_RECORDS = "Delete everyone's records and stored copies"
+TICK_TO_REMOVE = f'Tick "{DELETE_RECORDS}" to remove AIOSubtitles.'
 REMOVE_HOST = 'Remove AIOSubtitles'
 REMOVE_HOST_TEXT = ("This stops AIOSubtitles and removes its container with everyone's records and stored copies. "
                     "The sync configs it made on people's AIOStreams stay there, because opening a record needs that "
                     "person's own link.")
 SECRET_DOTS = '•' * 16
-REMOVE_TEXT = ("This takes subsync out of your config (1 entry), deletes subsync's own config, and removes the subsync "
-               "container with its stored copies. Your other subtitle sources stay.")
+# What removing subsync does, naming the configs this install has: its own, its Usenet one, or both (remove_text)
+REMOVE_TEXT = ('This takes subsync out of your config{count}, deletes {configs}, and removes the subsync container '
+               'with its stored copies. Your other subtitle sources stay.')
+REMOVED_CONFIGS = {'own': "subsync's own config", 'both': "subsync's own config and its Usenet config",
+                   'usenet': "subsync's Usenet config"}
 REMOVE_SAVED_KEY = 'Remove the saved key'       # under an optional key's field while one is saved
+# the page after setup's heading (and ./setup --status's), and removing's, by route
+STATUS = {'yourself': 'AIOSubtitles · subsync status', 'host': 'AIOSubtitles status'}
+REMOVING = {'yourself': 'Removing subsync', 'host': 'Removing AIOSubtitles'}
 KEPT_ANSWERS = ('Already set up here: your answers are kept unless you change them. To switch between installing it '
                 'for yourself and hosting a public instance, remove it first.')
 
@@ -95,13 +102,14 @@ INSTALLER_WORDS = (
     # the original-language lookup: TMDB's notice and its logo's name
     explain.TMDB_NOTICE, 'TMDB',
     'Updates', 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
-    RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, REMOVE_HOST, REMOVE_HOST_TEXT,
-    REMOVE_TEXT, REMOVE_SAVED_KEY, KEPT_ANSWERS,
+    RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, TICK_TO_REMOVE, REMOVE_HOST, REMOVE_HOST_TEXT,
+    *[REMOVE_TEXT.format(count='', configs=configs) for configs in REMOVED_CONFIGS.values()], REMOVE_SAVED_KEY,
+    KEPT_ANSWERS,
     update.ABOUT, update.ABOUT_HOSTING, update.NEWEST, update.ROLLBACK_HEADING, update.ROLLBACK_ABOUT,
     update.RESTORE_HELP,
     # the terminal setup's lines, as headings
-    'AIOSubtitles · subsync status',
-    'Already set up here: your answers are kept unless you change them.', 'Removing subsync',
+    *STATUS.values(),
+    'Already set up here: your answers are kept unless you change them.', *REMOVING.values(),
     'These stay, in case you set it up again; remove them when you no longer need them:',
     'AIOStreams', 'languages', 'audio', 'config', "subsync's config", 'logs',
     # Usenet
@@ -307,11 +315,14 @@ def limits(route, values, problem=None, audio=False, usenet=False):
     return step('yourself', 'limits', body, _back_and_continue('yourself', 'limits'))
 
 
-def review(sections, cache=False, sign_in=False, problem=None, username=''):
-    """Your AIOStreams configs: the changes to both, the cache setting with its sign-in, and Save these changes."""
-    body = ui.config_changes(sections) + ui.choices(_choice('CACHE', LABELS['CACHE'], cache))
+def review(sections, cache=False, sign_in=False, problem=None, username='', rows=(), stop=None):
+    """Your AIOStreams configs: what saving them wrote so far and how it stopped, the changes to both, the cache setting
+    with its sign-in (an admin's for the cache setting, else the one AIOStreams asks to save configs), and Save these
+    changes."""
+    body = (_rows(rows) + _stop(stop) + ui.config_changes(sections)
+            + ui.choices(_choice('CACHE', LABELS['CACHE'], cache)))
     if sign_in or cache:
-        body += (_input('AIOS_USERNAME', SIGN_IN_ADMIN, username, problem)
+        body += (_input('AIOS_USERNAME', SIGN_IN_ADMIN if cache else SIGN_IN_TO_SAVE, username, problem)
                  + _input('AIOS_PASSWORD', LABELS['AIOS_PASSWORD'], '', problem, kind='password', reveal=True))
     body += f'<p class="help">{e(_explanation("CONFIRM"))}</p>'
     actions = _back('limits') + ui.button('Save these changes', 'primary', type='submit',
@@ -319,13 +330,16 @@ def review(sections, cache=False, sign_in=False, problem=None, username=''):
     return step('yourself', 'review', body, actions)
 
 
-def installing(route, rows, running, stop=None, rule=None, rule_intro=None):
-    """Installing: the progress; no Back and Continue unavailable until the work is done."""
+def installing(route, rows, running, stop=None, rule=None, rule_intro=None, rule_note=None):
+    """Installing: the progress, and the web server's rule with its note under it; no Back and Continue unavailable
+    until the work is done."""
     step_id = 'hostinstall' if route == 'host' else 'install'
     body = _progress(rows) + _stop(stop)
     if rule:
         body += f'<p>{e(rule_intro)}</p>' + ''.join(f'<p class="help">{e(name)}</p>{ui.code_lines(lines)}'
                                                      for name, lines in rule.items())
+        if rule_note:
+            body += f'<p class="help">{e(rule_note)}</p>'
     if running:
         return step(route, step_id, body, _continue(False), back=False, refresh=2)
     if stop:
@@ -348,10 +362,11 @@ def check(route, rows, running, offer_test_read=False, stop=None):
     return step(route, step_id, body, actions, back=False)
 
 
-def done(route, title, lines, after):
-    """The end of setup: what is running and what to do next (the terminal setup's closing text)."""
+def done(route, title, lines, after, warnings=()):
+    """The end of setup: the check's warnings under the title when it warned, what is running and what to do next (the
+    terminal setup's closing text)."""
     names, ids = _steps(route)
-    paragraphs = f'<p class="lead">{e(lines[0])}</p>' + ui.dots(lines[1:])
+    paragraphs = _rows(warnings) + f'<p class="lead">{e(lines[0])}</p>' + ui.dots(lines[1:])
     for kind, text in after:
         paragraphs += ui.code_lines([text]) if kind == 'code' else f'<p>{e(text)}</p>'
     paragraphs += f'<p>{e(RUN_AGAIN)}</p>'
@@ -401,12 +416,23 @@ def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False, s
 
 # ------------------------------------------------------------------------------------------- after setup
 
+def remove_text(keys, count=''):
+    """REMOVE_TEXT for the configs this install has (`keys`: state/secrets.env's). `count`: the terminal's " (1
+    entry)"; the page asks the config's password with the text, so it can't count them."""
+    if keys.get('USENET_UUID'):
+        configs = 'both' if keys.get('SYNC_UUID') else 'usenet'
+    else:
+        configs = 'own'
+    return REMOVE_TEXT.format(count=count, configs=REMOVED_CONFIGS[configs])
+
+
 def after_setup(route, rows, details, running_version, ready, problem=None, offer_opensubtitles=False, config='',
-                rollback=None):
+                rollback=None, removing=None, sign_in=False, username='', written=()):
     """The page after setup: the status, updates, your answers, removing. `ready`: update.Ready, from comparing this
     setup's version with the service's. `rollback`: (the earlier version, its database copy's name or None) while one
-    is recorded."""
-    status = (f'<h1>AIOSubtitles · subsync status</h1><div class="grid12 band">' + ui.check_rows(list(rows))
+    is recorded. `removing`: what removing does (remove_text). `sign_in`: removing asks AIOStreams' sign-in to save
+    configs, under the lines it wrote before asking (`written`)."""
+    status = (f'<h1>{e(STATUS[route])}</h1><div class="grid12 band">' + ui.check_rows(list(rows))
               + '<dl class="details">' + ''.join(f'<div><dt>{e(label)}</dt><dd>{e(value)}</dd></div>'
                                                  for label, value in details) + '</dl></div>')
     running = e(update.RUNNING.format(version=running_version))
@@ -434,19 +460,24 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
                      f'<form class="controls" method="post" action="answers"><div class="actions">'
                      f'{ui.button("Change your answers", "secondary", type="submit")}</div></form>')
     if route == 'host':
-        controls = (ui.choices(ui.choice('confirm', DELETE_RECORDS, REMOVE_HOST_TEXT, name='CONFIRM', value='yes'))
-                    + (f'<p class="field-error">{e(problem[1])}</p>' if problem and problem[1] else '')
+        error = _error(problem, 'CONFIRM')
+        box = ui.choice('confirm', DELETE_RECORDS, '', name='CONFIRM', value='yes',
+                        error_id='confirm-error' if error else None)
+        controls = (ui.choices(box) + (f'<p class="field-error" id="confirm-error">{e(error)}</p>' if error else '')
                     + f'<div class="actions">{ui.button(REMOVE_HOST, "danger", type="submit")}</div>')
         about = REMOVE_HOST_TEXT
     else:
         controls = _input('AIOS_CONFIG_PASSWORD', CONFIG_PASSWORD.format(config=config), '', problem,
                           kind='password', reveal=True)
+        if sign_in:
+            controls += (_rows(written) + _input('AIOS_USERNAME', SIGN_IN_TO_SAVE, username, problem)
+                         + _input('AIOS_PASSWORD', LABELS['AIOS_PASSWORD'], '', problem, kind='password', reveal=True))
         if offer_opensubtitles:
             controls += ui.choices(_choice('REMOVE_OPENSUBTITLES', LABELS['REMOVE_OPENSUBTITLES'], True))
         controls += ('<input type="hidden" name="CONFIRM" value="yes">'
                      f'<div class="actions">{ui.button("Remove subsync", "danger", type="submit")}</div>')
-        about = REMOVE_TEXT
-    remove = ui.row('rm-h', 'Removing subsync', f'<p class="help">{e(about)}</p>',
+        about = removing or remove_text({})
+    remove = ui.row('rm-h', REMOVING[route], f'<p class="help">{e(about)}</p>',
                     f'<form class="controls" method="post" action="remove">{controls}</form>')
     return ui.page(TITLE, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}<main>{status}'
                           f'<div class="rows">{panel}{answers}{remove}</div></main></div>', 'settings')

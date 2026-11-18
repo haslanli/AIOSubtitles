@@ -102,6 +102,12 @@ def every_state():
     words = [w for heading, lines, after in sections for w in [heading, after] + [line for _, line in lines]] + ['+']
     add('review', screens.review(sections), *words)
     add('review-sign-in', screens.review(sections, cache=True, sign_in=True), *words)
+    asks = [('warn', 'Creating the sync config: This AIOStreams asks you to sign in before configs can be saved.', None)]
+    add('review-sign-in-to-save', screens.review(sections, sign_in=True, rows=asks), *words, asks[0][1])
+    limited = ('Creating the sync config: AIOStreams is limiting requests from this machine (it allows 10 new configs '
+               'an hour); try again later.', None)
+    add('review-stopped', screens.review(sections, cache=True, username='admin', rows=[('ok', 'Signed in', None)],
+                                         stop=limited), *words, 'Signed in', limited[0])
     # Usenet: the question, its stop, its number, the third config, a Usenet-only config, the check line
     add('choices-usenet', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', usenet=True), f'{PUBLIC}/subsync')
     no_usenet = (engine.NO_USENET, engine.NO_USENET_WAY_OUT_PAGE)
@@ -133,6 +139,14 @@ def every_state():
     failed = ('Starting subsync failed.', 'Error response from daemon: driver failed programming external connectivity')
     add('install-failed', screens.installing('yourself', progress[:1], running=False, stop=failed),
         progress[0][1], *failed)
+    personal_rule = plan.proxy_snippets(f'{PUBLIC}/subsync', '127.0.0.1:8790')
+    personal_intro = (f'Your web server needs one rule so {PUBLIC}/subsync/... reaches subsync. Add it next to your '
+                      "AIOStreams rule (keep the path as it is; don't strip it):")
+    rule_note = ("Web server running in Docker on AIOStreams' network: use aiosubtitles-subsync:8790 instead of "
+                 '127.0.0.1:8790.')
+    add('install-rule-note', screens.installing('yourself', finished, running=False, rule=personal_rule,
+                                                rule_intro=personal_intro, rule_note=rule_note),
+        *[r[1] for r in finished], personal_intro, *personal_rule, rule_note)
     rule = hosting.web_server_rule(ADDRESS, '127.0.0.1:8790')
     intro = (f'Your web server needs one rule so {ADDRESS} reaches AIOSubtitles on this machine. Add it with the https '
              'certificate your web server has for that name, and reload the web server:')
@@ -149,6 +163,10 @@ def every_state():
                                    'AIOStreams\' own Jellyfin server: the same, shown as "(synced)".'], \
         [('p', 'Your apps keep the same links: nothing to change in them.'), ('code', 'docker restart aiometadata')]
     add('done', screens.done('yourself', title, lines, after), title, *lines, *[t for _, t in after])
+    unreached = [('bad', 'AIOStreams did not reach subsync.', 'It calls http://aiosubtitles-subsync:8790/…; check that '
+                                                               'address works from AIOStreams.')]
+    add('done-warned', screens.done('yourself', engine.WARNED, lines, after, warnings=unreached), engine.WARNED,
+        *lines, *[t for _, t in after], *unreached[0][1:])
     # hosting
     add('host-machine', screens.machine('host', found), *[r[1] for r in found])
     add('host-address', screens.host_address(ADDRESS), ADDRESS, 'gateway')
@@ -211,6 +229,19 @@ def every_state():
                                           ready),
         *[r[1] for r in host_status], 'read today: 0.0 GB of 50 GB', 'docker logs aiosubtitles-subsync',
         update.RUNNING.format(version='1.1.0'), update.READY.format(version='1.2.0'))
+    add('after-host-not-ticked', screens.after_setup('host', host_status, [('logs', 'docker logs aiosubtitles-subsync')],
+                                                     '1.1.0', ready, problem=('CONFIRM', screens.TICK_TO_REMOVE)),
+        *[r[1] for r in host_status], 'read today: 0.0 GB of 50 GB', 'docker logs aiosubtitles-subsync',
+        update.RUNNING.format(version='1.1.0'), update.READY.format(version='1.2.0'))
+    add('after-usenet', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
+                                            config='1a2b3c4d…', removing=screens.remove_text({'SYNC_UUID': 'x',
+                                                                                              'USENET_UUID': 'y'})),
+        *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…')
+    saving = [('warn', 'Saving the config: This AIOStreams asks you to sign in before configs can be saved.', None)]
+    add('after-sign-in', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
+                                             problem=('AIOS_USERNAME', ''), config='1a2b3c4d…', sign_in=True,
+                                             username='admin', written=saving),
+        *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…', saving[0][1])
     saved = update.SAVED_DATABASES.format(path='state/backups/databases-20261114-061500')
     updating = [('ok', saved, None), ('done', update.CHECKING.format(version='1.2.0', old='1.1.0'), None),
                 ('ok', update.CHECKED, None), ('now', update.SWITCHING.format(version='1.2.0'), None)]
@@ -233,5 +264,15 @@ def every_state():
     stays = ['the subsync image (about 1 GB): docker image rm 3320f59e4ec8',
              'this folder, /home/me/aiosubtitles, with copies of your config in state/backups/ (./setup --restore FILE puts one back)']
     add('removed', screens.removed('Removing subsync', gone_rows, stays), *[r[1] for r in gone_rows], *stays)
+    timeout = (engine.REMOVE_FAILED, 'Error response from daemon: timeout')
+    add('removing-failed', screens.working('Removing subsync', gone_rows[:2], running=False, stop=timeout),
+        *[r[1] for r in gone_rows[:2]], *timeout)
+    host_gone = [('ok', 'Removed the subsync container and its stored copies', None), ('ok', 'Done.', None)]
+    host_stays = ['the subsync image (about 1 GB): docker image rm 3320f59e4ec8',
+                  f'the rule in your web server for {ADDRESS}: remove it there and reload the web server',
+                  'this folder, /home/me/aiosubtitles, with the database copies made before updates in state/backups/, '
+                  "which hold everyone's records"]
+    add('removed-host', screens.removed('Removing AIOSubtitles', host_gone, host_stays), *[r[1] for r in host_gone],
+        *host_stays)
     add('ended', screens.ended())
     return out

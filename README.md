@@ -205,8 +205,10 @@ Goes back to the version before the last update (see [Rollback](#rollback)).
 ./setup --uninstall
 ```
 
-Takes subsync out of your config, deletes its own config and removes the container. It then lists what stays: the
-subsync image, your web server's rule for subsync, and this folder with the copies of your config.
+Takes subsync out of your config, deletes subsync's own configs on your AIOStreams (its Usenet config too) and removes
+the container with its stored copies. It then lists what stays: the subsync image, your web server's rule for subsync,
+and this folder with the copies of your config. On a public instance it removes AIOSubtitles with everyone's records
+and stored copies, after you confirm; the sync configs it made on people's AIOStreams stay.
 
 ```bash
 ./setup --restore state/backups/FILE

@@ -410,13 +410,15 @@ class ConfigRecovery(Offline):
         self.assertIn('AIOStreams did not keep the cache setting; synced copies may take 5 minutes.',
                       self.cache_setting(keeps_setting=False))
 
-    def test_uninstall_warns_when_a_config_of_subsyncs_is_gone(self):
+    def test_uninstall_skips_a_config_of_subsyncs_already_gone(self):
+        # it warned once ("Removing the sync config: That config ID and password don't match …"): a removal stopped
+        # half way had deleted it, and the next removal, which finishes the job, skips what is already done
         sync_id = self.install()['SYNC_UUID']
         del self.aios.users[sync_id]
         code, out = self.again('--uninstall', CONFIRM='yes')
         self.assertEqual(code, 0, out)
-        self.assertIn("Removing the sync config: That config ID and password don't match a config on this AIOStreams.",
-                      out)
+        self.assertNotIn("don't match", out)
+        self.assertNotIn('!  ', out)                                    # no warning at all
         self.assertNotIn("Deleted subsync's own config", out)
         self.assertIn('Done.', out)
         self.assertFalse((self.state / 'secrets.env').exists())
@@ -1061,6 +1063,138 @@ class ClosingWords(Offline):
         self.assertEqual(status({'other': 1, 'keep_original': 1}),       # an outcome without words: its own name, last
                          'synced copies offered: 0; subtitles checked: 2 (1 original kept, 1 other); read today: '
                          '4.2 MB')
+
+
+class Removal(Offline):
+    """./setup --uninstall and --restore on an AIOStreams that saves configs only for a signed-in account, Docker failing
+    to take the service down, and what removing says it deletes."""
+
+    SIGN_IN = {'AIOS_USERNAME': 'admin', 'AIOS_PASSWORD': 'adminpw'}
+
+    def run_main(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(list(argv))
+        return code, out.getvalue()
+
+    def test_uninstall_signs_in_when_aiostreams_asks(self):
+        # it stopped with "This AIOStreams asks you to sign in before configs can be saved." and never asked
+        self.aios.gated = True
+        self.install(**self.SIGN_IN)
+        code, out = self.again('--uninstall', CONFIRM='yes', **self.SIGN_IN)
+        self.assertEqual(code, 0, out)
+        self.assertIn('!  Saving the config: This AIOStreams asks you to sign in before configs can be saved.', out)
+        self.assertIn('AIOStreams sign-in to save configs: username', out)
+        self.assertIn('Signed in', out)
+        self.assertEqual(self.ours(), [])
+        self.assertNotIn('adminpw', out)
+
+    def test_restore_signs_in_when_aiostreams_asks(self):
+        self.aios.gated = True
+        self.install(**self.SIGN_IN)
+        copy = next((self.state / 'backups').iterdir())
+        answers = self.answers_file(dict(AIOS_CONFIG_PASSWORD=PASSWORD, CONFIRM='yes', **self.SIGN_IN))
+        code, out = self.run_main('--restore', str(copy), '--answers', answers, '--yes')
+        self.assertEqual(code, 0, out)
+        self.assertIn('Restored.', out)
+        self.assertEqual(self.ours(), [])                                     # the copy from before subsync
+
+    def test_a_failed_container_removal_keeps_setups_files_and_the_next_one_finishes(self):
+        # it said "Removed the subsync container and its stored copies" and deleted setup's files while the container
+        # kept running; the next ./setup then stopped at a container "this setup didn't make"
+        self.install()
+
+        def compose(state, *args, **kw):
+            return (1, '', 'Error response from daemon: timeout') if 'down' in args else (0, '', '')
+        with mock.patch.object(dockerenv, 'compose', compose):
+            code, out = self.again('--uninstall', CONFIRM='yes')
+        self.assertEqual(code, 1, out)
+        self.assertIn("✗  Removing the subsync container failed; setup's files were kept, so removing it again finishes "
+                      'the job.\n      Error response from daemon: timeout\n', out)
+        self.assertNotIn('Removed the subsync container', out)
+        for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
+            self.assertTrue((self.state / name).exists(), name)
+        code, out = self.again('--uninstall', CONFIRM='yes')                 # its sync config is gone already
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('!  ', out)
+        self.assertIn('Removed the subsync container and its stored copies', out)
+        self.assertFalse((self.state / 'settings.json').exists())
+
+    def test_uninstall_names_the_configs_it_deletes(self):
+        # it said "deletes subsync's own config" also when the Usenet config goes too, from a second copy of the page's
+        self.install(USENET='yes')
+        code, out = self.again('--uninstall', CONFIRM='yes')
+        self.assertEqual(code, 0, out)
+        self.assertIn("This takes subsync out of your config (1 entry), deletes subsync's own config and its Usenet "
+                      'config, and removes the subsync container with its stored copies. Your other subtitle sources '
+                      'stay.', flat(out))
+        self.assertIn("Deleted subsync's Usenet config", out)
+
+
+class Advice(Offline):
+    """The way out the terminal gives after an answer refused or not given: by the answers file, and none to give for a
+    public instance's removal answered no."""
+
+    def run_main(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(list(argv))
+        return code, out.getvalue()
+
+    def test_the_three_ways_out(self):
+        self.assertEqual(ui.answers_advice('PUBLIC_ADDRESS', {'PUBLIC_ADDRESS': 'x'}),
+                         'Change PUBLIC_ADDRESS in the answers file.')
+        self.assertEqual(ui.answers_advice('PUBLIC_ADDRESS', {}), 'Add PUBLIC_ADDRESS=... to the answers file.')
+        self.assertEqual(ui.answers_advice('PUBLIC_ADDRESS', None),
+                         'Give PUBLIC_ADDRESS=... in an answers file: ./setup --answers FILE --yes.')
+
+    def test_a_refused_answer_the_file_gives_is_to_be_changed_there(self):
+        # it said "Add PUBLIC_ADDRESS=... to the answers file." to a file that has that line
+        with mock.patch.object(dockerenv, 'port_in_use', lambda *a: True), \
+                mock.patch.object(dockerenv, 'container_state', lambda n: ''):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', PUBLIC_ADDRESS=f'{PUBLIC}/subsync'))
+            self.assertEqual(code, 1, out)
+            self.assertIn('✗  Port 8790 on this machine is already in use.\n      Change PUBLIC_ADDRESS in the answers '
+                          'file.\n', out)
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))   # the line left out: the default refused
+            self.assertIn('      Add PUBLIC_ADDRESS=... to the answers file.\n', out)
+
+    def test_a_missing_answer_says_where_to_give_it(self):
+        # it said "Add …=... to the answers file." also when no answers file was given, or the file has that line
+        self.install()
+        code, out = self.run_main('--uninstall', '--yes')
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'✗  "Password of your config {UUID[:8]}…" needs an answer.\n      Give AIOS_CONFIG_PASSWORD=... in '
+                      'an answers file: ./setup --answers FILE --yes.\n', out)
+        for lines, advice in (({'CONFIRM': 'yes'}, 'Add AIOS_CONFIG_PASSWORD=... to the answers file.'),
+                              ({'AIOS_CONFIG_PASSWORD': '', 'CONFIRM': 'yes'},
+                               'Change AIOS_CONFIG_PASSWORD in the answers file.')):
+            with self.subTest(lines=lines):
+                code, out = self.run_main('--uninstall', '--answers', self.answers_file(lines), '--yes')
+                self.assertEqual(code, 1, out)
+                self.assertIn(f' needs an answer.\n      {advice}\n', out)
+        self.assertTrue((self.state / 'settings.json').exists())
+
+
+class AnswersEcho(Offline):
+    """An answers run prints each answer back, never a pasted link: its second part is the config's encrypted
+    password."""
+
+    def test_a_pasted_install_link_is_shown_by_its_config_id(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no',
+                                        AIOS_CONFIG_ID=f'{PUBLIC}/stremio/{UUID}/SECRETSEGMENT/manifest.json'))
+        self.assertEqual(code, 0, out)
+        self.assertIn(f'  > {UUID[:8]}…   (from the answers file)\n', out)
+        self.assertNotIn('SECRETSEGMENT', out)
+        self.assertNotIn(f'/stremio/{UUID}/', out)
+
+    def test_an_alias_link_is_shown_as_one(self):
+        self.aios.aliases['Home'] = UUID
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no',
+                                        AIOS_CONFIG_ID=f'{PUBLIC}/stremio/u/Home/manifest.json'))
+        self.assertEqual(code, 0, out)
+        self.assertIn('  > an alias link   (from the answers file)\n', out)
+        self.assertNotIn('/stremio/u/Home', out)
 
 
 class RouteKept(Offline):

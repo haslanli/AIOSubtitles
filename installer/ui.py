@@ -92,6 +92,15 @@ def masked(value):
 REMOVE = 'remove'      # typed at an optional question with a current answer: removes it
 
 
+def answers_advice(key, given):
+    """The way out after an answer was refused or not given: `given`, the keys the answers file has (None: no file)."""
+    if given is None:
+        return f'Give {key}=... in an answers file: ./setup --answers FILE --yes.'
+    if key in given:
+        return f'Change {key} in the answers file.'
+    return f'Add {key}=... to the answers file.'
+
+
 class Asker:
     """Questions with defaults, each shown with its one explanation (subsync/subsync/explain.py, by the question's
     answers-file key; a key without one is refused). Enter keeps the current answer (or takes the default); '?' shows
@@ -100,7 +109,9 @@ class Asker:
     '' is returned."""
 
     def __init__(self, answers=None, yes=False):
+        """`answers`: the answers file's lines; None when no file was given."""
         self.answers, self.yes = dict(answers or {}), yes
+        self.file_keys = None if answers is None else set(answers)
 
     def _input(self, prompt, secret):
         try:
@@ -115,7 +126,10 @@ class Asker:
 
     def text(self, key, question, *, current=None, default=None, secret=False, optional=False, check=None,
              shown=None, skip_hint='Enter skips'):
-        """One question. `check(value)` returns (good, message, value): a message is shown either way."""
+        """One question. `check(value)` returns (good, message, value): a message is shown either way. `shown(value)`:
+        how the current answer and one from the answers file are shown (a secret's: masked)."""
+        def show(value):
+            return masked(value) if secret else shown(value) if shown else value
         explanation = (explain.QUESTIONS.get(key) or explain.SETTINGS[key])[1]   # a limit: its setting's text
         preset = self.answers.pop(key, None)
         while True:
@@ -125,7 +139,7 @@ class Asker:
                 say(paint('2', f'  {line}'))
             hint = []
             if current:
-                hint.append(f'Enter keeps: {masked(current) if secret else (shown or current)}')
+                hint.append(f'Enter keeps: {show(current)}')
                 if optional:
                     hint.append(f'type {REMOVE} to delete it')
             elif default:
@@ -136,7 +150,7 @@ class Asker:
                 say(paint('2', '  ' + '; '.join(hint)))
             if preset is not None:
                 value = preset
-                say(f'  > {masked(value) if secret and value else (value or "(empty)")}   {paint("2", "(from the answers file)")}')
+                say(f'  > {show(value) if value else "(empty)"}   {paint("2", "(from the answers file)")}')
                 preset = None
                 removing = not value
             elif self.yes:
@@ -156,7 +170,7 @@ class Asker:
                 if optional:
                     return ''
                 if self.yes:
-                    stop(f'"{question}" needs an answer.', f'Add {key}=... to the answers file.')
+                    stop(f'"{question}" needs an answer.', answers_advice(key, self.file_keys))
                 warn('This one is needed.')
                 continue
             if check:

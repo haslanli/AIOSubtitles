@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from installer import engine, tests, update, web
+from installer import engine, screens, tests, update, web
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
@@ -241,7 +241,7 @@ class Personal(BackgroundWork, FlowFixture):
         _, _, text = b.follow('machine', {'go': 'next'})
         self.assertIn('Viewers reach it at', text)
         _, _, text = b.follow('aios', {'go': 'next'})
-        self.assertIn('Config ID (or paste your Stremio link)', text)
+        self.assertIn('Config ID (or paste your install link)', text)
         _, _, text = b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': 'wrong', 'go': 'next'})
         self.assertIn("don't match", text)
         _, _, text = b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
@@ -453,6 +453,87 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertEqual((keys['TMDB_KEY'], env['SUBSYNC_TMDB_KEY']), ('tmdb-key-1', 'tmdb-key-1'))
         self.assertFalse(any('subdl-key-1' in page or 'tmdb-key-1' in page for page in self.b.pages))
 
+    def test_the_config_step_calls_the_link_an_install_link(self):
+        # the box said "Stremio link" while its explanation, the alias errors and the public pages say "install link"
+        self.walk_to_config()
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': '00000000-0000-4000-8000-000000000000',
+                                            'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.assertIn('Config ID (or paste your install link)', text)
+        self.assertIn('There is no config with that ID on this AIOStreams. Check it, or paste your install link.', text)
+        self.assertNotIn('Stremio link', text)
+
+    def test_the_install_page_shows_the_rules_note_under_the_rule(self):
+        # the note was the install step's first output and joined the review step's last row, so no page showed it:
+        # a web server in Docker got only the rule's 127.0.0.1:8790
+        note = ("Web server running in Docker on AIOStreams' network: use aiosubtitles-subsync:8790 instead of "
+                '127.0.0.1:8790.')
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        _, _, text = self.b.settle('install')
+        self.assertEqual(text.count(note), 1)
+        self.assertGreater(text.index(note), text.rindex('</pre>'))            # under the rule, as in the terminal
+        self.assertNotIn(note, str(self.app.session.rows['review']))
+
+    def test_a_stop_while_saving_shows_on_the_review_page(self):
+        # the page came back unchanged: no message, the cache box unticked, the sign-in fields gone, and every retry
+        # met AIOStreams' hourly limit blind
+        limited = engine.AiosError('Creating the sync config: AIOStreams is limiting requests from this machine (it '
+                                   'allows 10 new configs an hour); try again later.')
+        unreachable = engine.AiosError("Can't reach AIOStreams at http://aiostreams:3000 (timed out).",
+                                       'Check the address, and that AIOStreams is running (docker ps).')
+        self.walk_to_review()
+        form = {'CONFIRM': 'yes', 'CACHE': 'yes', 'AIOS_USERNAME': 'admin', 'AIOS_PASSWORD': 'adminpw'}
+        for error in (limited, unreachable):
+            with self.subTest(error=error.message), mock.patch.object(engine.Aios, 'create_config', side_effect=error):
+                status, _, text = self.b.post('review', form)
+                self.assertEqual(status, 200)
+                self.assertIn(error.message, text)
+                self.assertIn(error.fix or error.message, text)              # its way out
+                self.assertRegex(text, r'<input[^>]*name="CACHE"[^>]*checked')
+                self.assertIn('AIOStreams sign-in (admin): username', text)
+                self.assertRegex(text, r'<input[^>]*name="AIOS_USERNAME"[^>]*value="admin"')
+                if error is limited:                                          # signed in once, the first time
+                    self.assertIn('Signed in', text)                          # what the step wrote before it stopped
+        self.assertFalse(any('adminpw' in page for page in self.b.pages))
+
+    def test_a_refused_audio_limit_shows_under_its_field(self):
+        # the engine refuses it under its answers-file key, AUDIO_BUDGET, which the page's field isn't named by
+        self.walk_to_review(AUDIO='pick')
+        _, _, text = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'SUBSYNC_AUDIO_BUDGET_GB': '3',
+                                            'go': 'next'})
+        self.assertIn('<p class="field-error">Type 0.5, 1, 2 or 4 (GB per file).</p>', text)
+
+    def test_the_sign_in_is_labelled_by_why_aiostreams_asks(self):
+        # it always said "(admin)", though only the cache setting needs an admin account
+        self.aios.gated = True
+        self.walk_to_review()
+        _, _, text = self.b.post('review', {'CONFIRM': 'yes'})
+        self.assertIn('AIOStreams sign-in to save configs: username', text)
+        self.assertNotIn('AIOStreams sign-in (admin): username', text)
+        self.assertIn('Creating the sync config: This AIOStreams asks you to sign in before configs can be saved.', text)
+        _, _, text = self.b.post('review', {'CONFIRM': 'yes', 'CACHE': 'yes'})
+        self.assertIn('AIOStreams sign-in (admin): username', text)
+        self.assertNotIn('AIOStreams sign-in to save configs: username', text)
+        status, headers, _ = self.b.post('review', {'CONFIRM': 'yes', 'AIOS_USERNAME': 'admin',
+                                                    'AIOS_PASSWORD': 'adminpw'})
+        self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/install'))
+        self.b.settle('install')
+
+    def test_the_done_page_shows_the_checks_warnings_under_its_heading(self):
+        # it said "Installed, with warnings (see above)" with nothing above: the warnings were on the page before
+        self.aios.reaches_subsync = False
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        self.b.follow('install', {'go': 'next'})
+        self.b.settle('check')
+        _, _, text = self.b.follow('check', {'go': 'next'})
+        self.assertIn('<h1 tabindex="-1">Installed, with warnings</h1>', text)
+        self.assertNotIn('see above', text)
+        self.assertLess(text.index('Installed, with warnings'), text.index('AIOStreams did not reach subsync.'))
+        self.assertIn('It calls http://aiosubtitles-subsync:8790/…; check that address works from AIOStreams.', text)
+        self.assertNotIn('AIOStreams asks subsync for subtitles', text)        # the warnings only
+
     def test_the_page_after_setup(self):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8803)
@@ -541,6 +622,16 @@ class Pieces(unittest.TestCase):
         self.assertTrue(s.run('machine', lambda: None))
         self.assertEqual(s.done, {'machine'})
 
+    def test_a_note_that_comes_first_in_a_step_stays_in_that_step(self):
+        # it joined the last row of the step before, already shown, and so was shown nowhere
+        s = web.Session('yourself', {})
+        s.run('review', lambda: s.e.out.ok("Created subsync's own config (91aaaaaa…)"))
+        s.run('install', lambda: s.e.out.note('A note first.'))
+        self.assertEqual(s.rows['install'], [('note', 'A note first.', None)])
+        self.assertEqual(s.e.out.rows[0], ['ok', "Created subsync's own config (91aaaaaa…)", None])
+        s.run('check', lambda: (s.e.out.warn('A warning.'), s.e.out.note('Its note.')))
+        self.assertEqual(s.rows['check'], [('warn', 'A warning.', 'Its note.')])     # under its own row, as before
+
     def test_a_stopped_step_leaves_no_turning_ring(self):
         s = web.Session('yourself', {})
 
@@ -610,6 +701,89 @@ class Hosting(BackgroundWork, RouteFixture):
         env = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual((env['SUBSYNC_PUBLIC_INVITE'], env['SUBSYNC_MAX_USERS']), ('my-own-code', '150'))
         self.assertFalse(any(env['SUBSYNC_SECRET_KEY'] in page for page in b.pages))     # never on a page
+
+    def test_removing_a_public_instance_on_the_page(self):
+        # its page said "subsync" and "Removing subsync", showed the warning twice, asked for a password it has no
+        # field for when the box wasn't ticked, and pointed at --restore for config copies a public instance never makes
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        b = Browser(web.App(port=8812))
+        _, _, text = b.get('')
+        self.assertIn('<h1>AIOSubtitles status</h1>', text)
+        self.assertIn('<h2 id="rm-h">Removing AIOSubtitles</h2>', text)
+        self.assertNotIn('subsync status', text)
+        self.assertEqual(text.count(screens.REMOVE_HOST_TEXT), 1)
+        _, _, text = b.post('remove', {})
+        self.assertIn('Tick "Delete everyone\'s records and stored copies" to remove AIOSubtitles.', text)
+        self.assertNotIn('Its password', text)
+        box = re.search(r'<input type="checkbox" id="confirm"[^>]*>', b.pages[-1]).group(0)
+        self.assertIn('aria-describedby="confirm-error confirm-help" aria-invalid="true"', box)
+        self.assertIn('<p class="field-error" id="confirm-error">', b.pages[-1])
+        self.assertTrue((self.state / 'subsync.env').exists())                          # nothing removed
+        _, _, text = b.post('remove', {'CONFIRM': 'yes'})
+        self.assertIn('<h1 tabindex="-1">Removing AIOSubtitles</h1>', text)
+        self.assertIn(f'this folder, {self.state.parent}</li>', text)                   # no database copies here
+        self.assertNotIn('--restore', text)
+        self.assertFalse((self.state / 'subsync.env').exists())
+
+
+class Removing(BackgroundWork, FlowFixture):
+    """Remove subsync on the page after setup."""
+
+    def setUp(self):
+        super().setUp()
+        self.b = Browser(web.App(port=8811))
+
+    def remove(self, **form):
+        return self.b.post('remove', dict({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, **form))[2]
+
+    def test_the_text_names_the_configs_this_install_has(self):
+        # it said "(1 entry)" and "subsync's own config" also when the Usenet config goes too
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no', USENET='yes'))
+        _, _, text = self.b.get('')
+        self.assertIn("This takes subsync out of your config, deletes subsync's own config and its Usenet config, and "
+                      'removes the subsync container with its stored copies. Your other subtitle sources stay.', text)
+        self.assertNotIn('(1 entry)', text)
+        self.assertIn("Deleted subsync's Usenet config", self.remove())
+
+    def test_removing_asks_the_sign_in_an_aiostreams_wants_to_save_configs(self):
+        # the form had no sign-in fields, so setup could never remove subsync from such an AIOStreams
+        self.aios.gated = True
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', AIOS_USERNAME='admin', AIOS_PASSWORD='adminpw'))
+        self.assertEqual(code, 0, out)
+        text = self.remove()
+        asks = 'Saving the config: This AIOStreams asks you to sign in before configs can be saved.'
+        self.assertIn(asks, text)
+        self.assertLess(text.index(asks), text.index('AIOStreams sign-in to save configs: username'))
+        self.assertRegex(self.b.pages[-1], r'<input[^>]*name="AIOS_PASSWORD"[^>]*type="password"')
+        self.assertNotIn('needs an answer', text)                                       # asked, not marked wrong
+        self.assertTrue((self.state / 'settings.json').exists())
+        text = self.remove(AIOS_USERNAME='admin', AIOS_PASSWORD='adminpw', REMOVE_OPENSUBTITLES='yes')
+        self.assertIn('These stay, in case you set it up again', text)
+        self.assertFalse((self.state / 'settings.json').exists())
+        self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
+        self.assertFalse(any('adminpw' in page or PASSWORD in page for page in self.b.pages))
+
+    def test_a_failed_container_removal_keeps_setups_files_and_says_what_docker_said(self):
+        # it said "Removed the subsync container" and deleted setup's files while the container kept running
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+
+        def compose(state, *args, **kw):
+            return (1, '', 'Error response from daemon: timeout') if 'down' in args else (0, '', '')
+        with mock.patch.object(engine.dockerenv, 'compose', compose):
+            text = self.remove()
+        self.assertIn('<h1 tabindex="-1">Removing subsync</h1>', text)
+        self.assertIn("Removing the subsync container failed; setup's files were kept, so removing it again finishes "
+                      'the job.', text)
+        self.assertIn('Error response from daemon: timeout', text)
+        self.assertIn('Your config no longer lists subsync', text)                      # what it did before it stopped
+        self.assertNotIn('Removed the subsync container', text)
+        for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
+            self.assertTrue((self.state / name).exists(), name)
+        self.assertIsNone(self.b.app.finishing)                                         # the page stays up
+        text = self.remove()
+        self.assertIn('Removed the subsync container and its stored copies', text)
+        self.assertFalse((self.state / 'settings.json').exists())
 
 
 class Lengths(unittest.TestCase):
