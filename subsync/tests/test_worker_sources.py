@@ -49,6 +49,11 @@ class FingerprintTest(unittest.TestCase):
         self.assertNotEqual(fingerprint(RU), fingerprint(RU.replace("00:00:03,500", "00:00:04,000")))
         self.assertNotEqual(fingerprint(RU), fingerprint(RU.replace("Привет", "Здравствуй")))
 
+    def test_with_no_edge_left_out_a_longer_subtitle_is_still_told_apart(self):
+        long = "\n".join(f"{i + 1}\n00:00:{i:02d},000 --> 00:00:{i:02d},800\nLine {i}\n" for i in range(30))
+        with mock.patch.object(srclimits, "FINGERPRINT_EDGE", 0):   # lines[0:-0] was no line at all
+            self.assertNotEqual(fingerprint(long), fingerprint(long.replace("Line 15", "Another line")))
+
 
 class FakeAios:
     def __init__(self, subs=(), sources=()):

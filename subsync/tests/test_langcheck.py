@@ -1,7 +1,10 @@
 """The language check: a subtitle whose text isn't in the language it is listed under is refused; a short one,
 or one the check can't tell, never is."""
 import os
+import random
+import re
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -90,6 +93,18 @@ class LanguageCheckTest(unittest.TestCase):
         m = langcheck.measure(text, "rus")
         self.assertEqual(m["script"], 1.0)                                     # no letter of a tag or drawing counted
         self.assertEqual(langcheck.check(ass(ENGLISH), "eng"), langcheck.PASS)
+
+    def test_a_drawing_is_found_as_before_and_unclosed_braces_are_read_in_linear_time(self):
+        old = re.compile(r"\{[^}]*\\p[1-9]")
+        rng = random.Random(5)
+        for _ in range(4000):
+            text = "".join(rng.choice("{}\\p1a ") for _ in range(rng.randrange(0, 14)))
+            self.assertEqual(bool(langcheck._DRAWING.search(text)), bool(old.search(text)), text)
+        cue = "1\n00:00:01,000 --> 00:00:02,000\n{}" + " ".join(ENGLISH[:3]) + "\n"
+        t0 = time.monotonic()   # 100,000 braces with no closer after them took about 3 s a pass, and there are two
+        braces = langcheck.measure(cue.format("{" * 100000), "eng")
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(braces["words"], langcheck.measure(cue.format(""), "eng")["words"])
 
     def test_a_language_without_a_word_list_gets_the_script_check_only(self):
         self.assertNotIn("pol", langcheck.WORDS)

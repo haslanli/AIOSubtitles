@@ -57,7 +57,12 @@ SEARCH_TTL_S = 6 * 3600
 EMPTY_TTL_S = 3600
 SEARCH_CACHE_ENTRIES = 2000
 CALLS_AT_ONCE = 16                 # source calls running at the same time, for every file together
-FINGERPRINT_EDGE = 3               # lines left out at each end of a longer subtitle when telling duplicates apart (sites add notices there)
+# Telling duplicates apart (subs.fingerprint): at most FINGERPRINT_CREDIT_LINES credit lines left out
+# at each end; a subtitle of more than FINGERPRINT_LONGER_THAN dialogue lines also leaves out FINGERPRINT_EDGE lines at
+# each end (sites add notices there)
+FINGERPRINT_CREDIT_LINES = 3
+FINGERPRINT_LONGER_THAN = 20
+FINGERPRINT_EDGE = 3
 TSDB_RELEASE_SCORE = 0.8          # TheSubtitleDB's release-name match: at least this score is a match (0.57 was another film)
 TSDB_PAGES = 5                     # TheSubtitleDB pages by IMDb id; the torrent and release lookups take one
 TSDB_PAGE_SIZE = 100               # subtitles a page: TheSubtitleDB's

@@ -213,8 +213,17 @@ class TextWordsTest(unittest.TestCase):
         self.assertEqual(textpair.words("{\\i1}Where's the <b>TRAIN</b>,\\Nfather? 9:15!"),
                          ["where", "s", "the", "train", "father", "9", "15"])
 
-    def test_ass_block_text_is_its_last_field(self):
-        self.assertEqual(textpair.ass_text("12,0,Default,,0,0,0,,Hello, there"), "Hello, there")
+    def test_words_are_read_as_the_old_pattern_read_them_and_in_linear_time(self):
+        import re
+        old = re.compile(r"\{[^}]*\}|<[^>]*>|\\[Nnh]")
+        rng = random.Random(3)
+        for _ in range(4000):
+            text = "".join(rng.choice("{}<>ab \\Nnh") for _ in range(rng.randrange(0, 14)))
+            self.assertEqual(textpair.words(text), textpair.WORD.findall(old.sub(" ", text).lower()), text)
+        t0 = time.monotonic()
+        for opener in "{<":   # 100,000 openers with no closer after them took about 3 s
+            self.assertEqual(textpair.words("{\\i1}Go<br>on " + opener * 100000), ["go", "on"])
+        self.assertLess(time.monotonic() - t0, 1.0)
 
     def test_at_most_120_lines_in_runs_of_three_spread_over_the_film(self):
         cues = [(s, d) for s, d, _ in dialogue(1500, 3)]
@@ -226,6 +235,18 @@ class TextWordsTest(unittest.TestCase):
         self.assertEqual(tenths, set(range(10)))
         runs = sum(1 for a, b in zip(picks, picks[1:]) if b == a + 1)
         self.assertGreater(runs, len(picks) / 2)
+
+    def test_each_run_starts_in_its_own_quarter_of_the_tenth_when_long_lines_are_few(self):
+        # 400 lines of 1.0 s, the last of each tenth 2.0 s long: every run once started at that one long line
+        cues = [(i * 2.0, 2.0 if i % 40 == 39 else 1.0) for i in range(400)]
+        picks = textpair.pick(cues)
+        for tenth in range(10):
+            for quarter in range(4):
+                first = tenth * 40 + quarter * 10
+                self.assertTrue(any(first <= i < first + 10 for i in picks), (tenth, quarter))
+        self.assertGreaterEqual(len(picks), 100)
+        self.assertLessEqual(len(picks), textpair.MAX_LINES)
+        self.assertIn(39, picks)                             # a long line in a run's own quarter still starts it
 
 
 class TextMatchTest(unittest.TestCase):

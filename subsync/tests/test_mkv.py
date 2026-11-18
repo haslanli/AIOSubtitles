@@ -102,6 +102,11 @@ class InflateLimitTest(unittest.TestCase):
             self.assertEqual(index.line_images(t["number"], starts), {})
 
 
+class AssBlockTest(unittest.TestCase):
+    def test_ass_block_text_is_its_last_field(self):
+        self.assertEqual(mkv.ass_text("12,0,Default,,0,0,0,,Hello, there"), "Hello, there")
+
+
 class HungLineReadTest(unittest.TestCase):
     """Once a track's line reads have stopped (three failed in a row), read_lines returns with what it
     has: a read the host never answers ends by itself at its timeout and holds nothing up."""

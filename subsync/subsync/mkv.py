@@ -151,6 +151,12 @@ def _block_at(buf, o, track):
     return None if ext is None else bytes(buf[ext[0]:ext[1]])
 
 
+def ass_text(block_text):
+    """The text field of a Matroska ASS block (ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect, Text)."""
+    parts = block_text.split(",", 8)
+    return parts[8] if len(parts) == 9 else block_text
+
+
 def uncompressed(payload, comp, limit):
     """A block payload with the track's ContentCompression undone (zlib, or header stripping); None when it can't be,
     or when it would inflate past `limit` bytes. A zlib payload cut short (a text line's block past WORD_READ) gives
@@ -579,7 +585,6 @@ class MkvIndex:
             if text.count("\ufffd") > 0.1 * max(1, len(text)):
                 return s, None
             if meta.get("codec", "").startswith(("S_TEXT/ASS", "S_TEXT/SSA")):
-                from .textpair import ass_text
                 text = ass_text(text)
             return s, text
         return read_lines(want, one, reads)

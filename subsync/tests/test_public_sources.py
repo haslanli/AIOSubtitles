@@ -49,6 +49,19 @@ class RecipeTest(unittest.TestCase):
         r = timing_recipe(ASS, body)
         self.assertEqual(apply_recipe(ASS, r), body)
 
+    def test_an_ass_with_a_dropped_line_whose_text_another_layer_repeats(self):
+        from subsync.subs import parse, write_like
+        original = ASS.replace("Dialogue: 0,0:00:03.00,0:00:04.00,Sign,,0,0,0,,{\\pos(1,1)}EXIT",
+                               "Dialogue: 1,0:00:01.50,0:00:02.50,Default,,0,0,0,,Hi")   # "Hi" again, on layer 1
+        lines = parse(original)
+        lines[0] = dict(lines[0], drop=True)
+        lines[1] = dict(lines[1], s=2.0, e=3.0)
+        body = write_like(original, lines)
+        r = timing_recipe(original, body)                    # the copy's "Hi" is layer 1's, not the dropped one's
+        self.assertIsNotNone(r)
+        self.assertEqual(r["times"], [None, [2000, 3000], [5000, 6000]])
+        self.assertEqual(apply_recipe(original, r), body)
+
     def test_unchanged_is_the_original(self):
         self.assertEqual(apply_recipe(SRT, timing_recipe(SRT, SRT)), SRT)
 

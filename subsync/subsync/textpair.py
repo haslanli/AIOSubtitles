@@ -1,9 +1,9 @@
 """Lines paired by their words (D1, D2): a subtitle's lines against the file's own track, in the same language.
 
 The index gives the track's line times, not its words; a few of its lines are read (index.line_words): runs of RUN
-consecutive lines, RUNS_PER_TENTH runs in each tenth of the track's span, each run starting at a line of at least
-MIN_LINE_S (the longer lines carry more words), at most MAX_LINES lines in all. Their words are kept only as hashes of
-word pairs, in memory, for the job; never stored or shared.
+consecutive lines, RUNS_PER_TENTH runs in each tenth of the track's span, each run starting at the first line of at
+least MIN_LINE_S in its own share of the tenth (the longer lines carry more words), at most MAX_LINES lines in all.
+Their words are kept only as hashes of word pairs, in memory, for the job; never stored or shared.
 
 A subtitle line and a track line say the same thing when at least SAME of the track line's word pairs are in the
 subtitle line (cover) and at least SAME of the subtitle line's are in the track line (precision). A track line with
@@ -12,25 +12,29 @@ said twice: "In his own way." 1.8 s apart in Inception), there is no anchor. A s
 line and the next one read is a merge: its start is measured against the first one's start, its end against the second
 one's end. Two or three consecutive subtitle lines that each fall inside one track line and together cover it are a
 split: the first one's start against the track line's start, the last one's end against its end; the others count as
-paired with no start of their own. Pairs never cross (the heaviest chain in both orders).
+paired with no start of their own. Pairs never cross (the longest chain in both orders).
 
 The confirmation (D2): a copy that passes by timing must also hold on its anchors, when it has at least MIN_ANCHORS:
-their median start error within the rule's own limit, and no tenth of the copy's span with at least TENTH_ANCHORS
-anchors whose median error is over TENTH_MS. With fewer than FEW_ANCHORS anchors in all, such a tenth refuses only with
-at least FEW_TENTH_ANCHORS anchors, or when the timing's own check finds that part weak too (Kingdom of Heaven
-DC's English, 21-22 anchors read from its PGS track, refused on about 3 of them in one tenth). It can only refuse.
+their median start error within the rule's own limit, and no tenth of the anchors' span (their first to their last
+start) with at least TENTH_ANCHORS anchors whose median error is over TENTH_MS. With fewer than FEW_ANCHORS anchors in
+all, such a tenth refuses only with at least FEW_TENTH_ANCHORS anchors, or when the timing's own check finds that part
+weak too (Kingdom of Heaven DC's English, 21-22 anchors read from its PGS track, refused on about 3 of them in
+one tenth). It can only refuse.
 """
 import hashlib
 import re
 import statistics
 
 from .relgate import within
+from .subs import strip_tags
 
 MIN_WORDS = 3
 SAME = 0.6
+TENTHS = 10               # the word check's own tenths (reads spread over them, anchors judged in them), not relgate's:
+                          # confirm matches the timing's weak tenths by time
 RUN = 3
 RUNS_PER_TENTH = 4
-MAX_LINES = 120
+MAX_LINES = TENTHS * RUNS_PER_TENTH * RUN   # the most lines pick() reads: every run of every tenth (120)
 MIN_LINE_S = 1.2
 MIN_ANCHORS = 20
 TENTH_ANCHORS = 3
@@ -38,13 +42,13 @@ TENTH_MS = 500.0
 FEW_ANCHORS = 40          # under this many anchors in all (about 4 a tenth), a tenth's words alone refuse only
 FEW_TENTH_ANCHORS = 5     # with this many in it, else only where the timing is weak there too
 
-TAGS = re.compile(r"\{[^}]*\}|<[^>]*>|\\[Nnh]")
+ESCAPES = re.compile(r"\\[Nnh]")   # an ASS line break or hard space
 WORD = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 def words(text):
     """A line's words: tags, case and punctuation out, digits kept."""
-    return WORD.findall(TAGS.sub(" ", text or "").lower())
+    return WORD.findall(ESCAPES.sub(" ", strip_tags(text or "", " ")).lower())
 
 
 def _h(a, b):
@@ -57,32 +61,25 @@ def pairs_of(text):
     return frozenset(_h(a, b) for a, b in zip(w, w[1:])), len(w)
 
 
-def ass_text(block_text):
-    """The text field of a Matroska ASS block (ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect, Text)."""
-    parts = block_text.split(",", 8)
-    return parts[8] if len(parts) == 9 else block_text
-
-
-def pick(cues, max_lines=MAX_LINES):
+def pick(cues):
     """Which of the track's lines to read: indexes into cues ((start, duration), by start), runs of RUN consecutive
-    lines, RUNS_PER_TENTH runs a tenth of the span, each starting at a line of at least MIN_LINE_S where one is near."""
+    lines, RUNS_PER_TENTH runs a tenth of the span, each starting at the first line of at least MIN_LINE_S in its own
+    share of the tenth, else at the share's first line."""
     if not cues:
         return []
     lo, hi = cues[0][0], cues[-1][0]
     span = max(hi - lo, 1e-9)
     tenth = {}
     for i, (s, _) in enumerate(cues):
-        tenth.setdefault(min(9, int((s - lo) / span * 10)), []).append(i)
+        tenth.setdefault(min(TENTHS - 1, int((s - lo) / span * TENTHS)), []).append(i)
     out = set()
-    for b in range(10):
-        idx = tenth.get(b, [])
-        if not idx:
-            continue
+    for idx in tenth.values():
         for r in range(RUNS_PER_TENTH):
             at = (r * len(idx)) // RUNS_PER_TENTH
-            k = next((j for j in idx[at:] if cues[j][1] >= MIN_LINE_S), idx[at])
+            share = idx[at:max(at + 1, ((r + 1) * len(idx)) // RUNS_PER_TENTH)]
+            k = next((j for j in share if cues[j][1] >= MIN_LINE_S), share[0])
             out.update(range(k, min(k + RUN, len(cues))))
-    return sorted(out)[:max_lines]
+    return sorted(out)
 
 
 class Track:
@@ -94,7 +91,6 @@ class Track:
         for i in sorted(texts):
             p, n = pairs_of(texts[i])
             self.lines.append({"i": i, "s": cues[i][0], "d": cues[i][1], "pairs": p, "n": n})
-        self.read = len(texts)
 
     def __len__(self):
         return len(self.lines)
@@ -129,11 +125,11 @@ def match(cand_lines, track):
             i = covering[0]
             prec = scores[i][1]
             if prec >= SAME:
-                found.append({"kind": "line", "c": [i], "t": [k], "w": 1.0})
+                found.append({"kind": "line", "c": [i], "t": [k]})
             elif k + 1 < len(tl) and tl[k + 1]["i"] == t["i"] + 1 and tl[k + 1]["pairs"] \
                     and _score(tl[k + 1]["pairs"], cp[i])[0] >= SAME \
                     and len(cp[i] & (t["pairs"] | tl[k + 1]["pairs"])) >= SAME * len(cp[i]):
-                found.append({"kind": "merge", "c": [i], "t": [k, k + 1], "w": 1.0})
+                found.append({"kind": "merge", "c": [i], "t": [k, k + 1]})
             continue
         inside = sorted(i for i, (_, prec) in scores.items() if prec >= SAME and cp[i])
         groups = []
@@ -145,22 +141,21 @@ def match(cand_lines, track):
         whole = [g for g in groups if len(g) >= 2
                  and len(t["pairs"] & frozenset().union(*(cp[i] for i in g))) >= SAME * len(t["pairs"])]
         if len(whole) == 1:
-            found.append({"kind": "split", "c": whole[0], "t": [k], "w": 1.0})
+            found.append({"kind": "split", "c": whole[0], "t": [k]})
     return _chain(found)
 
 
 def _chain(found):
-    """The heaviest set of anchors in which both the candidate and the track order rise (no crossing pairs)."""
+    """The longest chain of anchors in which both the candidate and the track order rise (no crossing pairs)."""
+    if not found:
+        return []
     found.sort(key=lambda a: (a["t"][0], a["c"][0]))
     n = len(found)
-    best, prev = [a["w"] for a in found], [-1] * n
+    best, prev = [1] * n, [-1] * n   # the longest chain ending at each anchor, and the anchor before it there
     for j in range(n):
         for i in range(j):
-            if found[i]["t"][-1] < found[j]["t"][0] and found[i]["c"][-1] < found[j]["c"][0] \
-                    and best[i] + found[j]["w"] > best[j]:
-                best[j], prev[j] = best[i] + found[j]["w"], i
-    if not n:
-        return []
+            if found[i]["t"][-1] < found[j]["t"][0] and found[i]["c"][-1] < found[j]["c"][0] and best[i] + 1 > best[j]:
+                best[j], prev[j] = best[i] + 1, i
     j = max(range(n), key=lambda x: best[x])
     out = []
     while j >= 0:
@@ -206,9 +201,9 @@ def confirm(anchors, errs, limit_ms, timing_weak=()):
     starts = [c for c, _, _ in errs]
     lo, hi = min(starts), max(starts)
     weak, spared = [], []
-    for b in range(10):
-        a, z = lo + (hi - lo) * b / 10, lo + (hi - lo) * (b + 1) / 10
-        e = [abs(x) * 1000 for c, x, _ in errs if a <= c < z or (b == 9 and c == hi)]
+    for b in range(TENTHS):
+        a, z = lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS
+        e = [abs(x) * 1000 for c, x, _ in errs if a <= c < z or (b == TENTHS - 1 and c == hi)]
         if len(e) >= TENTH_ANCHORS and not within(statistics.median(e), TENTH_MS):
             if len(errs) < FEW_ANCHORS and len(e) < FEW_TENTH_ANCHORS and \
                     not any(ta < z and a < tz for ta, tz in timing_weak):

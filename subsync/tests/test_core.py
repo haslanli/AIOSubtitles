@@ -76,6 +76,58 @@ class SubsTest(unittest.TestCase):
         self.assertEqual(subs.decode("﻿Hi".encode("utf-8")), "Hi")
         self.assertEqual(subs.decode("Привет".encode("cp1251"), "rus"), "Привет")
 
+    def test_a_dialogue_line_whose_time_cant_be_read_is_kept_as_it_is_and_not_counted(self):
+        bad = "Dialogue: 0,0:00:0x.00,0:00:04.00,Default,,0,0,0,,unreadable"
+        text = ASS.replace("Comment: ", bad + "\nComment: ")
+        lines = subs.parse(text)
+        self.assertEqual([l["text"] for l in lines], ["Hello, there", "{\\pos(10,10)}A SIGN", "la la"])
+        out = subs.write_like(text, [dict(l, s=l["s"] + 1, e=l["e"] + 1) for l in lines])
+        self.assertIn(bad, out)
+        self.assertEqual([round(l["s"], 2) for l in subs.parse(out)], [2.0, 4.0, 66.25])
+
+    def test_a_long_run_of_digits_is_no_time_and_is_read_in_linear_time(self):
+        digits = "1" * 30000   # each search took about 3 s when a time could start at any of them
+        srt = f"1\n{digits} --> 00:00:02,000\nx\n\n2\n00:00:03,000 --> 00:00:04,000\ny\n"
+        ass = ASS.replace("0:00:01.00,0:00:02.50", f"{digits},0:00:02.50")
+        t0 = time.monotonic()
+        self.assertEqual([l["text"] for l in subs.parse(srt)], ["y"])
+        lines = subs.parse(ass)
+        self.assertEqual([l["text"] for l in lines], ["{\\pos(10,10)}A SIGN", "la la"])
+        self.assertIn(f"Dialogue: 0,{digits},0:00:02.50,Default", subs.write_like(ass, lines))   # left as it is
+        self.assertLess(time.monotonic() - t0, 1.0)
+
+    def test_an_hour_too_long_to_be_one_is_no_time(self):
+        for digits in (300, 400):   # 300 was read as 3.6e303 s; 308 and more raised OverflowError
+            srt = "1\n00:00:01,000 --> 00:00:02,000\nHi\n\n2\n" + "9" * digits + ":00:00,000 --> 00:00:05,000\nx\n"
+            self.assertEqual([l["text"] for l in subs.parse(srt)], ["Hi"])
+            self.assertEqual(subs.fingerprint(srt), subs.fingerprint(srt.split("\n\n2\n")[0]))
+        long = "1\n123:00:01,000 --> 123:00:02,500\nHi\n\n2\n1:02:03,4 --> 1:02:04.5\nThere\n"
+        self.assertEqual([(l["s"], l["e"]) for l in subs.parse(long)],
+                         [(442801.0, 442802.5), (3723.4, 3724.5)])   # ordinary times read as before
+
+    def test_tags_are_stripped_as_the_old_pattern_did(self):
+        import re
+        rng = random.Random(7)
+        for _ in range(4000):
+            text = "".join(rng.choice("{}<>a \\N") for _ in range(rng.randrange(0, 14)))
+            for html, pattern in ((True, r"\{[^}]*\}|<[^>]*>"), (False, r"\{[^}]*\}")):
+                for repl in ("", " "):
+                    self.assertEqual(subs.strip_tags(text, repl, html), re.sub(pattern, repl, text), (text, html))
+        self.assertEqual(subs.strip_tags("{a{\\i1}text"), "text")             # as libass reads it
+        self.assertEqual(subs.strip_tags("{{a}} hello"), "} hello")
+        self.assertEqual(subs.strip_tags("<<b>x I <3"), "x I <3")
+
+    def test_unclosed_tags_are_read_in_linear_time(self):
+        n = 64000   # one cue of them took about 8 s through a fingerprint, 1.2 s through each other pass
+        for opener in "{<":
+            text = f"1\n00:00:01,000 --> 00:00:02,000\n{opener * n}\n"
+            t0 = time.monotonic()
+            subs.fingerprint(text)
+            self.assertEqual(subs.plain_line("<i>A</i> {\\i1}b{\\i0} " + opener * n), "a b " + opener * n)
+            self.assertEqual(subs.to_srt(subs.parse(text)), text)
+            self.assertIsNotNone(subs.timing_recipe(text, text.replace("00:00:01,000", "00:00:01,500")))
+            self.assertLess(time.monotonic() - t0, 2.0, opener)
+
 
 class RelgateTest(unittest.TestCase):
     def test_identical_passes(self):

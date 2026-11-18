@@ -85,7 +85,8 @@ _DISTINCT = {code: frozenset(w for w in words if not any(w in other for c, other
              for code, words in WORDS.items()}
 
 _TOKEN = re.compile(r"[^\W\d_]+")
-_DRAWING = re.compile(r"\{[^}]*\\p[1-9]")   # an ASS vector drawing: its commands are letters, not words
+# an ASS vector drawing: its commands are letters, not words ("{" left out of the block's class keeps the search linear)
+_DRAWING = re.compile(r"\{[^{}]*\\p[1-9]")
 
 
 def script_of(ch):
