@@ -138,6 +138,7 @@ class Settings:
         e = env if env is not None else os.environ
         g = lambda k: e.get(k, _default(k))  # noqa: E731
         self.port = int(g("SUBSYNC_PORT"))
+        self.bind = g("SUBSYNC_BIND").strip()      # the address it listens on (127.0.0.1 behind a host-network proxy)
         self.data = g("SUBSYNC_DATA")
         # where players fetch the synced files, and the AIOStreams config subsync finds files through: no defaults
         self.public_base = g("SUBSYNC_PUBLIC_BASE").rstrip("/")
@@ -248,8 +249,9 @@ class Settings:
         self.audio_extra = max(0, int(g("SUBSYNC_AUDIO_EXTRA_WINDOWS")))  # D5: windows a close call may add
         self.parallel_languages = _on(g("SUBSYNC_PARALLEL_LANGUAGES"))    # languages at the same time
         # a private path key for the routes that start work or show status (manifest, subtitles, status), so a published
-        # port or a reverse-proxy route can't be used to make subsync read files; the synced files and /health stay
-        # open. And an optional path prefix (e.g. /subsync) that a reverse proxy forwards unchanged.
+        # port or a reverse-proxy route can't be used to make subsync read files; the synced files, /health and the
+        # entries subsync lists stay open, each entry's address carrying a code made from the key (addon.entry_code).
+        # And an optional path prefix (e.g. /subsync) that a reverse proxy forwards unchanged.
         self.addon_key = g("SUBSYNC_ADDON_KEY").strip().strip("/")
         base = g("SUBSYNC_BASE_PATH").strip().strip("/")
         self.base_path = "/" + base if base else ""

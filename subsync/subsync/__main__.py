@@ -48,7 +48,7 @@ def main():
     worker = Worker(s, store, aios, safety, vad_factory=vad_factory, extra=extra, usenet=usenet, usenet_gate=gate,
                     lookup=lookup)
     worker.start()
-    server = serve(App(s, store, worker, safety), s.port)
+    server = serve(App(s, store, worker, safety), s.port, s.bind)
 
     def stop(*_):
         worker.stop()
@@ -144,7 +144,7 @@ def main_public(s):
     users = Users(os.path.join(s.data, "users.sqlite3"), s.secret_bytes())
     env = dict(os.environ)
     pool = Pool(s, env, store, users)
-    server = serve_public(PublicService(s, env, store, users, pool), s.port)
+    server = serve_public(PublicService(s, env, store, users, pool), s.port, s.bind)
 
     def housekeeping():
         last_expire = float("-inf")   # the first round expires; a step of the system clock moves no expiry

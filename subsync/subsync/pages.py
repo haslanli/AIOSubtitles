@@ -83,12 +83,8 @@ def _audio_group(settings, chosen, labelled=True, error_id=None):
 
 
 def _problem(error, field, title, fields=(), extra=""):
-    """The summary of a problem, with a link to the field it is about when the page has it; focused by the script."""
-    if not error:
-        return ""
-    message = (f"<a href=\"#{e(field)}\">{e(error)}</a>" if field in fields else e(error))
-    return ui.note("problem", None, title, role="alert", id="problem", focus=True,
-                   extra=f"<p id=\"problem-message\">{message}</p>{extra}")
+    """The summary of a problem, with a link to the field it is about when the page has it (`fields`)."""
+    return ui.problem_summary(error, title, field if field in fields else None, extra)
 
 
 # ------------------------------------------------------------------------------------------- the start page and sign-up

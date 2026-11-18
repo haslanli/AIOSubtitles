@@ -401,6 +401,9 @@ class ServerTest(unittest.TestCase):
         with mock.patch.object(addon, "Server") as made:
             addon.serve(None, 8080)
         self.assertEqual(made.call_args.args[0], ("0.0.0.0", 8080))
+        with mock.patch.object(addon, "Server") as made:                  # SUBSYNC_BIND
+            addon.serve(None, 8080, "127.0.0.1")
+        self.assertEqual(made.call_args.args[0], ("127.0.0.1", 8080))
 
     @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
     def test_the_public_server(self):

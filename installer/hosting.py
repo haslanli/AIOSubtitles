@@ -27,6 +27,9 @@ ADDRESS_REFUSED = ('Type an https address with no path after the name, like http
 NO_ANSWER = "{address}/health doesn't answer from this machine."
 NO_ANSWER_NOTES = ('If you just added the web server rule, reload the web server; some routers also block a machine',
                    'from reaching its own public address, so check it from your phone too: it should say "ok".')
+# setup's answer to SUBSYNC_TRUSTED_PROXY when none is given: the web server reaches the instance through the port
+# Docker publishes, from its network's gateway
+TRUSTED_PROXY = 'gateway'
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
          'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_KEY',
@@ -66,7 +69,7 @@ def public_env(answers, secret, limit_values, usenet=False, audio=False, tmdb_pe
         'SUBSYNC_PUBLIC_BASE': answers['HOST_ADDRESS'],
         'SUBSYNC_SECRET_KEY': secret,
         'SUBSYNC_PUBLIC_INVITE': answers.get('SUBSYNC_PUBLIC_INVITE', ''),
-        'SUBSYNC_TRUSTED_PROXY': answers.get('SUBSYNC_TRUSTED_PROXY') or 'gateway',
+        'SUBSYNC_TRUSTED_PROXY': answers.get('SUBSYNC_TRUSTED_PROXY') or TRUSTED_PROXY,
         'SUBSYNC_SUBDL_KEY': answers.get('SUBDL_KEY', ''),
         'SUBSYNC_SUBSOURCE_KEY': answers.get('SUBSYNC_SUBSOURCE_KEY', ''),
         # the original-language lookup's TMDB key for everyone; without one, whether each person may add their own

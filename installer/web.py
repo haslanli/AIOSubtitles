@@ -5,11 +5,12 @@ reaches through the port on this machine only (127.0.0.1 or ::1) given in the do
 the page on a port published beyond it, wizard.open_page. Other containers on the same Docker networks reach the
 container's port too, and get nothing without the key), and answers only under a one-time random key in the address
 and only to a Host of 127.0.0.1 or localhost at the machine's port (a page elsewhere in the same browser can't guess
-it, and DNS rebinding gets nothing). Every page has the public site's security header and nothing inline. Passwords and
-keys typed in stay in this process's memory for the run and are never sent back in a page. The work of each step is
-installer/engine.py; long work (installing, checking, updating) runs in the background once (an install that stopped
-is tried again on the person's word, and one whose answers changed after it runs again), and its page loads itself
-again every 2 seconds until it is done; meanwhile the steps before it lead to its page. An error setup doesn't know is
+it, and DNS rebinding gets nothing). Every page has the public site's security header, which also lets a page fetch
+its own address, and nothing inline. Passwords and keys typed in stay in this process's memory for the run and are never
+sent back in a page. The work of each step is installer/engine.py; long work (installing, checking, updating) runs in
+the background once (an install that stopped is tried again on the person's word, and one whose answers changed after
+it runs again), and its page shows the progress again every 2 seconds until it is done (the script fetches the page;
+without it the page loads itself again); meanwhile the steps before it lead to its page. An error setup doesn't know is
 a stop on the page with its way out, its details only in the terminal. The page stops when setup is done, after 60
 minutes without a request under its key, or with Ctrl-C.
 """
@@ -22,12 +23,17 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from installer import engine, limits, plan, screens, update
+from installer import engine, hosting, limits, plan, screens, update
 from installer.aios import AiosError
 from installer.ui import Stop
 from subsync import ui
-from subsync.ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS    # the public site's own (subsync/subsync/public.py)
+from subsync.ui import FONT_HEADERS, SCRIPT_HEADERS                  # the public site's own (subsync/subsync/public.py)
+from subsync.ui import PAGE_HEADERS as SITE_HEADERS
 
+# the public site's page headers, and one more source: a page whose work runs fetches its own address to show the
+# progress (static/app.js), which the site's pages never do
+PAGE_HEADERS = dict(SITE_HEADERS, **{'Content-Security-Policy': SITE_HEADERS['Content-Security-Policy']
+                                     + "; connect-src 'self'"})
 STATIC_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 MAX_BODY = 16 * 1024
 IDLE_S = 3600
@@ -214,7 +220,7 @@ class App:
 
     def static(self, path):
         """The stylesheet and script (their addresses carry their hash) and the typefaces are cached as the public site
-        caches them: the install, check and update pages load themselves again every 2 seconds."""
+        caches them: the install, check and update pages are shown again every 2 seconds."""
         if path == '/static/app.css':
             return 200, dict(SCRIPT_HEADERS, **{'Content-Type': 'text/css; charset=utf-8'}), ui.APP_CSS.encode()
         if path == '/static/app.js':
@@ -438,7 +444,7 @@ class App:
         prev = e.prev if e.prev.get('route') == 'host' else {}
         return self.page(screens.host_address(e.answers.get('HOST_ADDRESS') or prev.get('public_base', ''),
                                               e.answers.get('SUBSYNC_TRUSTED_PROXY') or
-                                              engine.env_values().get('SUBSYNC_TRUSTED_PROXY') or 'gateway',
+                                              engine.env_values().get('SUBSYNC_TRUSTED_PROXY') or hosting.TRUSTED_PROXY,
                                               s.problems.get('address'), s.stops.get('address')))
 
     def step_signups(self, s, method, form, one):

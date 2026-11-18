@@ -48,7 +48,7 @@ HOSTING = [
     ]),
 ]
 
-# the words for a value that doesn't fit (the two segmented ones are the terminal setup's)
+# the words for a value that doesn't fit (the two segmented ones are the terminal setup's; the page's are choose())
 WHOLE = 'A whole number from 1, like {default}.'
 COUNT = 'A whole number from 0, like {default}.'
 WHOLE_OR_AUTO = 'A whole number from 1, or auto.'
@@ -147,6 +147,13 @@ def check(lim, text, current=None, places=None):
         return (value, None) if value else (None, NOT_AN_AUDIO_LIMIT)
     value = text.strip()
     return (value, None) if value in lim.options else (None, NOT_A_LANGUAGE_LIMIT)
+
+
+def choose(lim):
+    """A row of buttons' problem as the page says it: the values to choose from, with the unit ("Choose 0.5, 1, 2 or 4
+    GB."); the terminal's words above say what to type."""
+    *first, last = lim.options
+    return f"Choose {', '.join(first)} or {last}{' ' + lim.unit if lim.unit else ''}."
 
 
 def shown(lim, value):

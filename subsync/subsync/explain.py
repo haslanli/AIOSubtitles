@@ -90,8 +90,9 @@ RULES = [
     ("Links and keys stay private",
      "subsync's log never contains stream links, config addresses, keys or passwords, and the files in state/ that "
      "hold them can be read only by your user. The routes that make subsync work (its subtitle lists and status) "
-     "answer only under a private key in their address, so nobody who finds subsync's address can make it read files; "
-     "only the synced files and a health check are open."),
+     "answer only under a private key in their address, and each entry in its lists carries a code made from that key, "
+     "so nobody who finds subsync's address can make it read files; only the synced files, those entries and a health "
+     "check are open."),
     ("Public mode: your AIOStreams password is used once",
      "When you sign up or refresh, AIOSubtitles uses your AIOStreams password in that request and then forgets it, "
      "unless you tick the box that lets it keep the password: then it is kept encrypted in your record, never in a "
@@ -287,7 +288,7 @@ QUESTIONS = {
         "AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (setup shows it); "
         "on a home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every "
         "device you watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only "
-        "synced files and a health check are open at that address."),
+        "synced files, the entries subsync lists and a health check are open at that address."),
     "CACHE": (
         "no",
         "AIOStreams keeps every subtitle answer for 5 minutes. Yes turns that off for subsync only, so a copy made "
@@ -369,8 +370,9 @@ GROUPS = [
             "",
             "A private key in the address of the routes that make subsync work: its manifest, its subtitle lists and "
             "its status. Without the key those routes answer \"not found\", so nobody who finds subsync's address can "
-            "make it read files; synced files and /health stay open for your apps. Made by ./setup; keep it private. "
-            "Empty: no key and every route open, safe only where nobody else can reach subsync."),
+            "make it read files; synced files, /health and the entries of subsync's own lists stay open for your apps, "
+            "and an entry's address can't be made up without the key. Made by ./setup; keep it private. Empty: no key "
+            "and every route open, safe only where nobody else can reach subsync."),
         "SUBSYNC_LANGUAGES": (
             DEFAULT_LANGUAGE,
             "The languages to sync, as codes separated by commas, like eng,rus: ./setup writes your answer to its "
@@ -431,6 +433,11 @@ GROUPS = [
             "The port subsync listens on: inside its container, or on the machine itself when AIOStreams uses host "
             "networking. Change it only when 8790 is taken, by giving ./setup's address question another port; ./setup "
             "then sets it."),
+        "SUBSYNC_BIND": (
+            "0.0.0.0",
+            "The address subsync listens on. ./setup sets 127.0.0.1 when AIOStreams uses host networking and your web "
+            "server passes subsync's address on, so nothing reaches subsync except through your web server. Leave it "
+            "as it is otherwise: in a container, Docker needs 0.0.0.0 to pass its port on."),
     }),
     ("Limits and safety", {
         "SUBSYNC_DAILY_BUDGET_GB": (

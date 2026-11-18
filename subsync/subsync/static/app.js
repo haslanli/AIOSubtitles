@@ -1,7 +1,8 @@
 // AIOSubtitles' pages: the few moments that move. Every page works without this script: the sign-up then opens by its
 // link and shows its questions one under another. With it, the sign-up is a layer that slides in, one question per
 // screen, Back or Escape reversing it; the language slots show one place and "Add language" up to the instance's
-// limit; passwords can be shown; the personal link can be copied. It loads nothing, sends nothing and stores nothing.
+// limit; passwords can be shown; the personal link can be copied; a setup page whose work runs shows its progress
+// without loading itself again. It loads nothing but that page's own address, sends nothing and stores nothing.
 (function () {
   "use strict";
   var root = document.documentElement;
@@ -221,4 +222,51 @@
   // ---------------------------------------------------------------------------------------------- a problem after a form
   var problem = document.getElementById("problem");
   if (problem && !(layer && layer.contains(problem))) problem.focus();
+
+  // ---------------------------------------------------------------------------------------------- work as it goes
+  // A setup page whose work runs (data-refresh) loads itself again every few seconds without the script. With it, the
+  // page fetches itself and puts in only its parts that change (the back arrow, the body, the actions), so focus and a
+  // screen reader's place stay where they are; the lines that are new are read out, once.
+  var every = +body.getAttribute("data-refresh") * 1000;
+  if (every && window.fetch && window.DOMParser) {
+    var said = document.createElement("div");
+    said.className = "sr";
+    said.setAttribute("role", "status");
+    body.appendChild(said);
+    var lines = function (scope) {
+      return Array.prototype.map.call(scope.querySelectorAll(".progress .tx, .checks .tx"),
+                                      function (line) { return line.textContent; });
+    };
+    var swap = function (fresh) {
+      var known = lines(document);
+      ["main .fbar", "main .body", "main .actions"].forEach(function (selector) {
+        var old = document.querySelector(selector), now = fresh.querySelector(selector);
+        if (now) now = document.importNode(now, true);
+        if (old && now) old.replaceWith(now);
+        else if (old) old.remove();
+        else if (now) document.querySelector("main .body").after(now);     // the actions, once the work has ended
+      });
+      var news = lines(document).filter(function (line) { return known.indexOf(line) < 0; });
+      if (!news.length) return;
+      said.textContent = "";
+      news.forEach(function (line) {
+        var p = document.createElement("p");
+        p.textContent = line;
+        said.appendChild(p);
+      });
+    };
+    var poll = function () {
+      fetch(location.href).then(function (answer) {
+        return answer.ok && !answer.redirected ? answer.text() : Promise.reject();
+      }).then(function (text) {
+        var fresh = new DOMParser().parseFromString(text, "text/html");
+        if (!fresh.querySelector("main .body")) return Promise.reject();
+        swap(fresh);
+        if (fresh.body.hasAttribute("data-refresh")) setTimeout(poll, every);
+      }).catch(function () { location.reload(); });
+    };
+    setTimeout(poll, every);
+  } else if (every) {
+    setTimeout(function () { location.reload(); }, every);
+  }
 })();

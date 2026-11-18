@@ -17,6 +17,7 @@ from unittest import mock
 
 from installer import dockerenv, engine, hosting, limits, plan, wizard
 from installer.tests.test_flow import AnswersRun
+from subsync import explain
 
 ADDRESS = 'https://subs.example.com'
 SECRET_WORDS = 'kept it in state/subsync.env'
@@ -281,6 +282,7 @@ class RouteFixture(AnswersRun, unittest.TestCase):
                   mock.patch.object(hosting, 'fetch', fetch)):
             p.start()
             self.addCleanup(p.stop)
+        self.stand_in_tmdb()
         self.addCleanup(self.tmp.cleanup)
 
 
@@ -449,6 +451,20 @@ class Route(RouteFixture):
         self.assertNotIn('SUBSYNC_TMDB_KEY', env)
         self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'on')
         self.assertNotIn('TMDB_KEY', engine.read_kv(self.state / 'secrets.env'))
+
+    def test_the_tmdb_key_for_everyone_is_checked_with_tmdb_first(self):
+        # As on your own install, a new key is checked once; refused, nothing is set up
+        self.tmdb_answer = False
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'TMDB_KEY': 'tmdb-key-1'})
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"TMDB_KEY: {explain.PUBLIC_TEXTS['tmdb_refused']}", ' '.join(out.split()))
+        self.assertFalse((self.state / 'subsync.env').exists())
+        self.tmdb_answer = True
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'TMDB_KEY': 'tmdb-key-1'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('✓  TMDB accepts this key', out)
+        self.assertEqual([key for _, key in self.tmdb_checked], ['tmdb-key-1', 'tmdb-key-1'])
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_TMDB_KEY'], 'tmdb-key-1')
 
     def test_a_public_instance_isnt_turned_into_an_install_for_yourself(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})

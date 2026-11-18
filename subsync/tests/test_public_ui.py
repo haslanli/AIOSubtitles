@@ -809,9 +809,13 @@ class ScriptTest(unittest.TestCase):
         from subsync.ui import APP_JS
         self.assertLess(len(APP_JS.encode()), 16 * 1024)
         self.assertIn("prefers-reduced-motion", APP_JS)
-        self.assertNotRegex(APP_JS, r"https?://|\beval\(|new Function|innerHTML|outerHTML|insertAdjacentHTML|"
-                                    r"document\.write|localStorage|sessionStorage|fetch\(|XMLHttpRequest|sendBeacon|"
-                                    r"setAttribute\(\s*['\"]style")
+        # its one request: a setup page whose work runs fetches its own address, which the setup page's
+        # security header allows (connect-src 'self'), the site's not
+        self.assertEqual(APP_JS.count("fetch(location.href)"), 1)
+        code = APP_JS.replace("fetch(location.href)", "")
+        self.assertNotRegex(code, r"https?://|\beval\(|new Function|innerHTML|outerHTML|insertAdjacentHTML|"
+                                  r"document\.write|localStorage|sessionStorage|fetch\(|XMLHttpRequest|sendBeacon|"
+                                  r"setAttribute\(\s*['\"]style")
         self.assertNotRegex(APP_JS, r"\bAD\d{1,3}\b|S4-\d+")
 
     def test_a_submit_before_the_last_screen_is_continue(self):
@@ -909,7 +913,7 @@ class PartsTest(unittest.TestCase):
         from subsync import ui
         checks = Tree(ui.check_rows([("ok", "Fine", None), ("warn", "Hm", "more"), ("bad", "No", None)]))
         self.assertEqual([a["aria-label"] for a in checks.all("span", role="img")], ["Done", "Warning", "Problem"])
-        progress = Tree(ui.progress_list([("done", "A"), ("now", "B"), ("next", "C")]))
+        progress = Tree(ui.progress_list([("done", "A", None), ("now", "B", None), ("next", "C", None)]))
         self.assertEqual([a["aria-label"] for a in progress.all("span", role="img")], ["Done", "Working", "Waiting"])
         changes = Tree(ui.config_changes([("Your config", [("+", "adds subsync")], "Nothing else.")]))
         self.assertIn("adds subsync", changes.text())
@@ -926,7 +930,7 @@ class PartsTest(unittest.TestCase):
         from subsync import ui
         parts = [ui.radio_row("w", "a", "A", "a."), ui.step_frame(["A"], 0, "", "S"), ui.number_field("n", "N", "1"),
                  ui.segmented("s", "S", ["1"], "1"), ui.check_rows([("ok", "x", None)]),
-                 ui.progress_list([("now", "x")]), ui.config_changes([("h", [("+", "x")], None)]),
+                 ui.progress_list([("now", "x", None)]), ui.config_changes([("h", [("+", "x")], None)]),
                  ui.gauge("1 of 2", "files", .5), ui.update_panel("U", "a", "b", "c", "d")]
         for text in parts:
             self.assertNotRegex(text, r"\sstyle=")

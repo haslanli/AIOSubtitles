@@ -4,7 +4,7 @@ import ast
 import unittest
 from pathlib import Path
 
-from installer import screens
+from installer import engine, screens
 from subsync import explain, relgate
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -50,6 +50,20 @@ class WhatYouNeed(unittest.TestCase):
         self.assertIn(f'and about **{screens.DISK_GB} GB** of free disk space. Nothing else: setup runs inside the '
                       'AIOSubtitles image.', section('What you need'))
         self.assertIn(f'About {screens.DISK_GB} GB of free disk space.', screens.BEFORE)
+
+
+class Install(unittest.TestCase):
+    def test_the_guard_names_the_one_unmarked_volume_it_treats_as_its_own(self):
+        # it said every item under setup's names carries the mark; an install by setup 1.3.0 or before keeps its
+        # unmarked data volume, recorded in state/settings.json (R3-2)
+        self.assertIn("Setup changes only what it made: before every change it checks that each container, network and "
+                      "volume under its names carries its own install's mark, and stops without changing anything if "
+                      "one doesn't. The one exception is the data volume of an install made by setup 1.3.0 or before: "
+                      "Docker can't mark a volume after it is made, so setup keeps that volume's name in "
+                      '`state/settings.json` and treats only that unmarked volume as its own.', section('Install'))
+        taken_over = {'installed': True, 'install_id': 'a1b2c3d4', 'external_volume': 'subsync_data'}
+        self.assertEqual(engine.unlabelled_own(taken_over), {('volume', 'subsync_data')})
+        self.assertEqual(engine.unlabelled_own({'installed': True, 'install_id': 'a1b2c3d4'}), set())
 
 
 class WhatItChanges(unittest.TestCase):

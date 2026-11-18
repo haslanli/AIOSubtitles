@@ -31,7 +31,7 @@ APP_JS = _read("app.js")
 CSS_URL = "/static/app.css?v=" + hashlib.sha256(APP_CSS.encode()).hexdigest()[:10]
 JS_URL = "/static/app.js?v=" + hashlib.sha256(APP_JS.encode()).hexdigest()[:10]
 
-# the HTTP headers of the public site's pages and files, and of the installer's setup page
+# the HTTP headers of the public site's pages and files, and of the installer's setup page (which adds one source)
 PAGE_HEADERS = {
     # only this service's own script, stylesheet and two typefaces, nothing inline
     "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
@@ -121,12 +121,15 @@ def footer(notice):
 def page(title, body, kind, personal=False, body_attrs="", opened=False, refresh=None):
     """A whole page around `body` (which starts with top()). `kind` names the layout: start, done, settings, letter.
     Personal pages ask not to be indexed. `body_attrs`: more attributes of <body> (escaped by the caller); `opened`:
-    the sign-up layer comes back open (after a problem); `refresh`: seconds after which the page loads itself again
-    (the installer's progress, without the script)."""
+    the sign-up layer comes back open (after a problem); `refresh`: seconds after which the page shows its work's
+    progress again (the installer's): without the script it loads itself again; with it, the script fetches the page
+    and puts in only what changed, so a screen reader isn't sent back to the top (data-refresh)."""
+    if refresh:
+        body_attrs = f" data-refresh=\"{int(refresh)}\"{body_attrs}"
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             + ("<meta name=\"robots\" content=\"noindex\">" if personal else "")
-            + (f"<meta http-equiv=\"refresh\" content=\"{int(refresh)}\">" if refresh else "")
+            + (f"<noscript><meta http-equiv=\"refresh\" content=\"{int(refresh)}\"></noscript>" if refresh else "")
             + f"<title>{e(title)}</title><link rel=\"preload\" href=\"/static/fonts/{FONT_FILES[0]}\" as=\"font\" "
             f"type=\"font/ttf\" crossorigin><link rel=\"stylesheet\" href=\"{CSS_URL}\">"
             f"<script src=\"{JS_URL}\" defer></script></head><body class=\"p-{e(kind)}{' open' if opened else ''}\"{body_attrs}>"
@@ -242,6 +245,17 @@ def note(kind, text=None, title=None, role=None, id=None, focus=False, extra="")
     return f"<div class=\"note {kind}\"{attrs}>{icon}<div>{head}{words}{extra}</div></div>"
 
 
+def problem_summary(error, title, field=None, extra=""):
+    """The summary of a problem at the top of a page (the site's, the setup page's): its title and its message, a link
+    to the field it is about (`field`: that field's id, when the page has it). The script focuses it. Nothing without
+    an `error`."""
+    if not error:
+        return ""
+    message = f"<a href=\"#{e(field)}\">{e(error)}</a>" if field else e(error)
+    return note("problem", None, title, role="alert", id="problem", focus=True,
+                extra=f"<p id=\"problem-message\">{message}</p>{extra}")
+
+
 def dots(items):
     return "<ul class=\"dots\">" + "".join(f"<li>{e(item)}</li>" for item in items) + "</ul>"
 
@@ -317,25 +331,38 @@ def step_frame(steps, current, content, rail_label, done=False, back=True):
             f"{''.join(segs)}</ol></div>{content}</main></div>")
 
 
-def number_field(id, label, value, help_text=None, unit=None, auto=False):
-    """A number with its unit inside the box. `auto`: the box also takes the word auto."""
+def _limit_error(id, error, help_text):
+    """A limit's problem as field() shows one: the message under the label (`id`-error) and the attributes that mark
+    the control as wrong and describe it by the message, read first, then by its explanation."""
+    help_id = f"{id}-help" if help_text else None
+    error_id = f"{id}-error" if error else None
+    refs = described(error_id, help_id)
+    attrs = (f" aria-describedby=\"{e(refs)}\"" if refs else "") + (" aria-invalid=\"true\"" if error else "")
+    return (f"<p class=\"field-error\" id=\"{e(error_id)}\">{e(error)}</p>" if error else ""), attrs
+
+
+def number_field(id, label, value, help_text=None, unit=None, auto=False, error=None):
+    """A number with its unit inside the box. `auto`: the box also takes the word auto. `error`: the problem with the
+    value, under the label, as field() shows it."""
     pattern = "auto|[0-9]+" if auto else "[0-9]+"
     mode = "text" if auto else "numeric"
-    return (f"<div class=\"limit field\"><label for=\"{e(id)}\">{e(label)}</label><div class=\"num"
+    error_html, attrs = _limit_error(id, error, help_text)
+    return (f"<div class=\"limit field\"><label for=\"{e(id)}\">{e(label)}</label>{error_html}<div class=\"num"
             f"{' has-unit' if unit else ''}\"><input id=\"{e(id)}\" name=\"{e(id)}\" type=\"text\" inputmode=\"{mode}\" "
-            f"pattern=\"{pattern}\" value=\"{e(value)}\" autocomplete=\"off\" spellcheck=\"false\""
-            + (f" aria-describedby=\"{e(id)}-help\"" if help_text else "") + ">"
+            f"pattern=\"{pattern}\" value=\"{e(value)}\" autocomplete=\"off\" spellcheck=\"false\"{attrs}>"
             + (f"<span class=\"unit\">{e(unit)}</span>" if unit else "") + "</div>"
             + (f"<p class=\"help\" id=\"{e(id)}-help\">{e(help_text)}</p>" if help_text else "") + "</div>")
 
 
-def segmented(name, label, options, value, help_text=None, unit=None):
-    """One value of a few, as joined rectangles (radio buttons underneath)."""
+def segmented(name, label, options, value, help_text=None, unit=None, error=None):
+    """One value of a few, as joined rectangles (radio buttons underneath); the group's id is `name`. `error`: the
+    problem with the value, under the label and outside the row, as field() shows it."""
     items = "".join(f"<label><input type=\"radio\" name=\"{e(name)}\" value=\"{e(v)}\"{' checked' if str(v) == str(value) else ''}>"
                     f"<span>{e(v)}</span></label>" for v in options)
-    return (f"<div class=\"limit field\"><span class=\"label\" id=\"{e(name)}-label\">{e(label)}</span><div class=\"seg-row\">"
-            f"<div class=\"seg\" role=\"radiogroup\" aria-labelledby=\"{e(name)}-label\""
-            + (f" aria-describedby=\"{e(name)}-help\"" if help_text else "") + f">{items}</div>"
+    error_html, attrs = _limit_error(name, error, help_text)
+    return (f"<div class=\"limit field\"><span class=\"label\" id=\"{e(name)}-label\">{e(label)}</span>{error_html}"
+            f"<div class=\"seg-row\"><div class=\"seg\" id=\"{e(name)}\" role=\"radiogroup\" "
+            f"aria-labelledby=\"{e(name)}-label\"{attrs}>{items}</div>"
             + (f"<span class=\"seg-unit\">{e(unit)}</span>" if unit else "") + "</div>"
             + (f"<p class=\"help\" id=\"{e(name)}-help\">{e(help_text)}</p>" if help_text else "") + "</div>")
 
@@ -358,12 +385,14 @@ PROGRESS_MARKS = {"done": (TICK_BOLD, "Done"), "now": ("", "Working"), "next": (
 
 
 def progress_list(rows):
-    """The install's progress: (state, text) with state done, now or next."""
+    """The install's progress: (state, text, more) with state done, now or next; `more` an optional line under the
+    text, as in check_rows."""
     out = []
-    for state, text in rows:
+    for state, text, more in rows:
         icon, spoken = PROGRESS_MARKS[state]
         out.append(f"<li class=\"{state}\"><span class=\"ic\" role=\"img\" aria-label=\"{spoken}\">{icon}</span>"
-                   f"<span class=\"tx\">{e(text)}</span></li>")
+                   f"<span class=\"tx\">{e(text)}" + (f"<span class=\"more\">{e(more)}</span>" if more else "")
+                   + "</span></li>")
     return "<ol class=\"progress\">" + "".join(out) + "</ol>"
 
 

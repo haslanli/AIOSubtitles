@@ -25,7 +25,7 @@ from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeD
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
-from subsync import sources  # noqa: E402
+from subsync import explain, sources  # noqa: E402
 from subsync.sources import (Aios, expected_size, extras, fetch_subtitle, parse_extras, same_hash,  # noqa: E402
                              unreadable)
 from subsync.store import REFUSED_BACKOFF_S, Store, result_key  # noqa: E402
@@ -1668,8 +1668,8 @@ class StopTest(unittest.TestCase):
         handlers, servers = {}, []
 
         class Server:
-            def __init__(self, app, port):
-                self.app = app
+            def __init__(self, app, port, host):
+                self.app, self.host = app, host
                 servers.append(self)
 
             def serve_forever(self):
@@ -1688,11 +1688,78 @@ class StopTest(unittest.TestCase):
                     mock.patch.object(entry, "serve", Server), local_network_only(), \
                     self.assertLogs("subsync", "INFO"):
                 entry.main()
+            self.assertEqual(servers[0].host, "0.0.0.0")          # SUBSYNC_BIND's default
             worker = servers[0].app.worker
             self.assertIn(pick.alias, worker.pickable)
             for lane in (worker, worker.audio_worker):
                 lane.join(2)
                 self.assertFalse(lane.is_alive())
+
+
+class EntryCodeTest(AddonFixture):
+    """With SUBSYNC_ADDON_KEY set, each entry's address carries a code made from the key, so the entries stay
+    open to players (their lists name them without the key) but an entry's address can't be made up: one without its
+    code answers "not found" and starts nothing (it started audio syncs, picks and list fetches for anyone)."""
+    URL = "/k3y/subtitles/movie/tt9/filename=b.mp4&videoSize=5.json"
+    ALIAS = "name:b.mp4|5"
+
+    def setUp(self):
+        super().setUp()
+        self.s.addon_key, self.s.audio_route = "k3y", True
+        self.worker.pickable[self.ALIAS] = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+        self.store.file_read("f" * 16 + "-5", 5, "f" * 16, False, {})   # read a moment ago: no new job
+        self.store.alias(self.ALIAS, "f" * 16 + "-5")
+
+    def test_a_token_carries_the_code_of_its_alias_under_the_key(self):
+        from subsync.addon import CODE_CHARS, alias_of, entry_code
+        coded = token(self.ALIAS, "k3y")
+        self.assertEqual(coded, token(self.ALIAS) + entry_code("k3y", self.ALIAS))
+        self.assertEqual(len(entry_code("k3y", self.ALIAS)), CODE_CHARS)
+        self.assertRegex(coded, r"^[A-Za-z0-9_-]+$")                       # what the routes take, unchanged
+        self.assertNotIn("k3y", coded)
+        self.assertEqual(alias_of(coded, "k3y"), self.ALIAS)
+        self.assertEqual(alias_of(token(self.ALIAS)), self.ALIAS)          # no key: every route open, as before
+        for forged in (token(self.ALIAS), token(self.ALIAS, "other"), token("name:c.mkv|7") + coded[-CODE_CHARS:],
+                       coded[:-1] + ("A" if coded[-1] != "A" else "B"), "x", ""):
+            with self.subTest(forged=forged), self.assertRaises(ValueError):
+                alias_of(forged, "k3y")
+
+    def test_the_lists_entries_carry_the_code_and_answer_without_the_key(self):
+        subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
+        self.assertEqual([s["url"] for s in subs], [f"http://subsync:8790/pick/{token(self.ALIAS, 'k3y')}/eng.srt"])
+        code, body, _ = self.get(f"/pick/{token(self.ALIAS, 'k3y')}/eng.srt")   # as a player fetches it, no key
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
+        self.assertEqual([(j.alias, j.audio) for j in self.worker.jobs.values()], [(self.ALIAS, True)])
+
+    def test_an_address_without_its_code_is_not_found_and_starts_nothing(self):
+        calls = []
+        for name in ("pick", "ask_list_again", "original_for", "prioritize"):
+            patch = mock.patch.object(self.worker, name, lambda *a, name=name: calls.append(name))
+            patch.start()
+            self.addCleanup(patch.stop)
+        unknown = "name:Film.2024.1080p.WEB.mkv|4521234567"            # a release the owner may open later
+        for route in ("pick", "pending", "original"):
+            for tok in (token(self.ALIAS), token(unknown), token(self.ALIAS, "other")):
+                with self.subTest(route=route, tok=tok):
+                    for prefix in ("", "/k3y"):
+                        self.assertEqual(self.get(f"{prefix}/{route}/{tok}/eng.srt")[0], 404)
+        self.assertEqual(calls, [])
+        self.assertIn(self.ALIAS, self.worker.pickable)                  # still waiting for the owner's pick
+        self.assertEqual((dict(self.worker.jobs), dict(self.worker.picked_early)), ({}, {}))
+
+    def test_the_texts_name_the_entries_as_open(self):
+        rule = dict(explain.RULES)["Links and keys stay private"]
+        self.assertIn("The routes that make subsync work (its subtitle lists and status) answer only under a private key "
+                      "in their address, and each entry in its lists carries a code made from that key, so nobody who "
+                      "finds subsync's address can make it read files; only the synced files, those entries and a health "
+                      "check are open.", rule)
+        self.assertIn('Without the key those routes answer "not found", so nobody who finds subsync\'s address can make '
+                      "it read files; synced files, /health and the entries of subsync's own lists stay open for your "
+                      "apps, and an entry's address can't be made up without the key.",
+                      explain.SETTINGS["SUBSYNC_ADDON_KEY"][1])
+        self.assertTrue(explain.QUESTIONS["PUBLIC_ADDRESS"][1].endswith(
+            "Only synced files, the entries subsync lists and a health check are open at that address."))
 
 
 class AddonKeyTest(AddonCase):

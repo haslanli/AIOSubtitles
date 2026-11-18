@@ -29,7 +29,8 @@ class Offline:
 
 
 def aios_error(address, call, answer):
-    """The AIOStreams client's own error for `call(client)` when its requests get `answer`: what setup's checks show."""
+    """The AIOStreams client's own error for `call(client)` when its requests get `answer`: what setup's checks show.
+    Both of its openers answer here (calls that carry a password have their own), so no request leaves this machine."""
     aios = Aios(address)
     aios.opener = aios.keyed_opener = answer
     try:
@@ -92,6 +93,9 @@ def every_state():
     daily = ('SUBSYNC_DAILY_BUDGET_GB', limits.check(limits.DAILY, '0')[1])
     add('limits-problem', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '0'}, problem=daily), daily[1])
     add('limits-stopped', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50'}, stop=screens.UNEXPECTED))
+    audio_limit = (limits.AUDIO.setting, limits.check(limits.AUDIO, '3')[1])                    # web.py's key for it
+    add('limits-audio-problem', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.AUDIO.setting: '3'},
+                                               problem=audio_limit, audio=True))
     sections = [('Your config 1a2b3c4d…', [('+', 'adds 1 subtitle source: subsync (synced copies of the subtitles you '
                                                  'already get)')],
                  'Nothing else in it changes. A copy of it as it is now is saved first.'),
@@ -204,6 +208,10 @@ def every_state():
     add('host-limits-problem', screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': 'many'}, problem=at_once),
         at_once[1])
     add('host-limits-stopped', screens.limits('host', {}, stop=screens.UNEXPECTED))
+    # a value set by hand in state/subsync.env that no button offers: the engine refuses it in the terminal's words
+    per_person = next(lim for lim in limits.hosting() if lim.setting == 'SUBSYNC_MAX_LANGUAGES')
+    languages = ('SUBSYNC_MAX_LANGUAGES', limits.check(per_person, '6')[1])
+    add('host-limits-languages-problem', screens.limits('host', {'SUBSYNC_MAX_LANGUAGES': '6'}, problem=languages))
     host_progress = [('done', 'Made the secret key and kept it in state/subsync.env, readable only by your user.', None),
                      ('ok', 'AIOSubtitles is running (it restarts by itself after a reboot)', None)]
     add('host-install', screens.installing('host', host_progress, running=False, rule=rule, rule_intro=intro),

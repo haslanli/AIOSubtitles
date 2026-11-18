@@ -1,4 +1,4 @@
-"""The four small parts the installer adds to subsync/subsync/ui.py."""
+"""The small parts the installer adds to subsync/subsync/ui.py, and their look in static/app.css."""
 import unittest
 
 from subsync import ui
@@ -11,8 +11,13 @@ class UiAdditions(unittest.TestCase):
         self.assertIn('/privacy', ui.top('https://q.example'))                  # the site's stays as it was
 
     def test_a_page_can_load_itself_again(self):
-        self.assertIn('<meta http-equiv="refresh" content="2">', ui.page('T', '', 'letter', refresh=2))
+        # without the script only; with it, the script shows the progress and the page stays
+        page = ui.page('T', '', 'letter', refresh=2)
+        self.assertIn('<noscript><meta http-equiv="refresh" content="2"></noscript>', page)
+        self.assertEqual(page.count('http-equiv'), 1)
+        self.assertIn('<body class="p-letter" data-refresh="2">', page)
         self.assertNotIn('http-equiv', ui.page('T', '', 'letter'))
+        self.assertNotIn('data-refresh', ui.page('T', '', 'letter'))
 
     def test_the_back_arrow_can_be_a_link(self):
         frame = ui.step_frame(['A', 'B'], 1, '<p>x</p>', 'Setup steps', back='aios')
@@ -31,6 +36,53 @@ class UiAdditions(unittest.TestCase):
         self.assertEqual(ui.code_lines(['a {', '    b <c>', '}']), '<pre class="code">a {\n    b &lt;c&gt;\n}</pre>')
         self.assertIn('pre.code{', ui.APP_CSS)
         self.assertNotRegex(ui.APP_CSS, r'(^|[},\s])\.code\{')                 # a bare .code would hit the invite box
+
+
+    def test_a_progress_line_shows_its_note_under_it(self):
+        # The notes under finished lines of an install or update were dropped
+        self.assertEqual(ui.progress_list([('done', 'Switched', 'Kept <x>.'), ('now', 'Checking', None)]),
+                         '<ol class="progress"><li class="done"><span class="ic" role="img" aria-label="Done">'
+                         f'{ui.TICK_BOLD}</span><span class="tx">Switched<span class="more">Kept &lt;x&gt;.</span>'
+                         '</span></li><li class="now"><span class="ic" role="img" aria-label="Working"></span>'
+                         '<span class="tx">Checking</span></li></ol>')
+
+    def test_a_limits_problem_is_tied_to_its_box_or_row(self):
+        # As field ties a problem: under the label, the control described by it first and marked
+        box = ui.number_field('n', 'N', '0', help_text='H.', error='Bad <n>.')
+        self.assertIn('<label for="n">N</label><p class="field-error" id="n-error">Bad &lt;n&gt;.</p><div class="num">',
+                      box)
+        self.assertIn('aria-describedby="n-error n-help" aria-invalid="true">', box)
+        self.assertIn('aria-describedby="n-help">', ui.number_field('n', 'N', '0', help_text='H.'))
+        self.assertNotIn('aria-describedby', ui.number_field('n', 'N', '0'))
+        row = ui.segmented('s', 'S', ['1', '2'], '3', help_text='H.', unit='GB', error='Pick one.')
+        self.assertIn('<span class="label" id="s-label">S</span><p class="field-error" id="s-error">Pick one.</p>'
+                      '<div class="seg-row"><div class="seg" id="s" role="radiogroup" aria-labelledby="s-label" '
+                      'aria-describedby="s-error s-help" aria-invalid="true">', row)
+        self.assertIn('</div><span class="seg-unit">GB</span></div><p class="help" id="s-help">H.</p></div>', row)
+        self.assertIn('aria-labelledby="s-label">', ui.segmented('s', 'S', ['1'], '1'))
+
+    def test_a_problems_summary_links_to_its_field(self):
+        # The public pages' summary, for setup's steps too (pages._problem uses it)
+        summary = ui.problem_summary('No <good>.', 'That didn\'t go through', 'f')
+        self.assertTrue(summary.startswith('<div class="note problem" role="alert" id="problem" tabindex="-1">'))
+        self.assertIn('<b>That didn&#x27;t go through</b><p id="problem-message"><a href="#f">No &lt;good&gt;.</a></p>',
+                      summary)
+        self.assertIn('<p id="problem-message">No &lt;good&gt;.</p>', ui.problem_summary('No <good>.', 'T'))
+        self.assertEqual(ui.problem_summary('', 'T', 'f'), '')
+
+    def test_the_done_screens_first_line_and_the_step_heading_have_rules_of_their_own(self):
+        # The first line took no look (.letter .lead needs main.letter); the heading's top space came from the
+        # small pages' h1 rule, which the step pages happen to share
+        self.assertRegex(ui.APP_CSS, r'(?m)^\.letter \.lead,\.steparea \.lead\{font-weight:700;color:var\(--text\);'
+                                     r'font-size:19px\}')
+        self.assertRegex(ui.APP_CSS, r'(?m)^\.steparea h1\{[^}]*margin-top:clamp\(56px,8vh,88px\)\}')
+        self.assertRegex(ui.APP_CSS, r'(?m)^\.p-settings h1,\.p-letter h1\{[^}]*margin-top:clamp\(56px,8vh,88px\)\}')
+        self.assertNotRegex(ui.APP_CSS, r'h1\[tabindex')                    # no heading takes focus now
+
+    def test_a_long_image_name_in_a_choice_row_wraps(self):
+        # A digest-pinned image, one long word, made the step 910 px wide on a 390 px phone
+        self.assertRegex(ui.APP_CSS, r'(?m)^\.way b\{[^}]*overflow-wrap:anywhere\}')
+        self.assertRegex(ui.APP_CSS, r'(?m)^\.way \.head~span\{[^}]*overflow-wrap:anywhere\}')
 
 
 if __name__ == '__main__':

@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, engine, plan, ui, where, wizard
-from subsync import aiosconfig, explain, realdebrid
+from subsync import aiosconfig, explain, origlang, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
 PASSWORD = 'viewer-secret-password'
@@ -278,6 +278,18 @@ class AnswersRun:
             code = wizard.main(['--answers', self.answers_file(answers), '--yes', *extra])
         return code, out.getvalue()
 
+    def stand_in_tmdb(self):
+        """TMDB's key check answered here, so no request leaves this machine: with `self.tmdb_answer` (True accepted,
+        False refused, None no answer); each check made, (the TMDB address, the key), in self.tmdb_checked."""
+        self.tmdb_answer, self.tmdb_checked = True, []
+
+        def check_key(settings, key, timeout=10.0):
+            self.tmdb_checked.append((settings.tmdb_url, key))
+            return self.tmdb_answer
+        p = mock.patch.object(origlang, 'check_key', check_key)
+        p.start()
+        self.addCleanup(p.stop)
+
 
 class FlowFixture(AnswersRun, unittest.TestCase):
     """A stand-in AIOStreams with Docker stubbed out (no tests here: test_web.py drives the page on it too). Everything
@@ -326,6 +338,7 @@ class FlowFixture(AnswersRun, unittest.TestCase):
         ):
             p.start()
             self.addCleanup(p.stop)
+        self.stand_in_tmdb()
 
     def _compose(self, state, *args, **kw):
         self.assertNotIn('build', args)                     # nothing is built: the image is setup's own

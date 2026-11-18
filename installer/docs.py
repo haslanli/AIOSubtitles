@@ -8,12 +8,39 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import installer  # noqa: E402,F401  (its __init__ puts subsync's folder on the import path)
+from installer import hosting, limits  # noqa: E402
 from subsync import explain  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 START = '<!-- settings: written by python3 -I installer/docs.py from subsync/subsync/explain.py -->'
 END = '<!-- end of settings -->'
 WIDTH = 116
+
+# The keys of an answers file, in three parts, as ./setup asks them (a test checks them against the engine's questions).
+# Your own install: every question but the route's, the public instance's and removing's, with the limits it asks under
+# their setting names after the audio limit's question.
+YOURSELF_LIMITS = limits.names(limits.personal(audio=False, usenet=True))
+# A public instance: its address, the settings it asks under their own names (its trusted proxy, its invite code, its
+# choices), its audio question, then every limit; SUBDL_KEY and TMDB_KEY are asked as for your own install.
+HOSTING_SETTINGS = ('SUBSYNC_TRUSTED_PROXY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_TMDB_PERSONAL',
+                    'SUBSYNC_USENET')
+HOSTING = (('HOST_ADDRESS', *HOSTING_SETTINGS, 'SUBSYNC_AUDIO_ROUTE')
+           + limits.names(limits.hosting(usenet=True, audio=True)))
+REMOVING = ('REMOVE_OPENSUBTITLES',)
+PARTS = ('Install it for yourself (ROUTE=yourself)',
+         'Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.',
+         'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD and CONFIRM above are asked here too; '
+         'on a public instance only CONFIRM.')
+EXAMPLE_ON_GITHUB = 'https://github.com/haslanli/AIOSubtitles/blob/main/docs/answers.example'   # the image has no docs/
+
+
+def yourself():
+    """Your own install's keys, in the questions' order."""
+    keys = []
+    for key in explain.QUESTIONS:
+        if key != 'ROUTE' and key not in HOSTING + REMOVING:
+            keys += [key] + (list(YOURSELF_LIMITS) if key == 'AUDIO_BUDGET' else [])
+    return keys
 
 
 def comment(text):
@@ -35,7 +62,9 @@ def readme_section():
            'plays the same file.', '',
            '### The questions ./setup asks', '',
            'Each question shows its explanation as it is asked. In an answers file (`./setup --answers FILE`) each one '
-           'is a line `KEY=value`; see `docs/answers.example`.', '']
+           f'is a line `KEY=value`; see [docs/answers.example]({EXAMPLE_ON_GITHUB}). Also asked, under their setting '
+           f'names explained below: for your own install {limits.DAILY.setting} and, with Usenet on, '
+           f'{limits.USENET.setting}; for a public instance {", ".join(HOSTING_SETTINGS)} and its limits.', '']
     out += [f'- **`{key}`**: {text}' for key, (_, text) in explain.QUESTIONS.items()]
     out += ['', "### subsync's settings", '',
             './setup writes the first group into `state/subsync.env` from your answers, each line with its explanation '
@@ -55,13 +84,28 @@ def readme_section():
     return '\n'.join(out)
 
 
+def example(key):
+    """A key's example line, under its explanation: a question's own example, else (a setting's name) the setting's
+    default, or the answer setup takes when the line is left out where that differs (the trusted proxy)."""
+    if key in explain.QUESTIONS:
+        value, text = explain.QUESTIONS[key]
+    else:
+        default, text = explain.SETTINGS[key]
+        value = hosting.TRUSTED_PROXY if key == 'SUBSYNC_TRUSTED_PROXY' else default or ''
+    return [''] + comment(text) + [f'{key}={value}']
+
+
 def answers_example():
+    """docs/answers.example: the header, the route's question, then the three parts (PARTS), each under its heading."""
     out = comment('Answers for ./setup --answers state/FILE (add --yes to ask nothing). Leave a line out to be asked, '
                   "or to keep the current value on a re-run; an optional key's empty line (TMDB_KEY=) removes the "
                   'saved key. A " #" starts a comment, except inside quotes. Keep this file private if it holds a '
                   'password.')
-    for key, (example, text) in explain.QUESTIONS.items():
-        out += [''] + comment(text) + [f'{key}={example}']
+    out += example('ROUTE')
+    for heading, keys in zip(PARTS, (yourself(), HOSTING, REMOVING)):
+        out += ['', '', '# ' + '=' * (WIDTH - 2)] + comment(heading)
+        for key in keys:
+            out += example(key)
     return '\n'.join(out) + '\n'
 
 

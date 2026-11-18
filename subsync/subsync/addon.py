@@ -27,10 +27,14 @@ GET  /notice.srt                               public mode: what the person must
 GET  /health, /status
 
 With SUBSYNC_ADDON_KEY set, the manifest, the subtitles route and /status answer only under /<key>/ (the manifest URL
-AIOStreams is given carries it); /file, /pending and /health answer with or without it. SUBSYNC_BASE_PATH (e.g.
-/subsync) is removed from a request path that starts with it, for a reverse proxy that forwards the path as is.
+AIOStreams is given carries it); /file, /health and the entries the subtitle lists name (/pick, /pending, /original)
+answer with or without it, players fetching them as listed. Then an entry's <token> ends in a code made from the key
+(entry_code), so an entry's address can't be made up without the key, which never appears in it; one that doesn't carry
+its code is "not found" and starts nothing. SUBSYNC_BASE_PATH (e.g. /subsync) is removed from a request path that starts
+with it, for a reverse proxy that forwards the path as is.
 """
 import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -98,12 +102,32 @@ def key_of(fid):
     return "subsync:" + fid.replace("_", ":")
 
 
-def token(alias):
-    return base64.urlsafe_b64encode(alias.encode()).decode().rstrip("=")
+CODE_CHARS = 16   # an entry's code: the first 96 bits of an HMAC-SHA256, in base64url
 
 
-def alias_of(tok):
-    return base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4)).decode()
+def _b64(data):
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def entry_code(key, alias):
+    """The code an entry's address carries under SUBSYNC_ADDON_KEY `key`: made from the key and the file's alias, so
+    it can't be made up without the key, which it doesn't give away."""
+    return _b64(hmac.new(key.encode(), b"entry:" + alias.encode(), hashlib.sha256).digest())[:CODE_CHARS]
+
+
+def token(alias, key=""):
+    """An entry's token: the file's alias in base64url, then, with SUBSYNC_ADDON_KEY `key`, its code."""
+    return _b64(alias.encode()) + (entry_code(key, alias) if key else "")
+
+
+def alias_of(tok, key=""):
+    """The file's alias in an entry's token; with `key`, only when the token ends in the alias's code. ValueError for
+    any other token (answered "not found")."""
+    tok, code = (tok[:-CODE_CHARS], tok[-CODE_CHARS:]) if key else (tok, "")
+    alias = base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4)).decode()
+    if key and not hmac.compare_digest(code, entry_code(key, alias)):
+        raise ValueError("an entry address subsync didn't list")
+    return alias
 
 
 def as_srt(text):
@@ -243,7 +267,7 @@ class App:
         # download waits for the list. Once the list is known, only languages that have a subtitle get it.
         originals = self.worker.known_originals(job.alias)
         have = {e["lang"] for e in out}
-        tok = token(job.alias)
+        tok = token(job.alias, self.s.addon_key)
         for lang in self.s.languages:
             original = (originals or {}).get(lang)
             if lang in have or (originals is not None and not original):
@@ -274,7 +298,7 @@ class App:
         file_key = self.store.resolve(*job.aliases)
         originals = None
         entries = []
-        tok = token(job.alias)
+        tok = token(job.alias, self.s.addon_key)
         for lang in self.s.languages:
             if lang in have:
                 continue
@@ -343,7 +367,7 @@ class App:
         if not (self.s.pending_entry and originals and self.worker.busy_with(job.alias)):
             return out
         have = {e["lang"] for e in out}
-        tok = token(job.alias)
+        tok = token(job.alias, self.s.addon_key)
         for lang in self.s.languages:
             original = originals.get(lang)
             if lang not in have and original:   # only languages that have a subtitle to sync
@@ -456,7 +480,7 @@ class Handler(BaseHTTPRequestHandler):
             m = PENDING_ROUTE.match(path)
             if m:
                 try:
-                    alias = alias_of(m.group(1))
+                    alias = alias_of(m.group(1), app.s.addon_key)
                 except ValueError:
                     return self._send(404, b"")
                 deadline = time.time() + app.s.pick_wait
@@ -472,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
             m = ORIGINAL_ROUTE.match(path)
             if m:
                 try:
-                    alias = alias_of(m.group(1))
+                    alias = alias_of(m.group(1), app.s.addon_key)
                 except ValueError:
                     return self._send(404, b"")
                 kept, first = app.kept_choice(alias, m.group(2))
@@ -488,7 +512,7 @@ class Handler(BaseHTTPRequestHandler):
             m = PICK_ROUTE.match(path)
             if m:
                 try:
-                    alias = alias_of(m.group(1))
+                    alias = alias_of(m.group(1), app.s.addon_key)
                 except ValueError:
                     return self._send(404, b"")
                 lang = m.group(2)
@@ -575,6 +599,6 @@ class Server(ThreadingHTTPServer):
             log.warning("connection failed: %s", type(error).__name__)
 
 
-def serve(app, port):
+def serve(app, port, host="0.0.0.0"):
     handler = type("BoundHandler", (Handler,), {"app": app})   # this server's app, not every Handler's
-    return Server(("0.0.0.0", port), handler)
+    return Server((host, port), handler)

@@ -1000,6 +1000,28 @@ class HousekeepingTest(unittest.TestCase):
                          ["housekeeping failed: OperationalError", "store expiry failed: OperationalError"])
 
 
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+class ListenTest(unittest.TestCase):
+    def test_public_mode_listens_where_subsync_bind_says(self):
+        # The one setting for both modes (the self-hosted one: test_service's StopTest)
+        from unittest import mock
+        from subsync import __main__ as entry, net, public, users
+        from subsync.settings import Settings
+
+        class Served(Exception):
+            pass
+        self.assertEqual(Settings({}).bind, "0.0.0.0")
+        s = Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY, "SUBSYNC_PORT": "8791",
+                      "SUBSYNC_BIND": " 127.0.0.1 "})
+        with mock.patch.object(net, "configure"), mock.patch.object(entry, "public_store"), \
+                mock.patch.object(users, "Users"), mock.patch.object(public, "Pool"), \
+                mock.patch.object(public, "PublicService") as service, \
+                mock.patch.object(public, "serve_public", side_effect=Served) as serve:
+            with self.assertRaises(Served):
+                entry.main_public(s)
+        self.assertEqual(serve.call_args.args, (service.return_value, 8791, "127.0.0.1"))
+
+
 class StartupTest(unittest.TestCase):
     def run_main(self, env):
         """subsync's entry point with `env` as the whole environment: its logs at ERROR, once it has stopped as it must.

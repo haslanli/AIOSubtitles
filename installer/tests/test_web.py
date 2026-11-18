@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import engine, screens, tests, update, web
+from installer.tests import samples
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
@@ -118,6 +119,38 @@ class BackgroundWork:
             time.sleep(0.05)
 
 
+class ProgressPages(unittest.TestCase):
+    """A page whose work runs loaded itself again every 2 seconds, sending a screen reader back to the top
+    each time. Now it does only without the script; with it, the script fetches the page's own address (which only the
+    setup page's header allows) and puts in the parts that change, reading out the lines that are new."""
+
+    def test_the_parts_the_script_puts_in_are_on_every_progress_page(self):
+        states = samples.every_state()
+        self.assertIn('["main .fbar", "main .body", "main .actions"]', ui.APP_JS)
+        steps = ('fbar', 'body', 'actions')
+        for name, parts in (('install-running', steps), ('check-running', steps), ('updating', ('body',))):
+            main = states[name][0].split('<main', 1)[1]
+            with self.subTest(screen=name):
+                self.assertIn('data-refresh="2"', states[name][0])
+                for part in parts:
+                    self.assertEqual(main.count(f'<div class="{part}">'), 1, part)
+        done = states['updated'][0].split('<main', 1)[1]                  # the actions come once the work has ended
+        self.assertIn('<div class="body">', done)
+        self.assertIn('<div class="actions">', done)
+
+    def test_the_script_fetches_only_the_pages_own_address_and_reads_out_the_new_lines(self):
+        js = ui.APP_JS.split(' work as it goes\n', 1)[1]
+        self.assertIn('var every = +body.getAttribute("data-refresh") * 1000;', js)
+        self.assertIn('fetch(location.href).then(', js)
+        self.assertIn('return answer.ok && !answer.redirected ? answer.text() : Promise.reject();', js)
+        self.assertIn('if (fresh.body.hasAttribute("data-refresh")) setTimeout(poll, every);', js)   # until it ends
+        self.assertIn('}).catch(function () { location.reload(); });', js)       # as without the script
+        self.assertIn('} else if (every) {\n    setTimeout(function () { location.reload(); }, every);', js)
+        self.assertIn('said.setAttribute("role", "status");', js)               # one polite region, the new lines only
+        self.assertIn('return known.indexOf(line) < 0;', js)
+        self.assertIn('p.textContent = line;', js)
+
+
 class Security(unittest.TestCase):
     def setUp(self):
         self.app = web.App(port=8801)
@@ -136,7 +169,11 @@ class Security(unittest.TestCase):
             self.assertEqual(self.b.get('', host=host)[0], 200)
 
     def test_every_page_has_the_sites_security_header(self):
-        wanted = site_headers()
+        # with one source more: a page whose work runs fetches its own address to show its progress, which
+        # the site's pages never do
+        wanted = dict(site_headers())
+        self.assertNotIn('connect-src', wanted['Content-Security-Policy'])
+        wanted['Content-Security-Policy'] += "; connect-src 'self'"
         for path in (f'/{self.app.key}/', '/nope', f'/{self.app.key}/nothing-here'):
             _, headers, _ = self.b.request('GET', path)
             for name, value in wanted.items():
@@ -498,12 +535,30 @@ class Personal(BackgroundWork, FlowFixture):
                     self.assertIn('Signed in', text)                          # what the step wrote before it stopped
         self.assertFalse(any('adminpw' in page for page in self.b.pages))
 
+    def test_a_refused_answer_is_summed_up_first_linking_to_its_field(self):
+        # The error was only under its box, further down; nothing was focused or announced
+        b = self.b
+        b.post('', {'ROUTE': 'yourself'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('aios', {'go': 'next'})
+        _, _, text = b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': 'wrong', 'go': 'next'})
+        raw = b.pages[-1]
+        body = raw.split('<div class="body">', 1)[1]
+        self.assertTrue(body.startswith('<div class="note problem" role="alert" id="problem" tabindex="-1">'), body[:80])
+        message = re.search(r'<p id="problem-message"><a href="#aios_config_password">([^<]+)</a></p>', body).group(1)
+        self.assertIn(f'<p class="field-error" id="aios_config_password-error">{message}</p>', raw)
+        self.assertIn("That didn&#x27;t go through", body)
+        _, _, text = b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.assertNotIn('id="problem"', b.pages[-1])
+
     def test_a_refused_audio_limit_shows_under_its_field(self):
         # the engine refuses it under its answers-file key, AUDIO_BUDGET, which the page's field isn't named by
         self.walk_to_review(AUDIO='pick')
         _, _, text = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'SUBSYNC_AUDIO_BUDGET_GB': '3',
                                             'go': 'next'})
-        self.assertIn('<p class="field-error">Type 0.5, 1, 2 or 4 (GB per file).</p>', text)
+        # in the page's words for its row of buttons (the terminal's are "Type 0.5, 1, 2 or 4 (GB per file).")
+        self.assertIn('<p class="field-error" id="SUBSYNC_AUDIO_BUDGET_GB-error">Choose 0.5, 1, 2 or 4 GB.</p>', text)
 
     def test_the_sign_in_is_labelled_by_why_aiostreams_asks(self):
         # it always said "(admin)", though only the cache setting needs an admin account
@@ -530,7 +585,7 @@ class Personal(BackgroundWork, FlowFixture):
         self.b.follow('install', {'go': 'next'})
         self.b.settle('check')
         _, _, text = self.b.follow('check', {'go': 'next'})
-        self.assertIn('<h1 tabindex="-1">Installed, with warnings</h1>', text)
+        self.assertIn('<h1>Installed, with warnings</h1>', text)
         self.assertNotIn('see above', text)
         self.assertLess(text.index('Installed, with warnings'), text.index('AIOStreams did not reach subsync.'))
         self.assertIn('It calls http://aiosubtitles-subsync:8790/…; check that address works from AIOStreams.', text)
@@ -637,7 +692,7 @@ class Personal(BackgroundWork, FlowFixture):
                 contextlib.redirect_stderr(terminal):
             status, _, text = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
         self.assertEqual(status, 200)
-        self.assertIn('<h1 tabindex="-1">Limits</h1>', text)
+        self.assertIn('<h1>Limits</h1>', text)
         self.assertIn('Something unexpected went wrong, so setup stopped here.', text)
         self.assertIn("KeyError: 'settings'", terminal.getvalue())
         self.assertNotIn('settings', text.split('<h1', 1)[1].split('Data a day in total')[0])
@@ -648,7 +703,7 @@ class Personal(BackgroundWork, FlowFixture):
                 contextlib.redirect_stderr(terminal):
             status, _, text = self.b.get('')
         self.assertEqual(status, 200)
-        self.assertIn('<h1 tabindex="-1">Set up AIOSubtitles</h1>', text)
+        self.assertIn('<h1>Set up AIOSubtitles</h1>', text)
         self.assertIn('Something unexpected went wrong, so setup stopped here.', text)
         self.assertIn('Run ./setup again. If it happens again, send what the terminal shows with a bug report.', text)
         self.assertNotIn('Permission denied', text)
@@ -937,6 +992,27 @@ class Hosting(BackgroundWork, RouteFixture):
                                         'go': 'next'})
         self.assertIn('<p class="field-error" id="host_address-error">Leave out the spaces.</p>', text)
 
+    def test_a_hand_set_language_limit_no_button_offers_says_what_to_choose(self):
+        # Its problem named the setting and sat inside the row of buttons, widening a phone's page
+        self.state.mkdir(parents=True)
+        (self.state / 'subsync.env').write_text('SUBSYNC_MAX_LANGUAGES=6\n')
+        b = Browser(web.App(port=8812))
+        b.post('', {'ROUTE': 'host'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
+        b.follow('signups', {'SUBSYNC_PUBLIC_INVITE': 'my-own-code', 'go': 'next'})
+        b.follow('hostchoices', {'go': 'next'})
+        status, _, _ = b.post('hostlimits', {'go': 'next'})                # no button is picked: 6 isn't one
+        page = b.pages[-1]
+        self.assertEqual(status, 200)
+        self.assertIn('<p class="field-error" id="SUBSYNC_MAX_LANGUAGES-error">Choose 1, 2, 3 or 4.</p><div '
+                      'class="seg-row"><div class="seg" id="SUBSYNC_MAX_LANGUAGES" role="radiogroup" '
+                      'aria-labelledby="SUBSYNC_MAX_LANGUAGES-label" aria-describedby="SUBSYNC_MAX_LANGUAGES-error '
+                      'SUBSYNC_MAX_LANGUAGES-help" aria-invalid="true">', page)
+        self.assertIn('<a href="#SUBSYNC_MAX_LANGUAGES">Choose 1, 2, 3 or 4.</a>', page)
+        self.assertNotIn('SUBSYNC_MAX_LANGUAGES must be', page)
+
     def test_a_public_instance_through_the_page(self):
         app = web.App(port=8805)
         b = Browser(app)
@@ -1048,7 +1124,7 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertIn('<p class="field-error" id="confirm-error">', b.pages[-1])
         self.assertTrue((self.state / 'subsync.env').exists())                          # nothing removed
         _, _, text = b.post('remove', {'CONFIRM': 'yes'})
-        self.assertIn('<h1 tabindex="-1">Removing AIOSubtitles</h1>', text)
+        self.assertIn('<h1>Removing AIOSubtitles</h1>', text)
         self.assertIn(f'this folder, {self.state.parent}</li>', text)                   # no database copies here
         self.assertNotIn('--restore', text)
         self.assertFalse((self.state / 'subsync.env').exists())
@@ -1140,7 +1216,7 @@ class Removing(BackgroundWork, FlowFixture):
             return (1, '', 'Error response from daemon: timeout') if 'down' in args else (0, '', '')
         with mock.patch.object(engine.dockerenv, 'compose', compose):
             text = self.remove()
-        self.assertIn('<h1 tabindex="-1">Removing subsync</h1>', text)
+        self.assertIn('<h1>Removing subsync</h1>', text)
         self.assertIn("Removing the subsync container failed; setup's files were kept, so removing it again finishes "
                       'the job.', text)
         self.assertIn('Error response from daemon: timeout', text)

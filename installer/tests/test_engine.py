@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from html import escape as html_escape
 from pathlib import Path
 from unittest import mock
 
@@ -464,6 +465,31 @@ class AiostreamsShapes(Offline):
         self.assertEqual(self.ours(), [f'http://127.0.0.1:8790/{key}/manifest.json'])
         s = engine.load_settings()
         self.assertEqual((s['mode'], s['public_kind'], s['bind'], s['port']), ('host', 'path', None, 8790))
+
+    def test_subsync_listens_on_this_machine_only_behind_the_web_server_with_host_networking(self):
+        # With host networking it listened on every interface, a plain-http way around the web server, while
+        # the same answers on Docker's network publish it on 127.0.0.1 only
+        host = [self.container(host_network=True, networks=[])]
+        with mock.patch.object(dockerenv, 'aios_containers', lambda: host):
+            self.install()
+        self.assertEqual(self.env()['SUBSYNC_BIND'], '127.0.0.1')
+        self.assertIn(f"# {explain.SETTINGS['SUBSYNC_BIND'][1][:60]}", (self.state / 'subsync.env').read_text())
+        self.assertEqual(self.ours(), [f"http://127.0.0.1:8790/{self.keys()['ADDON_KEY']}/manifest.json"])  # still
+        with mock.patch.object(dockerenv, 'aios_containers', lambda: host), \
+                mock.patch.object(engine.Engine, 'public_health', lambda e: self.aios.subsync_up):
+            code, out = self.again(PUBLIC_ADDRESS='http://192.168.1.5:8790')        # its own port: every interface
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('SUBSYNC_BIND', self.env())
+
+    def test_on_dockers_network_the_published_port_decides_where_it_listens(self):
+        self.install()
+        self.assertNotIn('SUBSYNC_BIND', self.env())                    # 0.0.0.0 in its container, published on
+        self.assertIn('    ports: ["127.0.0.1:8790:8790"]\n', self.compose())   # 127.0.0.1 only
+        self.assertEqual(explain.SETTINGS['SUBSYNC_BIND'], (
+            '0.0.0.0', "The address subsync listens on. ./setup sets 127.0.0.1 when AIOStreams uses host networking and "
+            "your web server passes subsync's address on, so nothing reaches subsync except through your web server. "
+            'Leave it as it is otherwise: in a container, Docker needs 0.0.0.0 to pass its port on.'))
+        self.assertIn('SUBSYNC_BIND', explain.WRITTEN_BY_SETUP)          # so a re-run that doesn't write it removes it
 
     def test_aiostreams_elsewhere_on_the_network(self):
         # the common LAN case: no AIOStreams container here, AIOStreams at http://192.168.x.x:3000; subsync on this
@@ -1022,6 +1048,74 @@ class OptionalKeys(Offline):
         e = self.page_engine({})                                         # no answer: kept
         e.choices()
         self.assertEqual(e.keys['TMDB_KEY'], 'tmdb-key-1')
+
+
+class TmdbKeyCheck(Offline):
+    """A new TMDB key is checked with TMDB once, with one request (as the site's settings page checks a
+    person's own): a refused one is asked again with the site's words and isn't kept; one TMDB doesn't answer about is
+    saved with a warning; the saved key isn't checked again. TMDB's answer is the fixture's stand-in."""
+
+    REFUSED = ("TMDB didn't accept this key. Copy it again from themoviedb.org (your account's settings, API) and paste "
+               'it here.')
+
+    def test_a_new_key_is_checked_once_then_saved(self):
+        self.install(TMDB_KEY='tmdb-key-1')
+        self.assertEqual(self.tmdb_checked, [('https://api.themoviedb.org/3', 'tmdb-key-1')])
+        self.assertEqual(self.env()['SUBSYNC_TMDB_KEY'], 'tmdb-key-1')
+        code, out = self.again()                                         # the saved key: not checked again
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.tmdb_checked), 1)
+        self.assertNotIn('TMDB accepts this key', out)
+        code, out = self.again(TMDB_KEY='tmdb-key-2')                    # a new one is
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.tmdb_checked[-1][1], 'tmdb-key-2')
+        self.assertIn('✓  TMDB accepts this key', out)
+        self.assertNotIn('tmdb-key-2', out)
+
+    def test_a_refused_key_stops_an_answers_run_with_the_sites_words(self):
+        self.tmdb_answer = False
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', TMDB_KEY='tmdb-key-1'))
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'TMDB_KEY: {self.REFUSED}', ' '.join(out.split()))
+        self.assertEqual(self.REFUSED, explain.PUBLIC_TEXTS['tmdb_refused'])
+        self.assertFalse((self.state / 'subsync.env').exists())          # nothing saved
+        self.assertEqual(len(self.tmdb_checked), 1)
+
+    def test_a_key_tmdb_doesnt_answer_about_is_saved_with_a_warning(self):
+        self.tmdb_answer = None
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', TMDB_KEY='tmdb-key-1'))
+        self.assertEqual(code, 0, out)
+        self.assertIn("!  TMDB didn't answer, so the key wasn't checked; it is saved as you typed it.", out)
+        self.assertNotIn('TMDB accepts this key', out)
+        self.assertEqual(self.env()['SUBSYNC_TMDB_KEY'], 'tmdb-key-1')
+
+    def test_on_the_page_a_refused_key_is_under_its_field_and_left_out(self):
+        self.tmdb_answer = False
+        e = self.page_engine({'TMDB_KEY': 'tmdb-key-1'})
+        with self.assertRaises(engine.Problem) as refused:
+            e.choices()
+        self.assertEqual((refused.exception.field, refused.exception.message), ('TMDB_KEY', self.REFUSED))
+        self.assertNotIn('TMDB_KEY', e.answers)                         # its box is empty again
+        e.choices()                                                      # left empty, the step goes on without it
+        self.assertNotIn('TMDB_KEY', e.keys)
+        self.assertEqual(len(self.tmdb_checked), 1)
+        self.tmdb_answer = True
+        e.answers['TMDB_KEY'] = 'tmdb-key-2'
+        e.choices()
+        self.assertEqual(e.keys['TMDB_KEY'], 'tmdb-key-2')
+        self.assertIn(('ok', 'TMDB accepts this key'), [tuple(r[:2]) for r in e.out.rows])
+        e.choices()                                                      # the same step again: checked once
+        self.assertEqual([key for _, key in self.tmdb_checked], ['tmdb-key-1', 'tmdb-key-2'])
+        html = screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', problem=('TMDB_KEY', self.REFUSED))
+        self.assertIn(f'<p class="field-error" id="tmdb_key-error">{html_escape(self.REFUSED)}</p>', html)
+        self.assertIn(f'<a href="#tmdb_key">{html_escape(self.REFUSED)}</a>', html)       # the summary's link
+
+    def test_the_key_is_checked_at_the_tmdb_address_subsync_uses(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'subsync.env').write_text('SUBSYNC_TMDB_URL=http://127.0.0.1:9/3\n')
+        self.assertEqual(engine.Engine({}, page=True).check_tmdb_key('tmdb-key-1'), (True, 'TMDB accepts this key',
+                                                                                     'tmdb-key-1'))
+        self.assertEqual(self.tmdb_checked, [('http://127.0.0.1:9/3', 'tmdb-key-1')])
 
 
 class PlainHttp(Offline):

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from installer import docs, screens, ui
+from installer import docs, hosting, limits, screens, ui, web
 from subsync import explain
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -114,6 +114,84 @@ class Documents(unittest.TestCase):
                          "asked, or to keep the current value on a re-run; an optional key's empty line (TMDB_KEY=) "
                          'removes the saved key. A " #" starts a comment, except inside quotes. Keep this file private '
                          'if it holds a password.')
+
+    def test_the_readme_names_the_keys_asked_under_a_settings_name_and_links_the_example(self):
+        # it listed only the main questions, and pointed image-route users at a file the image doesn't have
+        section = ' '.join(docs.readme_section().split())
+        self.assertIn('Each question shows its explanation as it is asked. In an answers file (`./setup --answers FILE`) '
+                      'each one is a line `KEY=value`; see [docs/answers.example](https://github.com/haslanli/'
+                      'AIOSubtitles/blob/main/docs/answers.example). Also asked, under their setting names explained '
+                      'below: for your own install SUBSYNC_DAILY_BUDGET_GB and, with Usenet on, '
+                      'SUBSYNC_USENET_LISTINGS_PER_DAY; for a public instance SUBSYNC_TRUSTED_PROXY, '
+                      'SUBSYNC_PUBLIC_INVITE, SUBSYNC_SUBSOURCE_KEY, SUBSYNC_TMDB_PERSONAL, SUBSYNC_USENET and its '
+                      'limits.', section)
+
+    @staticmethod
+    def example_parts():
+        """docs/answers.example as [(heading, [(key, explanation, value)])], the route's question under heading None."""
+        parts, heading, comment = [(None, [])], None, []
+        for line in docs.answers_example().split('\n')[1:]:
+            if line.startswith('# ====='):
+                heading = ''
+            elif line.startswith('# '):
+                comment.append(line[2:])
+            elif '=' in line:
+                key, value = line.split('=', 1)
+                parts[-1][1].append((key, ' '.join(comment), value))
+                comment = []
+            elif heading == '' and comment:                     # a part's heading ends at its blank line
+                parts.append((' '.join(comment), []))
+                heading, comment = None, []
+            else:
+                comment = [] if not line else comment
+        return parts
+
+    def test_the_answers_example_has_its_three_parts_each_key_with_its_explanation(self):
+        # one list mixed both routes and removal, and left out the keys asked under a setting's name
+        parts = self.example_parts()
+        self.assertEqual([heading for heading, _ in parts], [
+            None, 'Install it for yourself (ROUTE=yourself)',
+            'Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.',
+            'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD and CONFIRM above are asked here '
+            'too; on a public instance only CONFIRM.'])
+        keys = [[key for key, _, _ in lines] for _, lines in parts]
+        self.assertEqual(keys[0], ['ROUTE'])
+        self.assertEqual(keys[1], ['AIOS_CONTAINER', 'AIOS_URL', 'AIOS_CONFIG_ID', 'AIOS_CONFIG_PASSWORD', 'LANGUAGES',
+                                   'AUDIO', 'USENET', 'AUDIO_BUDGET', 'SUBSYNC_DAILY_BUDGET_GB',
+                                   'SUBSYNC_USENET_LISTINGS_PER_DAY', 'SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY',
+                                   'ADD_OPENSUBTITLES', 'PUBLIC_ADDRESS', 'CACHE', 'AIOS_USERNAME', 'AIOS_PASSWORD',
+                                   'CONFIRM', 'TEST_READ'])
+        self.assertEqual(keys[2][:7], ['HOST_ADDRESS', 'SUBSYNC_TRUSTED_PROXY', 'SUBSYNC_PUBLIC_INVITE',
+                                       'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_TMDB_PERSONAL', 'SUBSYNC_USENET',
+                                       'SUBSYNC_AUDIO_ROUTE'])
+        self.assertEqual(keys[2][7:], [lim.setting for lim in limits.hosting(usenet=True, audio=True)])
+        self.assertEqual(keys[3], ['REMOVE_OPENSUBTITLES'])
+        for _, lines in parts:
+            for key, text, value in lines:
+                with self.subTest(key=key):
+                    question = explain.QUESTIONS.get(key)
+                    self.assertEqual(text, question[1] if question else explain.SETTINGS[key][1])
+                    if question:
+                        self.assertEqual(value, question[0])
+                    elif key == 'SUBSYNC_TRUSTED_PROXY':          # setup's own answer when none is given
+                        self.assertEqual(value, hosting.TRUSTED_PROXY)
+                    else:
+                        self.assertEqual(value, explain.SETTINGS[key][0] or '')
+        self.assertEqual(hosting.TRUSTED_PROXY, 'gateway')
+
+    def test_the_answers_example_has_every_key_setup_reads_from_an_answers_file(self):
+        asked = set()
+        for node in ast.walk(wizard_tree()):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ASKS \
+                    and node.args and isinstance(node.args[0], ast.Constant):
+                asked.add(node.args[0].value)
+        asked |= set(web.PERSONAL_KEYS + web.HOST_KEYS)            # the optional keys, asked by engine.optional_key
+        asked |= {lim.setting for lim in limits.personal(audio=False, usenet=True) + limits.hosting(True, True)}
+        engine_source = (REPO / 'installer' / 'engine.py').read_text()
+        self.assertIn("if 'SUBSYNC_PUBLIC_INVITE' in self.answers:", engine_source)   # read, not asked
+        asked.add('SUBSYNC_PUBLIC_INVITE')
+        in_example = {key for _, lines in self.example_parts() for key, _, _ in lines}
+        self.assertEqual(in_example, asked)
 
     def test_every_setting_and_rule_is_in_the_readme(self):
         section = docs.readme_section()

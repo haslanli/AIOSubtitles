@@ -6,7 +6,7 @@ import unittest
 from html.parser import HTMLParser
 from unittest import mock
 
-from installer import dockerenv, limits, plan, screens, update
+from installer import dockerenv, engine, limits, plan, screens, update
 from installer.aios import Aios
 from installer.tests import samples
 import html as htmllib
@@ -234,7 +234,10 @@ class Rules(unittest.TestCase):
         for name in ('install-running', 'check-running', 'updating'):
             html, _ = states[name]
             with self.subTest(screen=name):
-                self.assertIn('<meta http-equiv="refresh" content="2">', html)
+                # it loads itself again without the script only; the script shows the progress
+                self.assertIn('<noscript><meta http-equiv="refresh" content="2"></noscript>', html)
+                self.assertEqual(html.count('http-equiv="refresh"'), 1)
+                self.assertIn('<body class="p-letter" data-refresh="2">', html)
                 self.assertNotIn('aria-label="Back"', html)
                 self.assertNotIn('>Back<', html)
         for name in ('install-running', 'machine-stop'):
@@ -250,6 +253,7 @@ class Rules(unittest.TestCase):
             if name not in ('install-running', 'check-running', 'updating'):
                 with self.subTest(screen=name):
                     self.assertNotIn('http-equiv="refresh"', html)
+                    self.assertNotIn('data-refresh', html)
 
     def test_a_saved_key_has_the_box_that_removes_it_under_its_field(self):
         states = samples.every_state()
@@ -538,6 +542,121 @@ class StepsAndEnd(unittest.TestCase):
                          ['AIOStreams did not reach subsync.',
                           'It calls http://aiosubtitles-subsync:8790/…; check that address works from AIOStreams.'])
         self.assertNotIn('<ul class="checks">', samples.every_state()['done'][0])
+
+
+class LimitProblems(unittest.TestCase):
+    """A limit's problem shows under its label, tied to its box or row of buttons as every other question's
+    is; a row of buttons' problem stays outside the row and says what to choose."""
+
+    @staticmethod
+    def tag(html, pattern):
+        return re.search(pattern, html).group(0)
+
+    def test_a_number_limits_box_is_described_by_its_problem_and_marked(self):
+        # the problem was pasted in after the label: the box was neither described by it nor marked
+        html, _ = samples.every_state()['host-limits-problem']
+        box = self.tag(html, r'<input id="SUBSYNC_SYNCS_AT_ONCE"[^>]*>')
+        self.assertIn('aria-describedby="SUBSYNC_SYNCS_AT_ONCE-error SUBSYNC_SYNCS_AT_ONCE-help" aria-invalid="true"',
+                      box)
+        self.assertIn('<label for="SUBSYNC_SYNCS_AT_ONCE">Files synced at a time</label><p class="field-error" '
+                      'id="SUBSYNC_SYNCS_AT_ONCE-error">A whole number from 1, or auto.</p><div class="num">', html)
+        box = self.tag(html, r'<input id="SUBSYNC_USER_FILES_PER_DAY"[^>]*>')         # the others as they were
+        self.assertIn('aria-describedby="SUBSYNC_USER_FILES_PER_DAY-help">', box)
+        self.assertNotIn('aria-invalid', box)
+        html, _ = samples.every_state()['limits-problem']                             # a personal install's too
+        self.assertIn('aria-describedby="SUBSYNC_DAILY_BUDGET_GB-error SUBSYNC_DAILY_BUDGET_GB-help" '
+                      'aria-invalid="true"', self.tag(html, r'<input id="SUBSYNC_DAILY_BUDGET_GB"[^>]*>'))
+
+    def test_a_row_of_buttons_problem_is_under_its_label_outside_the_row_and_says_what_to_choose(self):
+        # it was put inside the row, after the last button, unread with the group and naming the setting
+        for name, setting, words in (('host-limits-languages-problem', 'SUBSYNC_MAX_LANGUAGES', 'Choose 1, 2, 3 or 4.'),
+                                     ('limits-audio-problem', 'SUBSYNC_AUDIO_BUDGET_GB', 'Choose 0.5, 1, 2 or 4 GB.')):
+            html, _ = samples.every_state()[name]
+            with self.subTest(screen=name):
+                self.assertIn(f'<span class="label" id="{setting}-label">', html)
+                self.assertIn(f'</span><p class="field-error" id="{setting}-error">{words}</p><div class="seg-row">'
+                              f'<div class="seg" id="{setting}" role="radiogroup" aria-labelledby="{setting}-label" '
+                              f'aria-describedby="{setting}-error {setting}-help" aria-invalid="true">', html)
+                row = html.split(f'id="{setting}" role="radiogroup"', 1)[1].split('</div>', 1)[0]
+                self.assertNotIn('field-error', row)
+                self.assertIn(words, screens.INSTALLER_WORDS)
+        # the terminal, where the answer is typed, keeps its words
+        self.assertEqual(limits.NOT_A_LANGUAGE_LIMIT, 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.')
+        self.assertEqual(limits.NOT_AN_AUDIO_LIMIT, 'Type 0.5, 1, 2 or 4 (GB per file).')
+        self.assertEqual([limits.choose(lim) for lim in limits.hosting(audio=True) if lim.kind == 'segmented'],
+                         ['Choose 1, 2, 3 or 4.', 'Choose 0.5, 1, 2 or 4 GB.'])
+
+    def test_without_a_problem_the_rows_of_buttons_are_as_they_were(self):
+        html, _ = samples.every_state()['host-limits-audio']
+        for setting in ('SUBSYNC_MAX_LANGUAGES', 'SUBSYNC_AUDIO_BUDGET_GB'):
+            self.assertIn(f'<div class="seg" id="{setting}" role="radiogroup" aria-labelledby="{setting}-label" '
+                          f'aria-describedby="{setting}-help">', html)
+        self.assertNotIn('field-error', html)
+
+
+class RefusedAnswerSummary(unittest.TestCase):
+    """A step that comes back with a refused answer starts with the public pages' summary, focused by the
+    script, its message linking to the field; the headings have no unused focus mark."""
+
+    def summary(self, html):
+        return re.search(r'<div class="body">(<div class="note problem"[^>]*>.*?</div></div>)', html)
+
+    def test_the_summary_comes_first_with_the_fields_own_words_linking_to_it(self):
+        states = samples.every_state()
+        for name, field, words in (
+                ('config-wrong-password', 'aios_config_password', samples.aios_error(
+                    samples.PUBLIC, lambda aios: aios.get_config(samples.CONFIG_ID, 'x'),
+                    samples.Offline(401, {'error': {'code': 'USER_INVALID_PASSWORD'}})).message),
+                ('choices-problem', 'languages', plan.parse_languages('Klingon')[1]),
+                ('limits-problem', 'SUBSYNC_DAILY_BUDGET_GB', limits.check(limits.DAILY, '0')[1]),
+                ('host-limits-languages-problem', 'SUBSYNC_MAX_LANGUAGES', 'Choose 1, 2, 3 or 4.'),
+                ('host-address-problem', 'host_address', screens.hosting.ADDRESS_REFUSED)):
+            html, _ = states[name]
+            with self.subTest(screen=name):
+                found = self.summary(html)
+                self.assertTrue(found, f'{name}: no summary first in the body')
+                self.assertEqual(found.group(1)[:found.group(1).index('<svg')],
+                                 '<div class="note problem" role="alert" id="problem" tabindex="-1">')
+                self.assertIn(f"<b>That didn&#x27;t go through</b><p id=\"problem-message\"><a href=\"#{field}\">"
+                              f'{htmllib.escape(words)}</a></p>', found.group(1))
+                self.assertIn(f' id="{field}"', html)                               # the link's field is there
+                self.assertIn(f'>{htmllib.escape(words)}</p>', html.split('id="problem-message"', 1)[1])  # and under it
+        self.assertEqual(screens.REFUSED, "That didn't go through")
+        self.assertIn(screens.REFUSED, pages.UI_WORDS)                             # the settings page's title
+
+    def test_no_summary_without_a_refused_answer(self):
+        for name in ('config', 'choices', 'limits', 'host-limits', 'host-address', 'after-sign-in'):
+            with self.subTest(screen=name):
+                self.assertNotIn('id="problem"', samples.every_state()[name][0])
+
+    def test_no_heading_has_a_focus_mark_and_the_script_focuses_the_summary(self):
+        for name, (html, _) in samples.every_state().items():
+            with self.subTest(screen=name):
+                self.assertNotRegex(html, r'<h1 [^>]*tabindex')
+        self.assertIn('var problem = document.getElementById("problem");\n  if (problem && !(layer && '
+                      'layer.contains(problem))) problem.focus();', ui.APP_JS)
+
+
+class ProgressNotes(unittest.TestCase):
+    """The notes under a finished line show under it in the progress list, as the check rows show theirs."""
+
+    def test_an_updates_notes_show_under_its_line(self):
+        html, _ = samples.every_state()['updated']
+        note = (update.KEPT.format(version='1.1.0') + ' ' + update.OLD_IMAGES.format(image='3320f59e4ec8'))
+        progress = html.split('<ol class="progress">', 1)[1].split('</ol>', 1)[0]
+        self.assertIn(f'<span class="tx">{htmllib.escape(update.SWITCHED.format(version="1.2.0"))}'
+                      f'<span class="more">{htmllib.escape(note)}</span></span>', progress)
+        self.assertRegex(ui.APP_CSS, r'(?m)^\.checks \.more,\.progress \.more\{display:block;margin-top:6px;')
+
+    def test_a_note_written_as_a_job_starts_is_its_own_line(self):
+        # Rows.note once joined the row before it, the last step's, which the job's page doesn't show
+        out = engine.Rows()
+        out.ok('Saved the configs')
+        out.begin()
+        out.note('Your web server needs one rule.')
+        out.working('Starting subsync')
+        self.assertIn('<p class="help">Your web server needs one rule.</p>',
+                      screens.working('Updates', [tuple(r) for r in out.rows[1:]], running=True))
 
 
 if __name__ == '__main__':

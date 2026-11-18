@@ -6,6 +6,10 @@
 # instance (host). Runs here with its own sign-up page, so other people can use it with their own AIOStreams.
 ROUTE=yourself
 
+
+# ==================================================================================================================
+# Install it for yourself (ROUTE=yourself)
+
 # Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins that
 # container's Docker network and finds files through it, so the wrong one means it finds none of the files you play.
 # Pick the one whose address your apps use.
@@ -60,6 +64,18 @@ USENET=no
 # originals.
 AUDIO_BUDGET=1
 
+# The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until the next
+# day and new files keep their original subtitles. 100 is far above normal use (about 1 MB per file, a few MB when
+# the track's lines are pictures; up to the audio limit per file with the audio route, 1 GB by default), so it only
+# catches something going wrong. Lower it if your debrid service or server has a tight traffic limit.
+SUBSYNC_DAILY_BUDGET_GB=100
+
+# How many times a day AIOSubtitles may look for a Usenet file through your indexers (10 by default). Each look is
+# one search per indexer in your config, usually answered from AIOStreams' own cache at no cost. Lower it if your
+# indexer's daily limit is tight; 0 turns Usenet off. On a public instance this is per person, through each person's
+# own indexers.
+SUBSYNC_USENET_LISTINGS_PER_DAY=10
+
 # Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, which
 # often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't asked.
 # Cost: one SubDL search for each file you play, plus a download per subtitle tried (at most three per file and
@@ -93,8 +109,8 @@ ADD_OPENSUBTITLES=yes
 # The address your apps download synced subtitle files from. The suggestion sits behind the same web address as
 # AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (setup shows it); on a
 # home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every device you
-# watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced files and
-# a health check are open at that address.
+# watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only synced files,
+# the entries subsync lists and a health check are open at that address.
 PUBLIC_ADDRESS=
 
 # AIOStreams keeps every subtitle answer for 5 minutes. Yes turns that off for subsync only, so a copy made while
@@ -122,11 +138,49 @@ CONFIRM=yes
 # file you play is the first read.
 TEST_READ=no
 
+
+# ==================================================================================================================
+# Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.
+
 # The web address of your public instance, with https, like https://subtitles.example.com: people open it to sign
 # up, and their apps download synced files from it. Your web server sends it to this machine; setup shows the one
 # rule it needs. It goes into every personal link, so choose one you will keep: changing it later breaks the links
 # people already added to their AIOStreams.
 HOST_ADDRESS=
+
+# The addresses of the web server in front of subsync, comma-separated. Only requests from these may say, in their
+# X-Forwarded-For header, which address they came from, and the sign-up limit per address counts that one. Set it to
+# your web server's address as subsync sees it, or to gateway when the web server reaches subsync through a port
+# Docker publishes: subsync then trusts its Docker network's gateway, found at start, with no fixed network to set
+# up. A wrong value makes every visitor count as one address, or lets visitors choose their own.
+SUBSYNC_TRUSTED_PROXY=gateway
+
+# When set, the sign-up page asks for this code, so only people you gave it to can sign up, for example while you
+# and your testers try the service. Empty lets anyone sign up. It doesn't affect people who already signed up.
+# Recommended while testing; remove it to open the service.
+SUBSYNC_PUBLIC_INVITE=
+
+# Optional: a free SubSource API key (create one under API in your account on subsource.net). With it, AIOSubtitles
+# also searches SubSource, which has many subtitles the other sites don't, so a copy that fits is more likely.
+# Without it, SubSource isn't asked. Cost: two requests per title and one per subtitle tried, counted against the
+# key's limit (60 a minute, 7,200 a day for a free key); at most four subtitles per file and language come from it.
+# The search sends the title's IMDb id and season. The key is sent in a header, never shown or logged.
+SUBSYNC_SUBSOURCE_KEY=
+
+# For a public instance with no TMDB key of its own. On: each person may add their own free TMDB key on their
+# settings page; it is used to look up the original language of the films and series they play, and the answers are
+# shared with everyone. Without one, their titles are looked up on Wikidata only, unless someone else's key found
+# them already. Off (recommended if you set a key): the service's own key, if any, is used for everyone. Each
+# person's key is stored encrypted in their record, opens only with their personal link, and is never shown or
+# logged.
+SUBSYNC_TMDB_PERSONAL=off
+
+# Off by default. On your own install: on, subsync also syncs files you play from Usenet, through a second config
+# made from yours with only your Usenet searches and services; off, nothing on Usenet is searched or read. On a
+# public instance: on lets each person turn Usenet on for themselves, with their own Usenet services and indexers
+# through their own AIOStreams; nobody's Usenet is searched or read until they do, and this server holds no Usenet
+# or indexer key.
+SUBSYNC_USENET=off
 
 # Off by default. Off removes it completely: no one's audio is read and the pages don't offer it; such files keep
 # their original subtitles. On: each person chooses on their settings page: off, when they pick a file's
@@ -136,6 +190,100 @@ HOST_ADDRESS=
 # sync serves everyone who plays that file. The reads count in each person's daily data and the service's daily
 # total; nothing goes through Real-Debrid.
 SUBSYNC_AUDIO_ROUTE=no
+
+# New files read per person per day (UTC). Files already in the shared store don't count, and neither does serving a
+# copy. Past it, that person gets only copies the store already has until the next day; nobody else is affected. 200
+# is more than anyone watches in a day, with room for the files apps open without playing them; it keeps one person,
+# or a leaked link, from using up the service's daily reads.
+SUBSYNC_USER_FILES_PER_DAY=200
+
+# Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes about
+# 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's index may take (32
+# MB) with room to spare, so those reads never stop someone before the file limit. A file the audio route syncs from
+# its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; such a sync starts only when what is left
+# of the day likely covers it, so it rarely stops half-way; if it does, the file waits for another pick. Past the
+# limit, that person gets only copies already in the store until the next day.
+SUBSYNC_USER_DAILY_MB=10000
+
+# How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they play:
+# its own subtitle downloads and a few seconds of work, while the file itself is read once. Recommended: 4, the most
+# the pages offer; lower it only when the server can't keep up. A lower limit applies when people next save their
+# languages; until then they keep the ones they have.
+SUBSYNC_MAX_LANGUAGES=4
+
+# With the audio route on, the most audio subsync reads of one file, in GB: your answer to ./setup's audio limit
+# question (0.5, 1, 2 or 4), written only while the audio route is on. Within it, high-bitrate files get shorter
+# audio parts, or none when they would be too short to judge, and then keep their originals; a smaller file is read
+# only as far as needed. Recommended: 1. Higher: very high-quality files such as 4K remuxes get copies too, at up to
+# that much data each. Lower: less data, more such files keep their originals. Another number set here by hand works
+# too; 0 removes the limit, which is not recommended. On a public instance it counts in each person's daily data
+# (SUBSYNC_USER_DAILY_MB).
+SUBSYNC_AUDIO_BUDGET_GB=1
+
+# Audio syncs one person may start a day (UTC), picked or opened. Each reads about 60–350 MB of a file's sound and
+# keeps a processor busy for one to three minutes, and its copy then serves everyone who plays that file. 20 by
+# default; recommended: keep it, so the processors are shared fairly while the daily data limit bounds the reads. 0
+# stops new audio syncs and keeps the copies already made. Past it, that person's files wait for a pick the next
+# day.
+SUBSYNC_USER_AUDIO_PER_DAY=20
+
+# Of those, how many may start as soon as a file is opened, for people who chose that (UTC day). 5 by default;
+# recommended: keep it low, since apps also ask for files people only browse or that they prepare next. 0 removes
+# that answer from the pages; people who had chosen it then sync when they pick.
+SUBSYNC_USER_OPENED_PER_DAY=5
+
+# How many times a day AIOSubtitles may look for a Usenet file through your indexers (10 by default). Each look is
+# one search per indexer in your config, usually answered from AIOStreams' own cache at no cost. Lower it if your
+# indexer's daily limit is tight; 0 turns Usenet off. On a public instance this is per person, through each person's
+# own indexers.
+SUBSYNC_USENET_LISTINGS_PER_DAY=10
+
+# The most subsync reads from files in one day (UTC), in GB received. When it's spent, reading stops until the next
+# day and new files keep their original subtitles. 100 is far above normal use (about 1 MB per file, a few MB when
+# the track's lines are pictures; up to the audio limit per file with the audio route, 1 GB by default), so it only
+# catches something going wrong. Lower it if your debrid service or server has a tight traffic limit.
+SUBSYNC_DAILY_BUDGET_GB=100
+
+# How many people can be signed up at once; past it the sign-up page says the service is full. Each person costs a
+# little disk and, while they play, a worker, so the limit keeps the server within what it can carry. Raise it only
+# after watching memory, processor use and the daily read total for a while.
+SUBSYNC_MAX_USERS=200
+
+# Sign-up attempts allowed per internet address per hour, counted before anything is fetched. Each attempt makes the
+# service contact that person's AIOStreams several times, so this stops one address from flooding the service or
+# someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is stricter, higher helps many
+# people behind one shared address.
+SUBSYNC_SIGNUPS_PER_HOUR=5
+
+# How many files the service works on at once for everyone, or auto for one per processor it may use. Recommended:
+# auto, since one sync keeps about one processor busy. More lets people who play new files at the same time wait
+# less, at more processor use and more requests to each AIOStreams at once; one public AIOStreams shared by many
+# people limits how many requests one address may make, so give a number when the processors are many and that
+# AIOStreams is shared. A torrent's file is never read twice at once: whoever plays it second waits for the first
+# one's work and reads nothing.
+SUBSYNC_SYNCS_AT_ONCE=auto
+
+# Audio syncs running at the same time, for everyone together. auto (the default, recommended) is half of
+# SUBSYNC_SYNCS_AT_ONCE, at least one, so ordinary files never wait behind them. A higher number finishes picked
+# files sooner when many come together but makes every other file wait longer; it can't be more than
+# SUBSYNC_SYNCS_AT_ONCE. A self-hosted install syncs one at a time whatever it says.
+SUBSYNC_AUDIO_AT_ONCE=auto
+
+# How many people can have a worker (the part that finds and syncs their files) running at once. A worker with
+# nothing to do stops after a while (30 minutes by default). Past the limit, a person's requests get only copies
+# already in the shared store until a worker frees up. Each worker takes about 2.5 MB of memory, so 100 take about
+# 250 MB; keep the limit within what the server's memory allows.
+SUBSYNC_ACTIVE_WORKERS=100
+
+# Requests handled at once. Each one takes a thread and some memory, so past it the service answers "busy, try
+# again" (HTTP 503) at once instead of running out of memory. Apps ask for subtitles again on their own. 256 leaves
+# room for 200 people's apps asking at once; raise it together with the memory the service may use.
+SUBSYNC_MAX_CONNECTIONS=256
+
+
+# ==================================================================================================================
+# Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD and CONFIRM above are asked here too; on a
+# public instance only CONFIRM.
 
 # Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, leaving
 # your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.

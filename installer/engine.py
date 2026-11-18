@@ -30,7 +30,8 @@ from installer import docs, dockerenv, hosting, limits, plan, screens, ui, updat
 from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the client through here)
 from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
-from subsync import explain, realdebrid
+from subsync import explain, origlang, realdebrid
+from subsync.settings import Settings
 
 REPO = Path(__file__).resolve().parent.parent      # the code (/opt/aiosubtitles in the image)
 STATE = Path(os.environ.get('AIOSUBTITLES_STATE') or REPO / 'state')
@@ -71,6 +72,9 @@ NO_DEBRID_WAY_OUT = ("Add a debrid service other than Real-Debrid (TorBox, ...) 
 PLAIN_HTTP = ("AIOStreams at {address} uses plain http, so the config's password would go over the network "
               "unencrypted. Use its https address if it has one.")
 KEY_REMOVED = 'Removed the saved {name}'
+# a new TMDB key, checked with TMDB once (refused, it is asked again with the site's words, explain.PUBLIC_TEXTS)
+TMDB_ACCEPTED = 'TMDB accepts this key'
+TMDB_UNCHECKED = "TMDB didn't answer, so the key wasn't checked; it is saved as you typed it."
 # The closing title when a check warned: the terminal printed the warnings above it, the page shows them under it
 WARNED = 'Installed, with warnings'
 WARNED_ABOVE = 'Installed, with warnings (see above)'
@@ -777,18 +781,37 @@ class Engine:
 
     def tmdb_key_question(self, label):
         """The original-language lookup's optional TMDB key, with TMDB's notice under it (its terms ask for it; the page
-        shows it under the key's field, screens._tmdb, so it is no row of the step there)."""
-        value = self.optional_key('TMDB_KEY', label)
+        shows it under the key's field, screens._tmdb, so it is no row of the step there). A new key is checked with
+        TMDB first (check_tmdb_key)."""
+        value = self.optional_key('TMDB_KEY', label, check=self.check_tmdb_key)
         if not self.page:
             self.out.note(explain.TMDB_NOTICE)
         return value
 
-    def optional_key(self, key, label):
+    def check_tmdb_key(self, value):
+        """A TMDB key given in this run, checked with TMDB once, with one request (origlang.check_key, as the site's
+        settings page checks a person's own key, at the TMDB address subsync uses): refused, it is asked again, and not
+        kept as the answer (the page's box is empty again: left empty, the step goes on without it); when TMDB doesn't
+        answer, it is kept with a warning. The saved key, and one checked before in this run, aren't checked again."""
+        if value in (self.keys.get('TMDB_KEY'), getattr(self, 'tmdb_checked', None)):
+            return True, '', value
+        url = env_values().get('SUBSYNC_TMDB_URL')
+        accepted = origlang.check_key(Settings({'SUBSYNC_TMDB_URL': url} if url else {}), value)
+        if accepted is False:
+            self.ask.answers.pop('TMDB_KEY', None)
+            return False, explain.PUBLIC_TEXTS['tmdb_refused'], value
+        self.tmdb_checked = value
+        if accepted is None:
+            self.out.warn(TMDB_UNCHECKED)
+            return True, '', value
+        return True, TMDB_ACCEPTED, value
+
+    def optional_key(self, key, label, check=None):
         """An optional key: a new one replaces the saved one, no answer keeps it, and the answer that removes it (the
-        page's "Remove the saved key" box, remove typed in a terminal, KEY= in an answers file) removes it. Returns
-        the key in use, or ''."""
+        page's "Remove the saved key" box, remove typed in a terminal, KEY= in an answers file) removes it. `check`: the
+        question's check of an answer (ui.Asker.text). Returns the key in use, or ''."""
         saved = self.keys.get(key)
-        value = self.ask.text(key, label, secret=True, optional=True, current=saved)
+        value = self.ask.text(key, label, secret=True, optional=True, current=saved, check=check)
         if value:
             self.keys[key] = value
         elif saved:
@@ -821,7 +844,7 @@ class Engine:
             port = int(self.prev.get('port') or plan.SUBSYNC_PORT)
             bind = '127.0.0.1'
         if self.s['mode'] == 'host':
-            bind = None   # host network: subsync listens on the port itself
+            bind = None   # host network: subsync listens on the port itself, at SUBSYNC_BIND (install)
         if port != self.prev.get('port') and port_taken(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0') \
                 and not dockerenv.container_state(CONTAINER):
             raise Problem('PUBLIC_ADDRESS', f'Port {port} on this machine is already in use.')
@@ -1041,6 +1064,8 @@ class Engine:
             'tmdb_key': self.keys.get('TMDB_KEY', '')})
         if self.s['mode'] == 'host':
             env['SUBSYNC_PORT'] = str(self.s['port'])
+            if self.s['public_kind'] == 'path':     # reached through your web server only (AIOStreams at 127.0.0.1)
+                env['SUBSYNC_BIND'] = '127.0.0.1'
         asked = limits.personal(audio=False, usenet=self.usenet)
         env.update(limits.env_lines(asked, self.limit_values))
         # the setting SUBSYNC_AUDIO_WHEN replaced goes: the audio answer carries it (known_audio)
@@ -1343,7 +1368,7 @@ class Engine:
         self.address = self.ask.text('HOST_ADDRESS', screens.LABELS['HOST_ADDRESS'], current=kept,
                                      check=hosting.check_address)
         self.trusted_proxy = self.ask.text('SUBSYNC_TRUSTED_PROXY', screens.LABELS['SUBSYNC_TRUSTED_PROXY'],
-                                           current=env.get('SUBSYNC_TRUSTED_PROXY'), default='gateway')
+                                           current=env.get('SUBSYNC_TRUSTED_PROXY'), default=hosting.TRUSTED_PROXY)
         # a public instance keeps its own port on a re-run; a personal install's (80, say) is never taken over. The port
         # is checked unless this install's own container holds it.
         port = int(self.prev.get('port') or hosting.PORT) if self.prev.get('route') == 'host' else hosting.PORT

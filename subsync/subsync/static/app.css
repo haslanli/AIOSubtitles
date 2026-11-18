@@ -45,7 +45,7 @@ a{color:var(--accent-link);text-underline-offset:3px;text-decoration-thickness:1
 .links a:hover{color:var(--text);text-decoration:underline}
 h1{font-weight:800;line-height:1;letter-spacing:-.033em}
 h2{font-weight:700}
-h1[tabindex="-1"]:focus,h2[tabindex="-1"]:focus{outline:none}
+h2[tabindex="-1"]:focus{outline:none}
 
 /* ---------- buttons: primary (blue), secondary (outline), light (white, on blue), danger, text link ---------- */
 .btn{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:10px;height:54px;padding:0 26px;
@@ -127,9 +127,9 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .way input:checked::after{opacity:1}
 .way input:focus-visible{outline:2px solid var(--accent-link);outline-offset:3px}
 .way .head{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
-.way b{font-weight:700;font-size:19px;line-height:1.35}
+.way b{font-weight:700;font-size:19px;line-height:1.35;overflow-wrap:anywhere}
 .way i{font-style:normal;font-size:15px;font-weight:700;color:var(--accent-text);white-space:nowrap}
-.way .head~span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2)}
+.way .head~span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
 .way:has(input:checked){background:var(--accent-bg);border-color:var(--accent-link)}
 .way:has(input:checked) .head~span{color:var(--on-accent-bg)}
 /* words for the picked row only (AD567): hidden while another row is picked; a browser without :has shows them */
@@ -307,7 +307,7 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .letter a.mono{overflow-wrap:anywhere}
 .letter .body p{color:var(--text-2);font-size:17px;line-height:1.6;max-width:40em}
 .letter .body section p{margin-top:12px}
-.letter .lead{font-weight:700;color:var(--text);font-size:19px}
+.letter .lead,.steparea .lead{font-weight:700;color:var(--text);font-size:19px}
 .letter .dots li{color:var(--text-2)}
 .letter .actions{margin-top:32px}
 .letter .field{margin-top:32px}
@@ -325,7 +325,8 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .rail li[aria-current=step] .dot{border-color:var(--accent);background:transparent;
   box-shadow:inset 0 0 0 4px var(--ground),inset 0 0 0 11px var(--accent)}
 .steparea{grid-column:5/12;min-width:0}
-.steparea h1{font-size:clamp(44px,4.2vw,60px);line-height:1.02;letter-spacing:-.032em}
+/* the step heading's own top space (the small pages' h1 rule gave it before): one 8vh below the rail's first step */
+.steparea h1{font-size:clamp(44px,4.2vw,60px);line-height:1.02;letter-spacing:-.032em;margin-top:clamp(56px,8vh,88px)}
 .steparea .body{margin-top:28px;display:grid;gap:32px}
 .steparea .actions{position:sticky;bottom:0;z-index:5;margin-top:40px;padding:20px 0 28px;background:var(--ground)}
 .fbar,.segs{display:none}
@@ -367,7 +368,7 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .checks .tx{padding-top:2px;font-size:17px;line-height:1.5;overflow-wrap:anywhere}
 .checks .warn .tx{color:var(--warn-text)}
 .checks .bad .tx{color:var(--text)}
-.checks .more{display:block;margin-top:6px;color:var(--text-2);font-size:15px}
+.checks .more,.progress .more{display:block;margin-top:6px;color:var(--text-2);font-size:15px}
 
 /* the install's progress */
 .progress{list-style:none;padding:0;display:grid;max-width:44em}
