@@ -8,7 +8,7 @@ import unittest
 from concurrent.futures import Future
 from unittest import mock
 
-from helpers import FakeDownloads, RangeServer, TempDir
+from helpers import closed_after, FakeDownloads, RangeServer, TempDir
 from subsync import origlang, pipeline
 from subsync.addon import App
 from subsync.settings import Settings
@@ -78,7 +78,7 @@ class Base(unittest.TestCase):
     def worker(self, **env):
         self.s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_EXTRA_SOURCES": "",
                                 "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"}, **env))
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         return Worker(self.s, self.store, self.listing, Safety(), lookup=self.lookup)
 
     def run_job(self, w, video_id="tt1375666"):
@@ -149,10 +149,10 @@ class JudgedAgainTest(Base):
         row = {"url": self.srv.url("tiny.mkv")}
 
         def once():
-            before = self.store.bytes_today("read")
+            before = self.store.day_count("read")
             with self.downloads.patch():
                 w._process_row(Job("movie", "tt1375666", self.hints), self.hints, row, bt)
-            return self.store.bytes_today("read") - before
+            return self.store.day_count("read") - before
         self.assertGreater(once(), 0)                    # first read; the answer isn't there yet
         self.assertEqual(once(), 0)                      # judged lately under the same rule: nothing read
         self.lookup.answers["tt1375666"] = {"tmdb": "eng", "wikidata": ["eng"], "anime": None, "failed": []}
@@ -168,10 +168,10 @@ class JudgedAgainTest(Base):
         row = {"url": self.srv.url("tiny.mkv")}
 
         def once(video_id):
-            before = self.store.bytes_today("read")
+            before = self.store.day_count("read")
             with self.downloads.patch():
                 w._process_row(Job("movie", video_id, self.hints), self.hints, row, bt)
-            return self.store.bytes_today("read") - before
+            return self.store.day_count("read") - before
         self.assertGreater(once("tt1375666"), 0)
         for video_id in ("tmdb:27205", "tt1375666", "tmdb:27205"):
             self.assertEqual(once(video_id), 0, video_id)

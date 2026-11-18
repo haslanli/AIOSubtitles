@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FIXTURES, RangeServer, TempDir  # noqa: E402
+from helpers import closed_after, FIXTURES, RangeServer, TempDir  # noqa: E402
 from subsync import sources  # noqa: E402
 from subsync import worker as worker_mod  # noqa: E402
 from subsync.reader import ReadFailed, Refused  # noqa: E402
@@ -122,20 +122,20 @@ class SettingsTest(unittest.TestCase):
 class StoreCountsTest(unittest.TestCase):
     def test_counted_in_the_stores_day_counters(self):
         with TempDir() as d:
-            store = Store(d)
+            store = closed_after(self, Store(d))
             s = Settings({"SUBSYNC_USER_AUDIO_PER_DAY": "3", "SUBSYNC_USER_OPENED_PER_DAY": "1"})
             counts = StoreAudioCounts(store, s)
             self.assertTrue(counts.may_start_audio(opened=True))
             counts.audio_started(opened=True)                      # an opened sync counts one of each
-            self.assertEqual((store.bytes_today("audio_syncs"), store.bytes_today("audio_opened")), (1, 1))
+            self.assertEqual((store.day_count("audio_syncs"), store.day_count("audio_opened")), (1, 1))
             self.assertFalse(counts.may_start_audio(opened=True))   # the opened ones are used up
             self.assertTrue(counts.may_start_audio(opened=False))
             counts.audio_started()                                 # a picked one counts one
             counts.audio_started()
-            self.assertEqual((store.bytes_today("audio_syncs"), store.bytes_today("audio_opened")), (3, 1))
+            self.assertEqual((store.day_count("audio_syncs"), store.day_count("audio_opened")), (3, 1))
             self.assertFalse(counts.may_start_audio(opened=False))
             s.user_audio_per_day = 0                                # read when asked: 0 stops new audio syncs
-            self.assertFalse(StoreAudioCounts(Store(d), s).may_start_audio())
+            self.assertFalse(StoreAudioCounts(closed_after(self, Store(d)), s).may_start_audio())
 
 
 # --------------------------------------------------------------------------------------------- each person's record
@@ -224,7 +224,7 @@ class RecordTest(unittest.TestCase):
         for at_once, places in (("auto", 2), ("3", 3), ("1", 1)):
             with self.subTest(at_once=at_once):
                 env = dict(self.env, SUBSYNC_AUDIO_AT_ONCE=at_once)
-                pool = Pool(Settings(env), env, Store(self.dir), self.users, start_workers=False)
+                pool = Pool(Settings(env), env, closed_after(self, Store(self.dir)), self.users, start_workers=False)
                 self.addCleanup(pool.close)
                 self.assertEqual((pool.turn.places, pool.audio_turn.places), (4, places))
                 self.assertIs(pool.app(self.token).worker.audio_turn, pool.audio_turn)
@@ -334,7 +334,7 @@ class Base(unittest.TestCase):
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
         self.addCleanup(self.tmp.__exit__, None, None, None)
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         self.workers = []
         self.addCleanup(lambda: [w.stop() for w in self.workers])
         self.srv = RangeServer(FIXTURES)
@@ -579,7 +579,7 @@ class SelfHostedTest(Base):
                 w._sync_all = lambda *a: None
                 w.process(w.jobs.pop(self.alias))
                 w.queue.clear()
-                self.assertEqual((self.store.bytes_today("audio_syncs"), self.store.bytes_today("audio_opened")), (1, 1))
+                self.assertEqual((self.store.day_count("audio_syncs"), self.store.day_count("audio_opened")), (1, 1))
 
     def test_no_room_in_the_day_waits_for_a_pick(self):
         w = self.worker(settings=self.self_hosted(SUBSYNC_AUDIO_WHEN="open"))
@@ -590,7 +590,7 @@ class SelfHostedTest(Base):
 
     def test_the_days_count_reached_waits_for_a_pick(self):
         w = self.worker(settings=self.self_hosted(SUBSYNC_AUDIO_WHEN="open", SUBSYNC_USER_OPENED_PER_DAY="1"))
-        self.store.add_bytes("audio_opened", 1)
+        self.store.day_add("audio_opened", 1)
         self.first_pass(w)
         self.assertEqual(len(w.jobs), 0)
         self.assertTrue(w.waits_for_pick(self.alias))
@@ -1006,7 +1006,7 @@ class SmallTrackTest(unittest.TestCase):
         row = {"url": srv.url("tiny.mkv"), "streamData": {"torrent": {"infoHash": "a" * 40, "fileIdx": 0}}}
         s = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng",
                       "SUBSYNC_EXTRA_SOURCES": ""})
-        store = Store(folder)
+        store = closed_after(self, Store(folder))
         w = Worker(s, store, Listing(row, [{"id": "big", "lang": "eng", "url": url, "release": "Movie"}]), Safety())
         first = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": os.path.getsize(os.path.join(FIXTURES,
                                                                                                          "tiny.mkv"))})

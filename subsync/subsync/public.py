@@ -24,7 +24,8 @@ from .recheck import Checker
 from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh,
                      remove_tmdb_key, set_audio, set_languages, set_tmdb_key, signup, store_only)
 from .sources import Aios
-from .users import TOKEN, day_of
+from .store import day_of
+from .users import TOKEN
 from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 
 log = logging.getLogger("subsync.public")

@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import TempDir  # noqa: E402
+from helpers import closed_after, TempDir  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from test_recheck import (HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, KEY, PASSWORD, REALDEBRID, TORBOX, TORRENTIO,  # noqa: E402
                           Base)
@@ -194,7 +194,7 @@ class StoredCopiesServedTest(unittest.TestCase):
                     "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
                     "SUBSYNC_RECHECK_HOURS": "0"}
         self.s = Settings(self.env)
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes())
         self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
         self.token = new_token()

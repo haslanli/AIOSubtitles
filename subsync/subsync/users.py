@@ -23,12 +23,13 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .store import DAY, day_of
+
 TOKEN = r"[A-Za-z0-9_-]{43}"     # a personal token: secrets.token_urlsafe(32), 43 base64url characters
 TOKEN_RE = re.compile(f"^{TOKEN}$")
 _SALT = b"aiosubtitles users v1"
 _FORMAT = b"\x01"
 _NONCE = 12
-DAY = 86400
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, blob BLOB NOT NULL, created_day TEXT NOT NULL,
@@ -49,10 +50,6 @@ DAY_TABLES = ("usage", "usenet_usage", "audio_usage")
 def new_token():
     """A personal link's token: 32 random bytes, base64url without padding (43 characters)."""
     return secrets.token_urlsafe(32)
-
-
-def day_of(t):
-    return time.strftime("%Y-%m-%d", time.gmtime(t))
 
 
 class Users:

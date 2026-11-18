@@ -9,7 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FIXTURES, RangeServer, TempDir, have  # noqa: E402
+from helpers import closed_after, FIXTURES, have, RangeServer, TempDir  # noqa: E402
 from subsync import pipeline  # noqa: E402
 from subsync.mkv import MkvIndex, NotMatroska, oshash  # noqa: E402
 from subsync.mp4 import Mp4Index, open_index  # noqa: E402
@@ -536,7 +536,7 @@ class WorkerChoiceTest(unittest.TestCase):
         shutil.rmtree(self.dir)
 
     def worker(self, **env):
-        store = Store(os.path.join(self.dir, "store"))
+        store = closed_after(self, Store(os.path.join(self.dir, "store")))
         base = {"SUBSYNC_ALASS": ALASS, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_MAX_TRIES": "3", "SUBSYNC_RANK_BY_RELEASE": "off",
                 "SUBSYNC_LIST_IN_SYNC": "off", "SUBSYNC_FAST_PATH": "off", "SUBSYNC_PARALLEL_LANGUAGES": "off",
                 "SUBSYNC_IMAGE_REF": "off", "SUBSYNC_BEST_FIT": "off"}   # every switch stated, so each test turns on only what it tests
@@ -816,7 +816,8 @@ class HasReferenceTest(unittest.TestCase):
     def test_tracks(self):
         from subsync.store import Store
         with TempDir() as d:
-            w = Worker(Settings({"SUBSYNC_DATA": d, "SUBSYNC_IMAGE_REF": "on"}), Store(d), None, None)
+            w = Worker(Settings({"SUBSYNC_DATA": d, "SUBSYNC_IMAGE_REF": "on"}), closed_after(self, Store(d)), None,
+                       None)
             self.assertFalse(w._has_reference(FakeIndex()))
             lines = realistic(300, 4)
             self.assertTrue(w._has_reference(FakeIndex(image=[pgs_track(lines)])))
@@ -1027,7 +1028,7 @@ class ParallelLanguagesTest(unittest.TestCase):
 
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_both_languages_published(self):
-        store = Store(os.path.join(self.dir, "store"))
+        store = closed_after(self, Store(os.path.join(self.dir, "store")))
         s = Settings({"SUBSYNC_ALASS": ALASS, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_PARALLEL_LANGUAGES": "on",
                       "SUBSYNC_FAST_PATH": "on", "SUBSYNC_LANGUAGES": "eng,rus"})
         w = Worker(s, store, self.aios, Safety())
@@ -1046,7 +1047,7 @@ class PlayedFileHashTest(ParallelLanguagesTest):
     test_both_languages_published = None
 
     def run_job(self, video_hash):
-        store = Store(os.path.join(self.dir, "store"))
+        store = closed_after(self, Store(os.path.join(self.dir, "store")))
         s = Settings({"SUBSYNC_ALASS": ALASS, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_LANGUAGES": "eng,rus"})
         w = Worker(s, store, self.aios, Safety())
         job = Job("movie", "tt1", {"filename": "tiny.mkv", "videoHash": video_hash})
@@ -1069,7 +1070,7 @@ class PlayedFileHashTest(ParallelLanguagesTest):
 class GuardCapTest(unittest.TestCase):
     def test_a_job_stops_at_its_byte_cap(self):
         with tempfile.TemporaryDirectory() as d:
-            store = Store(d)
+            store = closed_after(self, Store(d))
             JobGuard(Safety(), store, 10 ** 9, 1000).before_read(500)
             g = JobGuard(Safety(), store, 10 ** 9, 1000)
             g.after_read(900)
@@ -1083,7 +1084,7 @@ class GuardCapTest(unittest.TestCase):
         from subsync.reader import CapReached
         self.assertTrue(issubclass(CapReached, GuardStopped))
         with tempfile.TemporaryDirectory() as d:
-            store = Store(d)
+            store = closed_after(self, Store(d))
             g = JobGuard(Safety(), store, 10 ** 9, 1000)
             g.after_read(900)
             with self.assertRaises(CapReached) as caught:
@@ -1103,7 +1104,7 @@ class GuardReservationTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.store = Store(self.tmp.name)
+        self.store = closed_after(self, Store(self.tmp.name))
 
     def meanwhile(self, call):
         """call() in another thread: (the thread, what it gave: "read" or the exception)."""
@@ -1256,7 +1257,7 @@ class CapReachedTest(unittest.TestCase):
                 self.lists += 1
                 return [{"id": "e1", "url": srv.url("tiny.srt"), "lang": "eng", "release": ""}]
         self.aios = Aios()
-        self.store = Store(os.path.join(self.dir, "store"))
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
         self.job = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": self.size})
 
     def tearDown(self):
@@ -1472,7 +1473,7 @@ class FirstReadRetryTest(unittest.TestCase):
 
             def subtitles(self, *a):
                 return [{"id": "e1", "url": link + ".srt", "lang": "eng", "release": ""}]
-        self.store = Store(os.path.join(self.dir, "store"))
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
         s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_SIZE_SLACK_MB": "0"})
         self.w = Worker(s, self.store, Aios(), Safety())
         self.w._sync_all = lambda *a: None    # the reads are what is tested here, not the sync after them
@@ -1494,8 +1495,8 @@ class FirstReadRetryTest(unittest.TestCase):
             return stopped
 
     def backed_off_for(self):
-        row = self.store.db.execute("SELECT retry_at FROM files WHERE file_key=?", (self.job.alias,)).fetchone()
-        return None if row is None else round(row[0] - time.time(), -1)
+        retry = self.store.file_retry(self.job.alias)
+        return None if retry is None else round(retry - time.time(), -1)
 
     def test_one_dropped_connection_is_tried_again_and_the_file_read_in_the_same_job(self):
         from subsync.worker import READ_RETRY_S
@@ -1552,6 +1553,22 @@ class FirstReadRetryTest(unittest.TestCase):
         self.sleep.assert_called_once()
         self.assertEqual(flaky.link_calls, 1 + MAX_RE_RESOLVE)
         self.assertTrue(self.store.file_blocked(self.job.alias))
+
+    def test_a_read_that_succeeds_clears_the_failures_before_it(self):
+        # The failures of a file added up over its whole life, a refusal's too, so passing faults months
+        # apart stopped it for good in the end
+        from subsync.store import REFUSED_BACKOFF_S
+        past = time.time() - 2 * 86400
+        self.store.clock = lambda: past
+        for _ in range(2):
+            self.store.file_failed(self.job.alias)                     # 10 min, then 1 h: over by now
+        self.store.file_failed(self.job.alias, REFUSED_BACKOFF_S)     # and a refusal's hour
+        self.store.clock = time.time
+        self.assertFalse(self.store.file_blocked(self.job.alias))
+        self.run_with()
+        self.assertIsNotNone(self.store.resolve(self.job.alias))     # its index was read
+        self.assertIsNone(self.backed_off_for())
+        self.assertEqual(round(self.store.file_failed(self.job.alias) - time.time(), -1), 600)   # the first wait again
 
     def test_a_usenet_file_is_not_tried_again(self):
         flaky = Flaky(self.link, faults=1)

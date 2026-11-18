@@ -39,8 +39,8 @@ class HostCmdTest(unittest.TestCase):
     def test_status_counts_people_and_todays_reads(self):
         people(self.data, 3)
         store = Store(self.data)
-        store.add_bytes("read", 2_500_000)
-        store.db.close()
+        store.day_add("read", 2_500_000)
+        store.close()
         code, out = self.run_cmd("status", env={"SUBSYNC_PUBLIC": "on", "SUBSYNC_MAX_USERS": "150"})
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out), {"public": True, "people": 3, "max_people": 150, "read_today": 2_500_000,
@@ -53,7 +53,7 @@ class HostCmdTest(unittest.TestCase):
 
     def test_copy_databases_makes_whole_private_copies(self):
         people(self.data, 2)
-        Store(self.data).db.close()
+        Store(self.data).close()
         dest = os.path.join(self.data, "before-update")
         code, out = self.run_cmd("copy-databases", dest)
         self.assertEqual(code, 0)
@@ -79,7 +79,7 @@ class HostCmdTest(unittest.TestCase):
                 data = os.path.join(self.data, name)
                 os.makedirs(data)
                 people(data, 2)
-                Store(data).db.close()
+                Store(data).close()
                 before = sorted(os.listdir(self.data))
                 out = io.StringIO()
                 with redirect_stdout(out):

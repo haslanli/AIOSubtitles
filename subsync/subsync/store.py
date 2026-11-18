@@ -8,9 +8,11 @@ offers     per (file, language): the offered results, best fit first (last_good 
 judged     per (file, language): when every subtitle of that language was last judged for the file, and under which
            pass rule; a language with no subtitle at all counts as judged. With many people of different languages
            sharing the store (public mode), a file read for one language is read again for another.
-files      per file: served size, hash, whether it has a usable text track, read failures and back-off
+files      per file: served size, hash, whether it has a usable text track; per file hint: its read failures and back-off
 aliases    file hints (AIOS videoHash, or file name + size) -> file key, so a listing finds a file read earlier
-budget     bytes received per UTC day
+budget     counters per UTC day and kind (day_add, day_count): "read" is the bytes received (the daily budget); a
+           self-hosted install also counts "usenet" (Usenet listings), "usenet_stop" (1: none for the rest of the day),
+           "audio_syncs" and "audio_opened" (audio syncs started, and of those, as soon as a file was opened)
 pickable   files that wait for the viewer's pick before the audio route may start (kept across a restart)
 originals  per file hint: the original subtitle per language (the pick entries' fallback, kept across a restart)
 over_cap   per file hint: the byte cap a job of the file stopped at; it isn't read again under that cap
@@ -25,8 +27,10 @@ others.
 Lifetimes: synced/in_sync rows live 180 days after last served; keep_original is retried after 30 days
 (or when ALGO_VERSION changes, which changes the key), and a kept_original row goes after 30 days unless the file is
 judged again; a file that couldn't be read backs off 10 min / 1 h / 6 h / 24 h, a refused one (and one neither
-MKV nor MP4, or a Usenet file) 1 h / 6 h / 24 h, then it stops.
+MKV nor MP4, or a Usenet file) 1 h / 6 h / 24 h, then it stops. Those are failures in a row, each back-off counting its
+own: a read of the file that succeeds clears them.
 """
+import contextlib
 import gzip
 import json
 import logging
@@ -34,6 +38,7 @@ import os
 import sqlite3
 import threading
 import time
+import zlib
 
 from . import ALGO_VERSION
 from .subs import fingerprint, timing_recipe
@@ -48,6 +53,11 @@ READ_FAILED_BACKOFF_S = (600, 3600, 6 * 3600, 24 * 3600)   # a file that couldn'
 REFUSED_BACKOFF_S = (3600, 6 * 3600, 24 * 3600)
 KEEP_PICKABLE_S = 7 * DAY
 JUDGED_FOR_S = DAY            # a file judged for every language asked within this long is not read again
+# the files row that counts a file hint's failures under REFUSED_BACKOFF_S (and other waits than READ_FAILED_BACKOFF_S):
+# the hint with this after it, so the two back-offs count apart
+OTHER_BACKOFF_SUFFIX = "|refused"
+# what reading a damaged copy file raises: cut short, not gzip (or its check fails), garbled, not UTF-8 or not JSON
+DAMAGED = (EOFError, gzip.BadGzipFile, zlib.error, ValueError)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -55,9 +65,11 @@ CREATE TABLE IF NOT EXISTS results (
   outcome TEXT NOT NULL, reason TEXT, route TEXT, detail TEXT, fmt TEXT, body_bytes INTEGER DEFAULT 0,
   candidate_id TEXT, created REAL NOT NULL, last_served REAL, retry_at REAL);
 CREATE INDEX IF NOT EXISTS results_file ON results(file_key, lang);
+CREATE INDEX IF NOT EXISTS results_lru ON results(last_served) WHERE body_bytes>0;
 CREATE TABLE IF NOT EXISTS last_good (
   file_key TEXT NOT NULL, lang TEXT NOT NULL, key TEXT NOT NULL, rank INTEGER, updated REAL,
   PRIMARY KEY (file_key, lang));
+CREATE INDEX IF NOT EXISTS last_good_key ON last_good(key);
 CREATE TABLE IF NOT EXISTS files (
   file_key TEXT PRIMARY KEY, size INTEGER, oshash TEXT, text_track INTEGER, detail TEXT, read_at REAL,
   fails INTEGER DEFAULT 0, retry_at REAL);
@@ -69,6 +81,7 @@ CREATE TABLE IF NOT EXISTS pickable (alias TEXT PRIMARY KEY, type TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS originals (alias TEXT PRIMARY KEY, langs TEXT NOT NULL, updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS offers (file_key TEXT NOT NULL, lang TEXT NOT NULL, pos INTEGER NOT NULL, key TEXT NOT NULL,
   updated REAL NOT NULL, PRIMARY KEY (file_key, lang, pos));
+CREATE INDEX IF NOT EXISTS offers_key ON offers(key);
 CREATE TABLE IF NOT EXISTS judged (file_key TEXT NOT NULL, lang TEXT NOT NULL, rule TEXT NOT NULL, at REAL NOT NULL,
   PRIMARY KEY (file_key, lang));
 CREATE TABLE IF NOT EXISTS usenet_misses (key TEXT PRIMARY KEY, at REAL NOT NULL);
@@ -85,7 +98,13 @@ def result_key(file_key, sub_sha):
 
 
 def day_of(t=None):
+    """The UTC day of `t` (default now), as the day counters here and in users.py key it."""
     return time.strftime("%Y-%m-%d", time.gmtime(t if t is not None else time.time()))
+
+
+def _discard(path):
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(path)
 
 
 class Store:
@@ -95,8 +114,38 @@ class Store:
         self.db = sqlite3.connect(os.path.join(root, "subsync.sqlite3"), check_same_thread=False,
                                   isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
+        # copies and counters: with WAL, NORMAL commits without syncing the disk and can lose only the last commits on
+        # a power cut, never corrupt the database (users.py keeps the default FULL: a sign-up must survive one)
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
         self.lock = threading.RLock()
+
+    def close(self):
+        with self.lock:
+            self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    @contextlib.contextmanager
+    def _tx(self):
+        """Statements as one transaction, under the lock: one commit, and all of them or none; inside another, they
+        are part of it."""
+        with self.lock:
+            if self.db.in_transaction:
+                yield
+                return
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                if self.db.in_transaction:   # SQLite may have rolled it back itself (a full disk)
+                    self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
 
     # -- bodies ------------------------------------------------------------------------------------------------
     def _body_path(self, key):
@@ -110,28 +159,65 @@ class Store:
     def _copy_path(self, key):
         return self._body_path(key) if self.keep_texts else self._recipe_path(key)
 
+    def _remove_copy(self, key):
+        for path in (self._body_path(key), self._recipe_path(key)):
+            _discard(path)
+
+    def _read_copy(self, path, key, parse=lambda text: text):
+        """A copy file's content, or None: there is none, or it is damaged (DAMAGED), and then it goes with its row, so
+        it is no longer offered and the subtitle is judged again."""
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                return parse(f.read())
+        except FileNotFoundError:
+            return None
+        except DAMAGED as e:
+            log.warning("a stored copy can't be read (%s): dropped, to be judged again", type(e).__name__)
+            self._drop(key)
+            return None
+
+    @contextlib.contextmanager
+    def _temp_copy(self, key, content):
+        """`content` (None: no copy) gzipped into a temporary file next to the key's copy, named for this thread, so two
+        puts of one key never write into the same file; it is removed unless it was put in place."""
+        if content is None:
+            yield None
+            return
+        path = self._copy_path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}-{threading.get_ident()}.tmp"
+        try:
+            with gzip.open(tmp, "wt", encoding="utf-8") as f:
+                f.write(content)
+            yield tmp
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+
+    def _place_copy(self, key, tmp):
+        """Lock held: the copy written to `tmp` replaces the key's copy, and its size is returned; with none (tmp None),
+        the key's earlier copy goes and 0 is returned."""
+        if tmp is None:
+            self._remove_copy(key)
+            return 0
+        path = self._copy_path(key)
+        os.replace(tmp, path)
+        return os.path.getsize(path)
+
     def body(self, key):
         """A synced copy's text; never in public mode (keep_texts off), where only its recipe is kept."""
         if not self.keep_texts:
             return None
-        try:
-            with gzip.open(self._body_path(key), "rt", encoding="utf-8") as f:
-                return f.read()
-        except FileNotFoundError:
-            return None
+        return self._read_copy(self._body_path(key), key)
 
     def recipe(self, key):
         """Public mode: how a synced copy is made from its original (subs.apply_recipe), or None."""
-        try:
-            with gzip.open(self._recipe_path(key), "rt", encoding="utf-8") as f:
-                return json.loads(f.read())
-        except (FileNotFoundError, ValueError):
-            return None
+        return self._read_copy(self._recipe_path(key), key, json.loads)
 
     def drop_texts(self):
         """Public mode, at start: copies kept as text by an earlier version are dropped with their rows, so they are
         judged again and kept as recipes. Returns how many rows went."""
-        with self.lock:
+        with self._tx():
             texts = sum(len(names) for _, _, names in os.walk(os.path.join(self.root, "bodies")))
             keys = [k for (k,) in self.db.execute("SELECT key FROM results WHERE body_bytes>0")
                     if not os.path.exists(self._recipe_path(k))]
@@ -179,7 +265,7 @@ class Store:
         the copy's recipe from `original` (the original's text) instead of `body`; with no recipe it isn't offered."""
         key = result_key(file_key, sub_sha)
         now = self.clock()
-        body_bytes = 0
+        content = None
         if outcome == "synced" and body is not None:
             content = body
             if not self.keep_texts:
@@ -189,18 +275,13 @@ class Store:
                 content = json.dumps(recipe) if recipe is not None else None
                 if content is None:
                     log.info("public mode: a copy that isn't a re-timing of its original is not kept")
-            if content is not None:
-                path = self._copy_path(key)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                tmp = path + ".tmp"
-                with gzip.open(tmp, "wt", encoding="utf-8") as f:
-                    f.write(content)
-                os.replace(tmp, path)
-                body_bytes = os.path.getsize(path)
         retry = None
         if outcome == "keep_original":
             retry = now + RETRY_KEEP_ORIGINAL_S
-        with self.lock:
+        # written before the lock, put in place with its row: a verdict with no copy removes the copy an earlier
+        # verdict of the key made, so no copy file outlives its row or goes uncounted
+        with self._temp_copy(key, content) as tmp, self._tx():
+            body_bytes = self._place_copy(key, tmp)
             self.db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (key, file_key, sub_sha, lang, rank, outcome, reason, route,
                              json.dumps(detail or {}), fmt, body_bytes, candidate_id, now, now, retry))
@@ -215,7 +296,8 @@ class Store:
                 # judged again and no longer passing (another pass rule, the language check): no longer offered
                 self.db.execute("DELETE FROM last_good WHERE key=?", (key,))
                 self.db.execute("DELETE FROM offers WHERE key=?", (key,))
-        self.enforce_cap()
+        if body_bytes:   # the cap is checked when a copy was added
+            self.enforce_cap()
         return key
 
     def results_of(self, file_key, lang):
@@ -234,7 +316,7 @@ class Store:
     def set_offers(self, file_key, lang, keys):
         """Best fit: what is offered for a file and language, best first; the first becomes last_good."""
         now = self.clock()
-        with self.lock:
+        with self._tx():
             self.db.execute("DELETE FROM offers WHERE file_key=? AND lang=?", (file_key, lang))
             for pos, key in enumerate(keys):
                 self.db.execute("INSERT INTO offers VALUES (?,?,?,?,?)", (file_key, lang, pos, key, now))
@@ -298,20 +380,34 @@ class Store:
 
     def file_failed(self, alias, backoff=READ_FAILED_BACKOFF_S):
         """A read failure for a file (by alias, since a file that can't be read has no hash): the waits of `backoff`
-        in turn (10 min / 1 h / 6 h / 24 h; REFUSED_BACKOFF_S 1 h / 6 h / 24 h), then never again. Returns the retry
-        time, or None when it stops."""
+        in turn (10 min / 1 h / 6 h / 24 h; REFUSED_BACKOFF_S 1 h / 6 h / 24 h), then never again. They count failures
+        in a row (file_ok clears them), each back-off its own. Returns the retry time, or None when it stops."""
+        key = alias if backoff == READ_FAILED_BACKOFF_S else alias + OTHER_BACKOFF_SUFFIX
+        now = self.clock()
         with self.lock:
-            row = self.db.execute("SELECT fails FROM files WHERE file_key=?", (alias,)).fetchone()
+            row = self.db.execute("SELECT fails FROM files WHERE file_key=?", (key,)).fetchone()
             fails = (row[0] if row else 0) + 1
-            retry = self.clock() + backoff[fails - 1] if fails <= len(backoff) else None
+            retry = now + backoff[fails - 1] if fails <= len(backoff) else None
             self.db.execute("INSERT OR REPLACE INTO files (file_key, fails, retry_at, read_at) VALUES (?,?,?,?)",
-                            (alias, fails, retry if retry is not None else float("inf"), self.clock()))
+                            (key, fails, retry if retry is not None else float("inf"), now))
         return retry
 
-    def file_blocked(self, alias):
+    def file_ok(self, *aliases):
+        """A read of the file succeeded: the failures counted under these aliases no longer count."""
+        keys = [key for alias in aliases for key in (alias, alias + OTHER_BACKOFF_SUFFIX)]
         with self.lock:
-            row = self.db.execute("SELECT retry_at FROM files WHERE file_key=? AND fails>0", (alias,)).fetchone()
-        return bool(row and row[0] is not None and row[0] > self.clock())
+            self.db.execute(f"DELETE FROM files WHERE fails>0 AND file_key IN ({','.join('?' * len(keys))})", keys)
+
+    def file_retry(self, alias):
+        """When a file whose reads failed may be read again (inf: never), or None."""
+        with self.lock:
+            row = self.db.execute("SELECT MAX(retry_at) FROM files WHERE file_key IN (?,?) AND fails>0",
+                                  (alias, alias + OTHER_BACKOFF_SUFFIX)).fetchone()
+        return row[0]
+
+    def file_blocked(self, alias):
+        retry = self.file_retry(alias)
+        return retry is not None and retry > self.clock()
 
     # -- a file over the job's byte cap -------------------------------------------------------------
     def cap_reached(self, alias, cap):
@@ -359,7 +455,7 @@ class Store:
     # -- which languages were judged for a file -------------------------------------------------------------------
     def judged_put(self, file_key, langs, rule):
         now = self.clock()
-        with self.lock:
+        with self._tx():
             for lang in langs:
                 self.db.execute("INSERT OR REPLACE INTO judged VALUES (?,?,?,?)", (file_key, lang, rule, now))
 
@@ -416,13 +512,13 @@ class Store:
                                   (alias, self.clock() - KEEP_PICKABLE_S)).fetchone()
         return json.loads(row[0]) if row else None
 
-    # -- budget ------------------------------------------------------------------------------------------------
-    def add_bytes(self, kind, n):
+    # -- counters per UTC day (the budget table; its kinds are in the module's docstring) --------------------------
+    def day_add(self, kind, n):
         with self.lock:
             self.db.execute("INSERT INTO budget VALUES (?,?,?) ON CONFLICT(day, kind) DO UPDATE SET bytes=bytes+?",
                             (day_of(self.clock()), kind, n, n))
 
-    def bytes_today(self, kind):
+    def day_count(self, kind):
         with self.lock:
             row = self.db.execute("SELECT bytes FROM budget WHERE day=? AND kind=?", (day_of(self.clock()), kind)).fetchone()
         return row[0] if row else 0
@@ -436,27 +532,34 @@ class Store:
         return bodies + db
 
     def _drop(self, key):
-        for path in (self._body_path(key), self._recipe_path(key)):
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
-        self.db.execute("DELETE FROM results WHERE key=?", (key,))
-        self.db.execute("DELETE FROM last_good WHERE key=?", (key,))
-        self.db.execute("DELETE FROM offers WHERE key=?", (key,))
+        with self._tx():
+            self._remove_copy(key)
+            self.db.execute("DELETE FROM results WHERE key=?", (key,))
+            self.db.execute("DELETE FROM last_good WHERE key=?", (key,))
+            self.db.execute("DELETE FROM offers WHERE key=?", (key,))
 
     def enforce_cap(self):
-        """Least recently served synced bodies go first until the store is under its cap."""
+        """Least recently served synced copies go first until the store is under its cap: at once, as many as cover
+        what it is over by."""
         with self.lock:
-            while self.total_bytes() > self.cap:
-                row = self.db.execute("SELECT key FROM results WHERE body_bytes>0 ORDER BY last_served LIMIT 1").fetchone()
-                if not row:
+            while (over := self.total_bytes() - self.cap) > 0:
+                keys, freed = [], 0
+                with contextlib.closing(self.db.execute(
+                        "SELECT key, body_bytes FROM results WHERE body_bytes>0 ORDER BY last_served")) as rows:
+                    for key, size in rows:
+                        keys.append(key)
+                        freed += size
+                        if freed >= over:
+                            break
+                if not keys:
                     break
-                self._drop(row[0])
+                with self._tx():
+                    for key in keys:
+                        self._drop(key)
 
     def expire(self):
         now = self.clock()
-        with self.lock:
+        with self._tx():
             old = [r[0] for r in self.db.execute(
                 "SELECT key FROM results WHERE outcome IN ('synced','in_sync') AND last_served < ?", (now - KEEP_SERVED_S,))]
             for key in old:

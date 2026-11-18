@@ -12,7 +12,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import RangeServer, local_network_only  # noqa: E402
+from helpers import closed_after, local_network_only, RangeServer  # noqa: E402
 from subsync.addon import App, file_id, serve  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -63,7 +63,7 @@ class TextlessStoreTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir)
 
     def test_no_text_is_written_only_timings(self):
-        store = Store(self.dir, keep_texts=False)
+        store = closed_after(self, Store(self.dir, keep_texts=False))
         key = store.put(FILE, sha(SRT), "eng", 0, "synced", body=SYNCED, fmt="srt", candidate_id="c1", original=SRT)
         self.assertIsNone(store.body(key))
         self.assertEqual(apply_recipe(SRT, store.recipe(key)), SYNCED)
@@ -81,10 +81,10 @@ class TextlessStoreTest(unittest.TestCase):
         self.assertEqual(store.offers(FILE, ["eng"]), [])                     # nothing to rebuild it from: not offered
 
     def test_texts_kept_before_public_mode_are_dropped(self):
-        old = Store(self.dir)
+        old = closed_after(self, Store(self.dir))
         key = old.put(FILE, sha(SRT), "eng", 0, "synced", body=SYNCED, fmt="srt", candidate_id="c1")
         self.assertEqual(old.body(key), SYNCED)
-        store = Store(self.dir, keep_texts=False)
+        store = closed_after(self, Store(self.dir, keep_texts=False))
         old.judged_put(FILE, ["eng"], "rule")
         with self.assertLogs("subsync.store", "INFO") as logs:
             self.assertEqual(store.drop_texts(), 1)
@@ -119,7 +119,7 @@ class ServingTest(unittest.TestCase):
             def find_row(self, *a):
                 return None
 
-        self.store = Store(os.path.join(self.dir, "store"), keep_texts=False)
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store"), keep_texts=False))
         self.key = self.store.put(FILE, sha(SRT), "eng", 0, "synced", body=SYNCED, fmt="srt", candidate_id="c1",
                                   original=SRT)
         self.store.alias("name:a.mkv|1000", FILE)

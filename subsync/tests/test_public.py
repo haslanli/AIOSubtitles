@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from helpers import closed_after  # noqa: E402
 from subsync.settings import Settings, available_cpus  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -209,7 +210,7 @@ class SharedStoreTest(unittest.TestCase):
         from subsync.store import Store
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
 
     def tearDown(self):
         self.tmp.__exit__(None, None, None)
@@ -268,7 +269,7 @@ class SharedStoreTest(unittest.TestCase):
         app.worker.process(job)
         self.assertEqual(self.store.resolve(job.alias), FILE)
         self.assertEqual(aios.subtitle_requests, 0)
-        self.assertEqual(self.store.bytes_today("read"), 0)
+        self.assertEqual(self.store.day_count("read"), 0)
 
     def test_a_read_records_the_torrent_and_the_languages(self):
         from helpers import FIXTURES, RangeServer
@@ -337,7 +338,7 @@ class WorkerHooksTest(unittest.TestCase):
         from subsync.store import Store
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         self.workers = []
 
     def tearDown(self):
@@ -470,7 +471,7 @@ class WorkerHooksTest(unittest.TestCase):
             folder = tmp.__enter__()
             workers = []
             try:
-                store = Store(folder)
+                store = closed_after(self, Store(folder))
                 row = {"url": srv.url("tiny.mkv"), "streamData": {"torrent": {"infoHash": HASH, "fileIdx": 2}}}
                 subs = [{"id": "os-1", "url": srv.url("tiny.srt"), "lang": "eng", "release": "", "hash": "",
                          "hash_match": False, "ai": False}]
@@ -485,7 +486,7 @@ class WorkerHooksTest(unittest.TestCase):
                     w.start()
                 self.assertTrue(wait_until(lambda: all(not w.jobs and w.current is None for w in workers), 20))
                 self.assertIsNotNone(store.resolve(f"bt:{HASH}:2"))
-                return len(srv.log), store.bytes_today("read")
+                return len(srv.log), store.day_count("read")
             finally:
                 for w in workers:
                     w.stop()
@@ -656,7 +657,7 @@ class PoolTest(unittest.TestCase):
                     "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off"}
         self.settings = Settings(self.env)
         self.clock = Clock()
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.settings.secret_bytes(), clock=self.clock)
         self.tokens = [new_token() for _ in range(3)]
         self.users.create(self.tokens[0], record())
@@ -856,7 +857,8 @@ class KeptAppTest(unittest.TestCase):
                     "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off"}
         self.settings = Settings(self.env)
         self.clock = Clock()
-        self.store = Store(self.dir, keep_texts=False)      # as public mode keeps it (__main__.public_store)
+        # as public mode keeps it (__main__.public_store)
+        self.store = closed_after(self, Store(self.dir, keep_texts=False))
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.settings.secret_bytes(), clock=self.clock)
         self.addCleanup(self.users.close)
         self.pool = Pool(self.settings, self.env, self.store, self.users, clock=self.clock, start_workers=False)

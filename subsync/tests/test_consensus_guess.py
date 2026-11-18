@@ -4,7 +4,7 @@ other English subtitles agreed within 100 ms, and AutoSync's first was right).""
 import os
 import unittest
 
-from helpers import FakeDownloads, RangeServer, TempDir
+from helpers import closed_after, FakeDownloads, RangeServer, TempDir
 from subsync import pipeline
 from subsync.settings import Settings
 from subsync.store import Store
@@ -81,7 +81,7 @@ class WorkerConsensusGuessTest(unittest.TestCase):
     def worker(self):
         s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng,rus",
                       "SUBSYNC_EXTRA_SOURCES": ""})
-        return Worker(s, Store(self.dir), self.listing, Safety())
+        return Worker(s, closed_after(self, Store(self.dir)), self.listing, Safety())
 
     def test_the_consensus_is_served_and_anchors_the_other_languages(self):
         w = self.worker()

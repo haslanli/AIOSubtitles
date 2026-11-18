@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FakeDownloads, RangeServer, dialogue_srt, local_network_only  # noqa: E402
+from helpers import closed_after, dialogue_srt, FakeDownloads, local_network_only, RangeServer  # noqa: E402
 from test_io import FakeIndex, realistic, srt_of  # noqa: E402
 from subsync import choose, pipeline, srclimits  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -80,7 +80,7 @@ class CandidatesTest(unittest.TestCase):
 
     def worker(self, aios, extra, **env):
         s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng,rus"}, **env))
-        return Worker(s, Store(self.dir), aios, None, extra=extra)
+        return Worker(s, closed_after(self, Store(self.dir)), aios, None, extra=extra)
 
     def test_config_sources_are_tagged_skipped_and_their_twins_dropped(self):
         aios = FakeAios([{"id": "123", "url": "https://subs5.strem.io/en/download/file/123", "lang": "eng"},
@@ -116,7 +116,7 @@ class LimitsTest(unittest.TestCase):
 
     def worker(self, ledger=None, who=None):
         s = Settings({"SUBSYNC_DATA": self.dir})
-        w = Worker(s, Store(self.dir), FakeAios(), None, extra=FakeExtra(ledger=ledger))
+        w = Worker(s, closed_after(self, Store(self.dir)), FakeAios(), None, extra=FakeExtra(ledger=ledger))
         w.who = who
         return w
 
@@ -188,7 +188,8 @@ class FetchTest(unittest.TestCase):
 
     def test_a_download_carries_the_sources_key_and_is_counted(self):
         ledger = Ledger(keyed={"subsource": True, "subdl": True})
-        w = Worker(Settings({"SUBSYNC_DATA": self.dir}), Store(self.dir), FakeAios(), None, extra=FakeExtra(ledger=ledger))
+        w = Worker(Settings({"SUBSYNC_DATA": self.dir}), closed_after(self, Store(self.dir)), FakeAios(), None,
+                   extra=FakeExtra(ledger=ledger))
         w.who = "me"
         got = w._fetch_one(Job("movie", "tt1"), "rus", 0, {"id": "ss-1", "source": "subsource", "url": self.url + "/a"})
         self.assertIsNotNone(got)
@@ -224,7 +225,7 @@ class DuplicateTest(unittest.TestCase):
                                     "cues": ref}])
 
     def test_judged_and_listed_once(self):
-        store = Store(os.path.join(self.dir, "store"))
+        store = closed_after(self, Store(os.path.join(self.dir, "store")))
         s = Settings({"SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_BEST_FIT": "on", "SUBSYNC_FAST_PATH": "on",
                       "SUBSYNC_LIST_IN_SYNC": "on", "SUBSYNC_PARALLEL_LANGUAGES": "off", "SUBSYNC_IMAGE_REF": "off",
                       "SUBSYNC_ALASS": "/nonexistent/alass"})
@@ -252,7 +253,7 @@ class LanguageCheckWorkerTest(unittest.TestCase):
         for patcher in (self.downloads.patch(), local_network_only()):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.store = Store(os.path.join(self.dir, "store"))
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
 
     def worker(self, **env):
         s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_BEST_FIT": "on",
@@ -415,7 +416,7 @@ class PickedLanguageTest(unittest.TestCase):
         for patcher in (self.downloads.patch(), local_network_only()):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.store = Store(os.path.join(self.dir, "store"))
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
         self.events, self.lock = [], threading.Lock()
         self.on_check = lambda cid, n: None
 

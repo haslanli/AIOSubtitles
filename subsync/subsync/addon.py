@@ -432,7 +432,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "busy": app.worker.current is not None or app.worker.current_audio is not None,
                                    "busy_audio": app.worker.current_audio is not None,
                                    "backing_off": app.safety.backing_off(),
-                                   "bytes_today": app.store.bytes_today("read")})
+                                   "bytes_today": app.store.day_count("read")})
             m = SUB_ROUTE.match(path)
             if m:
                 vid = urllib.parse.unquote(m.group(2))

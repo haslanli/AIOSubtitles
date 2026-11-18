@@ -12,6 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from helpers import closed_after  # noqa: E402
 from test_resolve_once import Debrid  # noqa: E402
 from subsync import aiosconfig, realdebrid, sources, worker as worker_mod  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
@@ -201,11 +202,11 @@ class MemoryTest(TempDirTest):
 
     def test_kept_in_the_store_for_a_day(self):
         now = [1_000_000.0]
-        store = Store(self.dir, clock=lambda: now[0])
+        store = closed_after(self, Store(self.dir, clock=lambda: now[0]))
         store.usenet_missed("k1")
         self.assertTrue(store.usenet_recently_missed("k1", 86400))
         self.assertFalse(store.usenet_recently_missed("k2", 86400))
-        again = Store(self.dir, clock=lambda: now[0])                 # after a restart
+        again = closed_after(self, Store(self.dir, clock=lambda: now[0]))                 # after a restart
         self.assertTrue(again.usenet_recently_missed("k1", 86400))
         now[0] += 86401
         self.assertFalse(again.usenet_recently_missed("k1", 86400))
@@ -221,7 +222,7 @@ class StoreCountsTest(TempDirTest):
 
     def test_counted_per_day_and_stopped_until_the_next_one(self):
         now = [1_000_000.0]
-        store = Store(self.dir, clock=lambda: now[0])
+        store = closed_after(self, Store(self.dir, clock=lambda: now[0]))
         counts = worker_mod.StoreUsenetCounts(store)
         self.assertEqual((counts.listings(), counts.stopped()), (0, False))
         counts.add_listing()
@@ -229,8 +230,9 @@ class StoreCountsTest(TempDirTest):
         counts.stop()
         counts.stop()                                                    # one stop a day
         self.assertEqual((counts.listings(), counts.stopped()), (2, True))
-        self.assertEqual((store.bytes_today("usenet"), store.bytes_today("usenet_stop")), (2, 1))
-        again = worker_mod.StoreUsenetCounts(Store(self.dir, clock=lambda: now[0]))   # after a restart
+        self.assertEqual((store.day_count("usenet"), store.day_count("usenet_stop")), (2, 1))
+        # after a restart
+        again = worker_mod.StoreUsenetCounts(closed_after(self, Store(self.dir, clock=lambda: now[0])))
         self.assertEqual((again.listings(), again.stopped()), (2, True))
         now[0] += 86400
         self.assertEqual((counts.listings(), counts.stopped()), (0, False))
@@ -246,7 +248,7 @@ class GateTest(TempDirTest):
                 got = super().listings()
                 time.sleep(0.3)                             # the other lane asks meanwhile
                 return got
-        store = Store(self.dir)
+        store = closed_after(self, Store(self.dir))
         counts = Slow(store)
         for _ in range(9):
             counts.add_listing()
@@ -259,7 +261,7 @@ class GateTest(TempDirTest):
         for t in lanes:
             t.join(5)
         self.assertEqual(sorted(taken), [False, True])
-        self.assertEqual(store.bytes_today("usenet"), 10)
+        self.assertEqual(store.day_count("usenet"), 10)
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography is not installed (the image has it; tests run it in a venv)")
@@ -469,7 +471,7 @@ class WorkerTest(TempDirTest):
 
     def make(self, usenet, per_day=10, debrid=None, **env):
         s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng"}, **env))
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         self.counts = Counts()
         gate = worker_mod.UsenetGate(self.store, per_day, self.counts, who="w")
         w = Worker(s, self.store, debrid or FakeDebrid(), worker_mod.Safety(), usenet=usenet, usenet_gate=gate)
@@ -590,7 +592,7 @@ class UsenetJobTest(TempDirTest):
     def test_a_failed_first_read_stops_usenet_and_reads_index_only(self):
         s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_AUDIO_ROUTE": "on",
                       "SUBSYNC_AUDIO_WHEN": "open"})
-        store = Store(self.dir)
+        store = closed_after(self, Store(self.dir))
         counts = Counts()
         subs = [{"id": "s", "url": "http://127.0.0.1:1/1.srt", "lang": "eng"}]
         u = FakeUsenet([row(url="http://127.0.0.1:1/playback/1")], subs=subs)
@@ -627,7 +629,7 @@ class UsenetJobTest(TempDirTest):
         hints = {"filename": "tiny-nosub.mp4", "videoSize": size}
         s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_AUDIO_ROUTE": "on",
                       "SUBSYNC_EXTRA_SOURCES": ""})
-        store = Store(self.dir)
+        store = closed_after(self, Store(self.dir))
         subs = [{"id": "s", "url": srv.url("tiny.srt"), "lang": "eng", "release": "", "hash": "", "hash_match": False,
                  "ai": False}]
         u = FakeUsenet([row(url=srv.url("tiny-nosub.mp4"), name="tiny-nosub.mp4", size=size)], subs=subs)

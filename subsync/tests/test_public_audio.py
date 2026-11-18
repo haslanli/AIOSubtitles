@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FIXTURES, FakeDownloads, RangeServer, TempDir, dialogue_srt, local_network_only  # noqa: E402
+from helpers import closed_after, dialogue_srt, FakeDownloads, FIXTURES, local_network_only, RangeServer, TempDir  # noqa: E402
 from subsync import audiofit  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -84,7 +84,7 @@ class Base(unittest.TestCase):
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
         self.addCleanup(self.tmp.__exit__, None, None, None)
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         self.workers = []
         self.addCleanup(self.stop_workers)
 
@@ -324,7 +324,7 @@ class RoomTest(Base):
     def test_the_services_day_must_have_room_too(self):
         self.facts()
         w = self.waiting(Limits())
-        self.store.add_bytes("read", w.s.daily_budget - 100_000_000)
+        self.store.day_add("read", w.s.daily_budget - 100_000_000)
         self.assertFalse(w.pick(ALIAS))
         self.assertTrue(w.waits_for_pick(ALIAS))
 
@@ -432,7 +432,7 @@ class CopyFromTheStoreTest(Base):
             f.write(SRT)
         srv = RangeServer(folder)
         self.addCleanup(srv.close)
-        store = Store(os.path.join(self.dir, "public"), keep_texts=False)
+        store = closed_after(self, Store(os.path.join(self.dir, "public"), keep_texts=False))
         key = store.put(self.FILE, hashlib.sha256(SRT.encode()).hexdigest(), "eng", 0, "synced", body=SYNCED,
                         fmt="srt", candidate_id="c1", original=SRT)
         store.set_offers(self.FILE, "eng", [key])
@@ -460,7 +460,7 @@ class OriginalEntryPublicTest(Base):
         for patcher in (self.downloads.patch(), local_network_only()):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.store = Store(os.path.join(self.dir, "public"), keep_texts=False)
+        self.store = closed_after(self, Store(os.path.join(self.dir, "public"), keep_texts=False))
         a = self.worker(Limits(who="a" * 16), Listing(subtitles=[{"id": "c1", "url": self.A_URL, "lang": "eng"}]))
         a._candidates(job(), dict(job().hints))           # person A's list, and A's judging kept c1
         a._set_originals(ALIAS, [{"id": "c1", "url": self.A_URL, "lang": "eng"}], "b.mp4", None)
@@ -692,7 +692,7 @@ class PoolTest(unittest.TestCase):
         self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
                     "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off", "SUBSYNC_SYNCS_AT_ONCE": "2",
                     "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_AUDIO_BUDGET_GB": "0.5"}
-        self.store = Store(self.dir)
+        self.store = closed_after(self, Store(self.dir))
         self.users = Users(os.path.join(self.dir, "users.sqlite3"), Settings(self.env).secret_bytes())
         self.addCleanup(self.users.close)
         self.tokens = [new_token(), new_token()]

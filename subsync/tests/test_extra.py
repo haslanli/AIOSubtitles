@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from helpers import closed_after  # noqa: E402
 from subsync import choose  # noqa: E402
 from subsync.extra import ExtraSources  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -216,7 +217,7 @@ class ExtraSourcesTest(unittest.TestCase):
         import tempfile
         d = tempfile.mkdtemp(prefix="subsync-test-")
         extra = Extra()
-        w = Worker(Settings({"SUBSYNC_DATA": d}), Store(d), Aios(), Safety(), extra=extra)
+        w = Worker(Settings({"SUBSYNC_DATA": d}), closed_after(self, Store(d)), Aios(), Safety(), extra=extra)
         w.process(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 5, "videoHash": "abcd"}))
         (args, kw), = extra.calls
         self.assertEqual(args[:2], ("movie", "tt1"))

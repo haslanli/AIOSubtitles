@@ -92,6 +92,12 @@ def have(tool):
     return shutil.which(tool) is not None
 
 
+def closed_after(test, resource):
+    """`resource` (a Store), closed when the test ends, so no test leaves its database open."""
+    test.addCleanup(resource.close)
+    return resource
+
+
 LOCAL = ("127.0.0.1", "localhost", "::1")
 
 

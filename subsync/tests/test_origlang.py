@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from subsync import origlang  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
-from helpers import TempDir  # noqa: E402
+from helpers import closed_after, TempDir  # noqa: E402
 
 KEY = "0123456789abcdef0123456789abcdef"            # a made-up v3 key (32 hex characters)
 TOKEN = "eyJhbGciOiJIUzI1NiJ9.made-up-token-for-tests.c2lnbmF0dXJl"   # a made-up Read Access Token
@@ -144,7 +144,7 @@ class Base(unittest.TestCase):
         self.srv = Services()
         self.addCleanup(self.srv.close)
         self.clock = Clock()
-        self.store = Store(self.tmp, clock=self.clock)
+        self.store = closed_after(self, Store(self.tmp, clock=self.clock))
         self.env = {"SUBSYNC_DATA": self.tmp, "SUBSYNC_TMDB_URL": self.srv.base + "/tmdb",
                     "SUBSYNC_WIKIDATA_URL": self.srv.base + "/sparql", "SUBSYNC_KITSU_URL": self.srv.base + "/kitsu",
                     "SUBSYNC_ANILIST_URL": self.srv.base + "/anilist", "SUBSYNC_TMDB_KEY": self.key or ""}

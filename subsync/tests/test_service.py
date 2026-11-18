@@ -1,9 +1,11 @@
 """Store, safety, sources filters and the addon's answers."""
+import errno
 import gzip
 import io
 import json
 import os
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -19,7 +21,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helpers import FakeDownloads, TempDir, answers, dialogue_srt, exchange, local_network_only  # noqa: E402
+from helpers import answers, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only, TempDir  # noqa: E402
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -59,7 +61,7 @@ class Clock:
 class StoreTest(unittest.TestCase):
     def test_synced_is_offered_and_rank_rules(self):
         with TempDir() as d:
-            st = Store(d)
+            st = closed_after(self, Store(d))
             k1 = st.put(FILE, SHA_A, "eng", 1, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
             self.assertEqual([r["key"] for r in st.offers(FILE, ["eng", "rus"])], [k1])
             st.put(FILE, SHA_B, "eng", 2, "synced", body="b", fmt="srt")      # worse rank: keeps the last good
@@ -75,7 +77,7 @@ class StoreTest(unittest.TestCase):
     def test_cap_evicts_least_recently_served(self):
         with TempDir() as d:
             clock = Clock()
-            st = Store(d, cap_bytes=10 ** 9, clock=clock)
+            st = closed_after(self, Store(d, cap_bytes=10 ** 9, clock=clock))
             body = os.urandom(200_000).hex()   # incompressible-ish
             keys = []
             for i, sha in enumerate((SHA_A, SHA_B, SHA_C)):
@@ -92,7 +94,7 @@ class StoreTest(unittest.TestCase):
     def test_lifetimes_and_read_failure_backoff(self):
         with TempDir() as d:
             clock = Clock()
-            st = Store(d, clock=clock)
+            st = closed_after(self, Store(d, clock=clock))
             k = st.put(FILE, SHA_A, "eng", 0, "keep_original")
             self.assertIsNotNone(st.fresh(k))
             clock.t += 31 * 86400
@@ -116,13 +118,13 @@ class StoreTest(unittest.TestCase):
     def test_budget_per_day_and_kind(self):
         with TempDir() as d:
             clock = Clock()
-            st = Store(d, clock=clock)
-            st.add_bytes("read", 100)
-            st.add_bytes("read", 50)
-            st.add_bytes("other", 7)
-            self.assertEqual(st.bytes_today("read"), 150)
+            st = closed_after(self, Store(d, clock=clock))
+            st.day_add("read", 100)
+            st.day_add("read", 50)
+            st.day_add("other", 7)
+            self.assertEqual(st.day_count("read"), 150)
             clock.t += 86400
-            self.assertEqual(st.bytes_today("read"), 0)
+            self.assertEqual(st.day_count("read"), 0)
 
     def test_key_format(self):
         self.assertEqual(result_key(FILE, SHA_A), f"subsync:{ALGO_VERSION}:{FILE}:{'a' * 16}")
@@ -131,7 +133,7 @@ class StoreTest(unittest.TestCase):
         # What the addon asks of a file's read, through the store's lock and on its clock
         with TempDir() as d:
             clock = Clock()
-            st = Store(d, clock=clock)
+            st = closed_after(self, Store(d, clock=clock))
             self.assertEqual((st.file_state(FILE), st.file_detail(FILE)), ((None, None), None))
             st.file_read(FILE, 1000, FILE[:16], True, {"reference": False})
             clock.t += 10
@@ -140,12 +142,210 @@ class StoreTest(unittest.TestCase):
             st.file_failed("name:x|1")                     # a read that failed: its time, no detail
             self.assertEqual((st.file_state("name:x|1"), st.file_detail("name:x|1")), ((clock.t, {}), {}))
 
+    def test_read_failures_count_in_a_row_each_back_off_its_own(self):
+        # A read that succeeds clears the failures before it, and a refusal (or a file neither MKV nor MP4)
+        # after read failures starts its own 1 h / 6 h / 24 h instead of stopping the file for good
+        with TempDir() as d, Store(d, clock=Clock()) as st:
+            waits = lambda calls: [None if r is None else round(r - st.clock()) for r in calls]   # noqa: E731
+            self.assertEqual(waits([st.file_failed("name:x|1") for _ in range(3)]), [600, 3600, 21600])
+            self.assertEqual(waits([st.file_failed("name:x|1", REFUSED_BACKOFF_S)]), [3600])
+            self.assertEqual(st.file_retry("name:x|1"), st.clock() + 21600)   # the later of the two
+            self.assertTrue(st.file_blocked("name:x|1"))
+            st.file_ok("name:x|1")
+            self.assertFalse(st.file_blocked("name:x|1"))
+            self.assertIsNone(st.file_retry("name:x|1"))
+            self.assertEqual(waits([st.file_failed("name:x|1"), st.file_failed("name:x|1", REFUSED_BACKOFF_S)]),
+                             [600, 3600])
+            st.file_ok("name:other|1")                     # another file's read clears nothing of this one
+            self.assertTrue(st.file_blocked("name:x|1"))
+
+    def test_a_damaged_copy_is_dropped_and_judged_again(self):
+        # A copy file cut short, garbled or not gzip reads as no copy, and its row goes (it was offered
+        # still, and every request for it failed); a file that is only missing keeps its row, and an OS error that
+        # says nothing of the file (too many open files) is not taken for damage
+        def damage(path, how):
+            with open(path, "rb") as f:
+                raw = f.read()
+            mid = len(raw) // 2   # in the compressed data, past the header and the file name it holds
+            raw = {"cut": raw[:mid], "garbled": raw[:mid] + bytes(b ^ 0xFF for b in raw[mid:mid + 40]) + raw[mid + 40:],
+                   "not gzip": b"1\n00:00:01,000 --> 00:00:02,000\nx\n", "not json": gzip.compress(b"{not json")}[how]
+            with open(path, "wb") as f:
+                f.write(raw)
+
+        text = "".join(f"{i}\n00:00:{i:02d},000 --> 00:00:{i:02d},500\nline {i}\n\n" for i in range(1, 50))
+        for keep_texts, how in ((True, "cut"), (True, "garbled"), (True, "not gzip"), (False, "cut"),
+                                (False, "not json")):
+            with self.subTest(keep_texts=keep_texts, damage=how), TempDir() as d, \
+                    Store(d, keep_texts=keep_texts) as st:
+                k = st.put(FILE, SHA_A, "eng", 0, "synced", body=text, fmt="srt", original=text)
+                self.assertEqual(len(st.offers(FILE, ["eng"])), 1)
+                damage(st._copy_path(k), how)
+                with self.assertLogs("subsync.store", "WARNING"):
+                    self.assertIsNone(st.body(k) if keep_texts else st.recipe(k))
+                self.assertIsNone(st.get(k))
+                self.assertEqual(st.offers(FILE, ["eng"]), [])
+                self.assertFalse(os.path.exists(st._copy_path(k)))
+        with TempDir() as d, Store(d) as st:
+            k = st.put(FILE, SHA_A, "eng", 0, "synced", body=text, fmt="srt")
+            with mock.patch("subsync.store.gzip.open", side_effect=OSError(errno.EMFILE, "Too many open files")):
+                with self.assertRaises(OSError):
+                    st.body(k)
+            self.assertIsNotNone(st.get(k))
+            os.remove(st._copy_path(k))
+            self.assertIsNone(st.body(k))
+            self.assertIsNotNone(st.get(k))
+
+    def test_a_verdict_with_no_copy_removes_the_copy_an_earlier_verdict_made(self):
+        # A synced copy judged again as keep_original (another pass rule, the language check) left its file
+        # on disk for good, uncounted by the cap; so did a public copy judged again that isn't a re-timing any more
+        text = "1\n00:00:01,000 --> 00:00:02,000\nthe line\n"
+        for keep_texts, again in ((True, "keep_original"), (True, "in_sync"), (False, "keep_original"),
+                                  (False, "synced")):
+            with self.subTest(keep_texts=keep_texts, again=again), TempDir() as d, \
+                    Store(d, keep_texts=keep_texts) as st:
+                k = st.put(FILE, SHA_A, "eng", 0, "synced", body=text, fmt="srt", original=text)
+                self.assertTrue(os.path.exists(st._copy_path(k)))
+                # public mode: a body that isn't a re-timing of its original keeps no recipe
+                st.put(FILE, SHA_A, "eng", 0, again, body="something else" if again == "synced" else None,
+                       original=text if again == "synced" else None)
+                self.assertFalse(os.path.exists(st._copy_path(k)))
+                self.assertEqual(st.get(k)["body_bytes"], 0)
+                self.assertEqual(st.offers(FILE, ["eng"]), [])
+
+    def test_a_copy_that_cannot_be_written_leaves_no_temporary_file(self):
+        # A full disk while the copy is written left its partial temporary file for good, outside the cap
+        real_open = gzip.open
+
+        class Full:
+            def __init__(self, f):
+                self.f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                self.f.close()
+
+            def write(self, _):
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        def full_disk(path, mode="rb", **kw):
+            f = real_open(path, mode, **kw)
+            return Full(f) if "w" in mode else f
+
+        with TempDir() as d, Store(d) as st:
+            with mock.patch("subsync.store.gzip.open", side_effect=full_disk):
+                with self.assertRaises(OSError):
+                    st.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
+            left = [n for _, _, names in os.walk(d) for n in names if not n.startswith("subsync.sqlite3")]
+            self.assertEqual(left, [])
+            self.assertIsNone(st.get(result_key(FILE, SHA_A)))
+
+    def test_two_puts_of_one_key_at_once_write_two_temporary_files(self):
+        # Both wrote into the key's one ".tmp" file; the second to put it in place found it gone (or the two
+        # writes mixed into one damaged copy)
+        real_open, both = gzip.open, threading.Barrier(2, timeout=10)
+        written, errors = [], []
+
+        def meet(path, mode="rb", **kw):
+            if "w" in mode:
+                written.append(path)
+                both.wait()   # the two puts are writing at the same time
+            return real_open(path, mode, **kw)
+
+        with TempDir() as d, Store(d) as st:
+            texts = [f"1\n00:00:01,000 --> 00:00:02,000\n{word}\n" for word in ("first", "second")]
+
+            def put(text):
+                try:
+                    st.put(FILE, SHA_A, "eng", 0, "synced", body=text, fmt="srt")
+                except Exception as e:
+                    errors.append(e)
+            with mock.patch("subsync.store.gzip.open", side_effect=meet):
+                threads = [threading.Thread(target=put, args=(t,)) for t in texts]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(20)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(set(written)), 2)
+            self.assertIn(st.body(result_key(FILE, SHA_A)), texts)
+            left = [n for _, _, names in os.walk(d) for n in names if n.endswith(".tmp")]
+            self.assertEqual(left, [])
+
+    def test_the_cap_is_checked_when_a_copy_is_added_and_evicts_in_one_pass(self):
+        # Every put summed the whole table and listed the folder, a verdict with no copy too; over the cap,
+        # each copy dropped summed it again
+        with TempDir() as d:
+            clock = Clock()
+            with Store(d, cap_bytes=10 ** 9, clock=clock) as st:
+                keys = []
+                for i in range(10):
+                    clock.t += 10
+                    keys.append(st.put(f"{i:016x}-1", SHA_A, "eng", 0, "synced", body=os.urandom(100_000).hex(),
+                                       fmt="srt"))
+                clock.t += 10
+                for k in keys[:3]:                       # served again: the least recently served are keys[3:]
+                    st.served(k)
+                with mock.patch.object(st, "total_bytes", wraps=st.total_bytes) as summed:
+                    st.put(FILE, SHA_B, "eng", 0, "keep_original")
+                    st.put(FILE, SHA_C, "eng", 0, "in_sync")
+                    self.assertEqual(summed.call_count, 0)
+                    st.put(FILE, "e" * 64, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
+                    self.assertEqual(summed.call_count, 1)
+                    sizes = {k: st.get(k)["body_bytes"] for k in keys}
+                    st.cap = st.total_bytes() - sum(sizes[k] for k in keys[3:6]) - sizes[keys[6]] // 4
+                    summed.reset_mock()
+                    st.enforce_cap()                     # keys[3] to keys[6] go, in one pass
+                    self.assertEqual(summed.call_count, 2)
+                self.assertEqual([k for k in keys if st.get(k)], keys[:3] + keys[7:])
+                self.assertLessEqual(st.total_bytes(), st.cap)
+
+    def test_eviction_and_drops_use_indexes_and_one_transaction(self):
+        # A dropped copy's last_good and offers rows were found by scanning both tables, and expire, the
+        # eviction, set_offers and judged_put committed (and synced) each statement on its own
+        with TempDir() as d, Store(d, clock=Clock()) as st:
+            def plan(sql, *args):
+                return " ".join(row[-1] for row in st.db.execute("EXPLAIN QUERY PLAN " + sql, args))
+            self.assertIn("results_lru", plan("SELECT key FROM results WHERE body_bytes>0 ORDER BY last_served"))
+            self.assertIn("last_good_key", plan("DELETE FROM last_good WHERE key=?", "k"))
+            self.assertIn("offers_key", plan("DELETE FROM offers WHERE key=?", "k"))
+            keys = [st.put(f"{i:016x}-1", SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n",
+                           fmt="srt") for i in range(3)]
+            statements = []
+            st.db.set_trace_callback(statements.append)
+            st.set_offers(FILE, "eng", keys)
+            st.judged_put(FILE, ["eng", "spa"], "r1")
+            st.clock.t += 181 * 86400
+            self.assertEqual(st.expire(), 3)
+            st.db.set_trace_callback(None)
+            self.assertEqual([s.split()[0] for s in statements if s.split()[0] in ("BEGIN", "COMMIT", "ROLLBACK")],
+                             ["BEGIN", "COMMIT"] * 3)
+            self.assertEqual(st.offers(FILE, ["eng"]), [])
+
+    def test_the_store_commits_without_syncing_and_closes(self):
+        # Every commit of the store (a listing's served copies, each range read's bytes) synced the disk;
+        # the people's records keep doing so. The store couldn't be closed
+        from subsync.users import Users
+        with TempDir() as d:
+            with Store(d) as st:
+                self.assertEqual(st.db.execute("PRAGMA synchronous").fetchone()[0], 1)   # NORMAL
+            with self.assertRaises(sqlite3.ProgrammingError):
+                st.db.execute("SELECT 1")
+            again = Store(d)
+            again.close()
+            with self.assertRaises(sqlite3.ProgrammingError):
+                again.day_count("read")
+            users = Users(os.path.join(d, "users.sqlite3"), b"s" * 32)
+            self.addCleanup(users.close)
+            self.assertEqual(users.db.execute("PRAGMA synchronous").fetchone()[0], 2)   # FULL
+
 
 class SafetyTest(unittest.TestCase):
     def test_guard_rules(self):
         with TempDir() as d:
             clock = Clock()
-            st = Store(d, clock=clock)
+            st = closed_after(self, Store(d, clock=clock))
             safety = Safety(backoff_s=900, clock=clock)
             g = JobGuard(safety, st, daily_budget=1000)
             g.before_read(500)
@@ -332,7 +532,7 @@ class AddonTest(unittest.TestCase):
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_PENDING_ENTRY": "on",
                            "SUBSYNC_PENDING_WAIT_MS": "200"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.safety = Safety()
         self.downloads = fake_downloads(self)
         self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
@@ -431,7 +631,7 @@ class AddonTest(unittest.TestCase):
     def test_no_subtitle_to_sync_reads_nothing(self):
         self.worker.aios.row = {"url": "http://127.0.0.1:9/never"}     # the file is listed, but no subtitle is
         self.worker.process(Job("movie", "tt7", {"filename": "f.mkv", "videoSize": 9}))
-        self.assertEqual(self.store.bytes_today("read"), 0)
+        self.assertEqual(self.store.day_count("read"), 0)
 
 
 class PickTest(AddonTest):
@@ -1115,7 +1315,7 @@ class OriginalEntryTest(unittest.TestCase):
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_AUDIO_ROUTE": "on",
                            "SUBSYNC_LANGUAGES": "eng,spa,rus", "SUBSYNC_PICK_WAIT_MS": "2000",
                            "SUBSYNC_PARALLEL_LANGUAGES": "off"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.texts = {cid: dialogue_srt(lang, start=start) for cid, (lang, start, _) in self.CANDS.items()}
         self.measures = {self.texts[cid]: m for cid, (_, _, m) in self.CANDS.items()}
         self.downloads = fake_downloads(self)
@@ -1196,7 +1396,7 @@ class OriginalEntryTest(unittest.TestCase):
             self.assertTrue(headers["Content-Type"].startswith("application/x-subrip"))
         # its download queues no job and reads nothing of the file: only the subtitles, and those kept a moment ago
         self.assertEqual((len(self.worker.jobs), len(self.worker.picked_early)), (0, 0))
-        self.assertEqual(self.store.bytes_today("read"), 0)
+        self.assertEqual(self.store.day_count("read"), 0)
         self.assertEqual(len(self.downloads.asked), asked)
 
     def test_friends_shape(self):
@@ -1355,7 +1555,7 @@ class LanesTest(unittest.TestCase):
                     if job.audio:
                         release.wait(10)
                     order.append(job.alias)
-            w = W(s, Store(d), FakeAios(), Safety())
+            w = W(s, closed_after(self, Store(d)), FakeAios(), Safety())
             audio = Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1})
             audio.audio = True
             w.submit(audio)
@@ -1382,7 +1582,7 @@ class LanesTest(unittest.TestCase):
         import sqlite3
         from subsync.reader import Refused
         with TempDir() as d:
-            store, ran = Store(d), []
+            store, ran = closed_after(self, Store(d)), []
 
             def full(*a, **k):
                 raise sqlite3.OperationalError("database or disk is full")
@@ -1411,7 +1611,7 @@ class LanesTest(unittest.TestCase):
         # alone, not again by each person's worker after its first job; self-hosted, the worker expires its own store
         for public, expiries in ((True, 0), (False, 1)):
             with self.subTest(public=public), TempDir() as d:
-                store, ran, expired = Store(d), [], []
+                store, ran, expired = closed_after(self, Store(d)), [], []
                 store.expire = lambda: expired.append(1)
 
                 class W(Worker):
@@ -1479,7 +1679,7 @@ class AddonKeyTest(unittest.TestCase):
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "https://example.org/subsync",
                            "SUBSYNC_ADDON_KEY": "/k3y/", "SUBSYNC_BASE_PATH": "subsync/"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started
         self.app = App(self.s, self.store, self.worker, Safety())
         self.server = serve(self.app, 0)
@@ -1578,7 +1778,7 @@ class NameOnlyTest(unittest.TestCase):
         self.tmp = TempDir()
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started
         self.app = App(self.s, self.store, self.worker, Safety())
 
@@ -1623,7 +1823,7 @@ class ReadLatelyTest(unittest.TestCase):
         self.addCleanup(self.tmp.__exit__, None, None, None)
         self.clock = Clock()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = Store(d, clock=self.clock)
+        self.store = closed_after(self, Store(d, clock=self.clock))
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())   # not started: jobs stay queued
         self.app = App(self.s, self.store, self.worker, Safety())
 
@@ -1646,7 +1846,7 @@ class ConnectionTest(unittest.TestCase):
         d = self.tmp.__enter__()
         self.addCleanup(self.tmp.__exit__, None, None, None)
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.safety = Safety()
         self.worker = Worker(self.s, self.store, FakeAios(), self.safety)   # not started: jobs stay queued
         self.app = App(self.s, self.store, self.worker, self.safety)
@@ -1887,7 +2087,7 @@ class AudioOffEntryTest(unittest.TestCase):
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus",
                            "SUBSYNC_PENDING_WAIT_MS": "3000", "SUBSYNC_PICK_WAIT_MS": "3000"})
         self.assertFalse(self.s.audio_route or self.s.pending_entry)    # the stock defaults
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         fake_downloads(self)
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())  # not started: jobs stay queued
         self.server = serve(App(self.s, self.store, self.worker, Safety()), 0)
@@ -1979,7 +2179,7 @@ class EmptyListTest(unittest.TestCase):
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus",
                            "SUBSYNC_PICK_WAIT_MS": "300"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.aios = FakeAios()
         self.aios.row = {"url": "http://127.0.0.1:9/never"}
         self.worker = Worker(self.s, self.store, self.aios, Safety())   # not started
@@ -2000,7 +2200,7 @@ class EmptyListTest(unittest.TestCase):
         self.worker.process(job)                                        # the list comes back empty
         self.assertIsNone(self.worker.known_originals(self.ALIAS))
         self.assertIsNone(self.store.originals_get(self.ALIAS))
-        self.assertEqual(self.store.bytes_today("read"), 0)
+        self.assertEqual(self.store.day_count("read"), 0)
 
     def test_a_pick_after_an_empty_list_asks_for_the_list_again(self):
         job = Job("movie", "tt9", {"filename": "b.mkv", "videoSize": 5})
@@ -2054,7 +2254,7 @@ class BestFitOffersTest(unittest.TestCase):
         self.tmp = TempDir()
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790", "SUBSYNC_LANGUAGES": "eng,rus"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())
         self.app = App(self.s, self.store, self.worker, Safety())
 
@@ -2161,7 +2361,7 @@ class RuleChangeTest(unittest.TestCase):
         self.tmp = TempDir()
         d = self.tmp.__enter__()
         self.s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC_BASE": "http://subsync:8790"})
-        self.store = Store(d)
+        self.store = closed_after(self, Store(d))
         self.worker = Worker(self.s, self.store, FakeAios(), Safety())
         self.app = App(self.s, self.store, self.worker, Safety())
 

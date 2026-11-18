@@ -129,17 +129,17 @@ class StoreUsenetCounts:
         self.store = store
 
     def listings(self):
-        return self.store.bytes_today("usenet")
+        return self.store.day_count("usenet")
 
     def add_listing(self):
-        self.store.add_bytes("usenet", 1)
+        self.store.day_add("usenet", 1)
 
     def stopped(self):
-        return self.store.bytes_today("usenet_stop") > 0
+        return self.store.day_count("usenet_stop") > 0
 
     def stop(self):
         if not self.stopped():
-            self.store.add_bytes("usenet_stop", 1)
+            self.store.day_add("usenet_stop", 1)
 
 
 class StoreAudioCounts:
@@ -151,15 +151,15 @@ class StoreAudioCounts:
         self.store, self.s = store, settings
 
     def may_start_audio(self, opened=False):
-        if self.store.bytes_today("audio_syncs") >= self.s.user_audio_per_day:
+        if self.store.day_count("audio_syncs") >= self.s.user_audio_per_day:
             return False
-        return not opened or self.store.bytes_today("audio_opened") < self.s.user_opened_per_day
+        return not opened or self.store.day_count("audio_opened") < self.s.user_opened_per_day
 
     def audio_started(self, opened=False):
         """A picked sync counts one audio sync; an opened one counts one of each."""
-        self.store.add_bytes("audio_syncs", 1)
+        self.store.day_add("audio_syncs", 1)
         if opened:
-            self.store.add_bytes("audio_opened", 1)
+            self.store.day_add("audio_opened", 1)
 
 
 class UsenetGate:
@@ -356,7 +356,7 @@ class JobGuard:
 
     def _check(self, length):
         """Raises when reading `length` more bytes would pass a limit (cv held)."""
-        if self.store.bytes_today("read") + length > self.daily_budget:
+        if self.store.day_count("read") + length > self.daily_budget:
             raise BudgetSpent(BUDGET_SPENT)
         if self.file_cap and self.bytes + length > self.file_cap:
             raise CapReached(self.file_cap)
@@ -367,7 +367,7 @@ class JobGuard:
         """A read ended with `n` bytes received (0 when it failed); `asked`: the length its before_read reserved (by
         default n, a read that got what it asked for)."""
         if n:
-            self.store.add_bytes("read", n)
+            self.store.day_add("read", n)
             if self.limits is not None:
                 self.limits.after_read(n)
             self.safety.read_ok()
@@ -701,7 +701,7 @@ class Worker(threading.Thread):
         file could read. Asked when the pick comes and again when the job starts, since several picks can be
         queued against the same data left."""
         need = self._audio_need(alias)
-        if self.store.bytes_today("read") + need > self.s.daily_budget:
+        if self.store.day_count("read") + need > self.s.daily_budget:
             return False
         return self.limits is None or self.limits.has_room(need)
 
@@ -1343,6 +1343,8 @@ class Worker(threading.Thread):
                 if job.audio:   # a debrid file's audio job: it backs off as any read, and waits for another pick
                     self._wait_again(job)
                 return
+        # the file could be read: a back-off is for failures in a row, so the earlier ones no longer count
+        self.store.file_ok(job.alias, self._refusal_key(job.alias))
         if job.usenet:
             self._keep_address(job.alias, row, reader.resolved)
         if hints.get("videoHash") and not same_hash(hints["videoHash"], oshash):
