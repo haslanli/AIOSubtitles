@@ -30,5 +30,7 @@ ALGO_VERSION = "v3"   # part of every stored result's key: a new version recompu
 # language settled only by a pass against its own language's track, subtitles read in their language's old encoding,
 # bilingual Chinese, Japanese and Korean subtitles in their language, a language's written forms as one, no word check
 # for Chinese and Japanese, tracks named or flagged as commentary, or as full ones with signs and songs, song and sign
-# styles told by their names' whole words, and SRT cues with no blank line between them
+# styles told by their names' whole words, and SRT cues with no blank line between them; each uncovered stretch
+# judged on its own against a track in the subtitle's own language, and one shift excusing a missing stretch only when
+# the subtitle's lines after it pair near the shift again
 RULE_REVISION = 11

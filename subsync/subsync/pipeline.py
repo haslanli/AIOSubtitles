@@ -261,11 +261,12 @@ def _shift_stats(before, after):
             "max_ms": round(max(d) * 1000, 1) if d else 0.0}
 
 
-def reference_gate(ref, n_dialogue, splits=True):
+def reference_gate(ref, n_dialogue, splits=True, cross=False):
     """The gate against a reference track: relgate with its line starts, its durations (for split lines) and the span
     rule. An image reference holds only the starts it is sure of, so even a perfect candidate pairs at most that share
     of its lines (Kingdom of Heaven's PGS track pins 73 % of its lines, and every Russian subtitle for this cut,
-    with fewer lines than the track, was held to pairing all of them): the pairing minimums are scaled to it (recall)."""
+    with fewer lines than the track, was held to pairing all of them): the pairing minimums are scaled to it (recall).
+    cross: the track is in another language than the subtitle's (is_cross; relgate's missing-scene rule)."""
     starts = [s for s, _ in ref["cues"]]
     durations = [d for _, d in ref["cues"]] if splits else None
     recall = 1.0
@@ -273,7 +274,7 @@ def reference_gate(ref, n_dialogue, splits=True):
         recall = min(1.0, len(starts) / n_dialogue, (ref.get("image") or {}).get("sure_share", 1.0))
 
     def gate(cand_starts, **kw):
-        return relgate(starts, cand_starts, durations, min_span=MIN_SPAN, ref_recall=recall, **kw)
+        return relgate(starts, cand_starts, durations, min_span=MIN_SPAN, ref_recall=recall, cross=cross, **kw)
     return gate, recall
 
 
@@ -466,7 +467,7 @@ def recentre(new, gate):
     return new, g, 0.0
 
 
-def section_checks(out, best, groups, ref, recall, snap_within, better):
+def section_checks(out, best, groups, ref, recall, snap_within, better, cross=False):
     """D4 (3): each section of a sectioned copy checked on its own, by the bar the whole copy passed (main rule, snapped,
     "clearly better" or aligned, same numbers), against the track's lines in that section's time. (ok, why, results)."""
     cues = sorted(ref["cues"])
@@ -483,7 +484,7 @@ def section_checks(out, best, groups, ref, recall, snap_within, better):
             share = snap_bar(ref, snap_within)
         else:
             share = WITHIN_SHARE
-        gs = relgate([s for s, _ in sub], new, [d for _, d in sub], within_share=share, ref_recall=recall)
+        gs = relgate([s for s, _ in sub], new, [d for _, d in sub], within_share=share, ref_recall=recall, cross=cross)
         if (out.get("aligned") or {}).get("pass"):
             ok = aligned(gs, better, None, recall)[0]
         elif (out.get("better") or {}).get("pass"):
@@ -537,7 +538,7 @@ def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=
     if best is None:
         return dict(out, outcome="keep_original", reason="below the bar" + how)
     if groups:
-        ok, note, per = section_checks(out, best, groups, ref, recall, snap_within, better)
+        ok, note, per = section_checks(out, best, groups, ref, recall, snap_within, better, cross)
         out["section_checks"] = per
         if not ok:
             return dict(out, outcome="keep_original", reason=note + how)
@@ -567,7 +568,8 @@ def shift_sync(index, text, lang, snap=True, snap_within=0.95, splits=True, imag
     ref = choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
     if ref is None:
         return None
-    gate, recall = reference_gate(ref, len(dial), splits)
+    cross = is_cross(ref, lang)
+    gate, recall = reference_gate(ref, len(dial), splits, cross)
     scale, offset, votes = shift.best_shift(dial, [s for s, _ in ref["cues"]], cand_ends=dialogue_ends(lines),
                                             ref_ends=ref_ends(ref))
     new = [dict(l, s=l["s"] * scale + offset, e=l["e"] * scale + offset) for l in lines]
@@ -575,7 +577,7 @@ def shift_sync(index, text, lang, snap=True, snap_within=0.95, splits=True, imag
            "reference": {"track": ref["number"], "language": ref["language"], "codec": ref["codec"], "cues": len(ref["cues"])},
            "shift_fit": {"scale": round(scale, 6), "offset_s": round(offset, 3), "votes": votes}}
     return judge_copy(out, text, lines, new, ref, gate, recall, snap, snap_within, better, how=" (one shift)",
-                      cross=is_cross(ref, lang), words=TextCheck(index, ref, lines, lang, text_pairing), one_shift=True)
+                      cross=cross, words=TextCheck(index, ref, lines, lang, text_pairing), one_shift=True)
 
 
 STACKED_OVERLAP_S = 0.5   # a line that starts this long before the previous one ends is on screen with it
@@ -679,9 +681,9 @@ def check_original(index, text, lang, splits=True, image_ref=False, prefer_plain
     ref = choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
     if ref is None:
         return None
-    gate, recall = reference_gate(ref, len(dial), splits)
-    g = gate_lines(gate, lines)
     cross = is_cross(ref, lang)
+    gate, recall = reference_gate(ref, len(dial), splits, cross)
+    g = gate_lines(gate, lines)
     fits = original_fits(g, cross, better, recall)
     reference = {"track": ref["number"], "language": ref["language"], "codec": ref["codec"], "cues": len(ref["cues"])}
     out = {"in_sync": fits, "route": ref["route"], "reference": reference, "gate_original": g,
@@ -711,13 +713,13 @@ def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19,
         return dict(base, outcome="keep_original", reason=f"broken timing: {broken}", route=None)
     ref = choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
     if ref is not None:
-        gate, recall = reference_gate(ref, len(dial), splits)
+        cross = is_cross(ref, lang)
+        gate, recall = reference_gate(ref, len(dial), splits, cross)
         out = dict(base, route=ref["route"], reference={"track": ref["number"], "language": ref["language"],
                                                          "codec": ref["codec"], "cues": len(ref["cues"])})
         if ref.get("image"):
             out["reference"]["image"] = ref["image"]
         out["gate_original"] = gate_lines(gate, lines)
-        cross = is_cross(ref, lang)
         words = TextCheck(index, ref, lines, lang, text_pairing)
         fits = original_fits(out["gate_original"], cross, better, recall)
         if fits:

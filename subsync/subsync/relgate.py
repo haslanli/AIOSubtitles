@@ -17,14 +17,20 @@ MISSING_S seconds, inside the candidate's span, with no candidate line starting 
 On Kingdom of Heaven's director's cut (1,099 sure starts of its PGS track): every director's-cut subtitle, English and
 Russian, leaves at most 11 lines (159 s) uncovered; theatrical ones 36 to 111 lines (378 s and more); a theatrical
 subtitle aligned perfectly (the director's-cut subtitle without the lines a theatrical one lacks) 68 lines over 477 s.
-An opening or closing song the candidate leaves out (about 90 s) stays under MISSING_S.
+An opening or closing song the candidate leaves out (about 90 s) stays under MISSING_S. Against a track in the
+candidate's own language each such stretch is judged on its own (a denser stretch it also leaves out, an
+untranslated song, can't hide the scene); against another language's track, where an untranslated stretch looks the
+same, the stretch with the most lines is judged.
 Beyond the candidate's first or last line the release's lines fail the gate when they are LONG_END_LINES over
 LONG_END_S, far longer than any opening or credits song the release's track transcribes (a subtitle that stops half an
 hour early, or covers only part of the film).
 Against another language's track an untranslated stretch (a song, background talk, on-screen text) looks the same, while
 a subtitle for another cut can't keep its lines paired under one shift (those after the extra scene are off by its
 length): there a candidate as it is or moved by one shift that pairs ONE_SHIFT_PAIRED of its lines is not refused for a
-missing scene inside its span (relgate.aligned); beyond its ends it is.
+missing scene inside its span when at least REALIGNED_SHARE of its lines after the stretch still pair near its shift
+(relgate.aligned,;: after an untranslated song the lines line up again, after a cut late in the
+film, where the lines after it are too few to bring the share paired under ONE_SHIFT_PAIRED, they are off by its
+length); beyond its ends it is.
 """
 import bisect
 import statistics
@@ -47,6 +53,7 @@ MISSING_S = 150.0
 LONG_END_LINES = 120
 LONG_END_S = 900.0
 ONE_SHIFT_PAIRED = 0.90   # across languages, under one shift: a missing scene doesn't refuse a candidate pairing this share
+REALIGNED_SHARE = 0.5     # ... when this share of its lines after the stretch pair near its shift (no minimum count)
 # the defaults of the second way to pass (clearly_better) and of the cross-language rule (aligned); Settings reads them
 BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5, "cross_median_ms": 300.0, "cross_paired": 0.75}
 EPS_S = 1e-6       # float noise on times: a microsecond, far below any timing a subtitle or an index holds
@@ -95,29 +102,36 @@ def _pair(ref, cand):
     return m
 
 
-def missing_scene(ref, cand, window=WINDOW):
+def missing_scene(ref, cand, each=True, window=WINDOW):
     """The part of the release a subtitle lacks: a stretch of consecutive reference starts that no candidate start is
-    within `window` of. Inside the candidate's span, the stretch with the most lines, when it has at least MISSING_LINES
-    lines over at least MISSING_S seconds (a scene a subtitle for another cut lacks); beyond its first or last line, the
+    within `window` of. Inside the candidate's span, a stretch of at least MISSING_LINES lines over at least MISSING_S
+    seconds (a scene a subtitle for another cut lacks): with `each` (a track in the subtitle's own language) any such
+    stretch, else (another language's track) only the stretch with the most lines; beyond its first or last line, the
     release's lines there when they are at least LONG_END_LINES over at least LONG_END_S, far longer than any credits
-    song. Both sorted. Returns (lines, seconds, found, at_end): the numbers of the stretch found (the one with the most
-    lines), else of the stretch inside the span with the most lines; at_end when one beyond the candidate's ends is
-    found."""
-    inside, run = (0, 0.0), []
+    song. Both sorted. Returns (lines, seconds, found, at_end, inside_at): the numbers of the stretch found with the most
+    lines, else of the stretch inside the span with the most lines (with `each`, the longest); at_end when one beyond
+    the candidate's ends is found; inside_at, the last reference start of each stretch found inside the span."""
+    stretches, run = [], []     # (lines, seconds, last start)
     for r in ref[bisect.bisect_left(ref, cand[0]):bisect.bisect_right(ref, cand[-1])]:
         if lands(cand, r, window):
+            if run:
+                stretches.append((len(run), run[-1] - run[0], run[-1]))
             run = []
             continue
         run.append(r)
-        if len(run) > inside[0]:
-            inside = (len(run), run[-1] - run[0])
+    if run:
+        stretches.append((len(run), run[-1] - run[0], run[-1]))
+    top = max(stretches, key=lambda x: x[0], default=(0, 0.0, None))      # the first with the most lines
     ends = ref[:bisect.bisect_left(ref, cand[0] - window)], ref[bisect.bisect_right(ref, cand[-1] + window):]
     found = [(len(e), e[-1] - e[0]) for e in ends if len(e) >= LONG_END_LINES and e[-1] - e[0] >= LONG_END_S]
     at_end = bool(found)
-    if inside[0] >= MISSING_LINES and inside[1] >= MISSING_S:
-        found.append(inside)
-    lines, secs = max(found) if found else inside
-    return lines, secs, bool(found), at_end
+    inside = [x for x in (stretches if each else [top]) if x[0] >= MISSING_LINES and x[1] >= MISSING_S]
+    found += [x[:2] for x in inside]
+    if found:
+        lines, secs = max(found)
+    else:
+        lines, secs = (max(stretches, key=lambda x: (x[1], x[0]), default=top) if each else top)[:2]
+    return lines, secs, bool(found), at_end, [x[2] for x in inside]
 
 
 def span_share(ref, cand):
@@ -141,7 +155,7 @@ def end_errors(err_pairs, ref, dur, cend):
 
 
 def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHARE, min_span=None, ref_recall=1.0,
-            cand_ends=None):
+            cand_ends=None, cross=False):
     """ref_durations: the reference lines' durations, in ref_starts' order; given, split lines count as paired.
     min_span: the share of the release's span the candidate must cover; a subtitle for half the film
     (a CD2 file) or another cut can pass on the part it has, so it fails here.
@@ -149,7 +163,9 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
     perfect candidate pairs only about that share of its lines: the paired and per-tenth minimums are scaled by it
     (<= 1). The error bar itself (median, share within 200 ms) is unchanged.
     cand_ends: the candidate lines' ends, in cand_starts' order; given with ref_durations, the end errors are recorded
-    (end_*), never part of the pass."""
+    (end_*), never part of the pass.
+    cross: the reference is another language's track than the candidate's: inside its span only the uncovered stretch
+    with the most lines is judged for a missing scene, not each one (missing_scene)."""
     order = sorted(range(len(ref_starts)), key=lambda x: ref_starts[x])
     ref = [ref_starts[x] for x in order]
     dur = [ref_durations[x] for x in order] if ref_durations is not None else None
@@ -199,7 +215,7 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
         if sum(i in err_ms for i in idx) / len(idx) < TENTH_MIN_SHARE * recall:
             unpaired.append(b)
     span = span_share(ref, cand)
-    missing_lines, missing_s, cut, at_end = missing_scene(ref, cand)
+    missing_lines, missing_s, cut, at_end, inside_at = missing_scene(ref, cand, each=not cross)
     ok = paired >= MIN_PAIRED * recall and within(med, MEDIAN_MS) and share >= within_share and not weak and not cut
     if min_span is not None and span < min_span:
         ok = False
@@ -209,6 +225,12 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
            "missing_scene": cut, "span": round(span, 3), "pass": ok}
     if at_end:
         out["missing_at_end"] = True
+    if inside_at:   # the measured lines after each stretch found inside the span, paired near its shift
+        signed = statistics.median(err.values())
+        near = {i for i, x in err.items() if within(abs(x - signed) * 1000, LOOSE_MS)}
+        measured = [i for i in range(n) if i not in split]
+        afters = [[i for i in measured if cand[i] > t] for t in inside_at]
+        out["realigned"] = all(a and sum(i in near for i in a) >= REALIGNED_SHARE * recall * len(a) for a in afters)
     if dur is not None:
         out["splits"] = len(split)
         if cend is not None:
@@ -257,9 +279,11 @@ def aligned(g, rule=None, min_span=None, ref_recall=1.0, one_shift=False):
     translation can have a tenth under half within 500 ms: Breaking Bad's Russian), no missing scene, and the span.
     one_shift: `g` measures the subtitle as it is or moved by one steady offset (not alass's or a sectioned fit); then a
     missing scene doesn't refuse it when at least ONE_SHIFT_PAIRED of its lines pair (scaled by the recall like the other
-    pairing minimums), unless what is missing is beyond its first or last line (`missing_at_end`: the subtitle stops
+    pairing minimums) and at least REALIGNED_SHARE of its lines after the stretch still pair near its shift
+    (`realigned`), unless what is missing is beyond its first or last line (`missing_at_end`: the subtitle stops
     long before the film does): an untranslated stretch, not another cut (MobLand S02E08's Russian
-    against the en-GB track, one shift of 60 ms, 97 % of its 624 lines paired).
+    against the en-GB track, one shift of 60 ms, 97 % of its 624 lines paired; its untranslated stretch ends 10 s before
+    its last line, which pairs near the shift).
     Returns (ok, why)."""
     rule = dict(BETTER, **(rule or {}))
     recall = max(0.0, min(1.0, ref_recall))
@@ -273,7 +297,8 @@ def aligned(g, rule=None, min_span=None, ref_recall=1.0, one_shift=False):
         return False, "a part of the runtime does not fit"
     if min_span is not None and g.get("span", 0.0) < min_span:
         return False, "covers too little of the runtime"
-    excused = one_shift and g["paired"] >= ONE_SHIFT_PAIRED * recall and not g.get("missing_at_end")
+    excused = one_shift and g["paired"] >= ONE_SHIFT_PAIRED * recall and not g.get("missing_at_end") \
+        and g.get("realigned", False)
     if g.get("missing_scene") and not excused:
         return False, "a scene of the release is missing (another cut)"
     return True, "aligned to another language's track"

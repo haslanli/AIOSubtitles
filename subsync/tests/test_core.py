@@ -1039,6 +1039,31 @@ class MissingSceneTest(unittest.TestCase):
         short = self.gate(self.without(self.ref, 3300.0, 4000.0))   # a credits song's length: 400 s, 94 lines
         self.assertEqual((short["missing_scene"], short["pass"]), (False, True))
 
+    def test_each_stretch_is_judged_on_its_own_against_the_subtitles_own_language(self):
+        # A scene the subtitle lacks (22 lines over 210 s) was refused alone, but with a denser stretch it
+        # also leaves out (an untranslated opening song, 30 lines over 80 s) the song was judged in its place and the
+        # copy passed. Against a track in the subtitle's own language each stretch is judged on its own (the record: the
+        # worst one found, else the longest); against another language's track, where an untranslated stretch looks
+        # the same, the stretch with the most lines still is
+        def gap(ref, cand, a, z, n):
+            keep = [s for s in ref if not a - 1.5 <= s <= z + 1.5]
+            return sorted(keep + [a + (z - a) * k / (n - 1) for k in range(n)]), [s for s in cand if not a - 1.5 <= s <= z + 1.5]
+        line = [2.0 * k for k in range(1501)]
+        ref, cand = gap(line, line, 2000.0, 2210.0, 22)               # the scene alone
+        for cross in (False, True):
+            g = relgate(ref, cand, cross=cross)
+            self.assertEqual((g["missing_scene"], g["missing_lines"], g["missing_s"], g["pass"]), (True, 22, 210.0, False))
+        ref, cand = gap(ref, cand, 500.0, 580.0, 30)                  # and the song
+        g = relgate(ref, cand)
+        self.assertEqual((g["missing_scene"], g["missing_lines"], g["missing_s"], g["pass"]), (True, 22, 210.0, False))
+        g = relgate(ref, cand, cross=True)
+        self.assertEqual((g["missing_scene"], g["missing_lines"], g["missing_s"], g["pass"]), (False, 30, 80.0, True))
+        ref, cand = gap(*gap(line, line, 500.0, 580.0, 30), 2000.0, 2140.0, 15)    # none qualifies: the song, 15 over 140 s
+        g = relgate(ref, cand)
+        self.assertEqual((g["missing_scene"], g["missing_lines"], g["missing_s"], g["pass"]), (False, 15, 140.0, True))
+        g = relgate(ref, cand, cross=True)
+        self.assertEqual((g["missing_scene"], g["missing_lines"], g["missing_s"], g["pass"]), (False, 30, 80.0, True))
+
 
 class AlignedTest(unittest.TestCase):
     """relgate.aligned: a translation against another language's track must pair in every part of the runtime, but its
@@ -1138,6 +1163,31 @@ class CrossMissingSceneTest(unittest.TestCase):
         self.assertTrue(pipeline.check_original(self.index(), text, "rus", better=rule)["in_sync"])
         self.assertFalse(pipeline.check_original(self.index(), text, "eng", better=rule)["in_sync"])
 
+    def test_a_scene_a_denser_stretch_hid_is_refused_against_the_subtitles_own_language_only(self):
+        # through the shift path: the track has an untranslated song (30 lines over 80 s) and a scene (22 lines
+        # over 210 s) the subtitle lacks. Against a track in its own language the scene refuses the copy, snapped or not
+        # (it passed snapped, and was "clearly better" unsnapped, with the song judged in the scene's place); against
+        # another language's track the stretch with the most lines is judged, so the copy stays offered (Dune: Part
+        # Two's Russian and Spanish one-shift copies against the English image track keep theirs)
+        song, scene = (800.0, 880.0), (2000.0, 2210.0)
+        r = random.Random(5)
+        sub = [(s + r.gauss(0, 0.15), d) for s, d in self.cues if not any(a - 1.5 <= s <= z + 1.5 for a, z in (song, scene))]
+        cues = sorted([c for c in self.cues if not any(a - 1.5 <= c[0] <= z + 1.5 for a, z in (song, scene))]
+                      + [(song[0] + 80.0 * k / 29, 2.0) for k in range(30)] + [(scene[0] + 10.0 * k, 3.0) for k in range(22)])
+        index = FakeIndex(text=[{"number": 2, "language": "en", "codec": "S_TEXT/UTF8", "name": "", "forced": False,
+                                 "cues": cues}])
+        text = self.srt(sub, shift_s=5.0)
+        for snap in (True, False):
+            r = pipeline.shift_sync(index, text, "eng", snap=snap, better={})
+            self.assertEqual(r["outcome"], "keep_original", r.get("reason"))
+            self.assertEqual(r["better"]["why"], "a scene of the release is missing (another cut)")
+            self.assertEqual((r["gate_synced"]["missing_scene"], r["gate_synced"]["missing_lines"]), (True, 22))
+        r = pipeline.shift_sync(index, text, "rus", better={})
+        self.assertEqual((r["outcome"], r["reason"]), ("synced", "passes against the release track (one shift) (snapped)"))
+        r = pipeline.shift_sync(index, text, "rus", snap=False, better={})
+        self.assertEqual((r["outcome"], r["reason"]), ("synced", "aligned to another language's track (one shift)"))
+        self.assertEqual((r["gate_synced"]["missing_scene"], r["gate_synced"]["missing_lines"]), (False, 30))
+
     def test_a_theatrical_subtitle_against_an_extended_cut_is_still_refused(self):
         r = random.Random(17)
         t, film = 20.0, []
@@ -1157,6 +1207,46 @@ class CrossMissingSceneTest(unittest.TestCase):
             self.assertLess(res["gate_synced"]["paired"], relgate_mod.ONE_SHIFT_PAIRED)   # one shift: the cut breaks it
         self.assertFalse(pipeline.check_original(self.index(), self.srt(theatrical), "rus",
                                                  better=dict(relgate_mod.BETTER))["in_sync"])
+
+    def test_one_shift_excuses_a_stretch_only_when_half_of_the_lines_after_it_pair_near_the_shift(self):
+        # Under one shift, a missing stretch inside the subtitle's span is excused only when at least half of
+        # the subtitle's lines after it still pair near the shift, with no minimum count: after an untranslated song
+        # the lines line up again, after a cut they are off by its length. A track line every 4 s; the subtitle leaves
+        # out the 49 lines from 3,400 to 3,600 s and has 4 lines after them, its last ones 2 s off: 2 of 4 near the
+        # shift excuse it, 1 of 4 doesn't; with one line after the stretch, which pairs, it is excused ('s MobLand
+        # S02E08 Russian: its untranslated stretch ends 10 s before its last line, 1 of 1)
+        ref = [20.0 + 4.0 * k for k in range(900)]
+        for z, off, excused in ((3600.0, 2, True), (3600.0, 3, False), (3612.0, 0, True)):
+            cand = [s for s in ref if not 3400.0 <= s <= z]
+            cand = cand[:len(cand) - off] + [s + 2.0 for s in cand[len(cand) - off:]]
+            g = relgate(ref, cand, min_span=0.7, cross=True)
+            self.assertEqual((g["missing_scene"], g.get("missing_at_end", False)), (True, False))
+            self.assertGreaterEqual(g["paired"], relgate_mod.ONE_SHIFT_PAIRED)
+            self.assertEqual(aligned(g, min_span=0.7, one_shift=True)[0], excused, (z, off))
+            self.assertEqual(aligned(g, min_span=0.7), (False, "a scene of the release is missing (another cut)"))
+
+    def test_a_late_extra_scene_inside_the_span_is_not_excused_by_one_shift(self):
+        # A 400 s extra scene at 85 % of the film, then a sparse finale of 8 lines moved back by its length:
+        # the stretch the scene leaves uncovered is inside the subtitle's span, and the subtitle still pairs 99.5 % of
+        # its lines under one shift, but none of its 8 lines after the stretch pair near the shift: refused
+        r = random.Random(3)
+        rel, t = [], 20.0
+        while t < 5100:
+            rel.append(t)
+            t += r.uniform(3, 8)
+        scene = []
+        while t < 5500:
+            scene.append(t)
+            t += r.uniform(5, 8)
+        post = []
+        while t < 6000:
+            post.append(t)
+            t += r.uniform(50, 70)
+        ref = sorted(rel + scene + post)
+        cand = sorted([x + r.gauss(0, 0.04) for x in rel] + [x - 400.0 + r.gauss(0, 0.04) for x in post])
+        g = relgate(ref, cand, [1.5] * len(ref), min_span=0.7, cross=True)
+        self.assertEqual((len(post), g["missing_scene"], g.get("missing_at_end", False), g["paired"]), (8, True, False, 0.995))
+        self.assertEqual(aligned(g, min_span=0.7, one_shift=True), (False, "a scene of the release is missing (another cut)"))
 
 
 class ImageRecallTest(unittest.TestCase):
