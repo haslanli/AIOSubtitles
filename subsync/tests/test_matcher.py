@@ -633,6 +633,31 @@ class PipelineWordsTest(unittest.TestCase):
         self.assertFalse(chk["in_sync"])
         self.assertFalse(chk["text"]["ok"])
 
+    def test_no_words_are_read_for_chinese_or_japanese(self):
+        # Written without spaces, their lines are one or two "words", never enough to pair; the check read up
+        # to 120 of the track's lines each time to end with "too few lines paired"
+        lines = dialogue(500, 22)
+        text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
+        for track_lang, lang in (("zh", "chi"), ("ja", "jpn")):
+            with self.subTest(lang=lang):
+                index = WordIndex(lines, lang=track_lang)
+                r = pipeline.shift_sync(index, text, lang, text_pairing=True, snap=False, better={})
+                self.assertEqual(r["outcome"], "synced", r.get("reason"))
+                self.assertEqual(index.asked, [])
+                ref = pipeline.choose_reference(index, 500, lang)
+                self.assertFalse(pipeline.TextCheck(index, ref, pipeline.parse(text), lang, True).on)
+
+    def test_a_track_in_a_written_form_of_the_language_is_checked_by_its_words(self):
+        # A Norwegian subtitle against the file's Norwegian track tagged nb was judged as across languages,
+        # with no word check
+        lines = dialogue(500, 22)
+        index = WordIndex(lines, lang="nb-NO")
+        text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
+        r = pipeline.shift_sync(index, text, "nor", text_pairing=True, snap=False, better={})
+        self.assertEqual(r["outcome"], "synced", r.get("reason"))
+        self.assertEqual(len(index.asked), 1)
+        self.assertTrue(r["text"]["ok"])
+
     def test_no_words_across_languages_or_with_the_setting_off(self):
         lines = dialogue(500, 25)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])

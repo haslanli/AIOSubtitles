@@ -8,6 +8,7 @@ attachments), and decoded from a pipe.
 import bisect
 import logging
 import math
+import re
 import struct
 import subprocess
 import sys
@@ -15,6 +16,8 @@ import threading
 import zlib
 from array import array
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+from .reader import IndexTooLarge
 
 AUDIO_BYTES_LOCK = threading.Lock()
 # ffmpeg decodes bytes of files anyone can publish; on Linux each decoder gets its own limits
@@ -51,7 +54,7 @@ def add_words_bytes(index, n):
 HEAD_BYTES = 256 * 1024
 HASH_CHUNK = 64 * 1024
 MAX_ELEMENT = 8 * 1024 * 1024      # Info/Tracks larger than this are not read
-MAX_CUES = 32 * 1024 * 1024        # 7.27 MB on a file with 75 PGS tracks
+MAX_CUES = 32 * 1024 * 1024        # 7.27 MB on a file with 75 PGS tracks; larger ones are never read (IndexTooLarge)
 # cue track positions kept of one file (the 7.27 MB above hold a few hundred thousand); each is a few Python objects,
 # so a Cues of tiny made-up entries could otherwise hold a gigabyte: a file with more is not read (NotMatroska)
 MAX_CUE_POINTS = 1_000_000
@@ -60,7 +63,14 @@ MAX_DURATION_S = 7 * 24 * 3600     # the longest runtime taken from a file; past
 EBML, SEGMENT, SEEKHEAD, INFO, TRACKS, CUES, CLUSTER = (0x1A45DFA3, 0x18538067, 0x114D9B74, 0x1549A966,
                                                         0x1654AE6B, 0x1C53BB6B, 0x1F43B675)
 TEXT_CODECS = ("S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT", "S_TEXT/ASCII")
-NOT_DIALOGUE = ("forced", "sign", "song", "karaoke", "commentary")
+# a track whose name holds one of these (whole words) is no dialogue: a commentary (the word in the main languages,
+#) or an audio description, and of subtitle tracks a forced, signs or songs one; but not when its name also says
+# it is the full track (FULL_TRACK: "Full Subtitles (Signs & Songs)")
+COMMENTARY = ("commentary", "kommentar", "commentaire", "comentario", "commento", "commentaar", "komentarz",
+              "комментарий", "audio description")
+NOT_DIALOGUE = ("forced", "sign", "signs", "song", "songs", "karaoke") + COMMENTARY
+FULL_TRACK = ("full", "dialogue", "complete")
+NAME_WORD = re.compile(r"\w+")
 
 
 WORD_READ = 2048                   # bytes read for one line's words (D1)
@@ -82,6 +92,18 @@ class NotMatroska(Exception):
 # what a damaged (or made-up) field makes the parsers raise; open_index turns it into NotMatroska, so such a file is
 # not readable as any other (the worker backs off) instead of being read again on every request
 DAMAGED = (IndexError, struct.error, OverflowError, ZeroDivisionError, ValueError, RecursionError)
+
+
+def named_not_dialogue(name, words=NOT_DIALOGUE):
+    """Whether a track's name says it is no dialogue: one of `words` in it as whole words, and none of FULL_TRACK."""
+    said = " " + " ".join(NAME_WORD.findall((name or "").lower())) + " "
+    return any(f" {w} " in said for w in words) and not any(f" {w} " in said for w in FULL_TRACK)
+
+
+def not_dialogue(track, words=NOT_DIALOGUE):
+    """Whether a track is no dialogue: flagged a commentary or an audio description (Matroska's FlagCommentary,
+    FlagVisualImpaired:), or so named (named_not_dialogue)."""
+    return bool(track.get("commentary") or track.get("descriptive")) or named_not_dialogue(track.get("name"), words)
 
 
 def sane_duration(d):
@@ -442,6 +464,12 @@ class MkvIndex:
                         t["name"] = v.decode(errors="replace")
                     elif cid == 0x55AA:
                         t["forced"] = uint(v)
+                    elif cid == 0x55AF:   # FlagCommentary
+                        t["commentary"] = uint(v)
+                    elif cid == 0x55AC:   # FlagVisualImpaired: an audio description
+                        t["descriptive"] = uint(v)
+                    elif cid == 0x55AB:   # FlagHearingImpaired: SDH (pipeline.is_secondary)
+                        t["hearing_impaired"] = uint(v)
                     elif cid == 0x88:
                         t["default"] = uint(v)
                     elif cid == 0x63A2:   # CodecPrivate: VobSub's palette (the .idx header), ASS's header
@@ -481,8 +509,10 @@ class MkvIndex:
             csize, m = vint(hdr, n)
         except IndexError:                 # the header is cut off at the file's end: no Cues
             return self
-        if eid != CUES or csize > MAX_CUES:
+        if eid != CUES:
             return self
+        if csize > MAX_CUES:   # ends as an index over the job's cap does, whatever that cap
+            raise IndexTooLarge(MAX_CUES)
         body_at = at + n + m
         if tail:
             body = self.last64[body_at - tail_at:body_at - tail_at + csize]
@@ -543,15 +573,16 @@ class MkvIndex:
 
     # -- what the pipeline asks ---------------------------------------------------------------------------------
     def _subtitle_tracks(self, codecs):
-        """The subtitle tracks with a codec in `codecs`, with their cue timings; forced/sign/song tracks marked."""
+        """The subtitle tracks with a codec in `codecs`, with their cue timings; tracks that are no dialogue (forced,
+        signs, songs, commentary: not_dialogue) marked forced, and those flagged for the hearing impaired so marked."""
         out = []
         for t in self.tracks:
             if t.get("type") != 0x11 or not t.get("codec", "").startswith(codecs):
                 continue
-            name = t.get("name", "").lower()
             out.append({"number": t["number"], "language": t.get("bcp47") or t.get("language", "und"),
                         "codec": t["codec"], "name": t.get("name", ""),
-                        "forced": bool(t.get("forced")) or any(w in name for w in NOT_DIALOGUE),
+                        "forced": bool(t.get("forced")) or not_dialogue(t),
+                        "hearing_impaired": bool(t.get("hearing_impaired")),
                         "cues": self.track_cues.get(t["number"], [])})
         return out
 
@@ -665,12 +696,19 @@ class MkvIndex:
 
     def audio_tracks(self):
         """Audio tracks in file order: {"index" (ffmpeg 0:a:N), "language", "default", "name", "tagged" (whether the
-        file names its language; untagged is English by Matroska's rule)}."""
+        file names its language; untagged is English by Matroska's rule), "commentary", "descriptive" (the file's
+        flags: a commentary, an audio description)}."""
         audio = [t for t in self.tracks if t.get("type") == 2]
         default = self.audio_track_index()
         return [{"index": i, "language": t.get("bcp47") or t.get("language", "und"), "default": i == default,
-                 "name": t.get("name") or "", "tagged": bool(t.get("tagged"))}
+                 "name": t.get("name") or "", "tagged": bool(t.get("tagged")),
+                 "commentary": bool(t.get("commentary")), "descriptive": bool(t.get("descriptive"))}
                 for i, t in enumerate(audio)]
+
+    def window_bytes(self, start, length):
+        """What reading the audio window [start, start + length) really costs: the bytes of its byte_range."""
+        a, b = self.byte_range(start, length)
+        return b - a
 
     def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024, track=None):
         """16 kHz mono s16le PCM of [start, start+length) from the default audio track (or audio track `track`), one bounded read. The range runs

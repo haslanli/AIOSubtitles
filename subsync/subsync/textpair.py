@@ -28,6 +28,9 @@ import statistics
 from .relgate import within
 from .subs import strip_tags
 
+# languages written without spaces between words: a line is one or two "words", never MIN_WORDS, so their lines can't
+# be paired by words, and the check is off for them (pipeline.TextCheck: nothing is read)
+UNSPACED = ("chi", "jpn")
 MIN_WORDS = 3
 SAME = 0.6
 TENTHS = 10               # the word check's own tenths (reads spread over them, anchors judged in them), not relgate's:

@@ -11,19 +11,28 @@ from helpers import DIALOGUE
 from subsync import langcheck, RULE_REVISION
 
 ENGLISH, SPANISH, VIETNAMESE, RUSSIAN = (DIALOGUE[code] for code in ("eng", "spa", "vie", "rus"))
+# a few lines of Chinese, Japanese and Korean dialogue, each with its English (bilingual subtitles show both)
+EN = ("I don't know what you're talking about.", "Let's leave tomorrow morning.", "Why didn't you call me back?",
+      "This has nothing to do with you.", "Hurry up, we're going to be late!", "Did he come home last night?")
+CJK = {"chi": ("我不知道你在说什么。", "我们明天早上再走吧。", "你为什么一直不回我电话？", "这件事跟你没有关系。",
+               "快点，我们要迟到了！", "他昨天晚上回家了吗？"),
+       "jpn": ("何を言っているのか分からない。", "明日の朝に出発しましょう。", "どうして電話してくれなかったの？",
+               "これはあなたには関係ない。", "急いで、遅れちゃうよ！", "彼は昨日の夜に帰ってきたの？"),
+       "kor": ("무슨 말을 하는지 모르겠어.", "내일 아침에 떠나자.", "왜 나한테 다시 전화 안 했어?", "이건 너랑 상관없어.",
+               "서둘러, 늦겠어!", "그 사람 어젯밤에 집에 왔어?")}
 
 # What passes the check, as one fingerprint (check_rules), and the RULE_REVISION it has been judged under since it took
 # this form. A change to it must bump RULE_REVISION, so stored verdicts are judged again: pin the new fingerprint here
 # with the new revision
-CHECK_RULES = "70354b301b1b897c02480133367f93034f91cd8b91ca96628ac41f730b64dfee"
-CHECK_REVISION = 10
+CHECK_RULES = "1e9e418748edcee4544d2ceb9fdc22cb9b9e193712ed152064ac71a14640f05a"
+CHECK_REVISION = 11
 
 
 def check_rules():
     """The fingerprint of what the check decides by: its thresholds, the scripts' letters and each language's scripts,
     the common-word lists, and how words and vector drawings are found."""
     rules = {"thresholds": [langcheck.MIN_WORDS, langcheck.MIN_SCRIPT_SHARE, langcheck.MIN_COMMON_SHARE],
-             "blocks": langcheck._BLOCKS, "scripts": langcheck.SCRIPTS,
+             "blocks": langcheck._BLOCKS, "scripts": langcheck.SCRIPTS, "characters": langcheck.CHARACTER_SCRIPTS,
              "words": {code: sorted(words) for code, words in langcheck.WORDS.items()},
              "patterns": [langcheck._TOKEN.pattern, langcheck._DRAWING.pattern]}
     return hashlib.sha256(json.dumps(rules, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -99,6 +108,20 @@ class LanguageCheckTest(unittest.TestCase):
         both = [line for pair in zip(ENGLISH, SPANISH) for line in pair]   # each English line, then its Spanish
         self.assertFalse(langcheck.refuses(srt(both), "eng"))
         self.assertFalse(langcheck.refuses(srt(both), "spa"))
+
+    def test_a_bilingual_chinese_japanese_or_korean_subtitle_is_in_its_language(self):
+        # The script share counted letters, a Chinese character against the four or five letters of an English
+        # word, so a subtitle with an English line under each line was refused as not its language (0.24 for Chinese);
+        # each Chinese, kana or Hangul character now counts one unit against one word
+        for lang, lines in CJK.items():
+            with self.subTest(lang=lang):
+                both = srt([f"{own}\n{en}" for own, en in zip(lines, EN)])
+                self.assertGreater(langcheck.measure(both, lang)["script"], langcheck.MIN_SCRIPT_SHARE)
+                self.assertEqual(langcheck.check(both, lang), langcheck.PASS)
+                self.assertEqual(langcheck.check(srt(lines, words=900), lang), langcheck.PASS)
+        # still refused: Japanese listed as Chinese (its kanji alone), and English listed as Chinese
+        self.assertEqual(langcheck.check(srt(CJK["jpn"], words=900), "chi"), langcheck.FAIL)
+        self.assertEqual(langcheck.check(srt(EN), "chi"), langcheck.FAIL)
 
     def test_ass_styling_tags_and_drawings_are_not_text(self):
         text = ass(RUSSIAN)

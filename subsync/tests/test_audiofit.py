@@ -118,6 +118,58 @@ class UnreadableWindowTest(unittest.TestCase):
             srv.close()
 
 
+class SeekIndexTest(unittest.TestCase):
+    """An MKV's audio window is read from the seek index's cue point before it to the one after it; without a
+    seek index (Cues) that is from the first cluster on, while the audio budget was checked against an estimate only:
+    31 times the budget was read on a test file. Such a file keeps its originals before any audio is read, and every
+    window counts what it really reads, so the budget holds."""
+
+    def index(self, cue_points, times_estimate):
+        """A file as an MkvIndex plans its windows: each window's read costs `times_estimate` times its estimate."""
+        speech, lines, end = film()
+
+        class Mkv(SpeechIndex):
+            def window_bytes(self, start, length):
+                return int(times_estimate * audiofit.COST * length * self.size / self.duration())
+
+            def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg"):
+                self.audio_bytes = getattr(self, "audio_bytes", 0) + self.window_bytes(start, length)
+                return super().window_pcm(start, length, sr, ffmpeg)
+        idx = Mkv(speech, end)
+        idx.cue_points, idx.size = cue_points, int(end * 500_000)      # 4 Mbit/s
+        return idx, lines
+
+    def test_an_mkv_without_a_seek_index_keeps_its_originals_without_reading_audio(self):
+        idx, lines = self.index([], 16)
+        out = AudioFit(idx, lines, vad=LoudVad(), better=AUDIO_BETTER, budget=10 ** 9).run()
+        self.assertEqual((out["decision"], out["why"], out["windows"]), ("keep_original", "no seek index", 0))
+        self.assertEqual(idx.reads, [])
+
+    def test_a_seek_index_too_sparse_for_the_budget_keeps_its_originals_without_reading_audio(self):
+        idx, lines = self.index([(0.0, 0)], audiofit.SPARSE_INDEX + 1)
+        out = AudioFit(idx, lines, vad=LoudVad(), better=AUDIO_BETTER, budget=10 ** 9).run()
+        self.assertEqual((out["decision"], out["why"]), ("keep_original", "seek index too sparse for the audio budget"))
+        self.assertEqual(idx.reads, [])
+
+    def test_each_window_counts_what_it_really_reads(self):
+        idx, lines = self.index([(0.0, 0)], 3)
+        one = idx.window_bytes(0.0, 30.0)
+        fit = AudioFit(idx, lines, vad=LoudVad(), budget=int(2.5 * one))
+        fit.prefetch([100.0, 200.0, 300.0, 400.0], 30.0)             # by their estimates, all four would fit
+        self.assertEqual(len(idx.reads), 2)
+        fit.read_window(100.0, 30.0)                                  # read already
+        with self.assertRaises(audiofit.AudioBudget):
+            fit.read_window(300.0, 30.0)
+        self.assertLessEqual(idx.audio_bytes, fit.budget)
+
+    def test_a_real_mkv_without_cues_has_no_seek_index(self):
+        from test_mkv import Memory, matroska
+        from subsync.mkv import MkvIndex
+        index = MkvIndex(Memory(matroska())).read_head().read_cues()
+        fit = AudioFit(index, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=LoudVad(), budget=10 ** 9)
+        self.assertEqual(fit.unseekable(), "no seek index")
+
+
 class ShortWindowTest(unittest.TestCase):
     """A window decoded short (a read or a decoder that stopped early) is a failed read, never kept for the file's
     other subtitles; a window that runs past the file's end only has to hold what is in the file."""

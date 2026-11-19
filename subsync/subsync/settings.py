@@ -178,7 +178,8 @@ def _language_limit(value):
 
 
 def _overrides(value):
-    """SUBSYNC_ORIGINAL_LANGUAGES as {IMDb id: language}; entries that aren't one are left out."""
+    """SUBSYNC_ORIGINAL_LANGUAGES as ({title: language}, the number of entries left out): a title is an IMDb id, or mal:
+    or kitsu: and a number (origlang.parse_overrides)."""
     from .origlang import parse_overrides
     return parse_overrides(value)
 
@@ -254,7 +255,7 @@ class Settings:
         self.original_language = read.switch("SUBSYNC_ORIGINAL_LANGUAGE")
         self.tmdb_key = g("SUBSYNC_TMDB_KEY").strip()
         self.tmdb_personal = read.switch("SUBSYNC_TMDB_PERSONAL")
-        self.original_languages = _overrides(g("SUBSYNC_ORIGINAL_LANGUAGES"))
+        self.original_languages, self.original_languages_ignored = _overrides(g("SUBSYNC_ORIGINAL_LANGUAGES"))
         self.tmdb_url = g("SUBSYNC_TMDB_URL").rstrip("/")
         self.wikidata_url = g("SUBSYNC_WIKIDATA_URL")
         self.kitsu_url = g("SUBSYNC_KITSU_URL").rstrip("/")

@@ -148,9 +148,12 @@ class MatroskaTest(unittest.TestCase):
         tracks = idx.audio_tracks()
         self.assertTrue(tracks)
         for t in tracks:
-            self.assertEqual(set(t), {"index", "language", "default", "name", "tagged"})
+            # and the file's commentary and audio-description flags
+            self.assertEqual(set(t), {"index", "language", "default", "name", "tagged", "commentary", "descriptive"})
             self.assertIsInstance(t["tagged"], bool)
             self.assertIsInstance(t["name"], str)
+            self.assertIs(t["commentary"], False)
+            self.assertIs(t["descriptive"], False)
 
 
 if __name__ == "__main__":

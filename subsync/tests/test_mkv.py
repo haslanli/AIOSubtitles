@@ -19,7 +19,7 @@ from helpers import FIXTURES, have  # noqa: E402
 from subsync import mkv  # noqa: E402
 from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash  # noqa: E402
 from subsync.mp4 import Mp4Index, open_index  # noqa: E402
-from subsync.reader import RangeReader, ReadFailed  # noqa: E402
+from subsync.reader import CapReached, IndexTooLarge, RangeReader, ReadFailed  # noqa: E402
 from subsync.worker import audio_facts  # noqa: E402
 
 
@@ -387,6 +387,61 @@ class CuePointsTest(unittest.TestCase):
         self.assertIsInstance(places, array)
         self.assertEqual(list(times), sorted(times))
         self.assertEqual(list(times), [s for s, _ in index.track_cues[n]])
+
+
+class IndexBoundTest(unittest.TestCase):
+    """A Cues element larger than the parser ever reads (MAX_CUES) was skipped, so the file looked as if it
+    had no subtitle track and went to the pick and the audio route; it ends as an index over the cap does."""
+
+    def test_cues_over_the_bound_end_as_an_index_over_the_cap(self):
+        data = matroska()
+        header = bytes.fromhex("1C53BB6B") + b"\x01" + (mkv.MAX_CUES + 1).to_bytes(7, "big")
+        index = MkvIndex(Memory(data)).read_head()
+        index.positions[mkv.CUES] = len(data)
+        index.r = Memory(data + header + bytes(64))
+        index.size = index.r.size
+        with self.assertRaises(IndexTooLarge) as caught:
+            index.read_cues()
+        self.assertEqual(caught.exception.cap, mkv.MAX_CUES)
+        self.assertIsInstance(caught.exception, CapReached)
+
+
+def flagged(number, kind, name, **flags):
+    """A TrackEntry of type `kind` (0x11 subtitles, 2 audio) named `name`, with Matroska's flags (ids in hex) set."""
+    codec = b"S_TEXT/UTF8" if kind == 0x11 else b"A_AAC"
+    body = el("D7", bytes([number])) + el("83", bytes([kind])) + el("86", codec) + el("536E", name.encode())
+    return el("AE", body + b"".join(el(eid, b"\x01") for eid in flags.values()))
+
+
+class NotDialogueTest(unittest.TestCase):
+    """A track name says "no dialogue" only by whole words, and not when it also says it is the full track;
+    Commentary in the main languages' words, and Matroska's commentary, audio-description and
+    hearing-impaired flags."""
+
+    def test_names(self):
+        for name in ("Full Subtitles (Signs & Songs)", "English [Full + Songs/Signs]", "Dialogue + Signs",
+                     "Designer's cut", "Complete (with songs)", "English", "Songsmith", ""):
+            self.assertFalse(mkv.named_not_dialogue(name), name)
+        for name in ("Signs & Songs", "Forced", "English (Signs)", "Karaoke", "Director's Commentary",
+                     "Commentaire audio du réalisateur", "Kommentar", "Comentario del director", "Commento",
+                     "Commentaar", "Komentarz reżysera", "Комментарий режиссёра", "Audio Description"):
+            self.assertTrue(mkv.named_not_dialogue(name), name)
+
+    def test_flags(self):
+        tracks = el("1654AE6B", flagged(1, 0x11, "Français", commentary="55AF")
+                    + flagged(2, 0x11, "English", hearing="55AB")
+                    + flagged(3, 0x11, "English")
+                    + flagged(4, 2, "Français", default="88") + flagged(5, 2, "Audio", described="55AC")
+                    + flagged(6, 2, "Kommentar"))
+        index = MkvIndex(Memory(matroska(tracks=tracks))).read_head()
+        text = {t["number"]: t for t in index.text_tracks()}
+        self.assertEqual([(n, t["forced"], t["hearing_impaired"]) for n, t in sorted(text.items())],
+                         [(1, True, False), (2, False, True), (3, False, False)])
+        from subsync import audiofit, pipeline
+        self.assertTrue(pipeline.is_secondary(text[2]))            # SDH by its flag, as by its name
+        audio = index.audio_tracks()
+        self.assertEqual([(t["commentary"], t["descriptive"], audiofit.dialogue_track(t)) for t in audio],
+                         [(False, False, True), (False, True, False), (False, False, False)])
 
 
 class DurationTest(unittest.TestCase):

@@ -20,8 +20,8 @@ import urllib.error
 from unittest import mock
 
 from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_track, RangeServer,
-                     realistic, srt_of, TempDir, translated, watch_the_log)
-from subsync import imageref, pipeline, realdebrid, selftest, sources
+                     realistic, srt_of, start_server, stop_server, TempDir, translated, watch_the_log)
+from subsync import imageref, mkv, pipeline, realdebrid, selftest, sources
 from subsync.addon import App
 from subsync.mkv import MkvIndex, NotMatroska, oshash, pipe_until
 from subsync.mp4 import Mp4Index, open_index
@@ -1303,6 +1303,20 @@ class CapReachedTest(unittest.TestCase):
         self.assertIsNotNone(self.store.resolve(self.job.alias))  # its index was read
         self.assertEqual(w.limits.started, 1)
 
+    def test_an_index_over_the_parsers_bound_ends_as_one_over_the_cap(self):
+        # Cues over mkv.MAX_CUES were skipped, so the file looked as if it had no subtitle track and went to the
+        # pick and the audio route, whatever the cap; it is now marked as an index over the cap is, under the job's cap
+        with mock.patch.object(mkv, "MAX_CUES", 64):            # tiny.mkv's Cues are larger
+            w = self.worker(SUBSYNC_INDEX_CAP_MB="32")
+            run_once(w, self.job)
+            read = list(self.srv.log)
+            self.assertEqual(self.store.over_cap(self.job.alias), 32 * 2 ** 20)
+            self.assertFalse(w.busy_with(self.job.alias))         # not queued again, not waiting for a pick
+            self.assertFalse(w.waits_for_pick(self.job.alias))
+            self.assertTrue(w.capped(Job("movie", "tt1", dict(self.job.hints))))
+            run_once(w, Job("movie", "tt1", dict(self.job.hints)))
+            self.assertEqual(self.srv.log, read)                  # not opened again
+
     def test_an_audio_job_stopped_at_its_audio_cap_leaves_the_index_readable(self):
         # The audio route's own cap (SUBSYNC_FILE_CAP_GB) says nothing about the index: the file isn't marked
         # over the cap, so its next index pass reads it; it waits for another pick, as when the person's day ran out
@@ -1685,6 +1699,66 @@ class Garbled(Flaky):
         if request.full_url != self.link:
             raise http.client.BadStatusLine("HTTP/1.1 2OO OK")
         return super().__call__(request, timeout)
+
+
+class Trickle:
+    """A local server that answers a range with 206 and then sends one byte every `gap` seconds."""
+
+    def __init__(self, size, gap):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                a, _, b = self.headers["Range"][6:].partition("-")
+                n = int(b) - int(a) + 1
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {a}-{b}/{size}")
+                self.send_header("Content-Length", str(n))
+                self.end_headers()
+                try:
+                    for _ in range(n):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(gap)
+                except OSError:              # the reader gave up: so does the connection
+                    self.close_connection = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/f.mkv"
+
+    def close(self):
+        stop_server(self.server)
+
+
+class ReadTimeLimitTest(unittest.TestCase):
+    """The timeout bounds each wait for data only, so a service that sent a byte now and then held a read (and
+    its job's sync place) for hours; a read now fails once it has gone on for the timeout plus a second for every
+    READ_BYTES_PER_S bytes it asked for."""
+
+    def setUp(self):
+        self.srv = Trickle(10_000, 0.1)
+        self.addCleanup(self.srv.close)
+
+    def test_a_trickling_read_fails_as_too_slow(self):
+        for name, read in ReplyCheckTest.reads():
+            with self.subTest(read=name):
+                r = RangeReader(self.srv.url, "t", timeout=0.5)
+                t0 = time.monotonic()
+                with self.assertRaises(ReadFailed) as caught:
+                    read(r, 0, 40)                          # 4 s at this pace, each wait 0.1 s
+                self.assertLess(time.monotonic() - t0, 2.0)
+                self.assertEqual(str(caught.exception), "too slow")
+                self.assertTrue(caught.exception.connection)  # a first read is tried once more, as after a timeout
+
+    def test_the_limit_grows_with_the_length_asked(self):
+        from subsync import reader
+        r = RangeReader(self.srv.url, "t", timeout=0.5)
+        with mock.patch.object(reader, "READ_BYTES_PER_S", 8):  # 0.5 s and a second for every 8 bytes: 3 s for 20
+            self.assertEqual(r.get(0, 20), b"x" * 20)               # sent in 2 s
 
 
 class ReplyCheckTest(unittest.TestCase):

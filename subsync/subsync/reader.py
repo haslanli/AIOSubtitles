@@ -10,14 +10,16 @@ after that a read the address can't answer fails without asking AIOStreams again
 at the download address had made 50 calls). The Real-Debrid guard checks every address, that one too. A refusal
 (HTTP 403, most likely a debrid per-account download limit) raises Refused so the worker can back off; a
 reply whose total size differs from the file's, or whose bytes start elsewhere than asked, raises ReadFailed. A read
-that got no answer (no connection, a reset, a timeout, a reply cut short) raises ReadFailed with `connection` set, so
-the worker can try a file's first read once more. Before each read the guard (budget, pause) may stop
-the job; after each, one that failed too, it is told the bytes received and the length the read asked for
-(guard.after_read).
+that got no answer (no connection, a reset, a timeout, a reply cut short), or one that goes on past its time (the
+timeout plus a second for every READ_BYTES_PER_S bytes asked for: "too slow"), raises ReadFailed with
+`connection` set, so the worker can try a file's first read once more. Before each read the guard
+(budget, pause) may stop the job; after each, one that failed too, it is told the bytes received and the length the
+read asked for (guard.after_read).
 """
 import http.client
 import logging
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -34,6 +36,8 @@ MAX_RE_RESOLVE = 3     # look-ups of a redirecting link per reader after its fir
 # how far a served file's size may be from its listed one, as a share of it, besides the listing's rounding (size_slack)
 SIZE_TOLERANCE = 0.0005
 FIRST_BYTE = re.compile(r"\s*bytes\s+([0-9]+)-", re.IGNORECASE)   # a Content-Range's first byte
+# a read may go on for the timeout plus one second for every READ_BYTES_PER_S bytes it asks for
+READ_BYTES_PER_S = 64 * 1024
 
 
 class ReadFailed(Exception):
@@ -87,6 +91,50 @@ class CapReached(Stopped):
     def __init__(self, cap):
         super().__init__("file byte cap")
         self.cap = cap
+
+
+class IndexTooLarge(CapReached):
+    """The file's index is larger than the parsers ever read (`cap`: mkv.MAX_CUES, mp4.MAX_MOOV), whatever the job's
+    own cap: it ends as a cap does, the file marked and its original subtitles kept."""
+
+
+class _TimeLimit:
+    """Ends a read that goes on past `seconds`: the reader's timeout bounds each wait for data only, so a
+    service that sends a byte now and then would hold a read for hours. A timer shuts the reply's connection down,
+    which makes the read in progress return; `passed` then says so. A reply that has no connection of its own (one made
+    in memory) has no limit."""
+
+    def __init__(self, reply, seconds):
+        self.passed = False
+        self._lock = threading.Lock()
+        try:   # a duplicate of the reply's socket: while it is held, the connection's number can't go to another one
+            self._sock = socket.fromfd(reply.fileno(), socket.AF_INET, socket.SOCK_STREAM)
+        except (AttributeError, OSError, TypeError, ValueError):
+            self._sock = None
+        self._timer = threading.Timer(seconds, self._end) if self._sock is not None else None
+
+    def _end(self):
+        with self._lock:
+            if self._sock is not None:
+                self.passed = True
+                try:
+                    self._sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def __enter__(self):
+        if self._timer is not None:
+            self._timer.daemon = True
+            self._timer.start()
+        return self
+
+    def __exit__(self, *exc):
+        if self._timer is not None:
+            self._timer.cancel()
+        with self._lock:
+            if self._sock is not None:
+                self._sock.close()
+                self._sock = None
 
 
 class RangeReader:
@@ -167,6 +215,10 @@ class RangeReader:
                 self.resolved, self.redirects = final, True
             return r, t0
 
+    def _time_limit(self, reply, length):
+        """The limit of a read of `length` bytes, from its reply on (_TimeLimit)."""
+        return _TimeLimit(reply, self.timeout + length / READ_BYTES_PER_S)
+
     def used_up(self):
         """The link has redirected and been asked 1 + max_re_resolve times: it isn't asked again."""
         return self.redirects and self.lookups > self.max_re_resolve
@@ -181,10 +233,10 @@ class RangeReader:
         if self.guard:
             self.guard.before_read(length)
         t0 = time.time()
-        data, status, first, total, sent = b"", 0, None, None, True
+        data, status, first, total, sent, limit = b"", 0, None, None, True, None
         try:
             r, t0 = self._open(start, length)
-            with r:
+            with r, self._time_limit(r, length) as limit:
                 status = getattr(r, "status", 200)
                 first, total = reply_range(r.headers, status)
                 # read at most what was asked, even when a server ignores the range (status 200), in one call: it fills
@@ -203,8 +255,9 @@ class RangeReader:
             status = e.code
             e.close()
         except (OSError, ValueError, http.client.HTTPException) as e:
-            self._log(start, length, 0, status, t0, type(e).__name__)
-            raise ReadFailed(type(e).__name__, connection=connection_fault(e)) from None
+            slow = limit is not None and limit.passed
+            self._log(start, length, 0, status, t0, "too slow" if slow else type(e).__name__)
+            raise ReadFailed("too slow" if slow else type(e).__name__, connection=slow or connection_fault(e)) from None
         finally:
             if sent:
                 self._count(requests=1)
@@ -215,6 +268,8 @@ class RangeReader:
         self._check(status, start, first, total)
         expected = min(length, self.size - start) if self.size is not None else length
         if len(data) < expected:
+            if limit is not None and limit.passed:
+                raise ReadFailed("too slow", connection=True)
             raise ReadFailed("short reply")
         return data
 
@@ -272,18 +327,21 @@ class RangeReader:
         got, status, error = 0, getattr(r, "status", 200), None
         try:
             self._check(status, start, *reply_range(r.headers, status))
-            left = length
-            while left > 0:
-                try:
-                    data = r.read(min(chunk, left))
-                except (OSError, ValueError, http.client.HTTPException) as e:   # a reset or a timeout in the body
-                    error = type(e).__name__
-                    raise ReadFailed(error, connection=connection_fault(e)) from None
-                if not data:
-                    raise ReadFailed("short reply")
-                got += len(data)
-                left -= len(data)
-                yield data
+            with self._time_limit(r, length) as limit:
+                left = length
+                while left > 0:
+                    try:
+                        data = r.read(min(chunk, left))
+                    except (OSError, ValueError, http.client.HTTPException) as e:   # a reset or a timeout in the body
+                        error = "too slow" if limit.passed else type(e).__name__
+                        raise ReadFailed(error, connection=limit.passed or connection_fault(e)) from None
+                    if not data:
+                        if limit.passed:
+                            error = "too slow"
+                        raise ReadFailed(error or "short reply", connection=limit.passed)
+                    got += len(data)
+                    left -= len(data)
+                    yield data
         finally:
             r.close()
             self._count(got=got)

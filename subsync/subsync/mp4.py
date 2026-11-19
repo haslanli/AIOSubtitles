@@ -7,14 +7,15 @@ the whole timing comes from `moov` without reading any media data. An empty samp
 `vtte` box) is the gap between two lines. An audio window is the byte range of the audio samples that cover it, streamed:
 each sample is cut out as its bytes pass, AAC frames with an ADTS header each and AC-3/E-AC-3 frames as they are, and
 fed to the decoder through a pipe.
-Fragmented files (`moof`) are not supported.
+Fragmented files (an `mvex` box in the movie box, or `moof`) are not supported: they are read as no MP4.
 """
 import struct
 
-from .mkv import (HASH_CHUNK, HEAD_BYTES, NOT_DIALOGUE, WORD_READ, LineReads, NotMatroska, add_audio_bytes,
-                  add_words_bytes, decoder_cmd, index_hash, pipe_until, read_lines, sane_duration, starts_at)
+from .mkv import (HASH_CHUNK, HEAD_BYTES, WORD_READ, LineReads, NotMatroska, add_audio_bytes, add_words_bytes,
+                  decoder_cmd, index_hash, named_not_dialogue, pipe_until, read_lines, sane_duration, starts_at)
+from .reader import IndexTooLarge
 
-MAX_MOOV = 64 * 1024 * 1024
+MAX_MOOV = 64 * 1024 * 1024      # a larger movie box is never read (IndexTooLarge)
 # the samples of a track walked one by one (_lines, _sample_offsets) cost a Python object or more each, while a few bytes
 # of the movie box can claim billions: a file with more than these is not read (NotMp4)
 MAX_TEXT_SAMPLES = 1_000_000     # of all its text tracks together (a film's track: a few thousand lines and gaps)
@@ -118,8 +119,8 @@ class Mp4Index:
         with the file's last 64 KiB, which the hash needs too (kept as `last64`). A file whose tracks claim more samples
         than MAX_TEXT_SAMPLES or MAX_AUDIO_SAMPLES is not read; without a usable movie length (the header's all ones
         say "unknown") the runtime is where the audio track ends."""
-        if self.moov_size > MAX_MOOV:
-            raise NotMp4("moov too large")
+        if self.moov_size > MAX_MOOV:   # ends as an index over the job's cap does, whatever that cap
+            raise IndexTooLarge(MAX_MOOV)
         end = min(self.moov_at + self.moov_size, self.size)
         moov = self._head[self.moov_at:end]           # what the head read holds of it: all of it in a fast-start file
         start = self.moov_at + len(moov)              # its first byte not held
@@ -163,15 +164,17 @@ class Mp4Index:
                 t = self._trak(b, q, f)
                 if t:
                     self.tracks.append(t)
+            elif kind == b"mvex":   # the mark of a fragmented file: its samples are in moof boxes, not read here
+                raise NotMp4("fragmented MP4")
 
     def _trak(self, b, p, e):
         t = {"id": None, "handler": b"", "codec": b"", "scale": 1, "lang": "und", "name": "", "stts": [], "sizes": [],
              "const": 0, "count": 0, "stsc": [], "chunks": [], "media_time": 0, "empty": 0, "enabled": True, "asc": b""}
 
-        def walk(p, e):
+        def walk(p, e, parent=b"trak"):
             for kind, q, f in boxes(b, p, e):
                 if kind in TRAK_CONTAINERS:
-                    walk(q, f)
+                    walk(q, f, kind)
                 elif kind == b"tkhd":
                     v, flags = b[q], int.from_bytes(b[q + 1:q + 4], "big")
                     t["enabled"] = bool(flags & 1)
@@ -187,9 +190,11 @@ class Mp4Index:
                     c = [(lang >> s) & 31 for s in (10, 5, 0)]
                     if all(1 <= x <= 26 for x in c):
                         t["lang"] = "".join(chr(x + 0x60) for x in c)
-                elif kind == b"hdlr":
+                elif kind == b"hdlr" and parent == b"mdia":
+                    # the media handler only: a QuickTime file's minf holds a data handler too, which says nothing of
+                    # the track's kind
                     t["handler"] = b[q + 8:q + 12]
-                    t["name"] = t["name"] or b[q + 24:f].split(b"\0")[0].decode("utf-8", "replace")
+                    t["name"] = t["name"] or _handler_name(b[q + 24:f], quicktime=b[q + 4:q + 8] != bytes(4))
                 elif kind == b"name":
                     t["name"] = b[q:f].decode("utf-8", "replace").strip("\0 ")
                 elif kind == b"elst":   # each edit: its duration, media time and rate
@@ -277,9 +282,8 @@ class Mp4Index:
         for t in self.tracks:
             if t["codec"] not in TEXT_SAMPLE_ENTRIES or t["handler"] not in (b"sbtl", b"text", b"subt"):
                 continue
-            name = t["name"].lower()
             out.append({"number": t["id"], "language": t["lang"], "codec": "mp4/" + t["codec"].decode("ascii", "replace"),
-                        "name": t["name"], "forced": any(w in name for w in NOT_DIALOGUE), "cues": self._lines(t)})
+                        "name": t["name"], "forced": named_not_dialogue(t["name"]), "cues": self._lines(t)})
         return out
 
     def image_tracks(self):
@@ -384,6 +388,14 @@ class Mp4Index:
             return pipe_until(cmd, b"", samples(self.r.stream(a, b - a, chunk)), int(length * sr) * 2)
         finally:
             add_audio_bytes(self, got[0])
+
+
+def _handler_name(raw, quicktime):
+    """A handler box's name: in a QuickTime file (the box names its component type) a counted string, its first byte
+    the length; else a string ended by a zero."""
+    if quicktime and raw and raw[0] < len(raw):
+        return raw[1:1 + raw[0]].decode("utf-8", "replace")
+    return raw.split(b"\0")[0].decode("utf-8", "replace")
 
 
 def sample_text(codec, data):

@@ -34,6 +34,23 @@ def starts(n, step=4.0, start=10.0):
     return [start + i * step for i in range(n)]
 
 
+# a line in each language and the Windows encoding it is usually saved in (subs.decode)
+LEGACY_TEXTS = (("eng", "cp1252", "It’s “fine”… — €5"), ("fre", "cp1252", "Ça va? « Oui », c’est l’été."),
+                ("ita", "cp1252", "Perché? Così è la città."),                   # any language not in the table
+                ("pol", "cp1250", "Cześć, jak się masz? Źle. Łódź"), ("cze", "cp1250", "Příliš žluťoučký kůň úpěl"),
+                ("hun", "cp1250", "Árvíztűrő tükörfúrógép"), ("hrv", "cp1250", "Šta želiš? Čekaj, ćao."),
+                ("rum", "cp1250", "Ştiu că ţara şi îmi pâine"), ("rus", "cp1251", "Привет, как дела?"),
+                ("bul", "cp1251", "Здравей, как си?"), ("mac", "cp1251", "Здраво, како си?"),
+                ("gre", "cp1253", "Γεια σου, τι κάνεις;"), ("tur", "cp1254", "Şimdi gitmeliyiz, ağabey"),
+                ("heb", "cp1255", "שלום, מה שלומך?"), ("ara", "cp1256", "مرحبا، كيف حالك؟"),
+                ("per", "cp1256", "سلام، حال شما چطور است؟"), ("lit", "cp1257", "Labas, kaip sekasi? Ačiū"),
+                ("vie", "cp1258", "Đi đâu? Tôi không chào"), ("tha", "cp874", "สวัสดีครับ"),
+                ("jpn", "cp932", "何を言っているのか分からない。"), ("kor", "cp949", "무슨 말을 하는지 모르겠어."),
+                ("srp", "cp1250", "Šta želiš? Čekaj, ćao, đak."),                 # Serbian in Latin letters
+                ("srp", "cp1251", "Шта желиш? Чекај, ћао, ђак."),                 # and in Cyrillic
+                ("chi", "gbk", "我不知道你在说什么，我们明天再走吧。"),                   # GBK
+                ("chi", "cp950", "我不知道你在說什麼，我們明天再走吧。"))                 # Big5
+
 class SubsTest(unittest.TestCase):
     def test_parse_srt_and_vtt_times(self):
         srt = "1\n00:00:01,000 --> 00:00:02,500\nHi\n\n2\n00:01:00.250 --> 00:01:01.000\nThere\n"
@@ -72,6 +89,40 @@ class SubsTest(unittest.TestCase):
     def test_decode(self):
         self.assertEqual(subs.decode("﻿Hi".encode("utf-8")), "Hi")
         self.assertEqual(subs.decode("Привет".encode("cp1251"), "rus"), "Привет")
+
+    def test_a_subtitle_that_isnt_unicode_is_read_in_its_languages_usual_encoding(self):
+        # Anything but UTF-8 was read as Latin-1 (only Cyrillic languages by their first two letters,:
+        # so not Bulgarian or Macedonian, and Romanian and Latin Serbian wrongly): garbled, or refused as another
+        # language
+        for lang, enc, text in LEGACY_TEXTS:
+            with self.subTest(lang=lang, enc=enc):
+                self.assertEqual(subs.decode(text.encode(enc), lang), text)
+        self.assertEqual(subs.decode(b"caf\xe9 \x81", "eng"), "caf\xe9 \x81")       # Latin-1 last (0x81: no cp1252)
+
+    def test_unicode_is_read_by_its_byte_order_mark_or_without_one(self):
+        # UTF-16 ("Unicode" in Windows tools) was read with a zero between the characters, and parsed to
+        # nothing
+        srt = "1\n00:00:01,000 --> 00:00:02,000\nHello there, Привет\n"
+        for enc in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-8-sig"):
+            with self.subTest(enc=enc):
+                text = subs.decode(srt.encode(enc), "eng")
+                self.assertEqual(text, srt)
+                self.assertEqual([l["text"] for l in subs.parse(text)], ["Hello there, Привет"])
+
+    def test_a_utf8_subtitle_with_a_stray_byte_stays_utf8(self):
+        # One bad byte made the whole file Latin-1 ("CafÃ©"); a file in cp1252 with a few curly quotes and no
+        # other character beyond ASCII is no UTF-8 file
+        good = "Café naïve, déjà vu — " * 40
+        text = subs.decode(good.encode("utf-8") + b"\x92" + good.encode("utf-8"), "fre")
+        self.assertEqual(text, good + "\ufffd" + good)
+        body = "Hello there, how are you doing today? " * 60 + "It’s fine."
+        self.assertEqual(subs.decode(body.encode("cp1252"), "eng"), body)
+
+    def test_one_subtitle_in_two_encodings_is_one(self):
+        # The README's "another text encoding ... doesn't make it a different subtitle"
+        srt = "".join(f"{i}\n00:00:{i:02d},000 --> 00:00:{i:02d},500\nIt’s “fine” — {i}…\n\n" for i in range(1, 30))
+        self.assertEqual(subs.fingerprint(subs.decode(srt.encode("utf-8"), "eng")),
+                         subs.fingerprint(subs.decode(srt.encode("cp1252"), "eng")))
 
     def test_a_dialogue_line_whose_time_cant_be_read_is_kept_as_it_is_and_not_counted(self):
         bad = "Dialogue: 0,0:00:0x.00,0:00:04.00,Default,,0,0,0,,unreadable"

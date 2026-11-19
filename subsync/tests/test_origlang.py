@@ -642,6 +642,26 @@ class KeepTest(Base):
         self.assertIsNone(lk.start("tt1375666", key=KEY))
         self.assertEqual(self.srv.calls, [])
 
+    def test_anime_known_only_by_a_myanimelist_or_kitsu_number_can_be_set(self):
+        # Only IMDb ids were taken, so the anime rule's weakest answers (kept with no expiry) couldn't be
+        # corrected; an episode's id is still no key
+        lk = self.make(SUBSYNC_ORIGINAL_LANGUAGES="mal:5114=ja,kitsu:7442=zh,mal:21:1=ko")
+        self.assertEqual(origlang.choose(lk.peek("mal:5114:3")), ("jpn", "override"))
+        self.assertEqual(origlang.choose(lk.peek("kitsu:7442")), ("chi", "override"))
+        self.assertIsNone(lk.start("kitsu:7442:1", key=KEY))
+        self.assertIsNone(lk.peek("mal:21"))
+        self.assertEqual(self.srv.calls, [])
+
+    def test_entries_left_out_are_counted_and_logged_once_at_start(self):
+        self.assertEqual(origlang.parse_overrides("tt1375666=en, mal:5114=ja,bad,tt3=zz,mal:5114:3=ja,,kitsu:x=ja"),
+                         ({"tt1375666": "eng", "mal:5114": "jpn"}, 4))
+        with self.assertLogs("subsync.origlang", "WARNING") as logs:
+            self.make(SUBSYNC_ORIGINAL_LANGUAGES="tt1375666=en, tt2788316=ja,bad,tt3=zz")
+        self.assertEqual(logs.output, ["WARNING:subsync.origlang:SUBSYNC_ORIGINAL_LANGUAGES: 2 entries ignored "
+                                       "(not an id=language pair)"])
+        with self.assertNoLogs("subsync.origlang", "WARNING"):
+            self.make(SUBSYNC_ORIGINAL_LANGUAGES="tt1375666=en,")
+
     def test_tmdb_answers_stay_when_tmdb_is_no_longer_used(self):
         self.srv.find["tt1"] = {"movie_results": [{"id": 1, "original_language": "en"}]}
         self.srv.wikidata["tt2"] = [binding("Q1860", iso1="en")]

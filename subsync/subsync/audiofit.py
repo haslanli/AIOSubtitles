@@ -22,7 +22,10 @@ A file's windows fit its audio budget (`budget` bytes, shared by all subtitles o
 average byte rate, the windows get shorter than W when the planned windows would not fit; when they would have to be
 shorter than MIN_W, the original is kept without reading any audio, and a window that would pass the budget is not read:
 narrowing down a shift change then stops and places the change from the windows read, and no more held-out windows are
-added (the copy is judged on those read); a planned window or a confirmation that would pass it keeps the original.
+added (the copy is judged on those read); a planned window or a confirmation that would pass it keeps the original. A
+window counts what its read really costs, where the index plans it (an MKV's byte range, from its seek index); an MKV
+without a seek index, or whose planned windows would cost more than SPARSE_INDEX times their estimate, keeps the
+original without reading any audio.
 
 On real releases subtitle lines start a steady ~190 ms before Silero's detected speech, so the bar is
 applied after removing that lead: onsets are moved `lead` seconds earlier before fitting and gating (the release's
@@ -47,7 +50,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from .langs import lang3, same_language
-from .mkv import NotMatroska
+from .mkv import COMMENTARY, NotMatroska, not_dialogue
 from .mp4 import NoAudioThere
 from .reader import ReadFailed, Refused, Stopped
 from .relgate import within
@@ -66,6 +69,8 @@ PLANNED = 4         # windows a fit reads beyond its K + V (a confirmation, bise
 MIN_WINDOW_LINES = 5  # a window whose usual place holds fewer of the subtitle's lines is moved to where they are
 PLACE_STEP = 2.0    # the starts place() looks at in a stretch, this far apart (s)
 COST = 1.25         # a window's read costs about 1.25 x its length at the average byte rate (Cues, interleaving)
+SPARSE_INDEX = 4    # an MKV whose planned windows would cost more than this many times their estimate keeps its
+                    # originals before any audio is read, as one without a seek index does
 PARALLEL_READS = 4  # planned windows read at once (AudioFit.prefetch)
 FULL_WINDOW = 0.95  # a window decoded to less of its length is a failed read, never judged
 RUN_GAP = 6         # speech runs (10 ms frames): gaps under 60 ms are closed,
@@ -89,7 +94,6 @@ GATE_STRICT_ORIGINAL = 0.90
 # the second way to pass, the defaults of settings' SUBSYNC_AUDIO_BETTER_*; with that rule off, close calls are
 # still measured against it
 BETTER = {"matched": 25, "miss": 0.30, "median_ms": 150.0, "within": 0.55, "min_shift_s": 1.0}
-NOT_DIALOGUE_TRACK = ("commentary", "audio description")   # an audio track whose name holds one is no dialogue
 CLOSE = 0.2         # a verdict within 20 % of the pass numbers is a close call
 CLOSE_MATCHED = 40  # a pass on fewer matched lines is a close call
 SPEECH_MIN = 0.05   # a window with speech in less of its length (music, noise under the subtitle's lines) scores no
@@ -142,9 +146,9 @@ def _audio_tracks(index):
 
 
 def dialogue_track(track):
-    """Whether an audio track carries the film's dialogue: not a commentary or an audio description, by its name."""
-    name = (track.get("name") or "").lower()
-    return not any(word in name for word in NOT_DIALOGUE_TRACK)
+    """Whether an audio track carries the film's dialogue: not a commentary or an audio description, by the file's flags
+    or its name (mkv.not_dialogue: the commentary words of the main languages)."""
+    return not not_dialogue(track, COMMENTARY)
 
 
 def second_track(index):
@@ -227,13 +231,41 @@ class AudioFit:
         d = self.index.duration()
         return (getattr(self.index, "size", 0) or 0) / d if d else 0.0
 
+    def estimate(self, length):
+        """What a window of `length` seconds costs to read, by the file's average byte rate."""
+        return COST * length * self.rate()
+
+    def cost(self, start, length):
+        """What reading the window at `start` really costs: its byte range where the index plans one (an MKV's, by its
+        seek index:), else the estimate."""
+        window_bytes = getattr(self.index, "window_bytes", None)
+        return window_bytes(start, length) if window_bytes else self.estimate(length)
+
+    def unseekable(self):
+        """Why the file's windows can't be found by its seek index, checked before any audio is read: an MKV
+        without one would read each window from its first cluster on; one whose planned windows would cost more than
+        SPARSE_INDEX times their estimate is little better. None when they can be, and for an index that finds its
+        windows otherwise (an MP4's sample tables)."""
+        if not hasattr(self.index, "window_bytes"):
+            return None
+        if not self.index.cue_points:
+            return "no seek index"
+        if self.budget and self.rate():
+            D = self.index.duration()
+            margin = 0.03 * D
+            plan = self.plan(D, margin, (D - 2 * margin) / self.K)
+            if any(self.cost(start, self.W) > SPARSE_INDEX * self.estimate(self.W)
+                   for start in plan["fit"] + plan["check"]):
+                return "seek index too sparse for the audio budget"
+        return None
+
     def _key(self, start, length):
         return (round(start, 2), round(length, 2), round(self.lead, 3), self.track)
 
     def read_window(self, start, length):
         key = self._key(start, length)
         if key not in self.cache:
-            if self.budget and getattr(self.index, "audio_bytes", 0) + COST * length * self.rate() > self.budget:
+            if self.budget and getattr(self.index, "audio_bytes", 0) + self.cost(start, length) > self.budget:
                 raise AudioBudget()
             self.cache[key] = self._read_window(start, length)
         return self.cache[key]
@@ -255,7 +287,7 @@ class AudioFit:
             key = self._key(start, length)
             if key in self.cache or any(k == key for k, _ in want):
                 continue
-            spent += COST * length * self.rate()
+            spent += self.cost(start, length)
             if self.budget and spent > self.budget:
                 break
             want.append((key, start))
@@ -462,6 +494,9 @@ class AudioFit:
                         "why": f"the file's bitrate is too high for the audio budget ({self.budget / 1e6:.0f} MB)"}
             self.W = w
         try:
+            why = self.unseekable()
+            if why:
+                return {"decision": "keep_original", "windows": 0, "audio_s": 0.0, "why": why}
             first = self._run()
         except AudioBudget:
             return {"decision": "keep_original", "windows": self.windows_read, "audio_s": self.audio_s,

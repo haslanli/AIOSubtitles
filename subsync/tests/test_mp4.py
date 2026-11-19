@@ -11,7 +11,7 @@ from unittest import mock
 from helpers import have  # noqa: E402
 from subsync import mp4  # noqa: E402
 from subsync.mp4 import NotMp4, open_index  # noqa: E402
-from subsync.reader import RangeReader  # noqa: E402
+from subsync.reader import IndexTooLarge, RangeReader  # noqa: E402
 from test_mkv import Memory, Opener, fixture  # noqa: E402
 
 CONTAINERS = (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts")
@@ -42,6 +42,70 @@ def track(data, codec):
 def top(data, kind):
     """(start, end) of a top-level box."""
     return next((q - 8, f) for k, q, f in mp4.boxes(data, 0, len(data)) if k == kind)
+
+
+def box(kind, payload):
+    return struct.pack(">I4s", 8 + len(payload), kind) + payload
+
+
+def rebuilt(data, edit):
+    """tiny.mp4 (its movie box at the end, so no sample moves) with the boxes of each track rebuilt by
+    `edit(kind, payload, parent) -> payload`, applied inside out."""
+    def walk(p, e, parent):
+        out = b""
+        for kind, q, f in mp4.boxes(data, p, e):
+            payload = walk(q, f, kind) if kind in (b"moov", b"trak", b"mdia", b"minf") else data[q:f]
+            out += box(kind, edit(kind, payload, parent))
+        return out
+    return walk(0, len(data), None)
+
+
+def quicktime(kind, payload, parent):
+    """A box as QuickTime's (and ffmpeg's MOV muxer's) writer has it: the media handler with its component type and a
+    counted name, and a data handler ("dhlr", "url ") first in each track's minf."""
+    if kind == b"hdlr" and parent == b"mdia":
+        name = payload[24:].split(b"\0")[0]
+        return payload[:4] + b"mhlr" + payload[8:24] + bytes([len(name)]) + name
+    if kind == b"minf":
+        return box(b"hdlr", b"\0\0\0\0dhlr" + b"url " + bytes(12) + b"\x0bDataHandler") + payload
+    return payload
+
+
+class QuickTimeTest(unittest.TestCase):
+    """A .mov's data handler in minf overwrote each track's kind, so the file seemed to have no sound and no
+    text track; and a QuickTime handler's name is a counted string."""
+
+    def test_a_movs_tracks_keep_their_kind_and_name(self):
+        data = fixture("tiny.mp4")
+        index = open_index(Memory(data))
+        mov = open_index(Memory(rebuilt(data, quicktime)))
+        self.assertEqual([t["handler"] for t in mov.tracks], [t["handler"] for t in index.tracks])
+        self.assertEqual([t["name"] for t in mov.tracks], [t["name"] for t in index.tracks])
+        self.assertIsNotNone(mov._audio())
+        self.assertEqual([(t["number"], len(t["cues"])) for t in mov.text_tracks()],
+                         [(t["number"], len(t["cues"])) for t in index.text_tracks()])
+        self.assertTrue(mov.text_tracks())
+
+
+class FragmentedTest(unittest.TestCase):
+    """A fragmented MP4 (an mvex box in its movie box) opened as an MP4 with no timings, so it waited for a pick
+    and spent an audio sync on a file that always keeps its originals; it is no MP4 this module reads, as an AVI."""
+
+    def test_a_fragmented_mp4_is_not_read(self):
+        mvex = box(b"mvex", box(b"trex", bytes(24)))
+        data = rebuilt(fixture("tiny.mp4"), lambda kind, payload, parent: payload + mvex if kind == b"moov" else payload)
+        with self.assertRaisesRegex(NotMp4, "fragmented MP4"):
+            open_index(Memory(data))
+
+
+class MovieBoxBoundTest(unittest.TestCase):
+    """A movie box larger than MAX_MOOV was "not readable", tried again after 1, 6 and 24 hours; it ends as an
+    index over the cap does."""
+
+    def test_a_movie_box_over_the_bound_ends_as_an_index_over_the_cap(self):
+        with mock.patch.object(mp4, "MAX_MOOV", 1000), self.assertRaises(IndexTooLarge) as caught:
+            open_index(Memory(fixture("tiny.mp4")))
+        self.assertEqual(caught.exception.cap, 1000)
 
 
 class TableTest(unittest.TestCase):

@@ -83,15 +83,20 @@ def title_of(video_id):
 
 
 def parse_overrides(text):
-    """SUBSYNC_ORIGINAL_LANGUAGES: "tt1375666=en,tt2788316=ja" -> {"tt1375666": "eng", ...}; entries that aren't an
-    IMDb id and a known language are left out."""
-    out = {}
+    """SUBSYNC_ORIGINAL_LANGUAGES: "tt1375666=en,mal:5114=ja" -> ({"tt1375666": "eng", "mal:5114": "jpn"}, ignored).
+    A key is a title as title_of names it: an IMDb id, or mal: or kitsu: and a number (an episode's id is
+    none); `ignored` counts the entries that aren't such a key and a known language."""
+    out, ignored = {}, 0
     for part in str(text or "").split(","):
-        tt, _, code = part.strip().partition("=")
-        lang = langs.known(code.strip())
-        if IMDB.fullmatch(tt.strip()) and lang:
-            out[tt.strip()] = lang
-    return out
+        if not part.strip():
+            continue
+        title, _, code = part.partition("=")
+        title, lang = title.strip(), langs.known(code.strip())
+        if lang and title_of(title) == title:
+            out[title] = lang
+        else:
+            ignored += 1
+    return out, ignored
 
 
 def _plain(track):
@@ -214,6 +219,9 @@ def make_lookup(settings, store, clock=time.time):
     if not settings.original_language:
         store.title_languages_clear()
         return None
+    if settings.original_languages_ignored:
+        log.warning("SUBSYNC_ORIGINAL_LANGUAGES: %d entries ignored (not an id=language pair)",
+                    settings.original_languages_ignored)
     store.title_languages_expiring(TMDB_KEEP_S, _from_tmdb)
     return Lookup(settings, store, clock=clock)
 

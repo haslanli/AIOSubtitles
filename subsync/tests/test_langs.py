@@ -116,6 +116,32 @@ class FamilyTest(unittest.TestCase):
         self.assertEqual(langs.lang3("nb"), "nob")
 
 
+class WrittenFormsTest(unittest.TestCase):
+    """Wherever a subtitle's language is compared with a track's, a language's written forms count as it
+    (Norwegian's nb and nn, the standard forms of Arabic, Persian and Malay); the Chinese varieties stay apart, since
+    their written text differs."""
+
+    def test_a_written_form_is_its_language(self):
+        for code, language in (("nb", "nor"), ("nb-NO", "nor"), ("nob", "nor"), ("nn", "nor"), ("nno", "nor"),
+                               ("no", "nor"), ("arb", "ara"), ("pes", "per"), ("prs", "per"), ("zsm", "may"),
+                               ("yue", "yue"), ("cmn", "cmn"), ("en-GB", "eng")):
+            self.assertEqual(langs.written(code), language, code)
+
+    def test_a_norwegian_subtitle_takes_a_bokmal_track_as_its_own(self):
+        from helpers import realistic
+        from subsync import pipeline
+        cues = realistic(600, 61)
+
+        class Index:
+            def text_tracks(self):
+                return [{"number": n, "language": lang, "codec": "S_TEXT/UTF8", "name": "", "forced": False,
+                         "cues": cues} for n, lang in ((3, "en"), (4, "nb-NO"))]
+        ref = pipeline.choose_reference(Index(), 0, "nor")
+        self.assertEqual(ref["number"], 4)                         # it was the English track: nb was another language
+        self.assertFalse(pipeline.is_cross(ref, "nor"))            # and judged as its own language's, words included
+        self.assertTrue(pipeline.is_cross({"language": "yue"}, "chi"))
+
+
 class DefaultLanguageTest(unittest.TestCase):
     """The language synced when none is chosen is one constant, wherever a default language is written."""
 

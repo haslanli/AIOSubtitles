@@ -22,7 +22,9 @@ def settings_read_by_the_code():
     return names
 
 
-APPROVED_LONG = ("USENET",)
+# approved as written though longer than 125 words: the Usenet box's explanation, and the audio limit's and the word
+# check's with the sentences added to them
+APPROVED_LONG = ("USENET", "SUBSYNC_AUDIO_BUDGET_GB", "SUBSYNC_TEXT_PAIRING")
 
 
 class ExplainTest(unittest.TestCase):
@@ -62,7 +64,6 @@ class ExplainTest(unittest.TestCase):
         yield from ((name, text) for name, (_, text) in explain.QUESTIONS.items())
         yield from explain.RULES
 
-    # approved as written though longer than 125 words: the Usenet box's explanation
     def test_each_explanation_is_one_short_plain_paragraph(self):
         for name, text in self.texts():
             with self.subTest(name=name):
@@ -78,7 +79,7 @@ class ExplainTest(unittest.TestCase):
         self.assertEqual(dict(explain.RULES)["A file that can't be reached is tried again later"],
                          "A file that can't be reached on its first read is tried once more 10 seconds later; if it "
                          "still fails, it waits 10 minutes, then 1, 6 and 24 hours, and then isn't read again.")
-        self.assertIn("a file's first read is then tried once more 10 seconds later, and a failed file is tried again "
+        self.assertIn("A file's first read is then tried once more 10 seconds later, and a failed file is tried again "
                       "10 minutes, 1, 6 and 24 hours later", explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
 
     def test_the_original_entry_and_the_language_check_rules(self):
@@ -311,8 +312,38 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(Settings({}).index_cap, 32 * 1024 * 1024)
         self.assertIn("Recommended: 32.", text)
         self.assertIn("A file whose index is larger keeps its original subtitles and isn't read again until the cap is "
-                      "raised.", text)
+                      "raised; an index over 32 MB (64 MB in an MP4 file) is never read, whatever the cap.", text)
         self.assertIn("100 is far above normal use", explain.SETTINGS["SUBSYNC_DAILY_BUDGET_GB"][1])
+
+    def test_the_media_and_language_texts_approved_in_ad644(self):
+        # The owner's words, as approved
+        settings, rules = explain.SETTINGS, dict(explain.RULES)
+        for key, sentence in (
+                ("SUBSYNC_INDEX_CAP_MB", "A file whose index is larger keeps its original subtitles and isn't read "
+                 "again until the cap is raised; an index over 32 MB (64 MB in an MP4 file) is never read, whatever "
+                 "the cap. Recommended: 32. Higher, up to 64: a few more MP4 files with very many tracks get copies, "
+                 "each costing that much more data."),
+                ("SUBSYNC_AUDIO_BUDGET_GB", "Within it, high-bitrate files get shorter audio parts, or none when they "
+                 "would be too short to judge, and then keep their originals, as do MKV files without a seek index; a "
+                 "smaller file is read only as far as needed."),
+                ("SUBSYNC_ORIGINAL_LANGUAGES", "Optional: titles whose original language you set yourself, which then "
+                 "is never looked up, as id=language pairs separated by commas, like tt1375666=en,mal:5114=ja: an IMDb "
+                 "id, or mal: or kitsu: and the number for anime known only by MyAnimeList or Kitsu (two- or "
+                 "three-letter codes)."),
+                ("SUBSYNC_READ_TIMEOUT_S", "How long one read of a file may wait for an answer, in seconds, before it "
+                 "counts as failed; a read that keeps going counts as failed too once it has taken this long plus one "
+                 "second for every 64 KB it asked for. A file's first read is then tried once more 10 seconds later, "
+                 "and a failed file is tried again 10 minutes, 1, 6 and 24 hours later. Recommended: 60. Shorter: slow "
+                 "services fail more often."),
+                ("SUBSYNC_TEXT_PAIRING", "A copy whose words disagree with its timing isn't offered. Chinese and "
+                 "Japanese, written without spaces between words, are paired by timing alone, and nothing more is read "
+                 "for them.")):
+            self.assertIn(sentence, settings[key][1], key)
+        self.assertIn("Other files (AVI, M2TS, fragmented MP4 and the like) keep their original subtitles, after one "
+                      "small read that shows the format.", rules["Only MKV and MP4 files"])
+        self.assertIn("Where the track is in the subtitle's language and timing alone leaves doubt, the lines' words "
+                      "must agree too, except in Chinese and Japanese (SUBSYNC_TEXT_PAIRING);",
+                      rules["A copy is offered only after it passes the check"])
 
     def test_public_mode_says_setup_turns_it_on(self):
         text = explain.SETTINGS["SUBSYNC_PUBLIC"][1]

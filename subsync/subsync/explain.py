@@ -57,8 +57,9 @@ RULES = [
      "download to your account. Files played from plain torrents or web links get no synced copy. Usenet files are "
      "read only when you turn Usenet on (see \"Usenet: only parts of a file\")."),
     ("Only MKV and MP4 files",
-     "subsync reads the subtitle tracks of MKV and MP4 files only, the formats nearly all streaming releases use. Other "
-     "files (AVI, M2TS and the like) keep their original subtitles, after one small read that shows the format."),
+     "subsync reads the subtitle tracks of MKV and MP4 files only, the formats nearly all streaming releases use. "
+     "Other files (AVI, M2TS, fragmented MP4 and the like) keep their original subtitles, after one small read that "
+     "shows the format."),
     ("A file that can't be reached is tried again later",
      "A file that can't be reached on its first read is tried once more 10 seconds later; if it still fails, it waits "
      "10 minutes, then 1, 6 and 24 hours, and then isn't read again."),
@@ -66,11 +67,11 @@ RULES = [
      "Each synced copy is checked against the file itself before it is offered: at least 90 % of its lines must start "
      "within 200 ms (a fifth of a second) of the file's own subtitle track, spread over the whole film (95 % when its "
      "lines were snapped onto the track), or it must be clearly better than the original (SUBSYNC_BETTER). Where the "
-     "track is in the subtitle's language and timing alone leaves doubt, the lines' words must agree too "
-     "(SUBSYNC_TEXT_PAIRING); a copy fitted in sections for another cut must pass in every section (SUBSYNC_SECTIONS). "
-     "Line ends are measured and recorded, but don't decide. Files without a subtitle track are checked against their "
-     "speech instead (the audio route). A copy that fails is never offered: you get the original subtitles, as without "
-     "subsync."),
+     "track is in the subtitle's language and timing alone leaves doubt, the lines' words must agree too, except in "
+     "Chinese and Japanese (SUBSYNC_TEXT_PAIRING); a copy fitted in sections for another cut must pass in every "
+     "section (SUBSYNC_SECTIONS). Line ends are measured and recorded, but don't decide. Files without a subtitle "
+     "track are checked against their speech instead (the audio route). A copy that fails is never offered: you get "
+     "the original subtitles, as without subsync."),
     ("A language with no synced copy is listed with its original",
      "A language that has subtitles but no synced copy for a file is listed once, as \"<Language> (original)\": the "
      "subtitle, unchanged, that fit the file best when it was checked, or else the likeliest by its release name, and "
@@ -439,11 +440,12 @@ GROUPS = [
             "1",
             "With the audio route on, the most audio subsync reads of one file, in GB: your answer to ./setup's audio "
             "limit question (0.5, 1, 2 or 4), written only while the audio route is on. Within it, high-bitrate files "
-            "get shorter audio parts, or none when they would be too short to judge, and then keep their originals; a "
-            "smaller file is read only as far as needed. Recommended: 1. Higher: very high-quality files such as 4K "
-            "remuxes get copies too, at up to that much data each. Lower: less data, more such files keep their "
-            "originals. Another number set here by hand works too; 0 removes the limit, which is not recommended. On "
-            "a public instance it counts in each person's daily data (SUBSYNC_USER_DAILY_MB)."),
+            "get shorter audio parts, or none when they would be too short to judge, and then keep their originals, as "
+            "do MKV files without a seek index; a smaller file is read only as far as needed. Recommended: 1. Higher: "
+            "very high-quality files such as 4K remuxes get copies too, at up to that much data each. Lower: less "
+            "data, more such files keep their originals. Another number set here by hand works too; 0 removes the "
+            "limit, which is not recommended. On a public instance it counts in each person's daily data "
+            "(SUBSYNC_USER_DAILY_MB)."),
         "SUBSYNC_URL_REWRITE": (
             "",
             "Rewrites the start of stream links, like https://aio.example.com=http://aiostreams:3000, so subsync reads "
@@ -482,8 +484,9 @@ GROUPS = [
             "32",
             "The most subsync reads of one file to find its subtitle tracks (the start, the index, and 64 KB at each "
             "end), in MB. Most files need about 1 MB; files with very many tracks need more. A file whose index is "
-            "larger keeps its original subtitles and isn't read again until the cap is raised. Recommended: 32. "
-            "Higher: a few more such files get copies, each costing that much more data."),
+            "larger keeps its original subtitles and isn't read again until the cap is raised; an index over 32 MB (64 "
+            "MB in an MP4 file) is never read, whatever the cap. Recommended: 32. Higher, up to 64: a few more MP4 "
+            "files with very many tracks get copies, each costing that much more data."),
         "SUBSYNC_FILE_CAP_GB": (
             "6",
             "The most subsync reads of one file in all when the audio route works on it, in GB: an outer safety limit, "
@@ -514,9 +517,10 @@ GROUPS = [
             "that is still on."),
         "SUBSYNC_READ_TIMEOUT_S": (
             "60",
-            "How long one read of a file may wait for an answer, in seconds, before it counts as failed; a file's first "
-            "read is then tried once more 10 seconds later, and a failed file is tried again 10 minutes, 1, 6 and 24 "
-            "hours later. Recommended: 60. Shorter: slow services fail more often."),
+            "How long one read of a file may wait for an answer, in seconds, before it counts as failed; a read that "
+            "keeps going counts as failed too once it has taken this long plus one second for every 64 KB it asked "
+            "for. A file's first read is then tried once more 10 seconds later, and a failed file is tried again 10 "
+            "minutes, 1, 6 and 24 hours later. Recommended: 60. Shorter: slow services fail more often."),
         "SUBSYNC_SIZE_SLACK_MB": (
             "5.5",
             "How far a file's listed size may be from its real size and still be taken for the same file, in MB; "
@@ -613,12 +617,13 @@ GROUPS = [
         "SUBSYNC_TEXT_PAIRING": (
             "on",
             "On: when your subtitle and the file's own subtitle track share a language and timing alone can't settle "
-            "it, subsync reads the words of up to 120 of the track's lines, once per file and language (up to 240 KB of "
-            "text; on an image track, with a reader installed for the language, each line's picture, up to 64 KB), and "
-            "pairs your subtitle's lines with those that say the same thing, even where lines are split or joined "
-            "differently. A copy whose words disagree with its timing isn't offered. Words are kept only while "
-            "the file is worked on. Recommended: on. Off: lines are paired by timing alone, nothing extra is read, and "
-            "a copy only words could refuse may be offered."),
+            "it, subsync reads the words of up to 120 of the track's lines, once per file and language (up to 240 KB "
+            "of text; on an image track, with a reader installed for the language, each line's picture, up to 64 KB), "
+            "and pairs your subtitle's lines with those that say the same thing, even where lines are split or joined "
+            "differently. A copy whose words disagree with its timing isn't offered. Chinese and Japanese, written "
+            "without spaces between words, are paired by timing alone, and nothing more is read for them. Words are "
+            "kept only while the file is worked on. Recommended: on. Off: lines are paired by timing alone, nothing "
+            "extra is read, and a copy only words could refuse may be offered."),
         "SUBSYNC_SECTIONS": (
             "on",
             "On: a subtitle made for a slightly different cut of the film (a few seconds added or cut here and there, "
@@ -674,11 +679,11 @@ GROUPS = [
             "already kept are deleted."),
         "SUBSYNC_ORIGINAL_LANGUAGES": (
             "",
-            "Optional: titles whose original language you set yourself, which then is never looked up, as IMDb "
-            "id=language pairs separated by commas, like tt1375666=en,tt2788316=ja (two- or three-letter codes). Use "
-            "it when a lookup gives a wrong language for a title you know. Empty (recommended): every title is looked "
-            "up. A wrong entry times that title's subtitles to the wrong track, so fewer of its copies pass the "
-            "check."),
+            "Optional: titles whose original language you set yourself, which then is never looked up, as id=language "
+            "pairs separated by commas, like tt1375666=en,mal:5114=ja: an IMDb id, or mal: or kitsu: and the number "
+            "for anime known only by MyAnimeList or Kitsu (two- or three-letter codes). Use it when a lookup gives a "
+            "wrong language for a title you know. Empty (recommended): every title is looked up. A wrong entry times "
+            "that title's subtitles to the wrong track, so fewer of its copies pass the check."),
         "SUBSYNC_FALLBACK_REFERENCE": (
             "eng",
             "When a file has no track in a subtitle's language, the languages whose track it is checked against first, "

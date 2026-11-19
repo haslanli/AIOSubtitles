@@ -74,10 +74,22 @@ DEFAULT_LANGUAGE = "eng"
 TMDB_CODES = {"cn": "chi", "xx": None}
 # codes that name no single language: undetermined, several, no speech, not coded; qaa-qtz are for local use
 NOT_A_LANGUAGE = {"und", "mul", "zxx", "mis"}
-# languages counted as one when a title's original language is compared with a file's tracks (only there): the Chinese
-# varieties, Norwegian's two written forms, and the standard forms of Arabic, Persian and Malay
-FAMILY = {"yue": "chi", "cmn": "chi", "nan": "chi", "hak": "chi", "wuu": "chi", "nob": "nor", "nno": "nor",
-          "arb": "ara", "pes": "per", "prs": "per", "zsm": "may"}
+# a language's written forms, counted as the language wherever a subtitle's language is compared with a track's
+#: Norwegian's two, and the standard forms of Arabic, Persian and Malay
+WRITTEN = {"nob": "nor", "nno": "nor", "arb": "ara", "pes": "per", "prs": "per", "zsm": "may"}
+# languages counted as one when a title's original language is compared with a file's tracks (only there): the written
+# forms, and the Chinese varieties too (written Cantonese differs from standard Chinese, so not in WRITTEN)
+FAMILY = {"yue": "chi", "cmn": "chi", "nan": "chi", "hak": "chi", "wuu": "chi", **WRITTEN}
+# the usual Windows encoding of a subtitle in each language when it isn't Unicode (subs.decode); any other
+# language is read as Western (cp1252). Serbian and Chinese have two each, and the text decides (subs.decode)
+LEGACY_ENCODINGS = {**dict.fromkeys(("rus", "ukr", "bul", "bel", "mac"), "cp1251"),
+                    **dict.fromkeys(("pol", "cze", "slo", "hun", "rum", "hrv", "bos", "slv", "alb"), "cp1250"),
+                    "gre": "cp1253", "tur": "cp1254", "heb": "cp1255",
+                    **dict.fromkeys(("ara", "per", "urd"), "cp1256"),
+                    **dict.fromkeys(("est", "lav", "lit"), "cp1257"),
+                    "vie": "cp1258", "tha": "cp874", "jpn": "cp932", "kor": "cp949",
+                    "srp": ("cp1250", "cp1251"),   # Latin, Cyrillic
+                    "chi": ("gbk", "cp950")}       # GBK, Big5 (as Windows writes them)
 
 
 def lang3(code):
@@ -125,6 +137,21 @@ def from_tmdb(code):
     if c in TMDB_CODES:
         return TMDB_CODES[c]
     return TWO.get(c)
+
+
+def written(code):
+    """A code as a three-letter code, a written form as its language (WRITTEN): what a subtitle's language and a
+    track's are compared by."""
+    c = lang3(code)
+    return WRITTEN.get(c, c)
+
+
+def legacy_encodings(code):
+    """The encodings a subtitle in language `code` that isn't Unicode may be in (LEGACY_ENCODINGS; a variety by its
+    language, FAMILY): one, two for subs.decode to choose between, or none (Western)."""
+    c = lang3(code)
+    found = LEGACY_ENCODINGS.get(FAMILY.get(c, c), ())
+    return (found,) if isinstance(found, str) else found
 
 
 def same_language(a, b):

@@ -21,7 +21,7 @@ import time
 from . import alass as alass_mod
 from . import imageref, imagetext, refine, sections, shift, textpair
 from .audiofit import fit_tracks
-from .langs import lang3, same_language
+from .langs import lang3, same_language, written
 from .relgate import MIN_PAIRED, TENTHS, WITHIN_SHARE, aligned, clearly_better, relgate
 from .subs import dialogue_ends, dialogue_starts, parse, plain_srt, timing_srt, write_like
 
@@ -57,10 +57,10 @@ MAX_LINES_PER_MIN = 40     # dialogue is rarely denser than ~25 lines a minute; 
 
 
 def is_secondary(track):
-    """Not the plain track of its language: one for the hearing impaired (it can trail the speech) or one timed
-    to a dub."""
+    """Not the plain track of its language: one for the hearing impaired, by its name or the file's flag (it can trail
+    the speech,), or one timed to a dub."""
     name = track.get("name") or ""
-    return bool(SDH.search(name) or DUB.search(name))
+    return bool(track.get("hearing_impaired") or SDH.search(name) or DUB.search(name))
 
 
 def dialogue_cues(cues):
@@ -156,8 +156,9 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
     several tracks in the subtitle's language (plain ones, with prefer_plain), the one whose timing agrees with the
     file's other tracks, else the one with the most lines. With no
     track in the subtitle's language, one in a `fallback` language comes first (Frieren's Russian was checked against a
-    Portuguese track, a few lines longer than the English one AutoSync and the scoring use)."""
-    want = lang3(cand_lang)
+    Portuguese track, a few lines longer than the English one AutoSync and the scoring use). A language's written forms
+    count as the language (langs.written: a Norwegian subtitle's own track may be tagged nb)."""
+    want = written(cand_lang)
     fallback = {lang3(x) for x in fallback}
     usable = [t for t in text_references(index) if not t["forced"] and len(t["cues"]) >= 0.5 * n_dialogue]
     original = getattr(index, "original_language", None)
@@ -180,17 +181,18 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
                 ref = image_reference(index, t)
                 if ref["plausible"] and len(ref["cues"]) >= MIN_IMAGE_SHARE * n_dialogue:
                     return dict(t, cues=ref["cues"], image=ref["stats"], route="image")
-        own_plain = [t for t in usable if lang3(t["language"]) == want and not is_secondary(t)]
+        own_plain = [t for t in usable if written(t["language"]) == want and not is_secondary(t)]
         if own and not own_plain:
             own.sort(key=lambda t: -len(t["cues"]))
             return dict(own[0], route="cues")
     if usable:
-        usable.sort(key=lambda t: (lang3(t["language"]) != want, lang3(t["language"]) not in fallback,
+        usable.sort(key=lambda t: (written(t["language"]) != want, lang3(t["language"]) not in fallback,
                                    prefer_plain and is_secondary(t), -len(t["cues"])))
         first = usable[0]
-        if lang3(first["language"]) == want:
+        if written(first["language"]) == want:
             plain = bool(prefer_plain and is_secondary(first))
-            same = [t for t in usable if lang3(t["language"]) == want and bool(prefer_plain and is_secondary(t)) == plain]
+            same = [t for t in usable
+                    if written(t["language"]) == want and bool(prefer_plain and is_secondary(t)) == plain]
             if len(same) > 1:
                 first = agreeing(index, same)
         return dict(first, route="cues")
@@ -207,7 +209,7 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
             images.append(dict(t, cues=ref["cues"], image=ref["stats"], route="image"))
     if not images:
         return None
-    images.sort(key=lambda t: (lang3(t["language"]) != want, lang3(t["language"]) not in fallback, -len(t["cues"])))
+    images.sort(key=lambda t: (written(t["language"]) != want, lang3(t["language"]) not in fallback, -len(t["cues"])))
     return images[0]
 
 
@@ -291,8 +293,9 @@ def snap_bar(ref, snap_within):
 
 
 def is_cross(ref, lang):
-    """The reference is another language's track than the subtitle's."""
-    return lang3(ref["language"]) != lang3(lang)
+    """The reference is another language's track than the subtitle's (a written form counts as its language:
+    langs.written)."""
+    return written(ref["language"]) != written(lang)
 
 
 IMAGE_BATCH = 12   # image lines read, then recognised, at a time
@@ -352,12 +355,14 @@ def settles(r, lang):
 
 class TextCheck:
     """D2 for one subtitle against one reference: its lines paired with the track's by their words, worked out once,
-    then the confirmation of any timing of it. Off across languages and with text pairing off; on image references only
-    with a recogniser for their language."""
+    then the confirmation of any timing of it. Off across languages, with text pairing off, and for the languages
+    written without spaces between words (textpair.UNSPACED), so nothing is read for them; on image references
+    only with a recogniser for their language."""
 
     def __init__(self, index, ref, lines, lang, on):
         self.index, self.ref = index, ref
-        self.on = bool(on) and ref.get("route") in ("cues", "image") and not is_cross(ref, lang)
+        self.on = bool(on) and ref.get("route") in ("cues", "image") and not is_cross(ref, lang) \
+            and written(lang) not in textpair.UNSPACED
         dial = [i for i, l in enumerate(lines) if l["kind"] == "dialogue"]
         self.order = sorted(range(len(dial)), key=lambda j: lines[dial[j]]["s"])
         self.lines = [lines[dial[j]] for j in self.order]

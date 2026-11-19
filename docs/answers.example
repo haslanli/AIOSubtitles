@@ -212,11 +212,11 @@ SUBSYNC_MAX_LANGUAGES=4
 
 # With the audio route on, the most audio subsync reads of one file, in GB: your answer to ./setup's audio limit
 # question (0.5, 1, 2 or 4), written only while the audio route is on. Within it, high-bitrate files get shorter
-# audio parts, or none when they would be too short to judge, and then keep their originals; a smaller file is read
-# only as far as needed. Recommended: 1. Higher: very high-quality files such as 4K remuxes get copies too, at up to
-# that much data each. Lower: less data, more such files keep their originals. Another number set here by hand works
-# too; 0 removes the limit, which is not recommended. On a public instance it counts in each person's daily data
-# (SUBSYNC_USER_DAILY_MB).
+# audio parts, or none when they would be too short to judge, and then keep their originals, as do MKV files without
+# a seek index; a smaller file is read only as far as needed. Recommended: 1. Higher: very high-quality files such
+# as 4K remuxes get copies too, at up to that much data each. Lower: less data, more such files keep their
+# originals. Another number set here by hand works too; 0 removes the limit, which is not recommended. On a public
+# instance it counts in each person's daily data (SUBSYNC_USER_DAILY_MB).
 SUBSYNC_AUDIO_BUDGET_GB=1
 
 # Audio syncs one person may start a day (UTC), picked or opened. Each reads about 60–350 MB of a file's sound and

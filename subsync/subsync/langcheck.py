@@ -3,14 +3,15 @@ another language than its text's (Friends S01E01's "English" original was Spanis
 timing alone. The check reads the text with its markup removed (SRT, WebVTT, ASS: tags, drawings, songs and signs left
 out) and measures two things:
 
-  the script     the share of its letters written in the language's script (Latin, Cyrillic, Greek, Arabic, Hebrew,
-                 Han, Kana, Hangul, Thai, Devanagari);
+  the script     the share of its writing in the language's script (Latin, Cyrillic, Greek, Arabic, Hebrew, Han,
+                 Kana, Hangul, Thai, Devanagari), each Han, kana or Hangul character one unit against one word of
+                 another script (a bilingual Chinese/English subtitle is Chinese);
   common words   the share of its words that are the language's most common function words, against the other
                  languages the check knows (only words found in one list count, so "no" or "de" tell nothing).
 
 No verdict under MIN_WORDS words, so a short subtitle is never refused; a language without a word list gets the script
 check only, and one without a known script neither. Refused only with a clear margin: the expected script under half the
-letters, or the expected language's common words under 3 % of the words and below another known language's. It never
+units, or the expected language's common words under 3 % of the words and below another known language's. It never
 re-labels a subtitle, it only refuses it. No packages besides the standard library.
 """
 import bisect
@@ -23,7 +24,7 @@ from .subs import parse, plain_line
 PASS, FAIL, NO_VERDICT = "pass", "fail", "no verdict"
 
 MIN_WORDS = 300            # fewer words: no verdict
-MIN_SCRIPT_SHARE = 0.5     # refused when less than this share of the letters is in the language's script
+MIN_SCRIPT_SHARE = 0.5     # refused when less than this share of the units (measure) is in the language's script
 MIN_COMMON_SHARE = 0.03    # ... or its common words are less than this share of the words and below another language's
 MORE_DOWNLOADS = 3         # an original refused when served: at most this many more of the file's subtitles downloaded
 
@@ -45,6 +46,9 @@ _BLOCKS = sorted([
     (0x3400, 0x4DBF, "han"), (0x4E00, 0x9FFF, "han"), (0xF900, 0xFAFF, "han"), (0x20000, 0x323AF, "han"),
 ])
 _STARTS = [b[0] for b in _BLOCKS]
+# scripts written a syllable or a word to a character: each character one unit of the script share, as a word of any
+# other script is
+CHARACTER_SCRIPTS = ("han", "kana", "hangul")
 
 # The scripts a language is written in, by its 3-letter code (langs.lang3)
 _LATIN = ("eng spa fre ger ita por dut swe nor dan fin cze slo hun rum hrv bos slv pol tur ind may vie est lav lit cat "
@@ -108,8 +112,27 @@ def plain_text(text):
     return unicodedata.normalize("NFC", "\n".join(lines))
 
 
+def units(plain):
+    """The scripts of a text's units of writing, in order: each Han, kana or Hangul character one (CHARACTER_SCRIPTS),
+    each run of letters of one other script (a word) one; a combining mark belongs to its letter's run."""
+    out, run = [], None   # run: the script of the word being read, None between words
+    for ch in plain:
+        if not ch.isalpha():
+            if not unicodedata.category(ch).startswith("M"):
+                run = None
+            continue
+        script = script_of(ch) or "other"
+        if script in CHARACTER_SCRIPTS:
+            out.append(script)
+            run = None
+        elif script != run:
+            out.append(script)
+            run = script
+    return out
+
+
 def measure(text, lang):
-    """What the check reads: {"words", "letters", "script" (share of the letters in the language's scripts, None when
+    """What the check reads: {"words", "letters", "script" (share of the units in the language's scripts, None when
     its script isn't known), "common" ({code: share of the words that are that language's common words})}."""
     code = lang3(lang)
     plain = plain_text(text)
@@ -117,8 +140,9 @@ def measure(text, lang):
     letters = [ch for ch in plain if ch.isalpha()]
     scripts = SCRIPTS.get(code)
     script = None
-    if scripts and letters:
-        script = round(sum(1 for ch in letters if script_of(ch) in scripts) / len(letters), 3)
+    written = units(plain) if scripts else []
+    if written:
+        script = round(sum(1 for s in written if s in scripts) / len(written), 3)
     common = {c: round(sum(1 for w in words if w in distinct) / len(words), 4) if words else 0.0
               for c, distinct in _DISTINCT.items()}
     return {"words": len(words), "letters": len(letters), "script": script, "common": common}

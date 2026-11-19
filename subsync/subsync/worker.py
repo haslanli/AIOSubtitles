@@ -28,7 +28,7 @@ from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .mkv import NotMatroska
 from .mp4 import open_index
-from .reader import MAX_RE_RESOLVE, CapReached, RangeReader, ReadFailed, Refused, Stopped
+from .reader import MAX_RE_RESOLVE, CapReached, IndexTooLarge, RangeReader, ReadFailed, Refused, Stopped
 from .sources import bt_alias, expected_size, fetch_subtitle, plausible_size, same_hash
 from .store import DAY, JUDGED_FOR_S, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, result_key
 from .subs import decode, fingerprint, is_ass, parse
@@ -1000,14 +1000,17 @@ class Worker(threading.Thread):
         except CapReached as e:
             # The file needs more than the job's own byte cap: not queued again, and not read again
             # while the cap is not raised (capped). An audio job stopped at the audio route's cap says nothing
-            # about the index, so the file isn't marked: it waits for another pick, as when the day runs out
-            if job.audio:
+            # about the index, so the file isn't marked: it waits for another pick, as when the day runs out. An index
+            # larger than the parsers ever read is marked under the job's cap too, so it isn't opened again
+            # until the cap is raised
+            if job.audio and not isinstance(e, IndexTooLarge):
                 log.info("stopped %s at the audio cap (%.0f MB): it waits for another pick", job.label,
                          e.cap / 2 ** 20)
                 unfinished = True
             else:
+                cap = max(e.cap, self._cap(job) or 0)
                 for alias in {job.alias, job.bt} - {None}:   # its torrent file too, as _process_row records aliases
-                    self.store.cap_reached(alias, e.cap)
+                    self.store.cap_reached(alias, cap)
                 log.info("index larger than the cap %s (%.0f MB): originals kept", job.label, e.cap / 2 ** 20)
         except Stopped as e:
             log.info("stopped %s: %s", job.label, e)
