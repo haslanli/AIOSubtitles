@@ -6,7 +6,8 @@ also takes one of the audio Turn's SUBSYNC_AUDIO_AT_ONCE places, and never two w
 A job is a file a viewer opened or played. A subtitle request that names the file (its name, size or hash, as Stremio
 and AIOStreams send them) queues it; the file is then found in subsync's own AIOStreams listing (cached debrid only),
 and, with Usenet on and only when that listing doesn't have it, in the Usenet config's listing (UsenetGate: a few a
-day, never twice a day for the same file, none after an error).
+day; a file not found there isn't looked up again for a day, a found one's row is reused for an hour; none after an
+error).
 Reads count toward a daily budget (SUBSYNC_DAILY_BUDGET_GB, bytes received). Any HTTP 403/429 stops every read for a
 back-off (SUBSYNC_403_BACKOFF_S, doubling up to BACKOFF_MAX_S), since the refusal is most likely per account. Every
 connection is closed after its read (reader.py).
@@ -566,6 +567,7 @@ class Worker(threading.Thread):
         self.cv = threading.Condition()
         self.current = None       # the job the main worker runs (index reads, text and image routes)
         self.current_audio = None  # the job the audio worker runs, so an audio route never holds another file
+        self.audio_worker = None   # the audio lane's thread, once start() opened one (start)
         self.done = {}            # alias -> {lang: result key | None}: the best pass so far, for pending entries and picks
         self.judged = {}          # alias -> languages whose every candidate is judged (their `done` key is final)
         self.originals = {}       # alias -> {lang: {"url", "id"} of the original subtitle}, the pending entries' fallback
@@ -771,7 +773,8 @@ class Worker(threading.Thread):
         """A file with no usable track (the caller's first point) starts its audio sync as soon as
         it is opened, for a viewer who chose that, only when at least one of their languages that has a subtitle to fit
         (job.listed) has no synced copy from anyone and no audio verdict yet (a "keep original" one counts as tried).
-        The room and today's counts are checked by the caller, Real-Debrid never by every read; a Usenet file as any."""
+        The room and today's counts are checked by the caller. A Real-Debrid file is never read (every read refuses it),
+    so it isn't checked here; a Usenet file counts like any other."""
         if self.s.audio_choice != "open" or not job.listed:
             return False
         file_key = self.store.resolve(job.alias)
@@ -1343,8 +1346,9 @@ class Worker(threading.Thread):
         job.bt = bt
         # the title's original language: looked up in the background, never waited for (origlang.py)
         self.start_lookup(job.video_id)
-        known = self.file_of((bt or (job.alias if job.usenet else None),), hints.get("videoHash")) \
-            if bt or job.usenet else None
+        # a file known by its torrent file, or a Usenet file by its name
+        key = bt or (job.alias if job.usenet else None)
+        known = self.file_of((key,), hints.get("videoHash")) if key else None
         if known and self.store.judged_all(known, self.s.languages, origlang.current(self.rule_for(job.video_id)),
                                            time.time() - JUDGED_FOR_S) and not self._audio_unjudged(job, known):
             # the same file of the same torrent, judged for every language here lately (read through someone else's

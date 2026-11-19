@@ -468,7 +468,7 @@ class OffTest(Base):
     def test_no_audio_lane_in_public_mode(self):
         w = self.worker(Limits())
         w.start()
-        self.assertIsNone(getattr(w, "audio_worker", None))
+        self.assertIsNone(w.audio_worker)
 
     def test_stored_copies_still_listed_and_a_pick_entry_never(self):
         w = self.first_pass(self.worker(Limits(), settings=self.settings(SUBSYNC_LANGUAGES="eng,spa"),
