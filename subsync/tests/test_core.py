@@ -1255,8 +1255,10 @@ class AudioClearlyBetterTest(AudioFitFixture):
         self.assertEqual(fit["decision"], "keep_original")
 
     def test_another_films_subtitle_is_never_accepted(self):
+        # windows without speech-run ends, a shape production never makes: 8 films keep it covered (R3-3,
+        #); test_matcher's CloseCallTest sweeps 40 with production's windows, both verdicts
         accepted = []
-        for seed in range(40):
+        for seed in range(8):
             other = rhythm(700, 3000 + seed)
             fit = self.fit([s for s, _ in other], durations=[d for _, d in other])
             if fit["decision"] != "keep_original":

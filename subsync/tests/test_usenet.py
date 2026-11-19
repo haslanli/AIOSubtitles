@@ -10,9 +10,8 @@ import threading
 import time
 import unittest
 
-from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, HAVE_CRYPTOGRAPHY, INSTANCE, KEY,  # noqa: E402
-                     NEEDS, PASSWORD, row)
-from test_resolve_once import Debrid  # noqa: E402
+from helpers import (closed_after, Counts, DebridLink, FakeDebrid, FakeUsenet, HAVE_CRYPTOGRAPHY,  # noqa: E402
+                     INSTANCE, KEY, NEEDS, PASSWORD, row)
 from subsync import aiosconfig, realdebrid, sources, worker as worker_mod  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -391,7 +390,7 @@ class ReaderTest(unittest.TestCase):
     """The reader: a Usenet file's link is asked at most twice per job, and its first read may take 120 s."""
 
     def setUp(self):
-        self.d = Debrid()
+        self.d = DebridLink()
         self.addCleanup(self.d.close)
 
     def test_the_link_is_asked_at_most_twice(self):
@@ -407,10 +406,9 @@ class ReaderTest(unittest.TestCase):
         # seen in a test: AIOStreams lists a Usenet release by its whole NZB (video, par2, nfo), so the file it
         # serves is a few per cent smaller; a reader with a size rule checks the served size by it instead of by an
         # exact size
-        from test_resolve_once import DATA
-        ok = RangeReader(self.d.link, "test", size_ok=lambda total: total == len(DATA))
+        ok = RangeReader(self.d.link, "test", size_ok=lambda total: total == len(self.d.data))
         self.assertEqual(len(ok.get(0, 100)), 100)
-        self.assertEqual(ok.size, len(DATA))
+        self.assertEqual(ok.size, len(self.d.data))
         refused = RangeReader(self.d.link, "test", size_ok=lambda total: False)
         with self.assertRaises(ReadFailed) as caught:
             refused.get(0, 100)

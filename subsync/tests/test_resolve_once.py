@@ -2,99 +2,25 @@
 followed once per reader; later reads go to where it pointed, and when that address stops answering, the link is asked
 once more. Against a local server: no network."""
 import logging
-import os
 import threading
-import time
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from helpers import FIXTURES, start_server, stop_server  # noqa: E402
+from helpers import DebridLink, FIXTURES  # noqa: E402
 from subsync.reader import MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused  # noqa: E402
-
-TINY = os.path.join(FIXTURES, "tiny.mkv")
-with open(TINY, "rb") as _f:
-    DATA = _f.read()
-
-
-class Debrid:
-    """/link/tiny.mkv redirects (302) to /file/<token>/tiny.mkv, which serves ranges while its token is valid."""
-
-    def __init__(self):
-        self.link_hits, self.file_hits, self.token, self.expired = 0, 0, 1, set()
-        self.link_status = None      # e.g. 429: the link itself refuses
-        self.file_status = None      # e.g. 429: the download address slows us down
-        self.link_delay = 0.0        # seconds the link takes to answer
-        self.file_dead = False       # the download address drops every connection unanswered (a network fault)
-        outer = self
-
-        class H(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def log_message(self, *a):
-                pass
-
-            def empty(self, code, location=None):
-                self.send_response(code)
-                if location:
-                    self.send_header("Location", location)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-
-            def do_GET(self):
-                parts = self.path.split("/")
-                if parts[1] == "link":
-                    outer.link_hits += 1
-                    if outer.link_delay:
-                        time.sleep(outer.link_delay)
-                    if outer.link_status:
-                        return self.empty(outer.link_status)
-                    return self.empty(302, f"/file/{outer.token}/{parts[2]}")
-                if parts[1] == "file":
-                    outer.file_hits += 1
-                    if outer.file_dead:
-                        self.close_connection = True
-                        return
-                    if outer.file_status:
-                        return self.empty(outer.file_status)
-                    if int(parts[2]) in outer.expired:
-                        return self.empty(403)
-                    a, _, b = self.headers["Range"][6:].partition("-")
-                    start, end = int(a), min(int(b), len(DATA) - 1)
-                    self.send_response(206)
-                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(DATA)}")
-                    self.send_header("Content-Length", str(end - start + 1))
-                    self.end_headers()
-                    try:
-                        self.wfile.write(DATA[start:end + 1])
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
-                    return
-                self.empty(404)
-
-        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
-        self.link = f"http://127.0.0.1:{self.server.server_address[1]}/link/tiny.mkv"
-
-    def expire(self):
-        """The download address handed out so far stops answering; the link hands out a new one."""
-        self.expired.add(self.token)
-        self.token += 1
-
-    def close(self):
-        stop_server(self.server)
 
 
 class ResolveOnceTest(unittest.TestCase):
     def setUp(self):
-        self.d = Debrid()
+        self.d = DebridLink()
 
     def tearDown(self):
         self.d.close()
 
     def test_the_link_is_followed_once_then_reads_go_where_it_pointed(self):
         r = RangeReader(self.d.link, "test")
-        self.assertEqual(r.get(0, 100), DATA[:100])
-        self.assertEqual(r.get(5000, 300), DATA[5000:5300])
-        self.assertEqual(b"".join(r.stream(9000, 4000, chunk=1000)), DATA[9000:13000])
+        self.assertEqual(r.get(0, 100), self.d.data[:100])
+        self.assertEqual(r.get(5000, 300), self.d.data[5000:5300])
+        self.assertEqual(b"".join(r.stream(9000, 4000, chunk=1000)), self.d.data[9000:13000])
         for k in range(20):                                 # the word reads: twenty small reads
             r.get(100 * k, 50)
         self.assertEqual(self.d.link_hits, 1)
@@ -105,16 +31,16 @@ class ResolveOnceTest(unittest.TestCase):
         r = RangeReader(self.d.link, "test")
         r.get(0, 100)
         self.d.expire()
-        self.assertEqual(r.get(200, 100), DATA[200:300])
+        self.assertEqual(r.get(200, 100), self.d.data[200:300])
         self.assertEqual(self.d.link_hits, 2)
-        self.assertEqual(r.get(400, 100), DATA[400:500])    # the new address is kept
+        self.assertEqual(r.get(400, 100), self.d.data[400:500])    # the new address is kept
         self.assertEqual(self.d.link_hits, 2)
 
     def test_a_stream_looks_the_link_up_again_too(self):
         r = RangeReader(self.d.link, "test")
         r.get(0, 100)
         self.d.expire()
-        self.assertEqual(b"".join(r.stream(1000, 2000, chunk=500)), DATA[1000:3000])
+        self.assertEqual(b"".join(r.stream(1000, 2000, chunk=500)), self.d.data[1000:3000])
         self.assertEqual(self.d.link_hits, 2)
 
     def test_a_link_that_refuses_is_refused_once(self):
@@ -176,7 +102,7 @@ class ResolveOnceTest(unittest.TestCase):
             r.get(100, 50)
         self.d.file_dead = False
         self.d.expire()
-        self.assertEqual(r.get(200, 100), DATA[200:300])
+        self.assertEqual(r.get(200, 100), self.d.data[200:300])
 
     def test_a_link_without_a_redirect_is_never_capped(self):
         from helpers import RangeServer
@@ -205,7 +131,7 @@ class ResolveOnceTest(unittest.TestCase):
         for t in threads:
             t.join(10)
         self.assertEqual(errors, [])
-        self.assertEqual({k: v for k, v in out.items()}, {k: DATA[1000 * k:1000 * k + 100] for k in range(4)})
+        self.assertEqual({k: v for k, v in out.items()}, {k: self.d.data[1000 * k:1000 * k + 100] for k in range(4)})
         self.assertEqual(self.d.link_hits, 1)
         self.assertEqual(self.d.file_hits, 4)               # the first read's redirect, then three at the address
 

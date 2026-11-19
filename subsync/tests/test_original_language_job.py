@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest import mock
 
-from helpers import closed_after, FakeDownloads, FIXTURES, RangeServer, realistic, srt_of, TempDir
+from helpers import closed_after, FakeDownloads, FIXTURES, LookupServices, RangeServer, realistic, srt_of, TempDir
 from subsync import origlang, pipeline
 from subsync.addon import App
 from subsync.settings import Settings
@@ -234,8 +234,7 @@ class RealLookupTest(Base):
     """The real lookup inside a worker (stand-in TMDB and Wikidata): the second request of a file finds the answer."""
 
     def test_the_answer_reaches_the_file(self):
-        from test_origlang import Services
-        srv = Services()
+        srv = LookupServices()
         self.addCleanup(srv.close)
         srv.find["tt1375666"] = {"movie_results": [{"id": 27205, "original_language": "ja"}]}
         env = {"SUBSYNC_TMDB_URL": srv.base + "/tmdb", "SUBSYNC_WIKIDATA_URL": srv.base + "/sparql",

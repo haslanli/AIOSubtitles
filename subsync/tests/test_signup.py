@@ -7,7 +7,7 @@ import time
 import unittest
 
 from helpers import (FakeAiostreams, files_bytes, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD,  # noqa: E402
-                     PublicParts, TempDir)
+                     SignupHarness, TempDir)
 from subsync.settings import Settings  # noqa: E402
 
 TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
@@ -39,15 +39,7 @@ def viewer(services=(TORBOX,), presets=(TORRENTIO, OSV3, NEWZNAB)):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class SignupTest(PublicParts, unittest.TestCase):
-    def setUp(self):
-        from subsync import signup
-        self.signup = signup
-        self.start_public()
-
-    def tearDown(self):
-        self.stop_public()
-
+class SignupTest(SignupHarness, unittest.TestCase):
     def form(self, uuid, **extra):
         return dict({"link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "password": PASSWORD,
                      "languages": "English", "add_addon": "on"}, **extra)
@@ -756,17 +748,11 @@ class SignupTest(PublicParts, unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class KeptPasswordTest(PublicParts, unittest.TestCase):
+class KeptPasswordTest(SignupHarness, unittest.TestCase):
     """Only the check uses a kept password, so with it off (SUBSYNC_RECHECK_HOURS 0) none is kept, even from a
     form that sends the box ticked, and one kept before goes at the next refresh."""
 
-    def setUp(self):
-        from subsync import signup
-        self.signup = signup
-        self.start_public(SUBSYNC_RECHECK_HOURS="0")
-
-    def tearDown(self):
-        self.stop_public()
+    public_env = {"SUBSYNC_RECHECK_HOURS": "0"}
 
     def refresh(self, settings, token):
         self.signup.refresh(settings, self.users, token, {"password": PASSWORD, "keep_password": "on"},

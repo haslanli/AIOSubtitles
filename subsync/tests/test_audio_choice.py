@@ -8,8 +8,9 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, HAVE_CRYPTOGRAPHY, KEY, Limits, Listing,
-                     NEEDS, RangeServer, row, start_server, stop_server, TempDir, wait_until)
+from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, form, HAVE_CRYPTOGRAPHY, http, KEY,
+                     Limits, Listing, NEEDS, RangeServer, row, ServerHarness, start_server, stop_server, TempDir,
+                     wait_until)
 from subsync import sources
 from subsync import worker as worker_mod
 from subsync.reader import ReadFailed, Refused
@@ -236,15 +237,12 @@ class ConfigureTest(unittest.TestCase):
     """The settings page's "audio" action: saved like the languages, and the person's worker starts again with it."""
 
     def setUp(self):
-        import test_public_http as harness
-        self.harness = harness
-        self.case = harness.Base()
+        self.case = ServerHarness()
         self.case.start(SUBSYNC_AUDIO_ROUTE="on")
-        self.addCleanup(self.case.tearDown)
+        self.addCleanup(self.case.close)
 
     def post(self, token, **fields):
-        h = self.harness
-        return h.http(f"{self.case.base}/u/{token}/configure", h.form(**fields))
+        return http(f"{self.case.base}/u/{token}/configure", form(**fields))
 
     def test_saved_and_applied(self):
         c = self.case

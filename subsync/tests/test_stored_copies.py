@@ -4,9 +4,9 @@ the same release. Refresh and the daily check (with a kept password) move a pers
 import os
 import unittest
 
-from helpers import closed_after, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD, TempDir  # noqa: E402
+from helpers import (closed_after, HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, KEY, NEEDS, PASSWORD, REALDEBRID,  # noqa: E402
+                     RecheckHarness, TempDir, TORBOX, TORRENTIO)
 from subsync.settings import Settings  # noqa: E402
-from test_recheck import HOUR, REALDEBRID, TORBOX, TORRENTIO, Base  # noqa: E402
 
 OSV3 = {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
         "options": {"name": "OpenSubtitles V3+", "resources": ["subtitles"]}}
@@ -14,7 +14,7 @@ SYNC_FIELDS = ("sync_uuid", "sync_link", "sync_password", "sync_fp")
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class StoredCopiesTest(Base):
+class StoredCopiesTest(RecheckHarness, unittest.TestCase):
     def sign_up_rd(self, keep=False, **extra):
         viewer = {"services": [dict(REALDEBRID)], "presets": [dict(TORRENTIO), dict(OSV3)]}
         uuid = self.fake.add(viewer, PASSWORD)
@@ -248,8 +248,8 @@ class TextsTest(unittest.TestCase):
 
     def test_the_usenet_sentence_only_where_the_instance_offers_usenet(self):
         # An instance without Usenet has no Usenet box, so the note doesn't offer it
+        from helpers import LINK, result, settings, Tree     # (a sign-up's `result` is a local name elsewhere here)
         from subsync import explain, pages
-        from test_public_ui import LINK, Tree, result, settings
         sentence = explain.PUBLIC_STORE_ONLY_USENET
         record = {"languages": ["eng"], "store_only": True}
         usage = {"files": 0, "bytes": 0}

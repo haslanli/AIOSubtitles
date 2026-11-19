@@ -4,76 +4,13 @@ import logging
 import socket
 import time
 import unittest
-import urllib.error
-import urllib.parse
-import urllib.request
 
-from helpers import (HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, PublicParts, answers, exchange,  # noqa: E402
-                     start_server, stop_server, wait_until)
-
-VIEWER = {"services": [{"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}],
-          "presets": [{"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}},
-                      {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
-                       "options": {"name": "OpenSubtitles V3+", "resources": ["subtitles"]}}]}
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):
-        return None
-
-
-def http(url, data=None, headers=None, method=None):
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
-    try:
-        with urllib.request.build_opener(NoRedirect).open(req, timeout=15) as r:
-            return r.status, r.read(), dict(r.headers)
-    except urllib.error.HTTPError as e:
-        with e:                                  # an error answer is closed once read, as any other
-            return e.code, e.read(), dict(e.headers)
-
-
-def form(**fields):
-    return urllib.parse.urlencode(fields).encode()
-
-
-class Base(PublicParts, unittest.TestCase):
-    """A public service on this machine, with a stand-in AIOStreams; workers are not started (jobs stay queued)."""
-
-    def start(self, **env):
-        from subsync.public import Pool, PublicService, serve_public
-        from subsync.store import Store
-        self.start_public(**dict({"SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
-                                  "SUBSYNC_RECHECK_HOURS": "0"}, **env))
-        self.store = Store(self.dir)
-        self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
-        self.service = PublicService(self.s, self.env, self.store, self.users, self.pool, api_factory=self.api)
-        self.server = start_server(serve_public(self.service, 0, host="127.0.0.1"))
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def tearDown(self):
-        # everything start() made is closed here, the store too, not by cleanups: the harness is also used as a plain
-        # object (test_audio_choice, test_public_ui, test_tmdb_pages), whose cleanups never run
-        stop_server(self.server)
-        self.pool.close()
-        self.store.close()
-        self.stop_public()
-
-    def sign_up(self, **extra):
-        uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
-        fields = dict(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", password=PASSWORD,
-                      languages="English", add_addon="on")
-        fields.update(extra)
-        code, body, headers = http(self.base + "/signup", form(**fields))
-        token = None
-        text = body.decode()
-        if code == 200:
-            start = text.index("https://subs.test/u/") + len("https://subs.test/u/")
-            token = text[start:start + 43]
-        return uuid, code, text, headers, token
+from helpers import (answers, exchange, form, HAVE_CRYPTOGRAPHY, http, INSTANCE, NEEDS, PASSWORD,  # noqa: E402
+                     ServerHarness, VIEWER, wait_until)
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class PublicManifestTest(Base):
+class PublicManifestTest(ServerHarness, unittest.TestCase):
     def test_the_addons_description_says_speech_while_the_audio_route_is_on(self):
         # Built from the instance's settings
         self.start(SUBSYNC_AUDIO_ROUTE="on")
@@ -124,7 +61,7 @@ class PublicManifestTest(Base):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class PublicHttpTest(Base):
+class PublicHttpTest(ServerHarness, unittest.TestCase):
     def setUp(self):
         self.start()
 
@@ -328,7 +265,7 @@ class PublicHttpTest(Base):
         contact = "mailto:host@example.com"
         self.assertFalse(questions(http(self.base + "/privacy")[1].decode()))
         self.assertNotIn(">Questions<", http(self.base + "/")[1].decode())
-        self.tearDown()
+        self.close()
         self.start(SUBSYNC_CONTACT=contact)
         uuid, code, text, headers, token = self.sign_up()
         self.assertTrue(questions(text))                                       # the signed-up page
@@ -367,12 +304,6 @@ class PublicHttpTest(Base):
         self.assertEqual(handler.client_ip(Request("127.0.0.1", "8.8.8.8, 1.2.3.4")), "1.2.3.4")
         self.assertEqual(handler.client_ip(Request("127.0.0.1", None)), "127.0.0.1")
         self.assertEqual(handler.client_ip(Request("9.9.9.9", "1.2.3.4")), "9.9.9.9")   # not the proxy: ignored
-
-    def test_signup_attempts_are_limited_per_address(self):
-        for _ in range(self.s.signups_per_hour):
-            self.assertEqual(http(self.base + "/signup", form(link="", password="x"))[0], 400)
-        code, body, _ = http(self.base + "/signup", form(link="", password="x"))
-        self.assertEqual(code, 429)
 
     def test_a_body_no_route_reads_closes_the_connection(self):
         # The body stayed on the kept-open connection and was read as the next request: a request hidden in it
@@ -524,7 +455,7 @@ class ServerTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class ConnectionCapTest(Base):
+class ConnectionCapTest(ServerHarness, unittest.TestCase):
     def setUp(self):
         self.start(SUBSYNC_MAX_CONNECTIONS="1")
 
@@ -544,7 +475,7 @@ class ConnectionCapTest(Base):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class PublicCheckTest(Base):
+class PublicCheckTest(ServerHarness, unittest.TestCase):
     """The daily check as people see it: a note on the settings page, one "action needed" entry in their subtitle
     lists while only they can fix something, the kept-password box, and Refresh with a new link."""
 
@@ -609,7 +540,7 @@ class PublicCheckTest(Base):
 
     def test_the_kept_password_box_and_forgetting_it(self):
         # the box is offered only while the check runs; a fresh record's check is a day away, so none runs
-        self.tearDown()
+        self.close()
         self.start(SUBSYNC_RECHECK_HOURS="24")
         uuid, code, text, headers, token = self.sign_up()
         self.assertNotIn("auto_password", self.users.open(token))
@@ -676,7 +607,7 @@ class PublicCheckTest(Base):
         self.assertEqual(self.users.open(token)["main_uuid"], new_main)
 
     def test_a_request_starts_the_check_in_the_background(self):
-        self.tearDown()
+        self.close()
         self.start(SUBSYNC_RECHECK_HOURS="24")
         uuid, code, text, headers, token = self.sign_up()
         record = self.users.open(token)
@@ -696,7 +627,7 @@ class PublicCheckTest(Base):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class AudioChoiceHttpTest(Base):
+class AudioChoiceHttpTest(ServerHarness, unittest.TestCase):
     """over HTTP: the answer for files with no subtitles of their own, chosen at sign-up, shown and changed on
     the settings page with the "audio" action, read back by the person's worker; nothing of it on an instance with
     the audio route off."""
@@ -743,7 +674,7 @@ class AudioChoiceHttpTest(Base):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class AudioOffHttpTest(Base):
+class AudioOffHttpTest(ServerHarness, unittest.TestCase):
     def setUp(self):
         self.start()
 

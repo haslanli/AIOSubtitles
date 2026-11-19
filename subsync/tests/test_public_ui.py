@@ -5,19 +5,11 @@ the language limit, stored copies only, the small script, the installer's parts,
 import html.parser
 import os
 import re
-import types
 import unittest
 
-from helpers import HAVE_CRYPTOGRAPHY, KEY, NEEDS  # (first: it puts the package on the import path)
-from subsync.settings import Settings  # noqa: E402
-
-BASE = "https://subs.test"
-TOKEN = "T" * 43
-LINK = f"{BASE}/u/{TOKEN}/manifest.json"
-
-
-def settings(**env):
-    return Settings(dict({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY, "SUBSYNC_PUBLIC_BASE": BASE}, **env))
+# helpers first: it puts the package on the import path
+from helpers import (BASE, change_lines, form, HAVE_CRYPTOGRAPHY, http, INSTANCE, LINK, NEEDS, PASSWORD, RECORD,
+                     result, ServerHarness, settings, TOKEN, Tree, USAGE, VIEWER)
 
 
 def contrast(a, b):
@@ -27,39 +19,6 @@ def contrast(a, b):
         return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b_)
     hi, lo = sorted((lum(a), lum(b)), reverse=True)
     return (hi + 0.05) / (lo + 0.05)
-
-
-class Tree(html.parser.HTMLParser):
-    """Every element with its attributes, the text inside each id'd element, and the page's text."""
-
-    def __init__(self, text):
-        super().__init__(convert_charrefs=True)
-        self.elements, self.text_of, self.open_ids, self.words = [], {}, [], []
-        self.feed(text)
-
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        self.elements.append((tag, a))
-        if "id" in a and tag not in ("input", "br", "img", "meta", "link"):
-            self.open_ids.append((tag, a["id"]))
-            self.text_of[a["id"]] = ""
-
-    def handle_endtag(self, tag):
-        for i in range(len(self.open_ids) - 1, -1, -1):
-            if self.open_ids[i][0] == tag:
-                del self.open_ids[i]
-                break
-
-    def handle_data(self, data):
-        self.words.append(data)
-        for _, i in self.open_ids:
-            self.text_of[i] += data
-
-    def all(self, tag, **match):
-        return [a for t, a in self.elements if t == tag and all(a.get(k) == v for k, v in match.items())]
-
-    def text(self):
-        return re.sub(r"\s+", " ", " ".join(self.words))
 
 
 def css_rule(selector):
@@ -87,33 +46,6 @@ CHANGES = ("Adds 1 subtitle source: AIOSubtitles (synced copies of the subtitles
            "keep its entries)")
 
 
-def change_lines():
-    """The lines aiosconfig.viewer_change writes for a sign-up, as the signed-up page gets them: AIOSubtitles added with
-    the subtitle addons it now searches itself removed, then its address updated, then moved before another subtitle
-    source (a shortened stand-in kept the real lines out of the approved-words test)."""
-    from subsync.aiosconfig import viewer_change
-    ours = {"type": "custom", "instanceId": "a", "enabled": True,
-            "options": {"name": "AIOSubtitles", "manifestUrl": LINK, "resources": ["subtitles"]}}
-    twins = [{"type": "subdl", "instanceId": "d", "enabled": True, "options": {"name": "SubDL"}},
-             {"type": "opensubtitles", "instanceId": "o", "enabled": True, "options": {"name": "OpenSubtitles"}}]
-    old = dict(ours, options=dict(ours["options"], manifestUrl=f"{BASE}/u/{'O' * 43}/manifest.json"))
-    other = {"type": "subhero", "instanceId": "h", "enabled": True, "options": {"name": "SubHero"}}
-    lines = []
-    for presets, clean_up in ((twins, ("subdl", "opensubtitles")), ([old], ()), ([other, ours], ())):
-        lines += viewer_change({"presets": presets}, LINK, name="AIOSubtitles", clean_up=clean_up)[1]
-    return lines
-
-
-def result(**kw):
-    # the fields of signup.SignupResult, without importing signup (it needs cryptography), so the page tests run anywhere
-    base = dict(token=TOKEN, manifest_url=LINK, changes=change_lines()[:2], warning=None,
-                added=True, manual=False, languages=["eng", "spa"], store_only=False, to_store_only=False,
-                usenet=False, usenet_why=None, sync_made=True)
-    base.update(kw)
-    return types.SimpleNamespace(**base)
-
-
-RECORD = {"languages": ["eng", "spa"], "synced_at": 0}
 CONTACT = "mailto:host@example.com"
 # a host's own setup on its pages: its Questions link, the service in front, how long its backups keep records
 HOST = {"SUBSYNC_CONTACT": CONTACT, "SUBSYNC_FRONT_PROXY": "Cloudflare", "SUBSYNC_BACKUP_DAYS": "30"}
@@ -124,7 +56,8 @@ def privacy_parts(s):
     from subsync import explain
     from subsync.extra import asked_sources
     return explain.privacy_parts(s, asked_sources(s, "series"))
-USAGE = {"files": 3, "bytes": 351 * 1024}
+
+
 HOSTILE = "<b onclick=\"x\">&'\""
 BOXES = ("add_addon", "clean_up", "usenet", "keep_password")         # the sign-up's boxes (pages.SIGNUP_BOXES)
 # a host allowing thousands: its settings, a record with Usenet on, and a day's use
@@ -1551,15 +1484,13 @@ class SignupMessagesTest(unittest.TestCase):
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class RoutesTest(unittest.TestCase):
     def setUp(self):
-        from test_public_http import Base
-        self.b = Base()
+        self.b = ServerHarness()
         self.b.start()
 
     def tearDown(self):
-        self.b.tearDown()
+        self.b.close()
 
     def test_headers_allow_only_our_own_script_stylesheet_and_fonts(self):
-        from test_public_http import http
         code, _, headers = http(self.b.base + "/")
         self.assertEqual(headers["Content-Security-Policy"],
                          "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; form-action 'self'; "
@@ -1584,7 +1515,6 @@ class RoutesTest(unittest.TestCase):
         import tempfile
         from unittest import mock
         from subsync import ui
-        from test_public_http import http
         with tempfile.TemporaryDirectory() as empty, mock.patch.object(ui, "STATIC", empty):
             for name in ui.FONT_FILES:                     # a source checkout has none: 404, the page falls back
                 self.assertEqual(http(f"{self.b.base}/static/fonts/{name}")[0], 404)
@@ -1607,7 +1537,6 @@ class RoutesTest(unittest.TestCase):
     def test_every_page_asks_a_proxy_in_front_to_pass_it_unchanged(self):
         # R3-10: Cloudflare added its analytics script to a page; with no-transform a proxy passes every page
         # (and the answer after a save) through as it is, whatever its own settings
-        from test_public_http import form, http
         _, _, _, signed_up, token = self.b.sign_up()
         answers = {"signed up": signed_up}
         for path in ("/", "/privacy", f"/u/{token}/configure"):
@@ -1620,14 +1549,12 @@ class RoutesTest(unittest.TestCase):
                 self.assertEqual(headers["Cache-Control"], "no-store, no-transform")
 
     def test_personal_pages_send_noindex(self):
-        from test_public_http import http
         _, _, text, headers, token = self.b.sign_up()
         self.assertEqual(headers.get("X-Robots-Tag"), "noindex")
         self.assertEqual(http(f"{self.b.base}/u/{token}/configure")[2].get("X-Robots-Tag"), "noindex")
 
     def test_not_found_is_a_page_for_browsers_and_the_same_for_any_unknown_address(self):
         from subsync.users import new_token
-        from test_public_http import http
         browser = {"Accept": "text/html,application/xhtml+xml"}
         a = http(f"{self.b.base}/u/{new_token()}/configure", headers=browser)
         b = http(f"{self.b.base}/nothing/here", headers=browser)
@@ -1641,7 +1568,6 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(http(f"{self.b.base}/u/{new_token()}/manifest.json")[1], b"")     # apps: as before
 
     def test_signup_keeps_the_slots_order_whatever_lang_order_says(self):   # R3-7
-        from test_public_http import INSTANCE, PASSWORD, VIEWER, form, http
         import json
         uuid = self.b.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
         body = form(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", password=PASSWORD, lang_ui="1",
@@ -1652,7 +1578,6 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.b.users.open(token)["languages"], ["eng", "rus"])
 
     def test_signup_with_slots_keeps_their_order(self):
-        from test_public_http import INSTANCE, PASSWORD, VIEWER, form, http
         import json
         uuid = self.b.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
         body = form(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", password=PASSWORD, lang_ui="1",
@@ -1663,9 +1588,8 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.b.users.open(token)["languages"], ["rus", "eng"])
 
     def test_more_languages_than_the_limit_are_refused_at_sign_up_and_on_the_settings_page(self):
-        from test_public_http import INSTANCE, PASSWORD, form, http
-        self.b.tearDown()
-        self.b = __import__("test_public_http").Base()
+        self.b.close()
+        self.b = ServerHarness()
         self.b.start(SUBSYNC_MAX_LANGUAGES="2")
         code, body, _ = http(self.b.base + "/signup", form(link=f"{INSTANCE}/stremio/x/y/manifest.json",
                                                            password=PASSWORD, lang_ui="1") + b"&lang=eng&lang=rus&lang=spa")
@@ -1680,7 +1604,6 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.b.users.open(token)["languages"], ["eng"])
 
     def test_a_refresh_to_stored_copies_says_so(self):
-        from test_public_http import PASSWORD, form, http
         _, _, _, _, token = self.b.sign_up()
         record = self.b.users.open(token)
         main = self.b.fake.configs[record["main_uuid"]]["config"]
@@ -1692,7 +1615,6 @@ class RoutesTest(unittest.TestCase):
         self.assertIn("Stored copies only", body.decode())
 
     def test_signup_with_no_chip_chosen_contacts_nothing(self):
-        from test_public_http import INSTANCE, PASSWORD, form, http
         code, body, _ = http(self.b.base + "/signup", form(link=f"{INSTANCE}/stremio/x/y/manifest.json",
                                                            password=PASSWORD, lang_ui="1", lang_order="eng"))
         self.assertEqual(code, 400)
@@ -1700,7 +1622,6 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.b.fake.requests, [])
 
     def test_a_wrong_password_is_marked_at_the_field(self):
-        from test_public_http import INSTANCE, PASSWORD, VIEWER, form, http
         import json
         uuid = self.b.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
         code, body, _ = http(self.b.base + "/signup", form(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json",
@@ -1718,7 +1639,6 @@ class RoutesTest(unittest.TestCase):
         # A port that isn't a number, or an unmatched "[", ended the sign-up and Refresh in a blank
         # error page
         from subsync.signup import NOT_A_LINK
-        from test_public_http import PASSWORD, form, http
         uuid = "1a2b3c4d-1111-2222-3333-444455556666"
         for link in (f"https://aios.test:abc/stremio/{uuid}/ENCRYPTED/manifest.json",
                      "https://[aios.test/stremio/u/Family.TV/manifest.json"):
@@ -1742,7 +1662,6 @@ class RoutesTest(unittest.TestCase):
         # With the optional box left empty, the error about the stored AIOStreams was shown under it and the
         # box marked wrong
         from subsync.aiosconfig import AiosApi
-        from test_public_http import INSTANCE, PASSWORD, form, http
         _, _, _, _, token = self.b.sign_up()
         self.b.service.api_factory = lambda base, timeout: AiosApi("https://127.0.0.1:9", timeout=timeout,
                                                                    max_timeout=timeout, retry_wait_cap=5)
@@ -1766,9 +1685,8 @@ class RoutesTest(unittest.TestCase):
     def test_an_unticked_box_deletes_the_kept_password_even_when_the_refresh_fails(self):
         # After a failed Refresh the password stayed kept, and the page showed the box ticked again with "Stop
         # keeping my password"
-        from test_public_http import PASSWORD, form, http
-        self.b.tearDown()
-        self.b = __import__("test_public_http").Base()
+        self.b.close()
+        self.b = ServerHarness()
         self.b.start(SUBSYNC_RECHECK_HOURS="24")
         _, _, _, _, token = self.b.sign_up(keep_password="on")
         self.assertEqual(self.b.users.open(token)["auto_password"], PASSWORD)
@@ -1782,7 +1700,6 @@ class RoutesTest(unittest.TestCase):
         self.assertNotIn('value="forget-password"', text)
 
     def test_saving_languages_redirects_and_says_so_once(self):
-        from test_public_http import form, http
         _, _, _, _, token = self.b.sign_up()
         url = f"{self.b.base}/u/{token}/configure"
         code, body, headers = http(url, form(action="languages", lang_ui="1", lang="eng", lang_order="eng") +
@@ -1795,21 +1712,18 @@ class RoutesTest(unittest.TestCase):
         self.assertNotIn("Languages saved", http(url + "?done=nonsense")[1].decode())
 
     def test_a_refresh_redirects_so_a_reload_never_sends_the_password_again(self):
-        from test_public_http import PASSWORD, form, http
         _, _, _, _, token = self.b.sign_up()
         url = f"{self.b.base}/u/{token}/configure"
         code, _, headers = http(url, form(action="refresh", password=PASSWORD))
         self.assertEqual((code, headers["Location"]), (303, "configure?done=refreshed"))
 
     def test_a_refresh_with_a_wrong_password_stays_on_the_page_with_the_error_at_the_field(self):
-        from test_public_http import form, http
         _, _, _, _, token = self.b.sign_up()
         code, body, _ = http(f"{self.b.base}/u/{token}/configure", form(action="refresh", password="wrong"))
         self.assertEqual(code, 400)
         self.assertEqual(Tree(body.decode()).all("input", id="refresh")[0].get("aria-invalid"), "true")
 
     def test_a_wrong_password_on_the_delete_step_stays_on_the_delete_step(self):
-        from test_public_http import form, http
         _, _, _, _, token = self.b.sign_up()
         code, body, _ = http(f"{self.b.base}/u/{token}/configure", form(action="delete", password="wrong"))
         self.assertEqual(code, 400)
@@ -1818,9 +1732,10 @@ class RoutesTest(unittest.TestCase):
         self.assertIsNotNone(self.b.users.open(token))
 
     def test_too_many_attempts_says_when(self):
-        from test_public_http import form, http
+        # the hour's attempts from one address, each refused as a form error, then the limit and when to try again
+        # (R3-5,: test_public_http's copy of this scenario, which checked the 400s, merged in here)
         for _ in range(self.b.s.signups_per_hour):
-            http(self.b.base + "/signup", form(link="", password="x"))
+            self.assertEqual(http(self.b.base + "/signup", form(link="", password="x"))[0], 400)
         code, body, _ = http(self.b.base + "/signup", form(link="", password="x"))
         self.assertEqual(code, 429)
         self.assertIn(b"Try again in an hour.", body)
@@ -1830,12 +1745,11 @@ class RoutesTest(unittest.TestCase):
         # them again" followed too many attempts too
         import json
         from subsync import explain
-        from test_public_http import INSTANCE, VIEWER, Base, form, http
         note = explain.PUBLIC_TEXTS["kept_note"]
-        b = Base()               # an instance that shows all four boxes, with eight attempts an hour
+        b = ServerHarness()      # an instance that shows all four boxes, with eight attempts an hour
         b.start(SUBSYNC_EXTRA_SOURCES="osv3", SUBSYNC_RECHECK_HOURS="24", SUBSYNC_USENET="on",
                 SUBSYNC_USENET_LISTINGS_PER_DAY="5", SUBSYNC_SIGNUPS_PER_HOUR="8")
-        self.addCleanup(b.tearDown)
+        self.addCleanup(b.close)
         uuid = b.fake.add(json.loads(json.dumps(VIEWER)), "the-password")
         link, wrong = f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "not-the-password-0435"
         for sent in ({}, {"add_addon": "on"}, {"add_addon": "on", "clean_up": "on", "usenet": "on"},
@@ -1862,13 +1776,12 @@ class RoutesTest(unittest.TestCase):
     def test_a_full_instance_asks_for_nothing_again(self):
         # "enter them again" followed "AIOSubtitles is full…", where a retry only costs a try
         from subsync import explain
-        from test_public_http import Base, form, http
-        full = Base()
+        full = ServerHarness()
         full.start(SUBSYNC_MAX_USERS="0")
         try:
             code, body, _ = http(full.base + "/signup", form(link="x", password="x", languages="English"))
         finally:
-            full.tearDown()
+            full.close()
         self.assertEqual(code, 503)
         problem = Tree(body.decode()).text_of["problem"]
         self.assertIn("AIOSubtitles is full for now.", problem)
@@ -1880,7 +1793,6 @@ class RoutesTest(unittest.TestCase):
         import sqlite3
         from unittest import mock
         from subsync import explain, pages
-        from test_public_http import form, http
         browser = {"Accept": "text/html,application/xhtml+xml"}
         line = explain.PUBLIC_TEXTS["went_wrong"]
         _, _, _, _, token = self.b.sign_up()

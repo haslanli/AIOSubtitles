@@ -2,6 +2,7 @@
 import ast
 import http.client
 import http.server
+import json
 import logging
 import os
 import shutil
@@ -15,8 +16,9 @@ import urllib.request
 from unittest import mock
 
 import imagesubs as I
-from helpers import (BACKLOG, HAVE_CRYPTOGRAPHY, local_lookup, Logs, NEEDS, RangeServer, SOURCE, start_server,
-                     stop_server, TempDir, watch_the_log)
+from helpers import (BACKLOG, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS, PASSWORD, RangeServer, REALDEBRID,
+                     RecheckHarness, ServerHarness, SignupHarness, SOURCE, start_server, stop_server, TempDir, TORBOX,
+                     TORRENTIO, watch_the_log)
 from subsync import net
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -25,16 +27,31 @@ TESTS = os.path.dirname(os.path.abspath(__file__))
 class OnePathSetupTest(unittest.TestCase):
     """Helpers is the one place that puts the package on the import path. Every test module imports it before
     anything from subsync and changes sys.path in no other way, so all of them test the same copy and each one also
-    runs on its own."""
+    runs on its own. What modules share is in helpers, and no module here imports a test module, so none runs
+    another's top level or collects its TestCase classes."""
 
     @staticmethod
-    def modules():
+    def modules(prefix="test_"):
         for name in sorted(os.listdir(TESTS)):
-            if name.startswith("test_") and name.endswith(".py"):
+            if name.startswith(prefix) and name.endswith(".py"):
                 with open(os.path.join(TESTS, name), encoding="utf-8") as f:
                     yield name, ast.parse(f.read())
 
-    def test_every_test_module_imports_helpers_before_the_package(self):
+    @staticmethod
+    def imported_test_modules(tree):
+        """The test modules a module imports, wherever it does (in a function too, or through __import__)."""
+        names = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names += [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names += [node.module or ""] + [f"{node.module or ''}.{a.name}" for a in node.names]
+            elif isinstance(node, ast.Call) and ast.unparse(node.func) in ("__import__", "importlib.import_module") \
+                    and node.args and isinstance(node.args[0], ast.Constant):
+                names.append(str(node.args[0].value))
+        return [n for n in names if n.split(".")[-1].startswith("test_")]
+
+    def test_every_test_module_imports_helpers_first_and_no_test_module(self):
         for name, tree in self.modules():
             with self.subTest(module=name):
                 imported = []                   # the top-level imports' first names, in order
@@ -46,6 +63,9 @@ class OnePathSetupTest(unittest.TestCase):
                 self.assertIn("helpers", imported)
                 if "subsync" in imported:
                     self.assertLess(imported.index("helpers"), imported.index("subsync"))
+        for name, tree in self.modules(prefix=""):          # helpers and imagesubs too
+            with self.subTest(module=name, imports="test modules"):
+                self.assertEqual(self.imported_test_modules(tree), [])
 
     def test_no_test_module_changes_the_import_path_itself(self):
         for name, tree in self.modules():
@@ -257,15 +277,45 @@ class LogsTest(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
     def test_each_public_harness_leaves_the_root_logger_as_it_found_it(self):
-        import test_public_http
-        import test_recheck
-        import test_signup
-        for case in (test_public_http.PublicHttpTest("test_user_manifest"),
-                     test_recheck.RecheckTest("test_off_with_zero_hours"),
-                     test_signup.SignupTest("test_real_debrid_with_torbox_warns_and_leaves_it_out")):
-            with self.subTest(harness=type(case).__module__):
+        # one test on each harness, a TestCase that takes it as its first base as its modules' tests do, each doing what
+        # test_public_http's test_user_manifest, test_recheck's test_off_with_zero_hours and test_signup's
+        # test_real_debrid_with_torbox_warns_and_leaves_it_out do (the harnesses are helpers', so no test
+        # module is imported to run them)
+        from helpers import http as fetch          # (`http` is the standard library's package here)
+        from subsync import explain
+
+        class Server(ServerHarness, unittest.TestCase):
+            def setUp(case):
+                case.start()
+
+            def test(case):
+                _, _, _, _, token = case.sign_up()
+                code, body, _ = fetch(f"{case.base}/u/{token}/manifest.json")
+                m = json.loads(body)
+                case.assertEqual(code, 200)
+                case.assertEqual((m["id"], m["name"], m["resources"]),
+                                 ("org.aiosubtitles.public", "AIOSubtitles", ["subtitles"]))
+
+        class Recheck(RecheckHarness, unittest.TestCase):
+            def test(case):
+                _, token = case.sign_up()
+                before = len(case.fake.requests)
+                case.assertFalse(case.checker(SUBSYNC_RECHECK_HOURS="0").maybe_start(token))
+                case.assertEqual(len(case.fake.requests), before)
+
+        class Signup(SignupHarness, unittest.TestCase):
+            def test(case):
+                uuid = case.fake.add({"services": [dict(TORBOX), dict(REALDEBRID)], "presets": [dict(TORRENTIO)]},
+                                     PASSWORD)
+                fields = {"link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "password": PASSWORD,
+                          "languages": "English", "add_addon": "on"}
+                made = case.signup.signup(case.s, case.users, fields, api_factory=case.api, timeout=10)
+                case.assertEqual(made.warning, explain.PUBLIC_REAL_DEBRID_WARNING)
+
+        for kind, harness in ((Server, ServerHarness), (Recheck, RecheckHarness), (Signup, SignupHarness)):
+            with self.subTest(harness=harness.__name__):
                 result = unittest.TestResult()
-                case.run(result)
+                kind("test").run(result)
                 self.assertEqual((result.testsRun, result.errors, result.failures), (1, [], []))
                 self.left_as_found()
 

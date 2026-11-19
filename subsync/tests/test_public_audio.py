@@ -74,8 +74,13 @@ class LaneTest(Base):
         for route, expect in (("on", True), ("off", False)):
             with self.subTest(route=route):
                 w = self.worker(settings=self.settings(SUBSYNC_AUDIO_ROUTE=route))
+                before = set(threading.enumerate())
                 w.start()
                 self.assertEqual(getattr(w, "audio_worker", None) is not None and w.audio_worker.is_alive(), expect)
+                if not expect:      # test_public's copy of this case, moved here (R3-4)
+                    started = set(threading.enumerate()) - before    # the threads: no leftover's name hides one
+                    self.assertNotIn("subsync-audio", {t.name for t in started})
+                    self.assertIsNone(getattr(w, "audio_worker", None))
 
     def test_an_audio_sync_takes_an_audio_place_and_other_files_go_on(self):
         """Two places, one of them for audio: two people's picks run one after the other, a third person's ordinary

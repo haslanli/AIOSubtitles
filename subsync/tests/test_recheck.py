@@ -9,55 +9,14 @@ import time
 import unittest
 from unittest import mock
 
-from helpers import files_bytes, HAVE_CRYPTOGRAPHY, INSTANCE, NEEDS, PASSWORD, Clock, PublicParts  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
+from helpers import (files_bytes, HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, NEEDS, OTHER, PASSWORD, REALDEBRID,  # noqa: E402
+                     RecheckHarness, TORBOX)
 
-OTHER = "https://other-aios.test"
-TORBOX = {"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}
-REALDEBRID = {"id": "realdebrid", "enabled": True, "credentials": {"apiKey": "rd-key"}}
-TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
 COMET = {"type": "comet", "instanceId": "cmt", "enabled": True, "options": {"name": "Comet"}}
-HOUR = 3600
-
-
-class Base(PublicParts, unittest.TestCase):
-    def setUp(self):
-        from subsync import signup
-        self.signup = signup
-        self.clock = Clock()
-        self.start_public(clock=self.clock)
-        self.dead = False      # True: every AIOStreams answers nothing (a closed port)
-        self.changed = []
-
-    def tearDown(self):
-        self.stop_public()
-
-    def api(self, base, timeout):
-        from subsync.aiosconfig import AiosApi
-        url = "http://127.0.0.1:9" if self.dead else base.replace(INSTANCE, self.fake.url).replace(OTHER, self.fake.url)
-        return AiosApi(url, timeout=timeout, max_timeout=timeout, retry_wait_cap=5)
-
-    def checker(self, **env):
-        from subsync.recheck import Checker
-        s = Settings(dict(self.env, **env))
-        return Checker(s, self.users, on_change=self.changed.append, api_factory=self.api, clock=self.clock, timeout=5)
-
-    def sign_up(self, keep=False, presets=(TORRENTIO,)):
-        viewer = {"services": [dict(TORBOX)], "presets": [dict(p) for p in presets]}
-        uuid = self.fake.add(viewer, PASSWORD)
-        form = {"link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "password": PASSWORD,
-                "languages": "English", "add_addon": "on"}
-        if keep:
-            form["keep_password"] = "on"
-        result = self.signup.signup(self.s, self.users, form, api_factory=self.api, timeout=5)
-        return uuid, result.token
-
-    def record(self, token):
-        return self.users.open(token)
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class RecheckTest(Base):
+class RecheckTest(RecheckHarness, unittest.TestCase):
     # -- the check without a kept password ------------------------------------------------------------------------
     def test_a_new_record_says_when_its_config_was_copied(self):
         uuid, token = self.sign_up()
@@ -437,7 +396,7 @@ class RecheckTest(Base):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
-class RefreshTest(Base):
+class RefreshTest(RecheckHarness, unittest.TestCase):
     """Refresh after the check found something: a new sync config when it is gone, a new config link, the kept
     password ticked or unticked."""
 

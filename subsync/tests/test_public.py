@@ -641,17 +641,6 @@ class WorkerHooksTest(unittest.TestCase):
         finally:
             srv.close()
 
-    def test_no_audio_lane_in_public_mode_while_the_audio_route_is_off(self):
-        # With the route on, public mode has an audio lane (test_public_audio.LaneTest has both)
-        import threading
-        from subsync.worker import Safety, Worker
-        w = Worker(self.settings(SUBSYNC_PUBLIC="on", SUBSYNC_AUDIO_ROUTE="off"), self.store, ListingAios(), Safety())
-        self.workers.append(w)
-        before = {t.name for t in threading.enumerate()}
-        w.start()
-        self.assertNotIn("subsync-audio", {t.name for t in threading.enumerate()} - before)
-        self.assertIsNone(getattr(w, "audio_worker", None))   # the worker's own: no leftover thread's name hides it
-
     def test_stop_ends_the_loop(self):
         from subsync.worker import Safety, Worker
         w = Worker(self.settings(SUBSYNC_PUBLIC="on"), self.store, ListingAios(), Safety())

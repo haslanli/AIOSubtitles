@@ -3,7 +3,6 @@ stop without waiting for a read that hangs, the decoder's pipe on a failed read,
 Cues read with the hash's last 64 KiB, cue points kept compactly and at most MAX_CUE_POINTS, a plausible runtime, and
 the clusters an audio window needs. No network: files are served from memory."""
 import math
-import os
 import struct
 import subprocess
 import sys
@@ -15,58 +14,12 @@ import zlib
 from array import array
 from unittest import mock
 
-from helpers import FIXTURES, have  # noqa: E402
+from helpers import el, fixture, have, matroska, Memory, Opener, text_track  # noqa: E402
 from subsync import mkv  # noqa: E402
 from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash  # noqa: E402
 from subsync.mp4 import Mp4Index, open_index  # noqa: E402
 from subsync.reader import CapReached, IndexTooLarge, RangeReader, ReadFailed  # noqa: E402
 from subsync.worker import audio_facts  # noqa: E402
-
-
-def fixture(name):
-    with open(os.path.join(FIXTURES, name), "rb") as f:
-        return f.read()
-
-
-class Memory:
-    """A RangeReader stand-in over bytes in memory: records each read (start, length)."""
-
-    def __init__(self, data):
-        self.b, self.size, self.reads = bytes(data), len(data), []
-
-    def get(self, start, length):
-        self.reads.append((start, length))
-        return self.b[start:start + length]
-
-
-# -- a made-up Matroska file -------------------------------------------------------------------------------------------
-def el(eid, payload):
-    """An EBML element: its id (hex), an 8-byte size, its payload."""
-    return bytes.fromhex(eid) + b"\x01" + len(payload).to_bytes(7, "big") + payload
-
-
-def text_track(number=1):
-    return el("AE", el("D7", bytes([number])) + el("83", b"\x11") + el("86", b"S_TEXT/UTF8"))
-
-
-def matroska(info=None, tracks=None, pad_to=None, seek_tracks=False):
-    """EBML header, a Segment of unknown size with an optional SeekHead (to Tracks), Info, a Void that puts Tracks at
-    byte `pad_to`, Tracks, one Cluster."""
-    ebml = el("1A45DFA3", el("4282", b"matroska"))
-    seg = bytes.fromhex("18538067") + bytes.fromhex("01FFFFFFFFFFFFFF")
-    seg_data = len(ebml) + len(seg)
-    info = el("1549A966", el("2AD7B1", (1_000_000).to_bytes(4, "big")) + el("4489", struct.pack(">d", 90_000.0))) \
-        if info is None else info
-    tracks = el("1654AE6B", text_track()) if tracks is None else tracks
-
-    def seekhead(at):
-        return el("114D9B74", el("4DBB", el("53AB", bytes.fromhex("1654AE6B")) + el("53AC", at.to_bytes(8, "big"))))
-    seek = seekhead(0) if seek_tracks else b""                     # the same length wherever it points
-    before = seg_data + len(seek) + len(info)
-    void = b"" if pad_to is None else el("EC", bytes(pad_to - before - 9))
-    if seek_tracks:
-        seek = seekhead(before + len(void) - seg_data)
-    return ebml + seg + seek + info + void + tracks + el("1F43B675", el("E7", b"\x00"))
 
 
 class InflateLimitTest(unittest.TestCase):
@@ -145,46 +98,6 @@ class HungLineReadTest(unittest.TestCase):
             return item, f"line {item}"
         with self.assertRaises(Refused):
             mkv.read_lines(range(4), one, reads)
-
-
-class Response:
-    """A 206 answer from memory; with `reset_after`, the body breaks off with a reset after that many bytes."""
-    status = 206
-
-    def __init__(self, body, start, end, size, reset_after=None):
-        self.body, self.pos, self.reset_after = body, 0, reset_after
-        self.headers = {"Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(len(body))}
-
-    def read(self, n=-1):
-        if self.reset_after is not None and self.pos >= self.reset_after:
-            raise ConnectionResetError(54, "Connection reset by peer")
-        n = len(self.body) - self.pos if n is None or n < 0 else n
-        if self.reset_after is not None:
-            n = min(n, self.reset_after - self.pos)
-        chunk = self.body[self.pos:self.pos + n]
-        self.pos += len(chunk)
-        return chunk
-
-    def close(self):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        self.close()
-
-
-class Opener:
-    """realdebrid.urlopen's stand-in: serves a file's bytes from memory; `reset_after` arms a mid-body reset."""
-
-    def __init__(self, data):
-        self.data, self.reset_after = data, None
-
-    def __call__(self, request, timeout):
-        a, _, b = request.get_header("Range")[6:].partition("-")
-        start, end = int(a), min(int(b), len(self.data) - 1)
-        return Response(self.data[start:end + 1], start, end, len(self.data), self.reset_after)
 
 
 class MidWindowFaultTest(unittest.TestCase):

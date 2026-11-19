@@ -4,9 +4,8 @@ release group, source tags written with a hyphen, "Non-Forced" subtitles, and AI
 subtitles last when they are not skipped."""
 import unittest
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+from helpers import SourcesHarness  # (first: it puts the package on the import path)
 from subsync import choose, extra  # noqa: E402
-from test_builtin_sources import SourcesBase  # noqa: E402
 
 
 def cand(cid, release, **kw):
@@ -58,7 +57,7 @@ class VideoExtensionTest(unittest.TestCase):
         self.assertEqual(choose.best_guess(cands, "Movie.2020.1080p.WEB-DL.DDP5.1.H.264-NTb.m4v")["id"], "own")
 
 
-class TheSubtitleDBNameTest(SourcesBase):
+class TheSubtitleDBNameTest(SourcesHarness, unittest.TestCase):
     def test_the_release_name_asked_has_no_video_extension(self):
         for ext in ("m4v", "wmv", "mkv"):
             self.fake.calls.clear()

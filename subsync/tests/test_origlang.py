@@ -3,15 +3,13 @@ anime ids; kept per title in the store, shared, never holding a job. A local sta
 no network."""
 import json
 import logging
-import re
-import threading
 import time
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import Clock, closed_after, start_server, stop_server, TempDir  # noqa: E402
+from helpers import Clock, closed_after, LookupServices, start_server, stop_server, TempDir  # noqa: E402
 from subsync import origlang  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
@@ -30,96 +28,6 @@ def binding(item, iso1=None, iso2=None, iso3=None, ietf=None):
     return b
 
 
-class Services:
-    """TMDB at /tmdb, Wikidata's query service at /sparql, Kitsu at /kitsu, AniList at /anilist."""
-
-    def __init__(self):
-        self.calls, self.lock = [], threading.Lock()
-        self.find, self.details, self.wikidata, self.kitsu, self.anilist = {}, {}, {}, {}, {}
-        self.status = {}            # service -> (code, headers) to answer with instead
-        self.delay = {}             # service -> seconds
-        self.active, self.most_active = {}, {}
-        outer = self
-
-        class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
-                pass
-
-            def answer(self, code, obj=None, headers=()):
-                body = json.dumps(obj if obj is not None else {}).encode()
-                self.send_response(code)
-                self.send_header("content-type", "application/json")
-                for k, v in headers:
-                    self.send_header(k, v)
-                self.send_header("content-length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def handle_any(self, method):
-                url = urllib.parse.urlsplit(self.path)
-                n = int(self.headers.get("content-length") or 0)
-                body = self.rfile.read(n).decode() if n else ""
-                service = url.path.split("/")[1]
-                with outer.lock:
-                    outer.calls.append({"service": service, "method": method, "path": url.path, "query": url.query,
-                                        "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
-                    outer.active[service] = outer.active.get(service, 0) + 1
-                    outer.most_active[service] = max(outer.most_active.get(service, 0), outer.active[service])
-                try:
-                    if outer.delay.get(service):
-                        time.sleep(outer.delay[service])
-                    if service in outer.status:
-                        code, headers = outer.status[service]
-                        return self.answer(code, {"status_message": "made up"}, headers)
-                    q = urllib.parse.parse_qs(url.query)
-                    if service == "tmdb":
-                        parts = url.path.split("/")
-                        if parts[2] == "find":
-                            return self.answer(200, outer.find.get(parts[3], {"movie_results": [], "tv_results": []}))
-                        got = outer.details.get((parts[2], parts[3]))
-                        return self.answer(200, got) if got else self.answer(404, {"status_code": 34})
-                    if service == "sparql":
-                        tt = re.search(r'wdt:P345 "(tt\d+)"', q["query"][0]).group(1)
-                        return self.answer(200, {"head": {"vars": ["lang"]},
-                                                 "results": {"bindings": outer.wikidata.get(tt, [])}})
-                    if service == "kitsu":
-                        n = url.path.split("/")[3]
-                        if n not in outer.kitsu:
-                            return self.answer(404, {"errors": [{"title": "Record not found"}]})
-                        mal = outer.kitsu[n]
-                        inc = [{"type": "mappings", "id": "1", "attributes": {"externalSite": "anidb",
-                                                                               "externalId": "1"}}]
-                        if mal:
-                            inc.append({"type": "mappings", "id": "2", "attributes": {
-                                "externalSite": "myanimelist/anime", "externalId": str(mal)}})
-                        return self.answer(200, {"data": {"id": n, "type": "anime"}, "included": inc})
-                    if service == "anilist":
-                        mal = json.loads(body)["variables"]["id"]
-                        if mal not in outer.anilist:
-                            return self.answer(404, {"data": {"Media": None}, "errors": [{"message": "Not Found."}]})
-                        return self.answer(200, {"data": {"Media": {"countryOfOrigin": outer.anilist[mal]}}})
-                    return self.answer(404)
-                finally:
-                    with outer.lock:
-                        outer.active[service] -= 1
-
-            def do_GET(self):
-                self.handle_any("GET")
-
-            def do_POST(self):
-                self.handle_any("POST")
-
-        self.srv = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
-        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
-
-    def of(self, service):
-        with self.lock:
-            return [c for c in self.calls if c["service"] == service]
-
-    def close(self):
-        stop_server(self.srv)
-
-
 class Base(unittest.TestCase):
     key = KEY
 
@@ -127,7 +35,7 @@ class Base(unittest.TestCase):
         td = TempDir()
         self.tmp = td.__enter__()
         self.addCleanup(td.__exit__, None, None, None)
-        self.srv = Services()
+        self.srv = LookupServices()
         self.addCleanup(self.srv.close)
         self.clock = Clock()
         self.store = closed_after(self, Store(self.tmp, clock=self.clock))

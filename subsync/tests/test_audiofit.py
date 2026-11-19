@@ -13,7 +13,8 @@ from unittest import mock
 
 import numpy as np
 
-from helpers import AUDIO_BETTER, FIXTURES, RangeServer, rhythm, timeline_fit, truth_fit  # noqa: E402
+from helpers import (AUDIO_BETTER, FIXTURES, matroska, Memory, RangeServer, rhythm, timeline_fit,  # noqa: E402
+                     truth_fit)
 from subsync import audiofit  # noqa: E402
 from subsync.audiofit import DT, OMAX, AudioFit  # noqa: E402
 from subsync.mp4 import NoAudioThere, NotMp4, open_index  # noqa: E402
@@ -163,7 +164,6 @@ class SeekIndexTest(unittest.TestCase):
         self.assertLessEqual(idx.audio_bytes, fit.budget)
 
     def test_a_real_mkv_without_cues_has_no_seek_index(self):
-        from test_mkv import Memory, matroska
         from subsync.mkv import MkvIndex
         index = MkvIndex(Memory(matroska())).read_head().read_cues()
         fit = AudioFit(index, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=LoudVad(), budget=10 ** 9)

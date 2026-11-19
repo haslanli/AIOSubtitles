@@ -8,9 +8,10 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import HAVE_CRYPTOGRAPHY, NEEDS, start_server, stop_server  # (first: it puts the package on the path)
+# helpers first: it puts the package on the path
+from helpers import (form, HAVE_CRYPTOGRAPHY, http, LINK, NEEDS, RECORD, ServerHarness, settings, start_server,
+                     stop_server, USAGE)
 from subsync import explain, origlang, pages, ui  # noqa: E402
-from test_public_ui import LINK, RECORD, USAGE, settings  # noqa: E402
 
 PERSON_KEY = "fedcba9876543210fedcba9876543210"
 
@@ -202,18 +203,15 @@ class PersonsKeyTest(unittest.TestCase):
     """The settings page's "tmdb-key" and "tmdb-key-remove" actions, end to end through public mode's server."""
 
     def setUp(self):
-        import test_public_http as harness
-        self.harness = harness
         self.tmdb = FakeTmdb()
         self.addCleanup(self.tmdb.close)
-        self.case = harness.Base()
+        self.case = ServerHarness()
         self.case.start(SUBSYNC_TMDB_PERSONAL="on", SUBSYNC_TMDB_URL=self.tmdb.url, SUBSYNC_ORIGINAL_LANGUAGE="on",
                         SUBSYNC_WIKIDATA_URL="http://127.0.0.1:9/sparql")
-        self.addCleanup(self.case.tearDown)
+        self.addCleanup(self.case.close)
 
     def post(self, token, **fields):
-        h = self.harness
-        return h.http(f"{self.case.base}/u/{token}/configure", h.form(**fields))
+        return http(f"{self.case.base}/u/{token}/configure", form(**fields))
 
     def test_saved_when_tmdb_takes_it_used_and_removed(self):
         c = self.case
@@ -228,7 +226,7 @@ class PersonsKeyTest(unittest.TestCase):
         self.assertEqual(c.pool.app(token).s.tmdb_key, PERSON_KEY)       # their lookups use it from now on
         raw = c.users.db.execute("SELECT blob FROM users").fetchone()[0]
         self.assertNotIn(PERSON_KEY.encode(), bytes(raw))                 # encrypted in the record
-        code, body, _ = self.harness.http(f"{c.base}/u/{token}/configure")
+        code, body, _ = http(f"{c.base}/u/{token}/configure")
         self.assertNotIn(PERSON_KEY, body.decode())
         code, _, headers = self.post(token, action="tmdb-key-remove")
         self.assertEqual((code, headers["Location"]), (303, "configure?done=tmdb-key-removed"))

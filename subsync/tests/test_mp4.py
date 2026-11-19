@@ -8,11 +8,10 @@ import time
 import unittest
 from unittest import mock
 
-from helpers import have  # noqa: E402
+from helpers import fixture, have, Memory, Opener  # noqa: E402
 from subsync import mp4  # noqa: E402
 from subsync.mp4 import NotMp4, open_index  # noqa: E402
 from subsync.reader import IndexTooLarge, RangeReader  # noqa: E402
-from test_mkv import Memory, Opener, fixture  # noqa: E402
 
 CONTAINERS = (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts")
 

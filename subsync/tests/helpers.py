@@ -1,19 +1,33 @@
-"""Test helpers: a local HTTP range server (stands in for AIOS's proxy), with switchable faults, and the stand-ins and
-data the test modules share.
+"""Test helpers: a local HTTP range server (stands in for AIOS's proxy), with switchable faults, and the stand-ins,
+harnesses and data the test modules share.
 
 Every test module imports helpers before anything from subsync: this is the one place that puts the package on the
 import path (the source next to these tests, ahead of any other copy), so all modules test the same copy and each one
 also runs on its own (python3 -m unittest test_x from this folder). The image build is the exception: it tests the
-image's own copy (see IMAGE_BUILD). It is also the one place that keeps the whole run on this machine (local_lookup)."""
+image's own copy (see IMAGE_BUILD). It is also the one place that keeps the whole run on this machine (local_lookup).
+
+What more than one module uses lives here, never in a test module: no test module imports another, so none
+runs another's top level or collects its TestCase classes. A harness here is a plain class, never a TestCase: a TestCase
+takes it as its first base and its tearDown closes it; ServerHarness can also be held as a plain object."""
+import html.parser
+import io
+import json
 import logging
 import os
 import random
+import re
 import shutil
 import socket
+import struct
 import sys
 import tempfile
 import threading
 import time
+import types
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -517,7 +531,7 @@ class Logs(logging.Handler):
 
 
 class PublicParts:
-    """What each public-mode harness starts from (test_public_http, test_recheck, test_signup): a data folder, public
+    """What each public-mode harness starts from (ServerHarness, RecheckHarness, SignupHarness): a data folder, public
     mode's settings (`env` added to them), the people's records, a stand-in AIOStreams that answers for INSTANCE through
     api(), and the log lines (Logs). start_public() makes them; stop_public() closes them and puts the logging back."""
 
@@ -542,6 +556,214 @@ class PublicParts:
         self.fake.close()
         self.users.close()
         self.tmp.__exit__(None, None, None)
+
+
+class SignupHarness(PublicParts):
+    """The sign-up's harness: public mode's parts, `public_env` added to their settings, and the signup module
+    (`signup`). As a TestCase's first base: setUp makes them, tearDown closes them."""
+
+    public_env = {}
+
+    def setUp(self):
+        from subsync import signup
+        self.signup = signup
+        self.start_public(**self.public_env)
+
+    def tearDown(self):
+        self.stop_public()
+
+
+# -- the daily check: its harness, and the parts of a person's config it reads -----------------------------------------
+OTHER = "https://other-aios.test"     # another AIOStreams, answered by the same stand-in (RecheckHarness.api)
+TORBOX = {"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}
+REALDEBRID = {"id": "realdebrid", "enabled": True, "credentials": {"apiKey": "rd-key"}}
+TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
+HOUR = 3600
+
+
+class RecheckHarness(PublicParts):
+    """The daily check's harness: public mode's parts on a clock the test moves (`clock`), the signup module, each
+    change the check reports (`changed`), and checker(); with `dead` set, every AIOStreams answers nothing (a closed
+    port). As a TestCase's first base: setUp makes it, tearDown closes it."""
+
+    def setUp(self):
+        from subsync import signup
+        self.signup = signup
+        self.clock = Clock()
+        self.start_public(clock=self.clock)
+        self.dead = False      # True: every AIOStreams answers nothing (a closed port)
+        self.changed = []
+
+    def tearDown(self):
+        self.stop_public()
+
+    def api(self, base, timeout):
+        from subsync.aiosconfig import AiosApi
+        url = "http://127.0.0.1:9" if self.dead else base.replace(INSTANCE, self.fake.url).replace(OTHER, self.fake.url)
+        return AiosApi(url, timeout=timeout, max_timeout=timeout, retry_wait_cap=5)
+
+    def checker(self, **env):
+        from subsync.recheck import Checker
+        s = Settings(dict(self.env, **env))
+        return Checker(s, self.users, on_change=self.changed.append, api_factory=self.api, clock=self.clock, timeout=5)
+
+    def sign_up(self, keep=False, presets=(TORRENTIO,)):
+        viewer = {"services": [dict(TORBOX)], "presets": [dict(p) for p in presets]}
+        uuid = self.fake.add(viewer, PASSWORD)
+        fields = {"link": f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "password": PASSWORD,
+                  "languages": "English", "add_addon": "on"}
+        if keep:
+            fields["keep_password"] = "on"
+        made = self.signup.signup(self.s, self.users, fields, api_factory=self.api, timeout=5)
+        return uuid, made.token
+
+    def record(self, token):
+        return self.users.open(token)
+
+
+# -- public mode over HTTP: a person's config, one request, and the service on this machine -----------------------------
+VIEWER = {"services": [{"id": "torbox", "enabled": True, "credentials": {"apiKey": "tb-key"}}],
+          "presets": [{"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}},
+                      {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
+                       "options": {"name": "OpenSubtitles V3+", "resources": ["subtitles"]}}]}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is the answer (its status and Location), never followed."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def http(url, data=None, headers=None, method=None):
+    """One request: (status, body, headers), an error answer's too."""
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(req, timeout=15) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        with e:                                  # an error answer is closed once read, as any other
+            return e.code, e.read(), dict(e.headers)
+
+
+def form(**fields):
+    """`fields` as a form posts them."""
+    return urllib.parse.urlencode(fields).encode()
+
+
+class ServerHarness(PublicParts):
+    """A public service on this machine, with a stand-in AIOStreams; workers are not started (jobs stay queued). start()
+    makes it, `env` added to its settings; close() closes everything start() made, the store too. As a TestCase's first
+    base, the test starts it (in setUp or in the test itself) and tearDown closes it; a TestCase of another kind, or a
+    test that needs a second one, holds it as a plain object and closes it itself."""
+
+    def start(self, **env):
+        from subsync.public import Pool, PublicService, serve_public
+        from subsync.store import Store
+        self.start_public(**dict({"SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
+                                  "SUBSYNC_RECHECK_HOURS": "0"}, **env))
+        self.store = Store(self.dir)
+        self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
+        self.service = PublicService(self.s, self.env, self.store, self.users, self.pool, api_factory=self.api)
+        self.server = start_server(serve_public(self.service, 0, host="127.0.0.1"))
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        # everything start made is closed here, the store too, not by cleanups: a plain object has none
+        stop_server(self.server)
+        self.pool.close()
+        self.store.close()
+        self.stop_public()
+
+    def tearDown(self):
+        self.close()
+
+    def sign_up(self, **extra):
+        """A sign-up with VIEWER's config and `extra` fields: (its config id, the answer's status, page and headers, the
+        person's token or None)."""
+        uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
+        fields = dict(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", password=PASSWORD,
+                      languages="English", add_addon="on")
+        fields.update(extra)
+        code, body, headers = http(self.base + "/signup", form(**fields))
+        token = None
+        text = body.decode()
+        if code == 200:
+            start = text.index("https://subs.test/u/") + len("https://subs.test/u/")
+            token = text[start:start + 43]
+        return uuid, code, text, headers, token
+
+
+# -- public mode's pages: an instance's settings, a person's link, record and day's use, a sign-up's result, and the
+#    elements and text of a page ----------------------------------------------------------------------------------------
+BASE = "https://subs.test"                # the instance's address (SUBSYNC_PUBLIC_BASE)
+TOKEN = "T" * 43                          # a person's token
+LINK = f"{BASE}/u/{TOKEN}/manifest.json"  # their addon's link
+RECORD = {"languages": ["eng", "spa"], "synced_at": 0}
+USAGE = {"files": 3, "bytes": 351 * 1024}
+
+
+def settings(**env):
+    return Settings(dict({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY, "SUBSYNC_PUBLIC_BASE": BASE}, **env))
+
+
+class Tree(html.parser.HTMLParser):
+    """Every element with its attributes, the text inside each id'd element, and the page's text."""
+
+    def __init__(self, text):
+        super().__init__(convert_charrefs=True)
+        self.elements, self.text_of, self.open_ids, self.words = [], {}, [], []
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        self.elements.append((tag, a))
+        if "id" in a and tag not in ("input", "br", "img", "meta", "link"):
+            self.open_ids.append((tag, a["id"]))
+            self.text_of[a["id"]] = ""
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.open_ids) - 1, -1, -1):
+            if self.open_ids[i][0] == tag:
+                del self.open_ids[i]
+                break
+
+    def handle_data(self, data):
+        self.words.append(data)
+        for _, i in self.open_ids:
+            self.text_of[i] += data
+
+    def all(self, tag, **match):
+        return [a for t, a in self.elements if t == tag and all(a.get(k) == v for k, v in match.items())]
+
+    def text(self):
+        return re.sub(r"\s+", " ", " ".join(self.words))
+
+
+def change_lines():
+    """The lines aiosconfig.viewer_change writes for a sign-up, as the signed-up page gets them: AIOSubtitles added with
+    the subtitle addons it now searches itself removed, then its address updated, then moved before another subtitle
+    source (a shortened stand-in kept the real lines out of the approved-words test)."""
+    from subsync.aiosconfig import viewer_change
+    ours = {"type": "custom", "instanceId": "a", "enabled": True,
+            "options": {"name": "AIOSubtitles", "manifestUrl": LINK, "resources": ["subtitles"]}}
+    twins = [{"type": "subdl", "instanceId": "d", "enabled": True, "options": {"name": "SubDL"}},
+             {"type": "opensubtitles", "instanceId": "o", "enabled": True, "options": {"name": "OpenSubtitles"}}]
+    old = dict(ours, options=dict(ours["options"], manifestUrl=f"{BASE}/u/{'O' * 43}/manifest.json"))
+    other = {"type": "subhero", "instanceId": "h", "enabled": True, "options": {"name": "SubHero"}}
+    lines = []
+    for presets, clean_up in ((twins, ("subdl", "opensubtitles")), ([old], ()), ([other, ours], ())):
+        lines += viewer_change({"presets": presets}, LINK, name="AIOSubtitles", clean_up=clean_up)[1]
+    return lines
+
+
+def result(**kw):
+    # the fields of signup.SignupResult, without importing signup (it needs cryptography), so the page tests run anywhere
+    base = dict(token=TOKEN, manifest_url=LINK, changes=change_lines()[:2], warning=None,
+                added=True, manual=False, languages=["eng", "spa"], store_only=False, to_store_only=False,
+                usenet=False, usenet_why=None, sync_made=True)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
 
 
 # Ten lines of everyday dialogue per language, written for these tests (the language check)
@@ -879,3 +1101,435 @@ class Counts:
 
     def stop(self):
         self.stopped_ = True
+
+
+# -- files from memory: a fixture's bytes, a reader and urlopen over bytes, a made-up Matroska file --------------------
+def fixture(name):
+    """The bytes of fixtures/<name>."""
+    with open(os.path.join(FIXTURES, name), "rb") as f:
+        return f.read()
+
+
+class Memory:
+    """A RangeReader stand-in over bytes in memory: records each read (start, length)."""
+
+    def __init__(self, data):
+        self.b, self.size, self.reads = bytes(data), len(data), []
+
+    def get(self, start, length):
+        self.reads.append((start, length))
+        return self.b[start:start + length]
+
+
+def el(eid, payload):
+    """An EBML element: its id (hex), an 8-byte size, its payload."""
+    return bytes.fromhex(eid) + b"\x01" + len(payload).to_bytes(7, "big") + payload
+
+
+def text_track(number=1):
+    return el("AE", el("D7", bytes([number])) + el("83", b"\x11") + el("86", b"S_TEXT/UTF8"))
+
+
+def matroska(info=None, tracks=None, pad_to=None, seek_tracks=False):
+    """EBML header, a Segment of unknown size with an optional SeekHead (to Tracks), Info, a Void that puts Tracks at
+    byte `pad_to`, Tracks, one Cluster."""
+    ebml = el("1A45DFA3", el("4282", b"matroska"))
+    seg = bytes.fromhex("18538067") + bytes.fromhex("01FFFFFFFFFFFFFF")
+    seg_data = len(ebml) + len(seg)
+    info = el("1549A966", el("2AD7B1", (1_000_000).to_bytes(4, "big")) + el("4489", struct.pack(">d", 90_000.0))) \
+        if info is None else info
+    tracks = el("1654AE6B", text_track()) if tracks is None else tracks
+
+    def seekhead(at):
+        return el("114D9B74", el("4DBB", el("53AB", bytes.fromhex("1654AE6B")) + el("53AC", at.to_bytes(8, "big"))))
+    seek = seekhead(0) if seek_tracks else b""                     # the same length wherever it points
+    before = seg_data + len(seek) + len(info)
+    void = b"" if pad_to is None else el("EC", bytes(pad_to - before - 9))
+    if seek_tracks:
+        seek = seekhead(before + len(void) - seg_data)
+    return ebml + seg + seek + info + void + tracks + el("1F43B675", el("E7", b"\x00"))
+
+
+class Response:
+    """A 206 answer from memory; with `reset_after`, the body breaks off with a reset after that many bytes."""
+    status = 206
+
+    def __init__(self, body, start, end, size, reset_after=None):
+        self.body, self.pos, self.reset_after = body, 0, reset_after
+        self.headers = {"Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(len(body))}
+
+    def read(self, n=-1):
+        if self.reset_after is not None and self.pos >= self.reset_after:
+            raise ConnectionResetError(54, "Connection reset by peer")
+        n = len(self.body) - self.pos if n is None or n < 0 else n
+        if self.reset_after is not None:
+            n = min(n, self.reset_after - self.pos)
+        chunk = self.body[self.pos:self.pos + n]
+        self.pos += len(chunk)
+        return chunk
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+class Opener:
+    """realdebrid.urlopen's stand-in: serves a file's bytes from memory; `reset_after` arms a mid-body reset."""
+
+    def __init__(self, data):
+        self.data, self.reset_after = data, None
+
+    def __call__(self, request, timeout):
+        a, _, b = request.get_header("Range")[6:].partition("-")
+        start, end = int(a), min(int(b), len(self.data) - 1)
+        return Response(self.data[start:end + 1], start, end, len(self.data), self.reset_after)
+
+
+# -- a file's link through a debrid service: a playback address that redirects -----------------------------------------
+class DebridLink:
+    """/link/tiny.mkv redirects (302) to /file/<token>/tiny.mkv, which serves ranges of tiny.mkv (`data`) while its
+    token is valid."""
+
+    def __init__(self):
+        self.data = fixture("tiny.mkv")
+        self.link_hits, self.file_hits, self.token, self.expired = 0, 0, 1, set()
+        self.link_status = None      # e.g. 429: the link itself refuses
+        self.file_status = None      # e.g. 429: the download address slows us down
+        self.link_delay = 0.0        # seconds the link takes to answer
+        self.file_dead = False       # the download address drops every connection unanswered (a network fault)
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def empty(self, code, location=None):
+                self.send_response(code)
+                if location:
+                    self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self):
+                parts = self.path.split("/")
+                if parts[1] == "link":
+                    outer.link_hits += 1
+                    if outer.link_delay:
+                        time.sleep(outer.link_delay)
+                    if outer.link_status:
+                        return self.empty(outer.link_status)
+                    return self.empty(302, f"/file/{outer.token}/{parts[2]}")
+                if parts[1] == "file":
+                    outer.file_hits += 1
+                    if outer.file_dead:
+                        self.close_connection = True
+                        return
+                    if outer.file_status:
+                        return self.empty(outer.file_status)
+                    if int(parts[2]) in outer.expired:
+                        return self.empty(403)
+                    a, _, b = self.headers["Range"][6:].partition("-")
+                    start, end = int(a), min(int(b), len(outer.data) - 1)
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(outer.data)}")
+                    self.send_header("Content-Length", str(end - start + 1))
+                    self.end_headers()
+                    try:
+                        self.wfile.write(outer.data[start:end + 1])
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
+                self.empty(404)
+
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.link = f"http://127.0.0.1:{self.server.server_address[1]}/link/tiny.mkv"
+
+    def expire(self):
+        """The download address handed out so far stops answering; the link hands out a new one."""
+        self.expired.add(self.token)
+        self.token += 1
+
+    def close(self):
+        stop_server(self.server)
+
+
+# -- the original-language lookup's services ---------------------------------------------------------------------------
+class LookupServices:
+    """The original-language lookup's services: TMDB at /tmdb, Wikidata's query service at /sparql, Kitsu at
+    /kitsu, AniList at /anilist."""
+
+    def __init__(self):
+        self.calls, self.lock = [], threading.Lock()
+        self.find, self.details, self.wikidata, self.kitsu, self.anilist = {}, {}, {}, {}, {}
+        self.status = {}            # service -> (code, headers) to answer with instead
+        self.delay = {}             # service -> seconds
+        self.active, self.most_active = {}, {}
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def answer(self, code, obj=None, headers=()):
+                body = json.dumps(obj if obj is not None else {}).encode()
+                self.send_response(code)
+                self.send_header("content-type", "application/json")
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def handle_any(self, method):
+                url = urllib.parse.urlsplit(self.path)
+                n = int(self.headers.get("content-length") or 0)
+                body = self.rfile.read(n).decode() if n else ""
+                service = url.path.split("/")[1]
+                with outer.lock:
+                    outer.calls.append({"service": service, "method": method, "path": url.path, "query": url.query,
+                                        "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
+                    outer.active[service] = outer.active.get(service, 0) + 1
+                    outer.most_active[service] = max(outer.most_active.get(service, 0), outer.active[service])
+                try:
+                    if outer.delay.get(service):
+                        time.sleep(outer.delay[service])
+                    if service in outer.status:
+                        code, headers = outer.status[service]
+                        return self.answer(code, {"status_message": "made up"}, headers)
+                    q = urllib.parse.parse_qs(url.query)
+                    if service == "tmdb":
+                        parts = url.path.split("/")
+                        if parts[2] == "find":
+                            return self.answer(200, outer.find.get(parts[3], {"movie_results": [], "tv_results": []}))
+                        got = outer.details.get((parts[2], parts[3]))
+                        return self.answer(200, got) if got else self.answer(404, {"status_code": 34})
+                    if service == "sparql":
+                        tt = re.search(r'wdt:P345 "(tt\d+)"', q["query"][0]).group(1)
+                        return self.answer(200, {"head": {"vars": ["lang"]},
+                                                 "results": {"bindings": outer.wikidata.get(tt, [])}})
+                    if service == "kitsu":
+                        n = url.path.split("/")[3]
+                        if n not in outer.kitsu:
+                            return self.answer(404, {"errors": [{"title": "Record not found"}]})
+                        mal = outer.kitsu[n]
+                        inc = [{"type": "mappings", "id": "1", "attributes": {"externalSite": "anidb",
+                                                                               "externalId": "1"}}]
+                        if mal:
+                            inc.append({"type": "mappings", "id": "2", "attributes": {
+                                "externalSite": "myanimelist/anime", "externalId": str(mal)}})
+                        return self.answer(200, {"data": {"id": n, "type": "anime"}, "included": inc})
+                    if service == "anilist":
+                        mal = json.loads(body)["variables"]["id"]
+                        if mal not in outer.anilist:
+                            return self.answer(404, {"data": {"Media": None}, "errors": [{"message": "Not Found."}]})
+                        return self.answer(200, {"data": {"Media": {"countryOfOrigin": outer.anilist[mal]}}})
+                    return self.answer(404)
+                finally:
+                    with outer.lock:
+                        outer.active[service] -= 1
+
+            def do_GET(self):
+                self.handle_any("GET")
+
+            def do_POST(self):
+                self.handle_any("POST")
+
+        self.srv = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def of(self, service):
+        with self.lock:
+            return [c for c in self.calls if c["service"] == service]
+
+    def close(self):
+        stop_server(self.srv)
+
+
+# -- the built-in subtitle sources: a stand-in that answers like them, and their harness -------------------------------
+# each subtitle the stand-in serves (in a zip, once for each name, its first line's text naming it)
+SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n"
+HASH = "a" * 40      # a torrent whose subtitles name S01E02 (two) and S01E03 (one)
+PACK = "b" * 40      # a season pack's torrent: its subtitles name their episodes, one names none
+SINGLE = "c" * 40    # one episode's torrent, whose subtitles name no episode
+
+
+def zipped(names):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for n in names:
+            z.writestr(n, SRT.replace("Hello", n))
+    return buf.getvalue()
+
+
+def tsdb_item(i, lang, release, cues=900):
+    return {"id": i, "language": lang, "format": "srt", "release_name": release, "cues": cues, "hearing_impaired": False,
+            "ai": None, "ai_transcribed": False, "download_url": f"{{url}}/tsdb/get/{i}"}
+
+
+class FakeSources:
+    """Answers like the built-in sources. `mode` per source: None, "500", "404", "423", "429", "503" (no Retry-After),
+    "503-retry" (with one), "slow"; /hop?to=<address> answers with a redirect there."""
+
+    def __init__(self):
+        self.calls, self.headers, self.mode, self.slow_s = [], [], {}, 1.5
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def send(self, code, body, ctype="application/json", extra=None):
+                body = body if isinstance(body, bytes) else json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def items(self, rows):
+                return {"subtitles": {"total": len(rows), "limit": 100, "offset": 0,
+                                      "items": [dict(r, download_url=r["download_url"].format(url=outer.url)) for r in rows]}}
+
+            def do_GET(self):
+                u = urllib.parse.urlsplit(self.path)
+                q = dict(urllib.parse.parse_qsl(u.query))
+                outer.calls.append((u.path, q))
+                outer.headers.append((u.path, dict(self.headers)))
+                top = u.path.split("/")[1]
+                mode = outer.mode.get(top)
+                if mode == "slow":
+                    time.sleep(outer.slow_s)
+                elif mode == "500":
+                    return self.send(500, {"error": "down"})
+                elif mode == "429":
+                    return self.send(429, {"error": "slow down"}, extra={"Retry-After": "120"})
+                elif mode == "503":
+                    return self.send(503, {"error": "restarting"})
+                elif mode == "503-retry":
+                    return self.send(503, {"error": "busy"}, extra={"Retry-After": "120"})
+                p = u.path
+                if p == "/hop":
+                    return self.send(302, b"", "text/plain", extra={"Location": q["to"]})
+                # TheSubtitleDB
+                if p == "/tsdb/v1/by-imdb/tt1":
+                    return self.send(200, self.items([tsdb_item(11, "en", "Movie.2010.WEB-DL"),
+                                                      tsdb_item(12, "ru", "Movie.2010.BluRay", 870)]))
+                if p == "/tsdb/v1/by-imdb/tt7":             # a popular title: page after page, 2 a page
+                    off = int(q.get("offset", 0))
+                    answer = self.items([tsdb_item(700 + k, "en", f"Movie.Release.{k}") for k in range(off, off + 2)])
+                    answer["subtitles"].update(total=100, limit=2, offset=off)
+                    return self.send(200, answer)
+                if p == "/tsdb/v1/by-imdb/tt2/season/1/episode/2":
+                    return self.send(200, self.items([tsdb_item(41, "en", "Show.S01E02.HDTV")]))
+                if p == f"/tsdb/v1/by-infohash/{HASH}":
+                    return self.send(200, self.items([tsdb_item(21, "en", "Show.S01E02.1080p.WEB-NTb"),
+                                                      tsdb_item(22, "en", "Show.S01E03.1080p.WEB-NTb"),
+                                                      tsdb_item(23, "ru", "Show.S01E02.1080p.WEB-NTb")]))
+                if p == f"/tsdb/v1/by-infohash/{PACK}":
+                    return self.send(200, self.items([tsdb_item(51, "en", "Show.S01E02.1080p.WEB-NTb"),
+                                                      tsdb_item(52, "en", "Show.S01E03.1080p.WEB-NTb"),
+                                                      tsdb_item(53, "en", "Show.S01.1080p.WEB-DL-NTb")]))
+                if p == f"/tsdb/v1/by-infohash/{SINGLE}":
+                    return self.send(200, self.items([tsdb_item(61, "en", "Show.1080p.WEB-DL-NTb")]))
+                if p == "/tsdb/v1/by-releasename":
+                    if outer.mode.get("tsdb-release") == "400":
+                        return self.send(400, {"error": "bad release"})
+                    # the real answer (capture): the title TheSubtitleDB matched, its closest subtitle and score,
+                    # and that title's subtitles; for a name it doesn't know it matches another title
+                    rel = q.get("release", "")
+                    if "Inception" in rel:
+                        return self.send(200, dict(self.items([tsdb_item(91, "en", "Nomadland.2020.1080p.WEB")]),
+                                                   match={"sub_id": 91, "score": 0.57}, title={"imdb": "tt9770150"}))
+                    return self.send(200, dict(self.items([tsdb_item(31, "en", rel), tsdb_item(32, "en", "Show.S01E02.HDTV"),
+                                                           tsdb_item(21, "en", "Show.S01E02.1080p.WEB-NTb")]),
+                                               match={"sub_id": 31, "score": float(outer.mode.get("score", 0.95))},
+                                               title={"imdb": "tt2"}))
+                if p.startswith("/tsdb/get/"):
+                    return self.send(200, SRT.encode(), "text/plain")
+                # Stremio's OpenSubtitles v3
+                if p.startswith("/osv3/subtitles/"):
+                    return self.send(200, {"subtitles": [
+                        {"id": "101", "url": f"{outer.url}/osv3/file/101", "lang": "eng", "m": "h", "g": "1"},
+                        {"id": "102", "url": f"{outer.url}/osv3/file/102", "lang": "rus", "m": "i", "g": "1"},
+                        {"id": "103", "url": f"{outer.url}/osv3/file/103", "lang": "fre", "m": "i", "g": "1"}]})
+                if p.startswith("/osv3/file/"):
+                    return self.send(200, SRT.encode(), "text/plain")
+                # Cinemeta + Gestdown
+                if p == "/cinemeta/meta/series/tt2.json":
+                    return self.send(200, {"meta": {"name": "Show", "tvdb_id": 121361}})
+                if p == "/cinemeta/meta/series/tt3.json":
+                    return self.send(200, {"meta": {"name": "Unknown", "tvdb_id": 999}})
+                if p == "/gestdown/shows/external/tvdb/121361":
+                    return self.send(200, {"shows": [{"id": "S1", "name": "Show"}]})
+                if p == "/gestdown/shows/external/tvdb/999":
+                    return self.send(404, {"error": "show not found"})
+                if p.startswith("/gestdown/subtitles/get/S1/1/2/"):
+                    if mode == "423":
+                        return self.send(423, {"error": "refreshing"})
+                    lang = p.rsplit("/", 1)[1]
+                    if lang != "English":
+                        return self.send(404, {"error": "no subtitles"})
+                    return self.send(200, {"matchingSubtitles": [
+                        {"subtitleId": "G1", "version": "WEB.NTb", "completed": True, "hearingImpaired": False,
+                         "downloadUri": "/subtitles/download/G1"}]})
+                # SubSource
+                if p.startswith("/subsource/"):
+                    if self.headers.get("X-API-Key") != "ss-key":
+                        return self.send(401, {"error": "key"})
+                    if p == "/subsource/movies/search":
+                        return self.send(200, {"data": [{"id": 555, "title": "Show"}]})
+                    if p == "/subsource/subtitles":
+                        return self.send(200, {"data": [
+                            {"subtitleId": 7001, "language": "english", "releaseInfo": ["Show.S01E02.1080p.WEB-NTb"],
+                             "hearingImpaired": False},
+                            {"subtitleId": 7002, "language": "english", "releaseInfo": ["Show.S01E03.1080p.WEB"]},
+                            {"subtitleId": 7003, "language": "russian", "releaseInfo": "Show.S01.Complete"},
+                            {"subtitleId": 7004, "language": "english", "releaseInfo": ["Show.S01E02.WEB"],
+                             "productionType": "machine translated"}]})
+                    if p == "/subsource/subtitles/7001/download":
+                        return self.send(200, zipped(["Show.S01E01.srt", "Show.S01E02.srt"]), "application/zip")
+                return self.send(404, {})
+
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def asked(self, prefix):
+        return [p for p, _ in self.calls if p.startswith(prefix)]
+
+    def close(self):
+        stop_server(self.server)
+
+
+class SourcesHarness:
+    """The built-in sources against FakeSources (`fake`), each source's address in `env`; extra() makes them, more
+    settings added. A connection to anything but this machine fails the test. As a TestCase's first base: setUp makes
+    it, tearDown closes it."""
+
+    def setUp(self):
+        self.guard = local_network_only()
+        self.guard.start()
+        self.fake = FakeSources()
+        u = self.fake.url
+        self.env = {"SUBSYNC_LANGUAGES": "eng,rus", "SUBSYNC_TSDB_URL": f"{u}/tsdb", "SUBSYNC_CINEMETA_URL": f"{u}/cinemeta",
+                    "SUBSYNC_GESTDOWN_URL": f"{u}/gestdown", "SUBSYNC_OSV3_URL": f"{u}/osv3",
+                    "SUBSYNC_OSV3PLUS_URL": f"{u}/osv3plus", "SUBSYNC_SUBDL_URL": f"{u}/subdl",
+                    "SUBSYNC_SUBDL_DOWNLOAD_URL": f"{u}/subdl-dl", "SUBSYNC_WYZIE_URL": f"{u}/wyzie",
+                    "SUBSYNC_SUBSOURCE_URL": f"{u}/subsource"}
+        self.clock = Clock()
+
+    def tearDown(self):
+        self.fake.close()
+        self.guard.stop()
+
+    def extra(self, clock=None, ledger=None, **env):
+        from subsync.extra import ExtraSources
+        return ExtraSources(Settings(dict(self.env, **env)), clock=clock or self.clock, ledger=ledger)

@@ -1,177 +1,19 @@
 """The subtitle sources AIOSubtitles asks itself. A local stand-in answers like TheSubtitleDB (by IMDb id,
 torrent hash and release name), Stremio's OpenSubtitles v3, Cinemeta + Gestdown and SubSource; no network (a test that
 opens a connection to anything but this machine fails)."""
-import io
 import json
 import threading
 import time
 import unittest
 import urllib.parse
-import zipfile
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import Clock, local_network_only, start_server, stop_server, wait_until
+from helpers import Clock, FakeSources, HASH, PACK, SINGLE, SourcesHarness, wait_until
 from subsync import srclimits
-from subsync.extra import ExtraSources, split_id
+from subsync.extra import split_id
 from subsync.settings import Settings
 from subsync.sourcestate import Health, Ledger
 from subsync.sources import fetch_subtitle
-
-SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n"
-HASH = "a" * 40
-PACK = "b" * 40      # a season pack's torrent: its subtitles name their episodes, one names none
-SINGLE = "c" * 40    # one episode's torrent, whose subtitles name no episode
-
-
-def zipped(names):
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        for n in names:
-            z.writestr(n, SRT.replace("Hello", n))
-    return buf.getvalue()
-
-
-def tsdb_item(i, lang, release, cues=900):
-    return {"id": i, "language": lang, "format": "srt", "release_name": release, "cues": cues, "hearing_impaired": False,
-            "ai": None, "ai_transcribed": False, "download_url": f"{{url}}/tsdb/get/{i}"}
-
-
-class Fake:
-    """Answers like the sources. `mode` per source: None, "500", "404", "423", "429", "503" (no Retry-After),
-    "503-retry" (with one), "slow"; /hop?to=<address> answers with a redirect there."""
-
-    def __init__(self):
-        self.calls, self.headers, self.mode, self.slow_s = [], [], {}, 1.5
-        outer = self
-
-        class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
-                pass
-
-            def send(self, code, body, ctype="application/json", extra=None):
-                body = body if isinstance(body, bytes) else json.dumps(body).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(body)))
-                for k, v in (extra or {}).items():
-                    self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(body)
-
-            def items(self, rows):
-                return {"subtitles": {"total": len(rows), "limit": 100, "offset": 0,
-                                      "items": [dict(r, download_url=r["download_url"].format(url=outer.url)) for r in rows]}}
-
-            def do_GET(self):
-                u = urllib.parse.urlsplit(self.path)
-                q = dict(urllib.parse.parse_qsl(u.query))
-                outer.calls.append((u.path, q))
-                outer.headers.append((u.path, dict(self.headers)))
-                top = u.path.split("/")[1]
-                mode = outer.mode.get(top)
-                if mode == "slow":
-                    time.sleep(outer.slow_s)
-                elif mode == "500":
-                    return self.send(500, {"error": "down"})
-                elif mode == "429":
-                    return self.send(429, {"error": "slow down"}, extra={"Retry-After": "120"})
-                elif mode == "503":
-                    return self.send(503, {"error": "restarting"})
-                elif mode == "503-retry":
-                    return self.send(503, {"error": "busy"}, extra={"Retry-After": "120"})
-                p = u.path
-                if p == "/hop":
-                    return self.send(302, b"", "text/plain", extra={"Location": q["to"]})
-                # TheSubtitleDB
-                if p == "/tsdb/v1/by-imdb/tt1":
-                    return self.send(200, self.items([tsdb_item(11, "en", "Movie.2010.WEB-DL"),
-                                                      tsdb_item(12, "ru", "Movie.2010.BluRay", 870)]))
-                if p == "/tsdb/v1/by-imdb/tt7":             # a popular title: page after page, 2 a page
-                    off = int(q.get("offset", 0))
-                    answer = self.items([tsdb_item(700 + k, "en", f"Movie.Release.{k}") for k in range(off, off + 2)])
-                    answer["subtitles"].update(total=100, limit=2, offset=off)
-                    return self.send(200, answer)
-                if p == "/tsdb/v1/by-imdb/tt2/season/1/episode/2":
-                    return self.send(200, self.items([tsdb_item(41, "en", "Show.S01E02.HDTV")]))
-                if p == f"/tsdb/v1/by-infohash/{HASH}":
-                    return self.send(200, self.items([tsdb_item(21, "en", "Show.S01E02.1080p.WEB-NTb"),
-                                                      tsdb_item(22, "en", "Show.S01E03.1080p.WEB-NTb"),
-                                                      tsdb_item(23, "ru", "Show.S01E02.1080p.WEB-NTb")]))
-                if p == f"/tsdb/v1/by-infohash/{PACK}":
-                    return self.send(200, self.items([tsdb_item(51, "en", "Show.S01E02.1080p.WEB-NTb"),
-                                                      tsdb_item(52, "en", "Show.S01E03.1080p.WEB-NTb"),
-                                                      tsdb_item(53, "en", "Show.S01.1080p.WEB-DL-NTb")]))
-                if p == f"/tsdb/v1/by-infohash/{SINGLE}":
-                    return self.send(200, self.items([tsdb_item(61, "en", "Show.1080p.WEB-DL-NTb")]))
-                if p == "/tsdb/v1/by-releasename":
-                    if outer.mode.get("tsdb-release") == "400":
-                        return self.send(400, {"error": "bad release"})
-                    # the real answer (capture): the title TheSubtitleDB matched, its closest subtitle and score,
-                    # and that title's subtitles; for a name it doesn't know it matches another title
-                    rel = q.get("release", "")
-                    if "Inception" in rel:
-                        return self.send(200, dict(self.items([tsdb_item(91, "en", "Nomadland.2020.1080p.WEB")]),
-                                                   match={"sub_id": 91, "score": 0.57}, title={"imdb": "tt9770150"}))
-                    return self.send(200, dict(self.items([tsdb_item(31, "en", rel), tsdb_item(32, "en", "Show.S01E02.HDTV"),
-                                                           tsdb_item(21, "en", "Show.S01E02.1080p.WEB-NTb")]),
-                                               match={"sub_id": 31, "score": float(outer.mode.get("score", 0.95))},
-                                               title={"imdb": "tt2"}))
-                if p.startswith("/tsdb/get/"):
-                    return self.send(200, SRT.encode(), "text/plain")
-                # Stremio's OpenSubtitles v3
-                if p.startswith("/osv3/subtitles/"):
-                    return self.send(200, {"subtitles": [
-                        {"id": "101", "url": f"{outer.url}/osv3/file/101", "lang": "eng", "m": "h", "g": "1"},
-                        {"id": "102", "url": f"{outer.url}/osv3/file/102", "lang": "rus", "m": "i", "g": "1"},
-                        {"id": "103", "url": f"{outer.url}/osv3/file/103", "lang": "fre", "m": "i", "g": "1"}]})
-                if p.startswith("/osv3/file/"):
-                    return self.send(200, SRT.encode(), "text/plain")
-                # Cinemeta + Gestdown
-                if p == "/cinemeta/meta/series/tt2.json":
-                    return self.send(200, {"meta": {"name": "Show", "tvdb_id": 121361}})
-                if p == "/cinemeta/meta/series/tt3.json":
-                    return self.send(200, {"meta": {"name": "Unknown", "tvdb_id": 999}})
-                if p == "/gestdown/shows/external/tvdb/121361":
-                    return self.send(200, {"shows": [{"id": "S1", "name": "Show"}]})
-                if p == "/gestdown/shows/external/tvdb/999":
-                    return self.send(404, {"error": "show not found"})
-                if p.startswith("/gestdown/subtitles/get/S1/1/2/"):
-                    if mode == "423":
-                        return self.send(423, {"error": "refreshing"})
-                    lang = p.rsplit("/", 1)[1]
-                    if lang != "English":
-                        return self.send(404, {"error": "no subtitles"})
-                    return self.send(200, {"matchingSubtitles": [
-                        {"subtitleId": "G1", "version": "WEB.NTb", "completed": True, "hearingImpaired": False,
-                         "downloadUri": "/subtitles/download/G1"}]})
-                # SubSource
-                if p.startswith("/subsource/"):
-                    if self.headers.get("X-API-Key") != "ss-key":
-                        return self.send(401, {"error": "key"})
-                    if p == "/subsource/movies/search":
-                        return self.send(200, {"data": [{"id": 555, "title": "Show"}]})
-                    if p == "/subsource/subtitles":
-                        return self.send(200, {"data": [
-                            {"subtitleId": 7001, "language": "english", "releaseInfo": ["Show.S01E02.1080p.WEB-NTb"],
-                             "hearingImpaired": False},
-                            {"subtitleId": 7002, "language": "english", "releaseInfo": ["Show.S01E03.1080p.WEB"]},
-                            {"subtitleId": 7003, "language": "russian", "releaseInfo": "Show.S01.Complete"},
-                            {"subtitleId": 7004, "language": "english", "releaseInfo": ["Show.S01E02.WEB"],
-                             "productionType": "machine translated"}]})
-                    if p == "/subsource/subtitles/7001/download":
-                        return self.send(200, zipped(["Show.S01E01.srt", "Show.S01E02.srt"]), "application/zip")
-                return self.send(404, {})
-
-        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def asked(self, prefix):
-        return [p for p, _ in self.calls if p.startswith(prefix)]
-
-    def close(self):
-        stop_server(self.server)
-
 
 class Ticking:
     """A clock that gives `times` one reading after another, then stays at the last."""
@@ -183,28 +25,7 @@ class Ticking:
         return self.times.pop(0) if len(self.times) > 1 else self.times[0]
 
 
-class SourcesBase(unittest.TestCase):
-    def setUp(self):
-        self.guard = local_network_only()
-        self.guard.start()
-        self.fake = Fake()
-        u = self.fake.url
-        self.env = {"SUBSYNC_LANGUAGES": "eng,rus", "SUBSYNC_TSDB_URL": f"{u}/tsdb", "SUBSYNC_CINEMETA_URL": f"{u}/cinemeta",
-                    "SUBSYNC_GESTDOWN_URL": f"{u}/gestdown", "SUBSYNC_OSV3_URL": f"{u}/osv3",
-                    "SUBSYNC_OSV3PLUS_URL": f"{u}/osv3plus", "SUBSYNC_SUBDL_URL": f"{u}/subdl",
-                    "SUBSYNC_SUBDL_DOWNLOAD_URL": f"{u}/subdl-dl", "SUBSYNC_WYZIE_URL": f"{u}/wyzie",
-                    "SUBSYNC_SUBSOURCE_URL": f"{u}/subsource"}
-        self.clock = Clock()
-
-    def tearDown(self):
-        self.fake.close()
-        self.guard.stop()
-
-    def extra(self, clock=None, ledger=None, **env):
-        return ExtraSources(Settings(dict(self.env, **env)), clock=clock or self.clock, ledger=ledger)
-
-
-class IdsTest(SourcesBase):
+class IdsTest(SourcesHarness, unittest.TestCase):
     def test_only_imdb_ids_are_sent_as_imdb_ids(self):
         self.assertEqual(split_id("tt1:2:3"), ("tt1", 2, 3))
         self.assertEqual(split_id("tt1375666"), ("tt1375666", None, None))
@@ -232,7 +53,7 @@ class IdsTest(SourcesBase):
         self.assertTrue({"tsdb-21", "tsdb-31"} <= {c["id"] for c in got})
 
 
-class TheSubtitleDBTest(SourcesBase):
+class TheSubtitleDBTest(SourcesHarness, unittest.TestCase):
     def test_torrent_hash_matches_first_episode_filtered_duplicates_once(self):
         hints = {"filename": "Show.S01E02.1080p.WEB-NTb.mkv", "infoHash": HASH, "fileIdx": 1}
         got = [c for c in self.extra(SUBSYNC_EXTRA_SOURCES="tsdb").search("series", "tt2:1:2", hints=hints)]
@@ -260,7 +81,7 @@ class TheSubtitleDBTest(SourcesBase):
         self.assertEqual(self.extra(SUBSYNC_EXTRA_SOURCES="tsdb").headers_for(cand), {})
 
 
-class ReviewFixesTest(SourcesBase):
+class ReviewFixesTest(SourcesHarness, unittest.TestCase):
     def test_one_lookup_failing_keeps_the_others_and_doesnt_count_as_a_failure(self):
         self.fake.mode["tsdb-release"] = "400"
         ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
@@ -290,7 +111,7 @@ class ReviewFixesTest(SourcesBase):
         self.assertEqual(len(self.fake.asked("/gestdown/shows/")), n + 1)   # then asked again
 
 
-class ReleaseNameTest(SourcesBase):
+class ReleaseNameTest(SourcesHarness, unittest.TestCase):
     """Seen in a capture: TheSubtitleDB answers a release name with the closest title it has, which can be
     another film (an Inception file name got Nomadland, score 0.57)."""
 
@@ -319,7 +140,7 @@ class ReleaseNameTest(SourcesBase):
         self.assertEqual(ex.search("series", "kitsu:1:1", hints={"filename": "Show.S01E02.x.mkv"}), [])
 
 
-class StremioOpenSubtitlesTest(SourcesBase):
+class StremioOpenSubtitlesTest(SourcesHarness, unittest.TestCase):
     def test_asked_like_a_player_with_the_files_hash(self):
         hints = {"filename": "Movie.2010.mkv", "videoSize": 123456, "videoHash": "abcd1234abcd1234"}
         got = self.extra(SUBSYNC_EXTRA_SOURCES="osv3").search("movie", "tt1", hints=hints)
@@ -330,7 +151,7 @@ class StremioOpenSubtitlesTest(SourcesBase):
                                "&filename=Movie.2010.mkv.json")
 
 
-class GestdownTest(SourcesBase):
+class GestdownTest(SourcesHarness, unittest.TestCase):
     def test_a_language_without_subtitles_keeps_the_others(self):
         ex = self.extra(SUBSYNC_EXTRA_SOURCES="gestdown")
         got = ex.search("series", "tt2:1:2")
@@ -365,7 +186,7 @@ class GestdownTest(SourcesBase):
         self.assertEqual(len(self.fake.calls), n)                    # paused: not asked
 
 
-class SubSourceTest(SourcesBase):
+class SubSourceTest(SourcesHarness, unittest.TestCase):
     def test_needs_a_key(self):
         self.assertEqual(self.extra(SUBSYNC_EXTRA_SOURCES="").search("series", "tt2:1:2"), [])
         self.assertFalse(self.fake.asked("/subsource"))
@@ -396,7 +217,7 @@ class SubSourceTest(SourcesBase):
         self.assertEqual(len(self.fake.asked("/subsource")), n)
 
 
-class WaitPauseCacheTest(SourcesBase):
+class WaitPauseCacheTest(SourcesHarness, unittest.TestCase):
     def test_a_slow_source_is_left_out_and_its_late_answer_kept_for_next_time(self):
         self.fake.mode["tsdb"] = "slow"
         self.fake.slow_s = 1.2
@@ -473,7 +294,7 @@ class WaitPauseCacheTest(SourcesBase):
         self.assertTrue(self.fake.asked("/tsdb"))
 
 
-class ReviewCycle1Test(SourcesBase):
+class ReviewCycle1Test(SourcesHarness, unittest.TestCase):
     """to (the step 9 review, cycle 1)."""
 
     def test_a_key_goes_only_to_its_sources_own_origin(self):
@@ -493,7 +314,7 @@ class ReviewCycle1Test(SourcesBase):
 
     def test_a_redirect_to_another_origin_leaves_the_key_behind(self):
         # Urllib sends every header on to wherever a redirect points
-        other = Fake()
+        other = FakeSources()
         self.addCleanup(other.close)
         keys = {"X-API-Key": "ss-key", "Authorization": "Bearer sdb_k"}
         for fake, kept in ((other, False), (self.fake, True)):
