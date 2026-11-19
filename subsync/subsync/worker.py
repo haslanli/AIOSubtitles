@@ -1808,7 +1808,7 @@ class Worker(threading.Thread):
         def entry(rank, cand, raw):
             sha = hashlib.sha256(raw).hexdigest()
             return {"rank": rank, "cand": cand, "raw": raw, "sha": sha,
-                    "got": self.fresh(result_key(file_key, sha), job.rule)}
+                    "got": self.fresh(result_key(file_key, lang, sha), job.rule)}
 
         texts, refused = {}, set()   # the downloads' texts by candidate id, and those refused by the language check
         not_language = f"not {lang_name(lang)} text"
@@ -1873,9 +1873,9 @@ class Worker(threading.Thread):
                 outcome = "synced"
             ok = outcome in ("synced", "in_sync")
             if ok and pipeline.settles(dict(got, reference=(got.get("detail") or {}).get("reference")), lang):
-                settled.append(result_key(file_key, e["sha"]))
+                settled.append(result_key(file_key, lang, e["sha"]))
             if ok and best_fit and outcome == "synced":
-                offer(result_key(file_key, e["sha"]))
+                offer(result_key(file_key, lang, e["sha"]))
             return ok
 
         def offer(key):
@@ -1932,7 +1932,7 @@ class Worker(threading.Thread):
                 self._note_measure(job.alias, lang, e["cand"]["id"], (chk.get("gate_original") or {}).get("within200"))
             if chk and chk["in_sync"]:
                 record(e, in_sync_result(e, dict(chk, fast=True)), t0)
-                e["got"] = self.fresh(result_key(file_key, e["sha"]), job.rule)
+                e["got"] = self.fresh(result_key(file_key, lang, e["sha"]), job.rule)
                 return True
             return False
 
@@ -1947,7 +1947,7 @@ class Worker(threading.Thread):
             if not (r and r["outcome"] == "synced"):
                 return False
             record(e, dict(r, fast=True), t0)
-            e["got"] = self.fresh(result_key(file_key, e["sha"]), job.rule)
+            e["got"] = self.fresh(result_key(file_key, lang, e["sha"]), job.rule)
             return self.passed_as(r, r["reason"]) == "main"
 
         fitted, shas = 0, set()   # best fit: alass runs so far, and the subtitles fitted (each once)

@@ -81,7 +81,7 @@ class FakeAios:
         self.head_check = True      # stock 2.37: HEAD /api/v1/user?uuid= says whether a config exists
         self.sizes = [1000]         # the ready files the sync config lists
         self.aliases = {}           # alias links (stock: /stremio/u/<alias>/… redirects to the full link)
-        self.alias_answer = None    # 'ok_200': the alias route answers a page instead
+        self.alias_answer = None    # 'ok_200': the alias route answers a page instead; a number: that HTTP status
         self.setting = {'*': 300}
         self.admin = True           # what the sign-in says of the account; the settings need an admin's sign-in
         self.setting_source = 'database'   # 'environment': fixed by SUBTITLE_CACHE_TTL, not changed through the API
@@ -160,6 +160,12 @@ class FakeAios:
                     found = outer.aliases.get(urllib.parse.unquote(parts[3]))
                     if outer.alias_answer == 'ok_200':
                         return self._json(200, {'id': 'a.page'})
+                    if isinstance(outer.alias_answer, int):    # limiting requests for an hour, or a server error
+                        self.send_response(outer.alias_answer)
+                        self.send_header('Retry-After', '3600')
+                        self.send_header('Content-Length', '0')
+                        self.end_headers()
+                        return
                     if not found:
                         return self._json(400, {'success': False, 'error': {'code': 'USER_INVALID_DETAILS'}})
                     self.send_response(302)
@@ -632,6 +638,17 @@ class Flow(FlowFixture):
                 self.assertEqual(code, 1, out)
                 self.assertIn(words, ' '.join(out.split()))
                 self.assertFalse([1 for m, p, _ in self.aios.log if m == 'GET' and p == '/api/v1/user'])   # never asked
+
+    def test_an_alias_link_on_a_busy_or_failing_aiostreams(self):
+        # A rate limit or a server error is said as it is, not blamed on the alias link
+        for answer, words in ((429, 'AIOStreams is limiting requests from this machine; try again in a few minutes.'),
+                              (502, 'AIOStreams answered HTTP 502 for the alias link; try again in a few minutes.')):
+            with self.subTest(answer=answer):
+                self.aios.alias_answer = answer
+                code, out = self.run_setup(dict(self.ANSWERS, AIOS_CONFIG_ID=f'{PUBLIC}/stremio/u/Home/manifest.json'))
+                self.assertEqual(code, 1, out)
+                self.assertIn(words, ' '.join(out.split()))
+                self.assertNotIn("couldn't get the config from that alias link", out)
 
     def test_without_the_head_check_the_id_is_taken_as_given(self):
         self.aios.head_check = False                                   # an AIOStreams without it: no false "unknown"

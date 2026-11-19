@@ -56,6 +56,36 @@ class AttributionTest(unittest.TestCase):
         self.assertIn(explain.TMDB_NOTICE, manifest(settings(SUBSYNC_TMDB_KEY="k"))["description"])
         self.assertNotIn("TMDB", manifest(settings())["description"])
 
+    def test_each_addons_description_says_what_the_instance_does(self):
+        # "or its speech" only while the audio route is on, TMDB's notice while TMDB is used: the public
+        # addon's too, and the self-hosted one no longer says speech with its audio route off
+        from subsync.addon import MANIFEST, manifest
+        from subsync.public import PUBLIC_MANIFEST
+        from subsync.settings import Settings
+        own = Settings({"SUBSYNC_AUDIO_ROUTE": "off"})
+        self.assertEqual(manifest(own)["description"],
+                         "Synced copies of the subtitles a viewer sees, checked against the release's own subtitle "
+                         "track; below the bar the original is kept.")
+        self.assertEqual(manifest(Settings({"SUBSYNC_AUDIO_ROUTE": "on"}))["description"],
+                         "Synced copies of the subtitles a viewer sees, checked against the release's own subtitle "
+                         "track or its speech; below the bar the original is kept.")
+        public = "Synced copies of the subtitles you see, checked against each file's own subtitle track{}; below " \
+                 "the bar the original is kept."
+        notice = (" AIOSubtitles uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by "
+                  "TMDB.")
+        for env, description in (({"SUBSYNC_AUDIO_ROUTE": "on"}, public.format(" or its speech")),
+                                 ({"SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_TMDB_PERSONAL": "on"},
+                                  public.format(" or its speech") + notice),
+                                 ({"SUBSYNC_TMDB_KEY": "k"}, public.format("") + notice),
+                                 ({}, public.format(""))):
+            with self.subTest(env=env):
+                made = manifest(settings(**env), PUBLIC_MANIFEST)
+                self.assertEqual(made["description"], description)
+                self.assertEqual({k: v for k, v in made.items() if k != "description"},
+                                 {k: v for k, v in PUBLIC_MANIFEST.items() if k != "description"})
+        self.assertEqual({k: v for k, v in manifest(own).items() if k != "description"},
+                         {k: v for k, v in MANIFEST.items() if k != "description"})
+
 
 class PrivacyTest(unittest.TestCase):
     def read_part(self, s):

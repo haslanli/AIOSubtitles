@@ -159,6 +159,24 @@ class SwitchesTest(unittest.TestCase):
         self.assertEqual(stopped.exception.code, 2)
         self.assertEqual(logs.output, ["ERROR:subsync:not started: SUBSYNC_PUBLIC must be on or off."])
 
+    def test_the_start_says_every_setting_written_wrong_and_missing_at_once(self):
+        # A missing setting hid a conflicting one until the next start
+        from subsync import __main__ as entry
+        for env, lines in (
+                ({"SUBSYNC_AUDIO_WHEN": "later"},
+                 ["not started: SUBSYNC_AUDIO_WHEN must be pick or open.",
+                  "not started: set SUBSYNC_SOURCE_MANIFEST, SUBSYNC_SOURCE_PASSWORD, SUBSYNC_PUBLIC_BASE (./setup "
+                  "writes them)"]),
+                ({"SUBSYNC_PUBLIC": "on", "SUBSYNC_AUDIO_AT_ONCE": "x"},
+                 ["not started: SUBSYNC_AUDIO_AT_ONCE must be a whole number from 1, or auto.",
+                  "not started: set SUBSYNC_SECRET_KEY, SUBSYNC_PUBLIC_BASE"])):
+            with self.subTest(env=env):
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(entry.logging, "basicConfig"), \
+                        self.assertLogs("subsync", "INFO") as logs, self.assertRaises(SystemExit) as stopped:
+                    entry.main()
+                self.assertEqual(stopped.exception.code, 2)
+                self.assertEqual(logs.output, ["ERROR:subsync:" + line for line in lines])
+
 
 class LanguagesTest(unittest.TestCase):
     def test_repeats_are_dropped_quietly(self):

@@ -255,7 +255,8 @@ class FakeAiostreams:
     """A stand-in for a person's AIOStreams: its status, its config API (read, save, create, delete, with basic auth)
     and each config's manifest. Records every request (method, path). Faults: 'wrong_password', 'refuse_create',
     'refuse_save', 'hang' (answers after `hang_s`), 'html' (answers a web page), 'bad_config' (userData not an object),
-    'no_manifest' (configs' manifests answer 404), 'rate_limited' (new configs answer 429, retry in an hour).
+    'no_manifest' (configs' manifests answer 404), 'rate_limited' (new configs answer 429, retry in an hour),
+    'garbled' (a config's read answers JSON cut short, as a proxy may).
     `creates_left`: after that many new configs, the next ones are refused. Each config's stream and subtitle routes
     answer `listings[uuid]` and `subtitle_lists[uuid]` and log every listing in `listed`.
     Alias links, as stock AIOStreams (routes/stremio/alias.ts): `aliases` maps an alias (as written, case kept) to a
@@ -369,6 +370,8 @@ class FakeAiostreams:
                             outer.fault == "wrong_password" and self.command == "GET"):
                         return self.answer(401, {"success": False, "error": {"code": "USER_INVALID_PASSWORD",
                                                                              "message": "Invalid password"}})
+                    if self.command == "GET" and outer.fault == "garbled":   # a whole answer of cut-short JSON
+                        return self.answer(200, '{"success": true, "data": {"userDa', "text/plain")
                     if self.command == "GET":
                         data = "not a config" if outer.fault == "bad_config" else stored["config"]
                         return self.answer(200, {"success": True, "data": {"userData": data,

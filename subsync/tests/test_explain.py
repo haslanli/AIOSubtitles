@@ -535,13 +535,17 @@ class Group3Test(unittest.TestCase):
         owner, other = self.public(SUBSYNC_FRONT_PROXY="Cloudflare", SUBSYNC_BACKUP_DAYS="30"), self.public()
         self.assertEqual(self.privacy(owner)["Who else sees your requests"],
                          "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet "
-                         "address and the links you open, your personal link included. AIOSubtitles itself keeps no "
-                         "log of requests. Backups of the stored data are kept for up to 30 days.")
+                         "address and the links you open, your personal link included. The subtitle links your app "
+                         "gets don't carry your personal link: their key opens only your subtitles, never your "
+                         "settings. AIOSubtitles itself keeps no log of requests. Backups of the stored data are kept "
+                         "for up to 30 days.")
         self.assertEqual(self.privacy(other)["Who else sees your requests"],
                          "The web server in front of AIOSubtitles passes every request on and so sees your internet "
                          "address and the links you open, your personal link included; whoever hosts this instance "
-                         "runs it. AIOSubtitles itself keeps no log of requests. Whoever hosts this instance decides "
-                         "whether backups of the stored data are made and how long they are kept.")
+                         "runs it. The subtitle links your app gets don't carry your personal link: their key opens "
+                         "only your subtitles, never your settings. AIOSubtitles itself keeps no log of requests. "
+                         "Whoever hosts this instance decides whether backups of the stored data are made and how long "
+                         "they are kept.")
         for s, field, keep, stored in (
                 (owner, "(the encrypted backups keep it up to 30 days more)",
                  "; the encrypted backups keep it up to 30 days more.", "(and up to 30 days more in the encrypted backups)"),

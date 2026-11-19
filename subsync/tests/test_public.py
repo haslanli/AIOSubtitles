@@ -668,7 +668,9 @@ class PoolTest(unittest.TestCase):
         a, b = self.pool.app(self.tokens[0]), self.pool.app(self.tokens[1])
         self.assertEqual(a.s.languages, ["eng"])
         self.assertEqual(b.s.languages, ["rus", "eng"])
-        self.assertEqual(a.s.public_base, "https://subs.test/u/" + self.tokens[0])
+        # Their entries' address carries their read key, never their personal link
+        self.assertEqual(a.s.public_base, "https://subs.test/r/" + self.users.read_key(self.tokens[0]))
+        self.assertNotIn(self.tokens[0], a.s.public_base)
         self.assertEqual(a.worker.aios.base, "https://aios.test/stremio/u1/E1")
         self.assertEqual(b.worker.aios.base, "https://aios.test/stremio/u2/E2")
         self.assertEqual(a.worker.aios.password, "p1")
@@ -795,7 +797,7 @@ class PoolTest(unittest.TestCase):
         with mock.patch.object(Settings, "__init__", counted):
             app = self.pool.app(self.tokens[1])
         self.assertEqual(made, [app.s])
-        self.assertEqual(app.s.public_base, "https://subs.test/u/" + self.tokens[1])
+        self.assertEqual(app.s.public_base, "https://subs.test/r/" + self.users.read_key(self.tokens[1]))
         self.assertEqual(app.s.languages, ["rus", "eng"])
 
 
@@ -1203,12 +1205,14 @@ class PublicTextsTest(unittest.TestCase):
         for env, added in (
                 ({"SUBSYNC_FRONT_PROXY": "Cloudflare", "SUBSYNC_BACKUP_DAYS": "30"},
                  "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address "
-                 "and the links you open, your personal link included. AIOSubtitles itself keeps no log of requests. "
-                 "Backups of the stored data are kept for up to 30 days."),
+                 "and the links you open, your personal link included. The subtitle links your app gets don't carry "
+                 "your personal link: their key opens only your subtitles, never your settings. AIOSubtitles itself "
+                 "keeps no log of requests. Backups of the stored data are kept for up to 30 days."),
                 ({}, "The web server in front of AIOSubtitles passes every request on and so sees your internet address "
-                     "and the links you open, your personal link included; whoever hosts this instance runs it. "
-                     "AIOSubtitles itself keeps no log of requests. Whoever hosts this instance decides whether "
-                     "backups of the stored data are made and how long they are kept.")):
+                     "and the links you open, your personal link included; whoever hosts this instance runs it. The "
+                     "subtitle links your app gets don't carry your personal link: their key opens only your "
+                     "subtitles, never your settings. AIOSubtitles itself keeps no log of requests. Whoever hosts this "
+                     "instance decides whether backups of the stored data are made and how long they are kept.")):
             with self.subTest(env=env):
                 s = Settings(env)
                 parts = explain.privacy_parts(s, asked_sources(s, "series"))

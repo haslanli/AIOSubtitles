@@ -55,6 +55,36 @@ class UsersTest(unittest.TestCase):
         finally:
             other.close()
 
+    def test_a_read_key_gives_back_its_token_and_nothing_else(self):
+        # The key of a person's subtitle entries, sealed with the secret, so nothing is stored
+        key = self.users.read_key(self.token)
+        self.assertRegex(key, f"^{self.users_module.READ_KEY}$")
+        self.assertNotIn(self.token, key)
+        self.assertEqual(self.users.read_key(self.token), key)             # the same in every list
+        self.assertEqual(self.users.token_of(key), self.token)
+        self.assertNotEqual(self.users.read_key(self.users_module.new_token()), key)
+        other = self.users_module.Users(self.path, bytes(32), clock=self.clock)
+        try:
+            self.assertIsNone(other.token_of(key))                         # another secret
+            self.assertNotEqual(other.read_key(self.token), key)
+        finally:
+            other.close()
+        changed = key[:10] + ("A" if key[10] != "A" else "B") + key[11:]
+        for made_up in (changed, "A" * 79, key[:-1], self.token, "", None, "!" * 79):
+            with self.subTest(key=made_up):
+                self.assertIsNone(self.users.token_of(made_up))
+        self.assertEqual(self.users.count(), 0)                            # nothing was stored
+
+    def test_the_module_says_what_a_record_holds(self):
+        # It said a record never holds the person's own AIOStreams password; with "Keep my password" it does
+        doc = " ".join(self.users_module.__doc__.split())
+        self.assertNotIn("never their own AIOStreams password", doc)
+        for held in ("the id of their config", "the Usenet config", "each one's id, link and password",
+                     "their answer for files with no subtitles of their own", "their own TMDB key",
+                     "what the last check of their AIOStreams found",
+                     "their own AIOStreams password only while they tick the box that lets AIOSubtitles keep it"):
+            self.assertIn(held, doc)
+
     def test_the_database_file_holds_no_secret(self):
         self.users.create(self.token, RECORD)
         self.users.add_usage(self.token, files=1, nbytes=1000)

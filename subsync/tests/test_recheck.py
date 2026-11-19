@@ -120,6 +120,16 @@ class RecheckTest(Base):
         self.assertIsNone(checker.check(token))
         self.assertEqual(self.record(token)["unreachable"], 0)
 
+    def test_a_garbled_answer_is_not_counted_as_unreachable(self):
+        # It answered, so it is reached: an error, never three of them making the page say "unreachable"
+        uuid, token = self.sign_up()
+        checker = self.checker()
+        self.fake.fault = "garbled"
+        for _ in range(3):
+            self.assertIsNone(checker.check(token))
+            self.clock.t += 24 * HOUR
+        self.assertEqual(self.record(token)["unreachable"], 0)
+
     def test_checks_start_in_the_background_at_most_once_a_period(self):
         uuid, token = self.sign_up()
         checker = self.checker()
@@ -311,6 +321,15 @@ class RecheckTest(Base):
         self.fake.configs[uuid]["config"]["services"] = []      # nothing left to read through (Real-Debrid alone now
         self.assertEqual(self.checker().check(token), "cannot_rebuild")   # means stored copies: test_stored_copies)
         self.assertIn("can't find any file", self.record(token)["state_detail"])
+
+    def test_the_notice_names_aiosubtitles_not_subsync(self):
+        # The daily check's notice says the public service's name
+        uuid, token = self.sign_up(keep=True)
+        self.fake.configs[uuid]["config"]["services"] = []
+        self.assertEqual(self.checker().check(token), "cannot_rebuild")
+        self.assertEqual(self.record(token)["state_detail"],
+                         "AIOSubtitles can't find any file it could read through your AIOStreams: no debrid service "
+                         "(AIOSubtitles reads files from debrid services only, not Usenet or torrents).")
 
     def test_the_kept_password_is_never_in_clear_on_disk_or_in_the_log(self):
         uuid, token = self.sign_up(keep=True)

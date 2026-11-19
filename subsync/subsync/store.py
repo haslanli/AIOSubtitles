@@ -1,6 +1,8 @@
-"""subsync's own store: SQLite + gzipped subtitle bodies on its volume, capped (default 2 GB), LRU by last served.
+"""subsync's own store: SQLite + gzipped subtitle bodies on its volume, the copies capped (default 2 GB), LRU by last
+served.
 
-results    one row per (file, subtitle): key subsync:v1:<oshash>-<size>:<sha256(subtitle)[:16]>
+results    one row per (file, language, subtitle), so one subtitle listed under two languages gets a verdict for each
+: key subsync:<ALGO_VERSION>:<oshash>-<size>:<lang>:<sha256(subtitle)[:16]>
 last_good  per (file, language): the synced result a viewer is offered; a new or better-ranked subtitle replaces it
            only when it passes; an original that passes as it is clears it (nothing to offer). With best fit
            the worker sets it from its ranking instead (set_offers).
@@ -41,6 +43,7 @@ import time
 import zlib
 
 from . import ALGO_VERSION
+from .settings import MB
 from .subs import fingerprint, line_positions, timing_recipe
 
 log = logging.getLogger("subsync.store")
@@ -93,8 +96,8 @@ CREATE TABLE IF NOT EXISTS title_language (title TEXT PRIMARY KEY, answer TEXT N
 USENET_MISSES_KEPT_S = 2 * DAY
 
 
-def result_key(file_key, sub_sha):
-    return f"subsync:{ALGO_VERSION}:{file_key}:{sub_sha[:16]}"
+def result_key(file_key, lang, sub_sha):
+    return f"subsync:{ALGO_VERSION}:{file_key}:{lang}:{sub_sha[:16]}"
 
 
 def day_of(t=None):
@@ -110,6 +113,7 @@ def _discard(path):
 class Store:
     def __init__(self, root, cap_bytes=2 * 1024 ** 3, clock=time.time, keep_texts=True):
         self.root, self.cap, self.clock, self.keep_texts = root, cap_bytes, clock, keep_texts
+        self.database_over_cap_said = False      # the database alone past the cap is logged once (enforce_cap)
         os.makedirs(os.path.join(root, "bodies"), exist_ok=True)
         self.db = sqlite3.connect(os.path.join(root, "subsync.sqlite3"), check_same_thread=False,
                                   isolation_level=None)
@@ -119,6 +123,32 @@ class Store:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
         self.lock = threading.RLock()
+        self._language_in_keys()
+
+    def _language_in_keys(self):
+        """Results stored before a result's key named its language get it, their copies, offers and
+        last_good with them, so nothing is read or judged again. The copies move first: a start that stops half-way
+        finds the rows as they were and does the rest. A row an earlier image stored again under its old key replaces
+        the one under its new key."""
+        with self.lock:
+            old = [(key, lang) for key, lang in self.db.execute("SELECT key, lang FROM results")
+                   if key.count(":") == 3]
+        if not old:
+            return
+        moves = []
+        for key, lang in old:
+            prefix, version, file_key, sha = key.split(":")
+            new = ":".join((prefix, version, file_key, lang, sha))
+            for path, moved in ((self._body_path(key), self._body_path(new)),
+                                (self._recipe_path(key), self._recipe_path(new))):
+                with contextlib.suppress(FileNotFoundError):
+                    os.replace(path, moved)
+            moves.append((new, key))
+        with self._tx():
+            self.db.executemany("UPDATE OR REPLACE results SET key=? WHERE key=?", moves)
+            for table in ("last_good", "offers"):
+                self.db.executemany(f"UPDATE {table} SET key=? WHERE key=?", moves)
+        log.info("%d stored result%s now keyed by language too", len(moves), "" if len(moves) == 1 else "s")
 
     def close(self):
         with self.lock:
@@ -263,7 +293,7 @@ class Store:
             candidate_id=None, offer=True, original=None):
         """offer=False (best fit): the result is stored but what is offered is left to set_offers. Public mode keeps
         the copy's recipe from `original` (the original's text) instead of `body`; with no recipe it isn't offered."""
-        key = result_key(file_key, sub_sha)
+        key = result_key(file_key, lang, sub_sha)
         now = self.clock()
         content = None
         if outcome == "synced" and body is not None:
@@ -525,12 +555,16 @@ class Store:
         return row[0] if row else 0
 
     # -- housekeeping ------------------------------------------------------------------------------------------
-    def total_bytes(self):
+    def copy_bytes(self):
+        """The synced copies' bytes: what the cap (SUBSYNC_STORE_CAP_MB) counts."""
         with self.lock:
-            bodies = self.db.execute("SELECT COALESCE(SUM(body_bytes),0) FROM results").fetchone()[0]
-        db = sum(os.path.getsize(os.path.join(self.root, f)) for f in os.listdir(self.root)
-                 if f.startswith("subsync.sqlite3") and os.path.isfile(os.path.join(self.root, f)))
-        return bodies + db
+            return self.db.execute("SELECT COALESCE(SUM(body_bytes),0) FROM results").fetchone()[0]
+
+    def database_bytes(self):
+        """The database's files, its write-ahead log included. Not counted against the cap: deleting copies
+        never shrinks them; what nobody used for 180 days is deleted instead (expire)."""
+        return sum(os.path.getsize(os.path.join(self.root, f)) for f in os.listdir(self.root)
+                   if f.startswith("subsync.sqlite3") and os.path.isfile(os.path.join(self.root, f)))
 
     def _drop(self, key):
         with self._tx():
@@ -540,10 +574,15 @@ class Store:
             self.db.execute("DELETE FROM offers WHERE key=?", (key,))
 
     def enforce_cap(self):
-        """Least recently served synced copies go first until the store is under its cap: at once, as many as cover
-        what it is over by."""
+        """Least recently served synced copies go first until the copies are under the cap: at once, as many as cover
+        what they are over by. The database isn't counted: deleting copies can't shrink it, so if it alone
+        grows past the cap, that is logged once and no copy goes for it."""
         with self.lock:
-            while (over := self.total_bytes() - self.cap) > 0:
+            if not self.database_over_cap_said and self.database_bytes() > self.cap:
+                self.database_over_cap_said = True
+                log.warning("the store's database alone is larger than SUBSYNC_STORE_CAP_MB (%s MB); copies aren't "
+                            "deleted for it", f"{self.cap / MB:.10g}")
+            while (over := self.copy_bytes() - self.cap) > 0:
                 keys, freed = [], 0
                 with contextlib.closing(self.db.execute(
                         "SELECT key, body_bytes FROM results WHERE body_bytes>0 ORDER BY last_served")) as rows:
@@ -611,4 +650,5 @@ class Store:
     def stats(self):
         with self.lock:
             rows = self.db.execute("SELECT outcome, COUNT(*) FROM results GROUP BY outcome").fetchall()
-        return {"results": dict(rows), "bytes": self.total_bytes(), "cap": self.cap}
+        return {"results": dict(rows), "bytes": self.copy_bytes(), "database_bytes": self.database_bytes(),
+                "cap": self.cap}

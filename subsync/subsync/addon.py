@@ -61,8 +61,9 @@ MANIFEST = {
     "id": "org.aiosubtitles.subsync",
     "version": "1.0.0",
     "name": "subsync",
-    "description": "Synced copies of the subtitles a viewer sees, checked against the release's own subtitle track "
-                   "or its speech; below the bar the original is kept.",
+    # "{speech}": " or its speech" while the audio route is on (manifest)
+    "description": "Synced copies of the subtitles a viewer sees, checked against the release's own subtitle "
+                   "track{speech}; below the bar the original is kept.",
     "resources": ["subtitles"],
     "types": ["movie", "series"],
     "catalogs": [],
@@ -70,19 +71,23 @@ MANIFEST = {
 }
 
 
-def manifest(settings):
-    """The addon's manifest; with a TMDB key, TMDB's notice in its description (TMDB's terms ask for it wherever its
-    data is used)."""
+def manifest(settings, base=MANIFEST):
+    """An addon's manifest (`base`: the self-hosted one, or public mode's), its description saying what this instance
+    does: "or its speech" only while its audio route is on, and TMDB's notice while it uses TMDB (TMDB's
+    terms ask for it wherever its data is used)."""
+    description = base["description"].format(speech=" or its speech" if settings.audio_route else "")
     if explain.tmdb_used(settings):
-        return dict(MANIFEST, description=MANIFEST["description"] + " " + explain.TMDB_NOTICE)
-    return MANIFEST
+        description += " " + explain.TMDB_NOTICE
+    return dict(base, description=description)
 
 
 SUB_ROUTE = re.compile(r"^/subtitles/(movie|series)/([^/]+?)(?:/([^/]*))?\.json$")
-FILE_ROUTE = re.compile(r"^/file/(v\d+_[0-9a-f]{16}-\d+_[0-9a-f]{16})\.(srt|ass)$")
+FILE_ROUTE = re.compile(r"^/file/(v\d+_[0-9a-f]{16}-\d+_[a-z]{3}_[0-9a-f]{16})\.(srt|ass)$")   # store.result_key
 PENDING_ROUTE = re.compile(r"^/pending/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 PICK_ROUTE = re.compile(r"^/pick/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 ORIGINAL_ROUTE = re.compile(r"^/original/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
+NOTICE_PATH = "/notice.srt"
+ENTRY_ROUTES = (FILE_ROUTE, PENDING_ROUTE, PICK_ROUTE, ORIGINAL_ROUTE)
 # a Stremio id is short ("tt0944947:1:1", "kitsu:46474:1"): a longer one, or one with a line break or another control
 # character, names no title and is answered 404 (it would reach the log as it is); so is one with a "/" (sent as %2F: it
 # would be more of the path in AIOStreams' address)
@@ -100,6 +105,12 @@ def file_id(key):
 
 def key_of(fid):
     return "subsync:" + fid.replace("_", ":")
+
+
+def is_entry(path):
+    """Whether a path is one a subtitle list names for a player: a synced copy, a pending, pick or original entry, or
+    the notice (public mode's read key opens these only)."""
+    return path == NOTICE_PATH or any(route.match(path) for route in ENTRY_ROUTES)
 
 
 CODE_CHARS = 16   # an entry's code: the first 96 bits of an HMAC-SHA256, in base64url
@@ -239,7 +250,7 @@ class App:
         t0 = time.time()
         out = self._with_pick_entries(Job(type_, video_id, parse_extras(extras)))
         if self.action() is not None:     # public mode: one entry after the others while only the person can fix something
-            out.append({"id": "aiosubtitles-notice", "url": f"{self.s.public_base}/notice.srt",
+            out.append({"id": "aiosubtitles-notice", "url": f"{self.s.public_base}{NOTICE_PATH}",
                         "lang": self.s.languages[0], "label": explain.PUBLIC_NOTICE_LABEL})
         log.info("answer %s/%s: %d entries (%d to pick) in %d ms", type_, video_id, len(out),
                  sum(str(e.get("id", "")).startswith("subsync-pick-") for e in out), (time.time() - t0) * 1000)
@@ -504,7 +515,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._subtitle(no_subtitle_note(m.group(2)), "note")
                 return self._original(app, alias, m.group(2), time.time() + app.s.pick_wait, first,
                                       unknown=None if kept else 404)
-            if path == "/notice.srt" and keyed:
+            if path == NOTICE_PATH and keyed:
                 text = app.notice_text()
                 if text is None:   # fixed since the list that holds this entry was made (apps keep lists a while)
                     text = f"1\n00:00:01,000 --> 00:00:08,000\n{explain.PUBLIC_NOTICE_DONE}\n"

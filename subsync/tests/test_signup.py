@@ -110,6 +110,14 @@ class SignupTest(PublicParts, unittest.TestCase):
         self.assertIn("debrid", e.exception.message)
         self.assertEqual(self.fake.writes(), [])
 
+    def test_a_config_with_no_debrid_service_is_told_in_aiosubtitles_name(self):
+        # Public pages never say "subsync"
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.run_signup(viewer(services=()))
+        self.assertEqual(e.exception.message, "AIOSubtitles can't find any file it could read through your AIOStreams: "
+                                              "no debrid service (AIOSubtitles reads files from debrid services only, "
+                                              "not Usenet or torrents).")
+
     def test_http_link_is_refused(self):
         uuid = self.fake.add(viewer(), PASSWORD)
         form = self.form(uuid, link=f"http://aios.test/stremio/{uuid}/ENCRYPTED/manifest.json")
@@ -333,7 +341,9 @@ class SignupTest(PublicParts, unittest.TestCase):
         record = self.users.open(result.token)
         with self.assertRaises(self.signup.SignupError) as e:
             self.signup.rebuild(self.s, record, result.token, self.api(INSTANCE, 10), PASSWORD)
-        self.assertIn("AIOStreams refused the config: " + TESTER_ERROR, e.exception.message)
+        # The page's own step only, AIOStreams' reason quoted as its words (the daily check's notice detail)
+        self.assertEqual(e.exception.message, "Updating AIOSubtitles' config on your AIOStreams: your AIOStreams "
+                                              f"refused the config: \"{TESTER_ERROR}\".")
         self.assertNotIn("fault in AIOSubtitles", e.exception.message)
 
     def test_a_sync_config_that_does_not_answer_is_removed(self):

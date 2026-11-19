@@ -77,11 +77,38 @@ class StoreTest(unittest.TestCase):
                 keys.append(st.put(f"{i:016x}-1", sha, "eng", 0, "synced", body=body, fmt="srt"))
             clock.t += 10
             st.served(keys[0])
-            st.cap = st.total_bytes() - 1      # one body must go: the least recently served is keys[1]
+            st.cap = st.copy_bytes() - 1       # one body must go: the least recently served is keys[1]
             st.enforce_cap()
             self.assertIsNotNone(st.get(keys[0]))
             self.assertIsNone(st.get(keys[1]))
             self.assertIsNotNone(st.get(keys[2]))
+
+    def test_the_cap_counts_the_copies_only(self):
+        # It counted the database too, which deleting copies never shrinks: once the database alone was near
+        # the cap every copy went, and each new one right after it was made; now that is logged once
+        from subsync.settings import MB
+        with TempDir() as d:
+            clock = Clock()
+            st = closed_after(self, Store(d, cap_bytes=32 * 1024, clock=clock))
+            text = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+            keys = []
+            with self.assertLogs("subsync.store", "WARNING") as logs:
+                for i in range(3):
+                    clock.t += 10
+                    keys.append(st.put(f"{i:016x}-1", SHA_A, "eng", 0, "synced", body=text, fmt="srt"))
+            self.assertGreater(st.database_bytes(), st.cap)                # the database alone is past the cap
+            self.assertEqual([k for k in keys if st.get(k)], keys)         # and no copy went for it
+            self.assertEqual(logs.output, ["WARNING:subsync.store:the store's database alone is larger than "
+                                           "SUBSYNC_STORE_CAP_MB (0.03125 MB); copies aren't deleted for it"])
+            self.assertEqual(st.cap / MB, 0.03125)
+            stats = st.stats()
+            self.assertEqual((stats["bytes"], stats["database_bytes"]), (st.copy_bytes(), st.database_bytes()))
+            self.assertEqual(stats["bytes"], sum(st.get(k)["body_bytes"] for k in keys))
+            st.cap = stats["bytes"] - 1                                    # the copies past it: the one served
+            clock.t += 10                                                  # longest ago goes
+            st.served(keys[0])
+            st.enforce_cap()
+            self.assertEqual([k for k in keys if st.get(k)], [keys[0], keys[2]])
 
     def test_lifetimes_and_read_failure_backoff(self):
         with TempDir() as d:
@@ -119,7 +146,52 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(st.day_count("read"), 0)
 
     def test_key_format(self):
-        self.assertEqual(result_key(FILE, SHA_A), f"subsync:{ALGO_VERSION}:{FILE}:{'a' * 16}")
+        # The language is part of the key, so each language keeps its own verdict
+        self.assertEqual(result_key(FILE, "eng", SHA_A), f"subsync:{ALGO_VERSION}:{FILE}:eng:{'a' * 16}")
+
+    def test_one_subtitle_under_two_languages_keeps_a_verdict_for_each(self):
+        # The same bytes listed as English and (mislabelled) Spanish shared one row: Spanish's language check
+        # wrote last and English's synced copy was no longer offered, nor judged again for 30 days
+        for keep_texts in (True, False):
+            with self.subTest(keep_texts=keep_texts), TempDir() as d, Store(d, keep_texts=keep_texts) as st:
+                text = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+                eng = st.put(FILE, SHA_A, "eng", 0, "synced", body=text, fmt="srt", original=text)
+                spa = st.put(FILE, SHA_A, "spa", 0, "keep_original", "not Spanish text")
+                self.assertNotEqual(eng, spa)
+                self.assertEqual([r["key"] for r in st.offers(FILE, ["eng", "spa"])], [eng])
+                self.assertEqual((st.fresh(eng)["outcome"], st.fresh(eng)["lang"]), ("synced", "eng"))
+                self.assertEqual((st.fresh(spa)["outcome"], st.fresh(spa)["lang"]), ("keep_original", "spa"))
+
+    def test_results_stored_before_are_keyed_by_language_once_with_nothing_judged_again(self):
+        # Rows keyed without their language get it at the next start, with their copies, offers and last_good
+        text = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+        synced, kept = result_key(FILE, "eng", SHA_A), result_key(FILE, "rus", SHA_B)
+        before = {synced: f"subsync:{ALGO_VERSION}:{FILE}:{'a' * 16}", kept: f"subsync:{ALGO_VERSION}:{FILE}:{'b' * 16}"}
+        for keep_texts in (True, False):
+            with self.subTest(keep_texts=keep_texts), TempDir() as d:
+                with Store(d, keep_texts=keep_texts) as st:
+                    st.put(FILE, SHA_A, "eng", 0, "synced", body=text, fmt="srt", original=text)
+                    st.put(FILE, SHA_B, "rus", 1, "keep_original", "nothing passes")
+                    st.set_offers(FILE, "eng", [synced])
+                    for key, old in before.items():      # as the earlier version keyed them, and named their copies
+                        for path, moved in ((st._body_path(key), st._body_path(old)),
+                                            (st._recipe_path(key), st._recipe_path(old))):
+                            if os.path.exists(path):
+                                os.replace(path, moved)
+                        for table in ("results", "last_good", "offers"):
+                            st.db.execute(f"UPDATE {table} SET key=? WHERE key=?", (old, key))
+                    copy = st.recipe(before[synced]) if not keep_texts else st.body(before[synced])
+                    self.assertIsNotNone(copy)
+                for _ in range(2):                       # once: a second start finds nothing to change
+                    with Store(d, keep_texts=keep_texts) as st:
+                        self.assertEqual([r["key"] for r in st.offers(FILE, ["eng"])], [synced])
+                        self.assertEqual(st.last_good(FILE, "eng")["key"], synced)
+                        self.assertEqual(st.fresh(synced)["outcome"], "synced")      # nothing to judge again
+                        self.assertEqual(st.fresh(kept)["reason"], "nothing passes")
+                        self.assertEqual(st.recipe(synced) if not keep_texts else st.body(synced), copy)
+                        self.assertEqual(st.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 2)
+                left = [n for _, _, names in os.walk(d) for n in names if n.endswith(".gz")]
+                self.assertEqual(len(left), 1)          # the one copy, under its new name only
 
     def test_file_state_is_when_a_file_was_read_and_what_its_read_found(self):
         # What the addon asks of a file's read, through the store's lock and on its clock
@@ -231,7 +303,7 @@ class StoreTest(unittest.TestCase):
                     st.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
             left = [n for _, _, names in os.walk(d) for n in names if not n.startswith("subsync.sqlite3")]
             self.assertEqual(left, [])
-            self.assertIsNone(st.get(result_key(FILE, SHA_A)))
+            self.assertIsNone(st.get(result_key(FILE, "eng", SHA_A)))
 
     def test_two_puts_of_one_key_at_once_write_two_temporary_files(self):
         # Both wrote into the key's one ".tmp" file; the second to put it in place found it gone (or the two
@@ -261,7 +333,7 @@ class StoreTest(unittest.TestCase):
                     t.join(20)
             self.assertEqual(errors, [])
             self.assertEqual(len(set(written)), 2)
-            self.assertIn(st.body(result_key(FILE, SHA_A)), texts)
+            self.assertIn(st.body(result_key(FILE, "eng", SHA_A)), texts)
             left = [n for _, _, names in os.walk(d) for n in names if n.endswith(".tmp")]
             self.assertEqual(left, [])
 
@@ -279,19 +351,19 @@ class StoreTest(unittest.TestCase):
                 clock.t += 10
                 for k in keys[:3]:                       # served again: the least recently served are keys[3:]
                     st.served(k)
-                with mock.patch.object(st, "total_bytes", wraps=st.total_bytes) as summed:
+                with mock.patch.object(st, "copy_bytes", wraps=st.copy_bytes) as summed:
                     st.put(FILE, SHA_B, "eng", 0, "keep_original")
                     st.put(FILE, SHA_C, "eng", 0, "in_sync")
                     self.assertEqual(summed.call_count, 0)
                     st.put(FILE, "e" * 64, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
                     self.assertEqual(summed.call_count, 1)
                     sizes = {k: st.get(k)["body_bytes"] for k in keys}
-                    st.cap = st.total_bytes() - sum(sizes[k] for k in keys[3:6]) - sizes[keys[6]] // 4
+                    st.cap = st.copy_bytes() - sum(sizes[k] for k in keys[3:6]) - sizes[keys[6]] // 4
                     summed.reset_mock()
                     st.enforce_cap()                     # keys[3] to keys[6] go, in one pass
                     self.assertEqual(summed.call_count, 2)
                 self.assertEqual([k for k in keys if st.get(k)], keys[:3] + keys[7:])
-                self.assertLessEqual(st.total_bytes(), st.cap)
+                self.assertLessEqual(st.copy_bytes(), st.cap)
 
     def test_eviction_and_drops_use_indexes_and_one_transaction(self):
         # A dropped copy's last_good and offers rows were found by scanning both tables, and expire, the

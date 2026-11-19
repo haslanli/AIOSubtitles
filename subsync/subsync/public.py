@@ -6,6 +6,9 @@ working through the sync config the sign-up made on their AIOStreams. Everyone s
 for one person serves everyone playing the same file, and one turn, so the service works on SUBSYNC_SYNCS_AT_ONCE files
 at a time and never on the same file twice at once.
 
+A person's personal link (/u/<token>/) opens their addon's address, their subtitle lists and their settings page; the
+entries those lists name are under their read key (/r/<key>/, users.read_key), which opens nothing else.
+
 A worker with nothing to do for a while stops, and its opened record leaves memory; the next request opens it again.
 """
 import io
@@ -17,7 +20,7 @@ import time
 import urllib.parse
 
 from . import pages, ui
-from .addon import App, Handler, Server
+from .addon import App, Handler, Server, is_entry, manifest
 from .aiosconfig import MAX_LANGUAGES, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
@@ -26,7 +29,7 @@ from .signup import (SignupError, SignupGate, delete, forget_password, form_lang
 from .sources import Aios
 from .store import day_of
 from .ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS   # the setup page sends the same
-from .users import TOKEN
+from .users import READ_KEY, TOKEN
 from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 
 log = logging.getLogger("subsync.public")
@@ -42,12 +45,13 @@ def person_audio(record, settings):
     return "pick" if choice == "open" and settings.user_opened_per_day <= 0 else choice
 
 
-def user_settings(env, record, token, instance=None):
+def user_settings(env, record, read_key, instance=None):
     """A person's own settings: the service's, with their languages, their sync config, their Usenet config,
-    their own address and their own audio choice (the instance's audio route and limits, started as they chose;
-    the instance's SUBSYNC_AUDIO_WHEN is not theirs). A record for stored copies only has no sync config:
-    nothing to read through; one with Usenet only has only the Usenet config. `instance`: the service's own settings,
-    made from `env` (the Pool passes the ones it has, so `env` is parsed once more only, for the person's own)."""
+    the address of their subtitle entries (under their read key, users.read_key: never their personal link)
+    and their own audio choice (the instance's audio route and limits, started as they chose; the instance's
+    SUBSYNC_AUDIO_WHEN is not theirs). A record for stored copies only has no sync config: nothing to read
+    through; one with Usenet only has only the Usenet config. `instance`: the service's own settings, made from `env`
+    (the Pool passes the ones it has, so `env` is parsed once more only, for the person's own)."""
     if instance is None:
         instance = Settings(env)
     own = dict(env)
@@ -56,7 +60,7 @@ def user_settings(env, record, token, instance=None):
                 "SUBSYNC_SOURCE_PASSWORD": record.get("sync_password") or "",
                 "SUBSYNC_USENET_MANIFEST": record.get("usenet_link") or "",
                 "SUBSYNC_USENET_PASSWORD": record.get("usenet_password") or "",
-                "SUBSYNC_PUBLIC_BASE": f"{instance.public_base}/u/{token}",
+                "SUBSYNC_PUBLIC_BASE": f"{instance.public_base}/r/{read_key}",
                 "SUBSYNC_ADDON_KEY": "", "SUBSYNC_BASE_PATH": ""})
     if instance.public and instance.tmdb_personal:     # the person's own TMDB key, when the instance asks for one
         own["SUBSYNC_TMDB_KEY"] = record.get("tmdb_key") or ""
@@ -202,7 +206,7 @@ class Pool:
 
     def _build(self, uid, token, record, limits, start):
         """A new App for the person (lock held), with their refusal back-off and the files their last one knew."""
-        s = user_settings(self.env, record, token, self.s)
+        s = user_settings(self.env, record, self.users.read_key(token), self.s)
         aios = Aios.from_settings(s, s.source_manifest, s.source_password, self.s.public_base)
         usenet = gate = None
         if s.usenet_usable and isinstance(limits, UserLimits):
@@ -366,12 +370,14 @@ FONT_PATH = re.compile(r"^/static/fonts/([A-Za-z0-9-]+\.ttf)$")
 MAX_FORM = 8192
 MAX_FIELDS = 50          # the sign-up form (its language slots and every other field) fits with room to spare
 USER_PATH = re.compile(f"^/u/({TOKEN})(/.*)?$")
-PUBLIC_MANIFEST = {
+# the subtitle entries a person's apps get: under their read key, which opens these only (users.read_key)
+ENTRY_PATH = re.compile(f"^/r/({READ_KEY})(/.*)$")
+PUBLIC_MANIFEST = {     # its description made for the instance by addon.manifest
     "id": "org.aiosubtitles.public",
     "version": "1.0.0",
     "name": "AIOSubtitles",
-    "description": "Synced copies of the subtitles you see, checked against each file's own subtitle track; below the "
-                   "bar the original is kept.",
+    "description": "Synced copies of the subtitles you see, checked against each file's own subtitle track{speech}; "
+                   "below the bar the original is kept.",
     "resources": ["subtitles"],
     "types": ["movie", "series"],
     "catalogs": [],
@@ -551,6 +557,14 @@ class PublicHandler(Handler):
                     # their link (/u/<token>/file/), never here
                     return self._send(404, b"")
                 return self.dispatch(svc.shared, path, False)
+            m = ENTRY_PATH.match(path)
+            if m:
+                if method != "GET":
+                    return self._send(405, b"")
+                token = svc.users.token_of(m.group(1))
+                if token is None or not is_entry(m.group(2)):   # never the personal link's routes
+                    return self._not_found()
+                return self._person(token, m.group(2))
             m = USER_PATH.match(path)
             if not m:
                 return self._not_found()
@@ -559,22 +573,29 @@ class PublicHandler(Handler):
                 return self._configure(token, method)
             if method != "GET":
                 return self._send(405, b"")
-            if rest == "/status":        # the service's own numbers are not for the people using it
-                return self._not_found()
             if rest == "/manifest.json":
                 if svc.users.open(token) is None:
                     return self._not_found()
-                return self._json(PUBLIC_MANIFEST, cache="max-age=3600")
-            app = svc.pool.app(token)
-            if app is None:
+                return self._json(manifest(svc.s, PUBLIC_MANIFEST), cache="max-age=3600")
+            # the personal link lists subtitles; its entries are under the read key, and the service's own
+            # numbers (/status) are not for the people using it
+            if not rest.startswith("/subtitles/"):
                 return self._not_found()
-            svc.checker.maybe_start(token)   # in the background, at most once per SUBSYNC_RECHECK_HOURS
-            return self.dispatch(app, rest, True)
+            return self._person(token, rest)
         except (BrokenPipeError, ConnectionResetError):
             return None
         except Exception as e:
             log.warning("request failed: %s", type(e).__name__)
             return self._failed(path)
+
+    def _person(self, token, rest):
+        """A request of a person's own service (their subtitle lists, and their entries), answered by their App."""
+        svc = self.service
+        app = svc.pool.app(token)
+        if app is None:
+            return self._not_found()
+        svc.checker.maybe_start(token)   # in the background, at most once per SUBSYNC_RECHECK_HOURS
+        return self.dispatch(app, rest, True)
 
     def _signup(self):
         svc = self.service

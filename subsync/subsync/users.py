@@ -3,11 +3,16 @@
 A person's personal link carries a token (32 random bytes, base64url) that is never stored. Their record is found by
 an id made from the service's secret and that token, and encrypted (AES-256-GCM) with a key made from the secret and
 the token, so neither the database, nor the database and the secret together, open a record without the person's link.
-The service opens a record only while that person's requests come in.
+The service opens a record only while that person's requests come in. The subtitle entries their apps get carry a read
+key instead of the token (read_key): the token sealed with the secret, which opens only those entries.
 
-A record holds their AIOStreams address, the sync config the service made there (its id, link and password) and their
-languages; never their own AIOStreams password. Usage is counted per person and UTC day for their limits.
+A record holds their AIOStreams address and the id of their config; the configs the service made there (the sync config
+and, with Usenet on, the Usenet config: each one's id, link and password); their languages, their answer for files with
+no subtitles of their own and their own TMDB key if they added one; what the last check of their AIOStreams found, and
+when; and their own AIOStreams password only while they tick the box that lets AIOSubtitles keep it. Usage is
+counted per person and UTC day for their limits.
 """
+import base64
 import hashlib
 import hmac
 import json
@@ -21,14 +26,18 @@ import weakref
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, AESSIV
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .store import DAY, day_of
 
 TOKEN = r"[A-Za-z0-9_-]{43}"     # a personal token: secrets.token_urlsafe(32), 43 base64url characters
 TOKEN_RE = re.compile(f"^{TOKEN}$")
+# the read key of a person's subtitle entries: their token sealed (AES-SIV: a 16-byte tag, then its 43 bytes), base64url
+READ_KEY = r"[A-Za-z0-9_-]{79}"
+READ_KEY_RE = re.compile(f"^{READ_KEY}$")
 _SALT = b"aiosubtitles users v1"
+_ENTRIES_INFO = b"subtitle entries"   # the read keys' own key (a token's characters have no space: never the same info)
 _FORMAT = b"\x01"
 _NONCE = 12
 
@@ -58,6 +67,8 @@ class Users:
         if len(secret) < 32:
             raise ValueError("the secret must be at least 32 bytes")
         self.secret, self.clock = bytes(secret), clock
+        self._entries = AESSIV(HKDF(algorithm=hashes.SHA256(), length=64, salt=_SALT,
+                                    info=_ENTRIES_INFO).derive(self.secret))
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -85,6 +96,22 @@ class Users:
 
     def _key(self, token):
         return HKDF(algorithm=hashes.SHA256(), length=32, salt=_SALT, info=token.encode()).derive(self.secret)
+
+    def read_key(self, token):
+        """The key in the addresses of a person's subtitle entries: their token sealed with the service's
+        secret, the same each time, so nothing is stored. It opens their entries only (public.py), never what their
+        personal link opens; that link stays between them, their AIOStreams and the service."""
+        return base64.urlsafe_b64encode(self._entries.encrypt(token.encode(), None)).decode().rstrip("=")
+
+    def token_of(self, read_key):
+        """The token a read key was made from; None for anything else (made up, or sealed with another secret)."""
+        if not isinstance(read_key, str) or not READ_KEY_RE.match(read_key):
+            return None
+        try:
+            token = self._entries.decrypt(base64.urlsafe_b64decode(read_key + "="), None).decode()
+        except (InvalidTag, ValueError):     # its tag doesn't match, or it isn't base64 or UTF-8
+            return None
+        return token if TOKEN_RE.match(token) else None
 
     def _seal(self, token, uid, record):
         nonce = os.urandom(_NONCE)

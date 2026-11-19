@@ -24,10 +24,10 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, PUBLIC_RETRY_WAIT_CAP, UUID_RE, WRONG_PASSWORD_CODES,
-                         AiosApi, AiosError, install_link, is_subsync_preset, new_key, parse_languages, sync_config,
-                         sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins,
-                         without_subsync)
+from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, PUBLIC_RETRY_WAIT_CAP, UNREADABLE, UUID_RE,
+                         WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link, is_subsync_preset, needs_sign_in,
+                         new_key, parse_languages, sync_config, sync_config_problems, usenet_route, usenet_sync_config,
+                         viewer_change, without_builtin_twins, without_subsync)
 from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
@@ -90,6 +90,7 @@ NOT_A_LINK = ("That isn't an AIOStreams config link: it should look like https:/
               "Copy it again from AIOStreams' configure page.")
 NOT_SIGNED_UP = "This link isn't signed up (any more). Sign up again on the start page."
 UNKNOWN_ANSWER = "Your AIOStreams answered in a way AIOSubtitles doesn't know"   # each step ends the sentence
+ALIAS_STEP = "Opening your alias link"
 
 
 def _variant_query(query):
@@ -169,7 +170,10 @@ def _config_id(api, uuid, alias):
             raise SignupError(UNKNOWN_ALIAS, field="link") from None
         if e.code == "ALIAS_NO_CONFIG":
             raise SignupError(NO_CONFIG_FROM_ALIAS, field="link") from None
-        raise SignupError(_plain(e, "Opening your alias link"), field="link") from None
+        if isinstance(e.code, int):   # its server error (500 to 599): the AIOStreams fails for now, not the link
+            raise SignupError(f"{ALIAS_STEP}: your AIOStreams answered with an error (HTTP {e.code}). Try again in a "
+                              "few minutes.", field="link") from None
+        raise SignupError(_plain(e, ALIAS_STEP), field="link") from None
 
 
 @contextlib.contextmanager
@@ -229,18 +233,31 @@ WRONG_PASSWORD = ("Your AIOStreams didn't accept this password for this link. Ty
                   "you set on AIOStreams' configure page, not the one you sign in to AIOStreams with.")
 
 
-def _plain(e, doing, own_password=False):
-    """An AIOStreams error in plain words, without the link or the password. own_password: the call used the
-    person's own password, so a refused config is about that password."""
+def _plain(e, doing, own_password=False, making=False):
+    """An AIOStreams error in plain words, without the link or the password: the page's own step (`doing`) only, then
+    AIOStreams' reason, its own words quoted as its words (./setup's words, e.message, stay its own).
+    own_password: the call used the person's own password, so a refused config is about that password. making: the
+    call made a config, which AIOStreams limits per hour."""
     if own_password and str(e.code) in WRONG_PASSWORD_CODES:
         return WRONG_PASSWORD
     if "Can't reach" in e.message:
         return (f"{doing}: AIOSubtitles can't reach your AIOStreams from the internet. Check the link, and that "
                 "your AIOStreams can be opened from outside your home network.")
+    if e.code == UNREADABLE:     # it answered, so it is reached
+        return f"{doing}: your AIOStreams answered in a way AIOSubtitles doesn't know. Try again in a few minutes."
     if e.code in ("RATE_LIMIT_EXCEEDED", 429) or "limiting requests" in e.message:
-        return (f"{doing}: your AIOStreams limits how many configs one address can make in an hour, and other people "
-                "on the same AIOStreams have signed up lately. Try again in an hour.")
-    return e.message if e.message.startswith(doing) else f"{doing}: {e.message}"
+        if making:
+            return (f"{doing}: your AIOStreams limits how many configs one address can make in an hour, and "
+                    "AIOSubtitles has made many there lately. Try again in an hour.")
+        return f"{doing}: your AIOStreams is limiting requests from AIOSubtitles right now. Try again in a few minutes."
+    if needs_sign_in(e):         # ./setup's advice to sign in is for whoever runs that AIOStreams
+        return (f"{doing}: your AIOStreams doesn't let AIOSubtitles make or save configs there. Ask whoever runs your "
+                "AIOStreams.")
+    if _refused(e):
+        return f'{doing}: your AIOStreams refused the config: "{e.detail}".'
+    if e.detail:
+        return f'{doing}: your AIOStreams answered "{e.detail}".'
+    return f"{doing}: {e.reason}"
 
 
 class SignupGate:
@@ -447,7 +464,8 @@ def _new_sync(api, instance, sync):
     except AiosError as e:
         if e.code == BAD_ANSWER:
             raise SignupError(f"{UNKNOWN_ANSWER} when making its config.") from None
-        raise SignupError(_plain(e, "Making AIOSubtitles' config on your AIOStreams"), refused=_refused(e)) from None
+        raise SignupError(_plain(e, "Making AIOSubtitles' config on your AIOStreams", making=True),
+                          refused=_refused(e)) from None
     with _removed_on_failure(api, [(sync_uuid, None, sync_password)]):
         try:
             api.addon_get(f"/stremio/{sync_uuid}/{sync_encrypted}", "/manifest.json")

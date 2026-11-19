@@ -405,6 +405,10 @@ class Settings:
         person's worker in public mode."""
         return bool(self.usenet and self.usenet_manifest and self.usenet_password and self.usenet_listings_per_day > 0)
 
+    def is_written_wrong(self, name):
+        """Whether the number or on/off setting `name` is written wrong (its sentence is in written_wrong)."""
+        return any(sentence.startswith(f"{name} must be ") for sentence in self.written_wrong)
+
     def missing(self):
         """What must be set before the service can work. In public mode each user's record holds their sync config's
         link and password, so the service needs its secret and its address instead."""

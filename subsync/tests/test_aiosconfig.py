@@ -382,6 +382,79 @@ class EveryFailureIsAnAiosErrorTest(ClientCase):
         self.assertEqual((status, waits), (429, [aiosconfig.SLOW_DOWN_WAIT] * (aiosconfig.TRIES - 1)))
 
 
+GARBLED = {"cut short": b'{"success": true, "data": {"vers', "not UTF-8": b'{"success": true, "x": "\xff"}'}
+
+
+class SetupWordsTest(ClientCase):
+    """What ./setup says when AIOStreams answers oddly: a garbled answer is not "can't reach", the hourly
+    limit only for making a config, an alias lookup's rate limit and server errors by name."""
+
+    def test_a_garbled_answer_is_unreadable_not_unreachable(self):
+        for shape, raw in GARBLED.items():
+            with self.subTest(shape=shape):
+                self.stand.routes[("GET", "/api/v1/status")] = answer(200, raw)
+                with self.assertRaises(AiosError) as e:
+                    self.api().status()
+                self.assertEqual(e.exception.code, aiosconfig.UNREADABLE)
+                # as ./setup shows it (the message, then its fix)
+                self.assertEqual(f"{e.exception.message} {e.exception.fix}",
+                                 f"{self.stand.url} answered, but its answer isn't the JSON AIOStreams sends (it may "
+                                 "have been cut short). Try again; if it keeps happening, check the web server or "
+                                 "proxy in front of AIOStreams.")
+
+    def test_the_hourly_limit_is_named_only_when_making_a_config(self):
+        limited = answer(429, {"error": {"code": "RATE_LIMIT_EXCEEDED"}}, **{"Retry-After": "3600"})
+        api = self.api()
+        for name, call, method in self.calls(api):
+            with self.subTest(call=name):
+                self.stand.routes[(method, "/api/v1/user")] = limited
+                with self.assertRaises(AiosError) as e:
+                    call()
+                step = e.exception.message.partition(": ")[0]
+                if name == "create_config":
+                    self.assertEqual(e.exception.message, "Creating the sync config: AIOStreams is limiting requests "
+                                                          "from this machine (it allows 10 new configs an hour); try "
+                                                          "again later.")
+                else:
+                    self.assertEqual(e.exception.message, f"{step}: AIOStreams is limiting requests from this machine; "
+                                                          "try again in a few minutes.")
+                self.assertEqual(e.exception.reason, e.exception.message.partition(": ")[2])   # without the step
+
+    def test_an_alias_lookup_waits_out_a_short_limit_once(self):
+        tries = []
+
+        def limited_once(h):
+            tries.append(1)
+            if len(tries) == 1:
+                return send(h, 429, b'{"error": {"code": "RATE_LIMIT_EXCEEDED"}}', {"Retry-After": "2"})
+            return redirect(302, f"/stremio/{UUID}/ENC/manifest.json")(h)
+        self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = limited_once
+        waits, said = [], []
+        with no_sleep(waits):
+            self.assertEqual(self.api(on_wait=said.append).alias_config_id("fam"), UUID)
+        self.assertEqual((waits, said, len(tries)), ([2], [2], 2))
+
+    def test_an_alias_lookup_on_a_busy_or_failing_aiostreams_names_it(self):
+        limited = "AIOStreams is limiting requests from this machine; try again in a few minutes."
+        for status, wait, asked, words in (
+                (429, "2", 2, limited),              # still limited after the wait: asked once more only
+                (429, "3600", 1, limited),           # a long limit: reported at once
+                (500, None, 1, "AIOStreams answered HTTP 500 for the alias link; try again in a few minutes."),
+                (502, None, 1, "AIOStreams answered HTTP 502 for the alias link; try again in a few minutes."),
+                (503, None, 1, "AIOStreams answered HTTP 503 for the alias link; try again in a few minutes.")):
+            with self.subTest(status=status, wait=wait):
+                self.stand.requests.clear()
+                self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = answer(
+                    status, {"error": {"code": "X"}}, **({"Retry-After": wait} if wait else {}))
+                waits = []
+                with no_sleep(waits), self.assertRaises(AiosError) as e:
+                    self.api(on_wait=lambda s: None).alias_config_id("fam")
+                self.assertEqual(e.exception.message, words)               # never "no config for that alias"
+                self.assertEqual(e.exception.code, "RATE_LIMIT_EXCEEDED" if status == 429 else status)
+                self.assertEqual(len(self.stand.requests), asked)
+                self.assertEqual(waits, [2] if asked == 2 else [])
+
+
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class SignupCallersTest(ClientCase):
     """The public sign-up's steps meet the client's AiosError only, and the public client waits out a short
@@ -469,6 +542,92 @@ class SignupCallersTest(ClientCase):
                 self.signup._new_sync(self.public(), self.stand.url, CONFIG)
         self.assertIn("Try again in an hour", e.exception.message)
         self.assertEqual(waits, [])
+
+    # -- the public pages' words for AIOStreams' errors: one step name, AIOStreams' own words quoted ------
+    def record(self):
+        return {"instance": self.stand.url, "sync_uuid": UUID, "sync_link": "L", "sync_password": "pw"}
+
+    def test_an_error_names_the_pages_step_only_and_quotes_aiostreams(self):
+        self.stand.routes[("GET", "/api/v1/status")] = answer(200, {"success": True, "data": {"version": "2.37.0"}})
+        self.stand.routes[("GET", "/api/v1/user")] = answer(500, {"success": False, "error": {
+            "code": "INTERNAL", "message": "Internal error"}})
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._read_viewer(self.public(), UUID, "pw")
+        self.assertEqual(e.exception.message, 'Reading your AIOStreams config: your AIOStreams answered "Internal '
+                                              'error".')
+        self.stand.routes[("PUT", "/api/v1/user")] = answer(500, {"success": False, "error": {
+            "code": "INTERNAL", "message": "boom"}})
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._put_sync(self.public(), self.record(), CONFIG)
+        self.assertEqual(e.exception.message, 'Updating AIOSubtitles\' config on your AIOStreams: your AIOStreams '
+                                              'answered "boom".')
+
+    def test_a_refusal_to_make_configs_is_said_for_the_person_signing_up(self):
+        for body in ({"success": False, "error": {"code": "FORBIDDEN", "message": "Forbidden"}},
+                     {"success": False, "error": {"code": "X", "message": "Creating configs is not allowed"}}):
+            with self.subTest(body=body):
+                self.stand.routes[("POST", "/api/v1/user")] = answer(403, body)
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.signup._new_sync(self.public(), self.stand.url, CONFIG)
+                self.assertEqual(e.exception.message, "Making AIOSubtitles' config on your AIOStreams: your "
+                                                      "AIOStreams doesn't let AIOSubtitles make or save configs "
+                                                      "there. Ask whoever runs your AIOStreams.")
+
+    def test_a_refused_config_quotes_aiostreams_reason(self):
+        self.stand.routes[("PUT", "/api/v1/user")] = answer(400, {"success": False, "error": {
+            "code": "USER_INVALID_CONFIG", "message": "bad config"}})
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._put_sync(self.public(), self.record(), CONFIG)
+        self.assertEqual(e.exception.message, 'Updating AIOSubtitles\' config on your AIOStreams: your AIOStreams '
+                                              'refused the config: "bad config".')
+        self.assertEqual(e.exception.refused, "bad config")
+
+    def test_the_hourly_limit_is_said_only_when_making_a_config(self):
+        # AIOStreams limits new configs per hour; any other call for seconds
+        limited = answer(429, {"error": {"code": "RATE_LIMIT_EXCEEDED"}}, **{"Retry-After": "3600"})
+        self.stand.routes[("POST", "/api/v1/user")] = limited
+        with no_sleep([]), self.assertRaises(self.signup.SignupError) as e:
+            self.signup._new_sync(self.public(), self.stand.url, CONFIG)
+        self.assertEqual(e.exception.message, "Making AIOSubtitles' config on your AIOStreams: your AIOStreams limits "
+                                              "how many configs one address can make in an hour, and AIOSubtitles has "
+                                              "made many there lately. Try again in an hour.")
+        self.stand.routes[("GET", "/api/v1/status")] = answer(200, {"success": True, "data": {"version": "2.37.0"}})
+        self.stand.routes[("GET", "/api/v1/user")] = limited
+        self.stand.routes[("PUT", "/api/v1/user")] = limited
+        for step, call in (("Reading your AIOStreams config",
+                            lambda: self.signup._read_viewer(self.public(), UUID, "pw")),
+                           ("Updating AIOSubtitles' config on your AIOStreams",
+                            lambda: self.signup._put_sync(self.public(), self.record(), CONFIG))):
+            with self.subTest(step=step):
+                with no_sleep([]), self.assertRaises(self.signup.SignupError) as e:
+                    call()
+                self.assertEqual(e.exception.message, f"{step}: your AIOStreams is limiting requests from "
+                                                      "AIOSubtitles right now. Try again in a few minutes.")
+
+    def test_a_garbled_answer_is_not_said_to_be_unreachable(self):
+        # It answered, so the person's network isn't the problem, and no field is marked
+        self.stand.routes[("GET", "/api/v1/status")] = answer(200, {"success": True, "data": {"version": "2.37.0"}})
+        for shape, raw in GARBLED.items():
+            with self.subTest(shape=shape):
+                self.stand.routes[("GET", "/api/v1/user")] = answer(200, raw)
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.signup._read_viewer(self.public(), UUID, "pw")
+                self.assertEqual(e.exception.message, "Reading your AIOStreams config: your AIOStreams answered in a "
+                                                      "way AIOSubtitles doesn't know. Try again in a few minutes.")
+                self.assertIsNone(e.exception.field)
+
+    def test_an_alias_link_on_a_busy_or_failing_aiostreams(self):
+        # The link is fine; the page names what its AIOStreams did
+        for status, words in ((429, "Opening your alias link: your AIOStreams is limiting requests from AIOSubtitles "
+                                    "right now. Try again in a few minutes."),
+                              (502, "Opening your alias link: your AIOStreams answered with an error (HTTP 502). Try "
+                                    "again in a few minutes.")):
+            with self.subTest(status=status):
+                self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = answer(
+                    status, {"error": {"code": "X"}}, **{"Retry-After": "3600"})
+                with no_sleep([]), self.assertRaises(self.signup.SignupError) as e:
+                    self.signup._config_id(self.public(), None, "fam")
+                self.assertEqual(e.exception.message, words)
 
 
 if __name__ == "__main__":

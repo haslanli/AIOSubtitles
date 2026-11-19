@@ -530,7 +530,9 @@ GROUPS = [
         "SUBSYNC_STORE_CAP_MB": (
             "2048",
             "Disk space for synced copies, in MB; past it, the copies served longest ago are deleted and made again "
-            "when needed, which costs a new read. 2048 holds about 20,000 copies. Lower it on a small disk."),
+            "when needed, which costs a new read. The store's database (what was checked, and the files' details) "
+            "isn't counted: it stays small because what nobody used for 180 days is deleted. 2048 holds about 20,000 "
+            "copies. Lower it on a small disk."),
         "SUBSYNC_SKIP_ADDONS": (
             "",
             "Names of AIOStreams addons, separated by commas, whose listed files subsync never reads; empty by default. "
@@ -1348,7 +1350,8 @@ PRIVACY_PARTS = (
      "its new timing (never its text), with the names and sizes of the files it fits, is shared and kept 180 days "
      "after last use, without who played them. Logs name the titles synced, never who asked."),
     ("Who else sees your requests",
-     "{front} AIOSubtitles itself keeps no log of requests. {backups_kept}"),
+     "{front} The subtitle links your app gets don't carry your personal link: their key opens only your subtitles, "
+     "never your settings. AIOSubtitles itself keeps no log of requests. {backups_kept}"),
     ("How long it is kept",
      "until you delete your data on your settings page, or {keep} after your last request; then AIOSubtitles' own "
      "config can't be removed from your AIOStreams, because opening your record needs your link."),

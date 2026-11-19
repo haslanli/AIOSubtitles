@@ -73,6 +73,19 @@ class Base(PublicParts, unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+class PublicManifestTest(Base):
+    def test_the_addons_description_says_speech_while_the_audio_route_is_on(self):
+        # Built from the instance's settings
+        self.start(SUBSYNC_AUDIO_ROUTE="on")
+        _, _, _, _, token = self.sign_up()
+        code, body, _ = http(f"{self.base}/u/{token}/manifest.json")
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["description"], "Synced copies of the subtitles you see, checked against "
+                                                          "each file's own subtitle track or its speech; below the bar "
+                                                          "the original is kept.")
+
+
+@unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class PublicHttpTest(Base):
     def setUp(self):
         self.start()
@@ -147,9 +160,49 @@ class PublicHttpTest(Base):
         self.assertEqual(code, 200)
         entries = json.loads(body)["subtitles"]       # the pick entry of a file being worked on, named for the public
         self.assertEqual([e["label"] for e in entries], ["English (AIOSubtitles)"])   # service
-        self.assertTrue(entries[0]["url"].startswith(f"https://subs.test/u/{token}/pick/"))
+        # Under their read key, never their personal link
+        self.assertTrue(entries[0]["url"].startswith(f"https://subs.test/r/{self.users.read_key(token)}/pick/"))
         self.assertEqual(len(self.pool.app(token).worker.jobs), 1)
         self.assertEqual(len(self.pool.app(other).worker.jobs), 0)
+
+    def test_subtitle_entries_carry_a_read_key_that_opens_them_only(self):
+        # Every entry an app gets carried the personal link's token, which opens the settings page (delete,
+        # Refresh with a new link, the addon's address, any title's subtitles); now a read key opens the entries only
+        from subsync.users import Users
+        _, _, _, _, token = self.sign_up()
+        key = self.users.read_key(token)
+        code, body, _ = http(f"{self.base}/u/{token}/subtitles/movie/tt1/filename=a.mkv&videoSize=1000.json")
+        self.assertEqual(code, 200)
+        self.set_state(token, "sync_gone")            # a notice entry too
+        code, body, _ = http(f"{self.base}/u/{token}/subtitles/movie/tt1/filename=a.mkv&videoSize=1000.json")
+        urls = [e["url"] for e in json.loads(body)["subtitles"]]
+        self.assertIn(f"https://subs.test/r/{key}/notice.srt", urls)
+        self.assertTrue([u for u in urls if "/pick/" in u], urls)
+        for url in urls:
+            self.assertTrue(url.startswith(f"https://subs.test/r/{key}/"), url)
+            self.assertNotIn(token, url)
+        self.assertEqual(http(f"{self.base}/r/{key}/notice.srt")[0], 200)      # the key serves its entries
+        for path in ("/configure", "/manifest.json", "/status", "/subtitles/movie/tt1.json", "/", ""):
+            with self.subTest(path=path):
+                self.assertEqual(http(f"{self.base}/r/{key}{path}")[0], 404)
+        code, _, _ = http(f"{self.base}/r/{key}/configure", form(action="delete"))
+        self.assertEqual(code, 405)
+        self.assertIsNotNone(self.users.open(token))                           # nothing deleted
+        self.assertEqual(http(f"{self.base}/u/{token}/notice.srt")[0], 404)   # entries no longer under the token
+        other = Users(self.dir + "/other.sqlite3", b"\x01" * 32)
+        try:
+            changed = key[:10] + ("A" if key[10] != "A" else "B") + key[11:]     # one character of it changed
+            for made_up in ("A" * 79, other.read_key(token), changed, token):
+                with self.subTest(key=made_up):
+                    self.assertEqual(http(f"{self.base}/r/{made_up}/notice.srt")[0], 404)
+        finally:
+            other.close()
+
+    def set_state(self, token, state):
+        record = self.users.open(token)
+        record["state"] = state
+        self.users.update(token, record)
+        self.pool.stop(token)
 
     def test_shared_files_are_served_to_anyone(self):
         from subsync import ALGO_VERSION
@@ -478,7 +531,8 @@ class PublicCheckTest(Base):
         from subsync import explain
         uuid, code, text, headers, token = self.sign_up()
         self.assertEqual(self.notices(token), [])
-        code, body, _ = http(f"{self.base}/u/{token}/notice.srt")     # an entry kept by an app after the fix
+        key = self.users.read_key(token)                               # entries are under the read key
+        code, body, _ = http(f"{self.base}/r/{key}/notice.srt")       # an entry kept by an app after the fix
         self.assertEqual(code, 200)
         self.assertIn(explain.PUBLIC_NOTICE_DONE, body.decode())
         self.set_record(token, state="sync_gone")
@@ -486,8 +540,8 @@ class PublicCheckTest(Base):
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0]["label"], "AIOSubtitles: action needed")
         self.assertEqual(notes[0]["lang"], "eng")
-        self.assertEqual(notes[0]["url"], f"https://subs.test/u/{token}/notice.srt")
-        code, body, headers = http(f"{self.base}/u/{token}/notice.srt")
+        self.assertEqual(notes[0]["url"], f"https://subs.test/r/{key}/notice.srt")
+        code, body, headers = http(f"{self.base}/r/{key}/notice.srt")
         self.assertEqual(code, 200)
         self.assertIn(explain.PUBLIC_STATES["sync_gone"][1][:40], " ".join(body.decode().split()))
         self.assertEqual(headers["Cache-Control"], "no-store")

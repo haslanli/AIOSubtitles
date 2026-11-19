@@ -19,15 +19,16 @@ log = logging.getLogger("subsync")
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     s = Settings()
-    # settings written wrong first: what must be set depends on them (a misspelt SUBSYNC_PUBLIC reads as off)
+    # every setting written wrong, then every one missing, all at one start. What must be set depends on the
+    # mode, so it isn't said while SUBSYNC_PUBLIC itself is written wrong (read as off, it would name a self-hosted
+    # install's settings)
     conflicts = s.conflicts()
+    missing = [] if s.is_written_wrong("SUBSYNC_PUBLIC") else s.missing()
     for conflict in conflicts:
         log.error("not started: %s", conflict)
-    if conflicts:
-        sys.exit(2)
-    missing = s.missing()
     if missing:
         log.error("not started: set %s%s", ", ".join(missing), "" if s.public else " (./setup writes them)")
+    if conflicts or missing:
         sys.exit(2)
     if s.public:
         return main_public(s)

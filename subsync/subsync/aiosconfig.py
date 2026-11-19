@@ -428,7 +428,8 @@ def usenet_names(services):
     return names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1] if names else ''
 
 
-NO_SERVICE = 'no debrid service (subsync reads files from debrid services only, not Usenet or torrents)'
+# Where Usenet files aren't read: said only by the public sign-up and its daily check (./setup reads Usenet files too)
+NO_SERVICE = 'no debrid service (AIOSubtitles reads files from debrid services only, not Usenet or torrents)'
 # Where Usenet files are read too
 NO_SERVICE_USENET = ('no debrid or Usenet service AIOSubtitles can read (it reads ready debrid files, and Usenet files '
                      'through services that stream part of a file; not torrents, not Stremio\'s NNTP streams)')
@@ -465,15 +466,21 @@ READ_SIZE = 64 * 1024        # an answer is read this much at a time, at most
 
 BAD_ANSWER = 'BAD_ANSWER'    # AiosError.code: an answer AIOStreams doesn't give (not JSON of the call's shape, too
                              # large, a redirect of a call that carries a password)
+UNREADABLE = 'UNREADABLE'    # AiosError.code: an answer that came but isn't whole JSON (cut short by a proxy, not
+                             # UTF-8): AIOStreams was reached
+# A "too many requests" of any call but making a config: AIOStreams' short limit (5 calls in 5 seconds)
+LIMITED = 'AIOStreams is limiting requests from this machine; try again in a few minutes.'
 
 
 class AiosError(Exception):
     """`detail`: AIOStreams' own words for a refusal, when it gave some (shown by the public sign-up for a refused
-    config)."""
+    config). `reason`: the message without the step it names, for the public pages, which name their own
+."""
 
-    def __init__(self, message, fix=None, code=None, detail=None):
+    def __init__(self, message, fix=None, code=None, detail=None, reason=None):
         super().__init__(message)
         self.message, self.fix, self.code, self.detail = message, fix, code, detail
+        self.reason = reason or message
 
 
 ALIAS_REDIRECTS = (301, 302, 303, 307, 308)
@@ -500,8 +507,9 @@ def needs_sign_in(e):
     return _asks_sign_in(e.code, e.detail)
 
 
-def _plain(code, message):
-    """AIOStreams error codes, in plain words."""
+def _plain(code, message, making=False):
+    """AIOStreams error codes, in plain words. `making`: the call made a config, which AIOStreams limits per hour; its
+    limit on every other call lasts seconds."""
     code = str(code or '')
     if code in WRONG_PASSWORD_CODES:
         return 'That config ID and password don\'t match a config on this AIOStreams.'
@@ -510,7 +518,10 @@ def _plain(code, message):
     if _asks_sign_in(code, message):
         return 'This AIOStreams asks you to sign in before configs can be saved.'
     if code == 'RATE_LIMIT_EXCEEDED' or 'too many' in (message or '').lower():
-        return 'AIOStreams is limiting requests from this machine (it allows 10 new configs an hour); try again later.'
+        if making:
+            return ('AIOStreams is limiting requests from this machine (it allows 10 new configs an hour); try again '
+                    'later.')
+        return LIMITED
     return message or code or 'AIOStreams gave an error without a message.'
 
 
@@ -607,8 +618,7 @@ class AiosApi:
             if len(payload) > MAX_ANSWER:
                 raise self._bad_answer(answer.status)
             if not isinstance(answer, urllib.error.HTTPError):
-                return answer.status, payload if raw else (
-                    json.loads(payload) if payload[:1] in (b'{', b'[') else {}), None
+                return answer.status, payload if raw else self._json(payload), None
             wait = self._asked_wait(answer.headers) if answer.status == 429 else None
             try:
                 return answer.status, json.loads(payload), wait
@@ -641,6 +651,19 @@ class AiosApi:
         return AiosError(f'{self.base} answered in a way AIOSubtitles doesn\'t know (HTTP {status}).',
                          'Give the address you open AIOStreams\' configure page at.', code=BAD_ANSWER)
 
+    def _json(self, payload):
+        """A successful answer's JSON ({} for one that isn't JSON at all); one that starts as JSON but can't be read
+        whole is UNREADABLE: it came, so AIOStreams was reached."""
+        if payload[:1] not in (b'{', b'['):
+            return {}
+        try:
+            return json.loads(payload)
+        except ValueError:      # cut short, or not UTF-8
+            raise AiosError(f'{self.base} answered, but its answer isn\'t the JSON AIOStreams sends (it may have been '
+                            'cut short).',
+                            'Try again; if it keeps happening, check the web server or proxy in front of AIOStreams.',
+                            code=UNREADABLE) from None
+
     def _object(self, status, body):
         """An answer's JSON object ({} for an empty answer); any other answer is BAD_ANSWER."""
         if not body:
@@ -649,9 +672,9 @@ class AiosApi:
             raise self._bad_answer(status)
         return body
 
-    def _error(self, status, body, doing):
+    def _error(self, status, body, doing, making=False):
         """The AiosError for a call AIOStreams refused, in plain words (BAD_ANSWER for an answer that isn't
-        AIOStreams')."""
+        AIOStreams'). `making`: the call made a config (_plain)."""
         if body and not isinstance(body, dict):
             return self._bad_answer(status)
         body = body or {}
@@ -662,14 +685,14 @@ class AiosApi:
             return self._bad_answer(status)
         said, detail = err.get('message'), body.get('detail')
         said = said if isinstance(said, str) else None
-        message = _plain(err.get('code'), said or (detail if isinstance(detail, str) else None))
-        return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=said)
+        message = _plain(err.get('code'), said or (detail if isinstance(detail, str) else None), making)
+        return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=said, reason=message)
 
-    def _succeeded(self, status, body, doing, ok=(200,)):
+    def _succeeded(self, status, body, doing, ok=(200,), making=False):
         """The answer of a call AIOStreams says succeeded; raises its refusal (_error) otherwise."""
         if status in ok and isinstance(body, dict) and body.get('success'):
             return body
-        raise self._error(status, body, doing)
+        raise self._error(status, body, doing, making)
 
     # ------------------------------------------------------------------------------------------- reads
 
@@ -691,9 +714,32 @@ class AiosApi:
     def alias_config_id(self, alias):
         """The config ID behind an alias link (…/stremio/u/<alias>/…): AIOStreams answers it, without a password, with
         a redirect to the config's full link. The redirect is read, never followed, and only the ID is kept: the rest of
-        that link holds the config's encrypted password and is dropped at once (never logged, stored or shown). Raises
-        AiosError: code ALIAS_UNKNOWN when this AIOStreams doesn't know the alias, ALIAS_NO_CONFIG when its answer
-        holds no config ID on this AIOStreams, and the usual "Can't reach" one when it can't be reached."""
+        that link holds the config's encrypted password and is dropped at once (never logged, stored or shown). A short
+        "too many requests" is waited out and asked once more, as `call` does. Raises AiosError: code
+        ALIAS_UNKNOWN when this AIOStreams doesn't know the alias, ALIAS_NO_CONFIG when its answer holds no config ID on
+        this AIOStreams, RATE_LIMIT_EXCEEDED while it limits requests, the HTTP status of its server error (500 to 599),
+        and the usual "Can't reach" one when it can't be reached."""
+        status, location, body, headers = self._ask_alias(alias)
+        if status == 429 and (wait := self._asked_wait(headers)) <= self.retry_wait_cap:
+            self.on_wait(wait)
+            time.sleep(wait)
+            status, location, body, headers = self._ask_alias(alias)
+        if status in ALIAS_REDIRECTS and location:
+            found = self._config_id_in(location)
+            if found:
+                return found
+        elif status == 404 or (status == 400 and _error_code(body) == 'USER_INVALID_DETAILS'):
+            raise AiosError('This AIOStreams doesn\'t know that alias.', code='ALIAS_UNKNOWN')
+        elif status == 429:
+            raise AiosError(LIMITED, code='RATE_LIMIT_EXCEEDED')
+        elif 500 <= status <= 599:
+            raise AiosError(f'AIOStreams answered HTTP {status} for the alias link; try again in a few minutes.',
+                            code=status)
+        raise AiosError('This AIOStreams gave no config for that alias.', code='ALIAS_NO_CONFIG')
+
+    def _ask_alias(self, alias):
+        """One request for an alias, its redirect never followed: (status, the redirect's target, a refusal's body,
+        the answer's headers)."""
         url = f'{self.base}/stremio/u/{urllib.parse.quote(alias, safe="")}/manifest.json'
         req = urllib.request.Request(url, method='GET', headers={'User-Agent': self.user_agent,
                                                                  'Accept': 'application/json'})
@@ -701,9 +747,10 @@ class AiosApi:
         location, body = None, b''
         try:
             with realdebrid.urlopen(req, wait_at_most, opener=net.build_opener(net.NoRedirects())) as r:
-                status = r.status
+                status, headers = r.status, r.headers
         except urllib.error.HTTPError as e:
-            status, location = e.code, (e.headers.get('Location') if e.headers else None)
+            status, headers = e.code, e.headers
+            location = headers.get('Location') if headers else None
             try:   # only a refusal's body is read: a redirect's would hold the encrypted password, and may never come
                 body = _read(e, wait_at_most, MAX_REFUSAL)[:MAX_REFUSAL] if status == 400 else b''
             except (OSError, ValueError, http.client.HTTPException):
@@ -714,13 +761,7 @@ class AiosApi:
             raise self._blocked() from None
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
             raise self._unreachable(e) from None
-        if status in ALIAS_REDIRECTS and location:
-            found = self._config_id_in(location)
-            if found:
-                return found
-        elif status == 404 or (status == 400 and _error_code(body) == 'USER_INVALID_DETAILS'):
-            raise AiosError('This AIOStreams doesn\'t know that alias.', code='ALIAS_UNKNOWN')
-        raise AiosError('This AIOStreams gave no config for that alias.', code='ALIAS_NO_CONFIG')
+        return status, location, body, headers
 
     def _config_id_in(self, location):
         """The config ID in a redirect's target (/stremio/<id>/<encrypted password>/…), only on this AIOStreams' own
@@ -754,7 +795,7 @@ class AiosApi:
         """(the new config's ID, its encrypted password)."""
         status, body = self.call('POST', '/api/v1/user', {'config': config, 'password': password},
                                  timeout=WRITE_TIMEOUT)
-        data = self._succeeded(status, body, 'Creating the sync config', ok=(200, 201)).get('data')
+        data = self._succeeded(status, body, 'Creating the sync config', ok=(200, 201), making=True).get('data')
         if not (isinstance(data, dict) and isinstance(data.get('uuid'), str)
                 and isinstance(data.get('encryptedPassword'), str)):
             raise self._bad_answer(status)
