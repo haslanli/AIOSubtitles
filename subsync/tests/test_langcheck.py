@@ -34,7 +34,7 @@ def check_rules():
     rules = {"thresholds": [langcheck.MIN_WORDS, langcheck.MIN_SCRIPT_SHARE, langcheck.MIN_COMMON_SHARE],
              "blocks": langcheck._BLOCKS, "scripts": langcheck.SCRIPTS, "characters": langcheck.CHARACTER_SCRIPTS,
              "words": {code: sorted(words) for code, words in langcheck.WORDS.items()},
-             "patterns": [langcheck._TOKEN.pattern, langcheck._DRAWING.pattern]}
+             "patterns": [langcheck._TOKEN.pattern, langcheck.DRAWING.pattern]}
     return hashlib.sha256(json.dumps(rules, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -136,7 +136,7 @@ class LanguageCheckTest(unittest.TestCase):
         rng = random.Random(5)
         for _ in range(4000):
             text = "".join(rng.choice("{}\\p1a ") for _ in range(rng.randrange(0, 14)))
-            self.assertEqual(bool(langcheck._DRAWING.search(text)), bool(old.search(text)), text)
+            self.assertEqual(bool(langcheck.DRAWING.search(text)), bool(old.search(text)), text)
         cue = "1\n00:00:01,000 --> 00:00:02,000\n{}" + " ".join(ENGLISH[:3]) + "\n"
         t0 = time.monotonic()   # 100,000 braces with no closer after them took about 3 s a pass, and there are two
         braces = langcheck.measure(cue.format("{" * 100000), "eng")

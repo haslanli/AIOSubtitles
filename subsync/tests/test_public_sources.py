@@ -2,6 +2,7 @@
 person's copy is made from the original, downloaded again from its source, with the stored timings. No network."""
 import gzip
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -14,7 +15,8 @@ from subsync import srclimits  # noqa: E402
 from subsync.addon import App, file_id, serve  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.store import Store  # noqa: E402
-from subsync.subs import apply_recipe, timing_recipe  # noqa: E402
+from subsync.subs import (apply_recipe, fingerprint, line_positions, parse, recognised,  # noqa: E402
+                          timing_recipe, write_like)
 from subsync.worker import Safety, Worker  # noqa: E402
 
 FILE = "0123456789abcdef-1000"
@@ -62,6 +64,19 @@ class RecipeTest(unittest.TestCase):
 
     def test_unchanged_is_the_original(self):
         self.assertEqual(apply_recipe(SRT, timing_recipe(SRT, SRT)), SRT)
+
+    def test_a_changed_original_is_recognised_by_its_words_timings_and_line_positions(self):
+        # The words and timings leave credit lines out, so an original whose credit line moved from the end
+        # to the start was still recognised
+        credit = "Subtitles downloaded from www.example.org"
+        original = SRT + f"\n4\n00:00:59,000 --> 00:01:00,000\n{credit}\n"
+        moved = f"1\n00:00:00,000 --> 00:00:00,500\n{credit}\n\n" + SRT
+        recipe = {"v": 1, "times": [], "fp": fingerprint(original), "positions": line_positions(original)}
+        self.assertTrue(recognised(original.replace("\n", "\r\n"), recipe))     # other bytes, the same subtitle
+        self.assertEqual(fingerprint(moved), recipe["fp"])                       # its words and timings stayed
+        self.assertFalse(recognised(moved, recipe))
+        self.assertFalse(recognised(original.replace("Kenobi", "Grievous"), recipe))
+        self.assertFalse(recognised(original, dict(recipe, positions=None)))     # a recipe kept before
 
     def test_a_copy_that_is_not_a_re_timing_of_the_original_has_no_recipe(self):
         self.assertIsNone(timing_recipe(SRT, SYNCED.replace("Kenobi", "Grievous")))
@@ -162,6 +177,48 @@ class ServingTest(unittest.TestCase):
             f.write(SRT.replace("Kenobi", "Grievous"))
         code, _ = self.get(f"/file/{file_id(self.key)}.srt")
         self.assertEqual(code, 404)
+
+    def put_original(self, text):
+        """`text` as the source serves it now, downloaded again on the next request."""
+        with open(os.path.join(self.dir, "subs", "orig.srt"), "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        self.worker.fetched_subs.clear()
+
+    def stored(self, original):
+        """A copy of `original` a second later, stored as public mode stores it: (its key, its text)."""
+        body = write_like(original, [dict(l, s=l["s"] + 1, e=l["e"] + 1) for l in parse(original)])
+        key = self.store.put(FILE, sha(original), "eng", 0, "synced", body=body, fmt="srt", candidate_id="c1",
+                             original=original)
+        return key, body
+
+    def test_a_changed_original_whose_lines_moved_is_not_served(self):
+        # The site moved a credit line from the end to the start; the words and timings the original is
+        # recognised by, and its number of lines, stayed as they were, so the copy was rebuilt one line off throughout
+        credit = "Subtitles downloaded from www.example.org"
+        original = SRT + f"\n4\n00:00:59,000 --> 00:01:00,000\n{credit}\n"
+        key, body = self.stored(original)
+        self.assertNotIn("Kenobi", json.dumps(self.store.recipe(key)))       # where its lines were: times only
+        self.put_original(f"1\n00:00:00,000 --> 00:00:00,500\n{credit}\n\n" + SRT)
+        self.assertEqual(self.get(f"/file/{file_id(key)}.srt")[0], 404)
+
+    def test_a_changed_original_with_its_lines_where_they_were_is_served(self):
+        key, body = self.stored(SRT)
+        self.put_original(SRT.replace("\n", "\r\n"))                          # other bytes, the same lines
+        self.assertEqual(self.get(f"/file/{file_id(key)}.srt"), (200, body))
+
+    def test_a_copy_kept_without_line_positions_is_served_only_from_its_unchanged_original(self):
+        # A recipe kept before has no check of where its original's lines were
+        key, body = self.stored(SRT)
+        path = self.store._recipe_path(key)
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            recipe = json.load(f)
+        del recipe["positions"]
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            json.dump(recipe, f)
+        self.put_original(SRT.replace("\n", "\r\n"))
+        self.assertEqual(self.get(f"/file/{file_id(key)}.srt")[0], 404)
+        self.put_original(SRT)
+        self.assertEqual(self.get(f"/file/{file_id(key)}.srt"), (200, body))
 
 
 class SignupCleanUpTest(unittest.TestCase):

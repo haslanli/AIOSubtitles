@@ -31,7 +31,7 @@ from .mp4 import open_index
 from .reader import MAX_RE_RESOLVE, CapReached, IndexTooLarge, RangeReader, ReadFailed, Refused, Stopped
 from .sources import bt_alias, expected_size, fetch_subtitle, plausible_size, same_hash
 from .store import DAY, JUDGED_FOR_S, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, result_key
-from .subs import decode, fingerprint, is_ass, parse
+from .subs import NO_DIALOGUE, decode, fingerprint, is_ass, parse, recognised
 
 log = logging.getLogger("subsync.worker")
 UNLISTED_S = 3600   # a file the listing didn't have (uncached, or another release) isn't looked for again this long
@@ -366,8 +366,8 @@ class JobGuard:
             self.limits.before_read(length)
 
     def after_read(self, n, asked=None):
-        """A read ended with `n` bytes received (0 when it failed); `asked`: the length its before_read reserved (by
-        default n, a read that got what it asked for)."""
+        """A read ended with `n` bytes received (when it failed, what arrived before it did:); `asked`: the
+        length its before_read reserved (by default n, a read that got what it asked for)."""
         if n:
             self.store.day_add("read", n)
             if self.limits is not None:
@@ -1333,10 +1333,10 @@ class Worker(threading.Thread):
                     log.info("read failed %s (%s): it waits for another pick", job.label, e)
                     self._wait_again(job)
                     return
-                if tries_left and e.connection and not reader.bytes and not job.usenet:
-                    # The first read got no answer (a passing fault, as on Breaking Bad): tried once
-                    # more, with the same reader, so it is one of the link's look-ups; the job keeps its
-                    # claims, but its places are free for others meanwhile
+                if tries_left and e.connection and not reader.finished and not job.usenet:
+                    # The first read got no answer or broke off (a passing fault, as on Breaking Bad;
+                    # what it got is counted): tried once more, with the same reader, so it is one of the
+                    # link's look-ups; the job keeps its claims, but its places are free for others meanwhile
                     log.info("read failed %s (%s), tried again in %d s", job.label, e, READ_RETRY_S)
                     with self._given_back(job):
                         time.sleep(READ_RETRY_S)
@@ -1845,8 +1845,9 @@ class Worker(threading.Thread):
                 fp = fingerprint(e["text"])
             except Exception:   # unreadable: judged on its own, as before
                 return False
-            if fp in fingerprints:
-                log.info("sync %s %s rank %d: the same subtitle as one already judged, left out", job.label, lang, e["rank"])
+            if fp in fingerprints:   # R3-8: every text with no dialogue line has one fingerprint (subs.NO_DIALOGUE)
+                why = "no dialogue line" if fp == NO_DIALOGUE else "the same subtitle as one already judged"
+                log.info("sync %s %s rank %d: %s, left out", job.label, lang, e["rank"], why)
                 return True
             fingerprints.update((fp, e["sha"]))
             return False
@@ -2072,10 +2073,10 @@ class Worker(threading.Thread):
         config the list starts with a built-in source's, which has no place of its own."""
         return bool(candidates) and candidates[0].get("from_config", True)
 
-    def original_text(self, result, fp=None):
+    def original_text(self, result, recipe=None):
         """Public mode: the original a stored result was made from, downloaded again from the source this
-        person's own list gives for it, or None when their list has no such subtitle or it changed since (its bytes,
-        and the words and timings it is recognised by, differ)."""
+        person's own list gives for it, or None when their list has no such subtitle or it changed since (its bytes
+        differ, and the copy's recipe doesn't recognise it: subs.recognised)."""
         key = (result.get("candidate_id"), result.get("lang"))
         with self.cv:
             cand = self.by_id.get(key)
@@ -2094,7 +2095,7 @@ class Worker(threading.Thread):
             return None
         raw = got[2]
         text = decode(raw, result["lang"])
-        if hashlib.sha256(raw).hexdigest() != result.get("sub_sha") and not (fp and fingerprint(text) == fp):
+        if hashlib.sha256(raw).hexdigest() != result.get("sub_sha") and not recognised(text, recipe):
             log.info("the original of a stored copy changed at its source: not served")
             return None
         return text

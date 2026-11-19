@@ -14,9 +14,11 @@ that got no answer (no connection, a reset, a timeout, a reply cut short), or on
 timeout plus a second for every READ_BYTES_PER_S bytes asked for: "too slow"), raises ReadFailed with
 `connection` set, so the worker can try a file's first read once more. Before each read the guard
 (budget, pause) may stop the job; after each, one that failed too, it is told the bytes received and the length the
-read asked for (guard.after_read).
+read asked for (guard.after_read). The bytes a read received are counted also when it fails: a reply is read
+a CHUNK at a time, so what arrived before it broke off is known.
 """
 import http.client
+import io
 import logging
 import re
 import socket
@@ -38,6 +40,7 @@ SIZE_TOLERANCE = 0.0005
 FIRST_BYTE = re.compile(r"\s*bytes\s+([0-9]+)-", re.IGNORECASE)   # a Content-Range's first byte
 # a read may go on for the timeout plus one second for every READ_BYTES_PER_S bytes it asks for
 READ_BYTES_PER_S = 64 * 1024
+CHUNK = 256 * 1024     # bytes taken from a reply at a time, each counted as it arrives
 
 
 class ReadFailed(Exception):
@@ -155,8 +158,9 @@ class RangeReader:
         # bytes the listed size may be off by rounding: addons list sizes to 0.01 GiB, so up to 0.005 GiB (5.4 MB),
         # which is 0.35 % of a 1.4 GiB episode and far over a relative tolerance
         self.slack = size_slack
-        self.bytes = 0
+        self.bytes = 0                # bytes received, also by reads that failed
         self.requests = 0
+        self.finished = 0             # reads that got all they asked for and passed the reply's checks
         self._lock = threading.Lock()   # audio windows are read up to 4 at once (audiofit.AudioFit.prefetch)
         self.open = opener or realdebrid.urlopen   # refuses Real-Debrid addresses, redirects included
         self.resolved = None          # the address the link pointed to: never logged, never stored
@@ -233,21 +237,22 @@ class RangeReader:
         if self.guard:
             self.guard.before_read(length)
         t0 = time.time()
-        data, status, first, total, sent, limit = b"", 0, None, None, True, None
+        data, got, status, first, total, sent, limit = b"", 0, 0, None, None, True, None
         try:
             r, t0 = self._open(start, length)
             with r, self._time_limit(r, length) as limit:
                 status = getattr(r, "status", 200)
                 first, total = reply_range(r.headers, status)
-                # read at most what was asked, even when a server ignores the range (status 200), in one call: it fills
-                # one buffer of that size, so a large read (a moov, the Cues, an audio window) isn't held twice while
-                # pieces of it are joined
-                data = r.read(length)
-                while data and len(data) < length:   # a reply that comes in pieces
-                    more = r.read(length - len(data))
-                    if not more:
+                # read at most what was asked, even when a server ignores the range (status 200), a CHUNK at a time so
+                # what arrived is counted if the read breaks off, into one buffer whose bytes are taken
+                # without a copy, so a large read (a moov, the Cues, an audio window) isn't held twice
+                buf = io.BytesIO()
+                while got < length:
+                    piece = r.read(min(CHUNK, length - got))
+                    if not piece:
                         break
-                    data += more
+                    got += buf.write(piece)
+                data = buf.getvalue()
         except LinkUsedUp:
             sent = False
             raise
@@ -256,21 +261,22 @@ class RangeReader:
             e.close()
         except (OSError, ValueError, http.client.HTTPException) as e:
             slow = limit is not None and limit.passed
-            self._log(start, length, 0, status, t0, "too slow" if slow else type(e).__name__)
+            self._log(start, length, got, status, t0, "too slow" if slow else type(e).__name__)
             raise ReadFailed("too slow" if slow else type(e).__name__, connection=slow or connection_fault(e)) from None
         finally:
-            if sent:
-                self._count(requests=1)
-            if self.guard:   # also when it failed: the length it asked for is no longer reserved (worker.JobGuard)
-                self.guard.after_read(len(data), length)
-        self._count(got=len(data))
-        self._log(start, length, len(data), status, t0, None)
+            # also when it failed: what it received is counted, and the length it asked for is no longer reserved
+            # (worker.JobGuard)
+            self._count(got=got, requests=1 if sent else 0)
+            if self.guard:
+                self.guard.after_read(got, length)
+        self._log(start, length, got, status, t0, None)
         self._check(status, start, first, total)
         expected = min(length, self.size - start) if self.size is not None else length
-        if len(data) < expected:
+        if got < expected:
             if limit is not None and limit.passed:
                 raise ReadFailed("too slow", connection=True)
             raise ReadFailed("short reply")
+        self._count(finished=1)
         return data
 
     def _check(self, status, start, first, total):
@@ -294,7 +300,7 @@ class RangeReader:
                 raise ReadFailed("size differs")
             self.size = total
 
-    def stream(self, start, length, chunk=256 * 1024):
+    def stream(self, start, length, chunk=CHUNK):
         """One bounded range request read in chunks as the caller takes them; a caller that stops early (closes the
         generator) closes the connection, and only the bytes read are counted. The same checks as get() (_check)."""
         if length <= 0:
@@ -342,6 +348,7 @@ class RangeReader:
                     got += len(data)
                     left -= len(data)
                     yield data
+            self._count(finished=1)
         finally:
             r.close()
             self._count(got=got)
@@ -349,10 +356,11 @@ class RangeReader:
                 self.guard.after_read(got, length)
             self._log(start, length, got, status, t0, error)
 
-    def _count(self, got=0, requests=0):
+    def _count(self, got=0, requests=0, finished=0):
         with self._lock:
             self.bytes += got
             self.requests += requests
+            self.finished += finished
 
     def _log(self, start, length, got, status, t0, error):
         log.info("read %s bytes=%d-%d got=%d status=%s ms=%d%s", self.label, start, start + length - 1, got,

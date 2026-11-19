@@ -48,7 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import explain, origlang, srclimits
 from .langs import name as lang_name
 from .sources import parse_extras
-from .subs import apply_recipe, is_ass, parse, to_srt
+from .subs import apply_recipe, format_of, is_ass, parse, to_srt
 from .worker import Job
 
 log = logging.getLogger("subsync.addon")
@@ -132,9 +132,8 @@ def alias_of(tok, key=""):
 
 def as_srt(text):
     """A subtitle's text as the ".srt" routes send it: SRT as it is, ASS and WebVTT written as SRT."""
-    if is_ass(text) or text.lstrip("\ufeff").startswith("WEBVTT"):
-        return to_srt(parse(text))
-    return text
+    fmt = format_of(text)
+    return text if fmt == "srt" else to_srt(parse(text), fmt)
 
 
 def no_subtitle_note(lang):
@@ -172,7 +171,7 @@ class App:
         recipe, result = self.store.recipe(key), self.store.get(key)
         if not recipe or not result:
             return None
-        original = self.worker.original_text(result, recipe.get("fp"))
+        original = self.worker.original_text(result, recipe)
         text = apply_recipe(original, recipe) if original is not None else None
         if text is not None:
             with self.texts_lock:
@@ -475,7 +474,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, b"")
                 app.store.served(key)
                 if m.group(2) == "srt" and is_ass(body):
-                    body = to_srt(parse(body))
+                    body = to_srt(parse(body), "ass")
                 ctype = "text/x-ssa; charset=utf-8" if m.group(2) == "ass" else "application/x-subrip; charset=utf-8"
                 return self._send(200, body, ctype, {"Cache-Control": "max-age=3600"})
             m = PENDING_ROUTE.match(path)
@@ -490,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = app.text_of(key)
                 if body is not None:
                     app.store.served(key)
-                    return self._subtitle(to_srt(parse(body)) if is_ass(body) else body, "copy")
+                    return self._subtitle(to_srt(parse(body), "ass") if is_ass(body) else body, "copy")
                 if original:   # the original's text once it is checked, never a redirect to it
                     return self._original(app, alias, m.group(2), deadline)
                 return self._send(503, b"", "text/plain", {"Retry-After": "1", "Cache-Control": "no-store"})
@@ -534,7 +533,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = app.text_of(key)
                 if body is not None:
                     app.store.served(key)
-                    return self._subtitle(to_srt(parse(body)) if is_ass(body) else body, "copy")
+                    return self._subtitle(to_srt(parse(body), "ass") if is_ass(body) else body, "copy")
                 originals = app.worker.wait_for_originals(alias, left())
                 if originals is None:
                     originals = app.worker.known_originals(alias)

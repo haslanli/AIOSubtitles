@@ -41,7 +41,7 @@ import time
 import zlib
 
 from . import ALGO_VERSION
-from .subs import fingerprint, timing_recipe
+from .subs import fingerprint, line_positions, timing_recipe
 
 log = logging.getLogger("subsync.store")
 
@@ -270,8 +270,9 @@ class Store:
             content = body
             if not self.keep_texts:
                 recipe = timing_recipe(original, body) if original is not None else None
-                if recipe is not None:   # the original is recognised by its words and timings if its bytes change
-                    recipe["fp"] = fingerprint(original)
+                if recipe is not None:   # the original is recognised by its words and timings if its bytes change,
+                    # and only while its lines are where they were (subs.recognised)
+                    recipe["fp"], recipe["positions"] = fingerprint(original), line_positions(original)
                 content = json.dumps(recipe) if recipe is not None else None
                 if content is None:
                     log.info("public mode: a copy that isn't a re-timing of its original is not kept")

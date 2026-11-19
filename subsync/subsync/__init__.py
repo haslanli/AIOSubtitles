@@ -29,5 +29,6 @@ ALGO_VERSION = "v3"   # part of every stored result's key: a new version recompu
 # they land, no sectioned fit where the words say one section, the release's lines far beyond the subtitle's ends, a
 # language settled only by a pass against its own language's track, subtitles read in their language's old encoding,
 # bilingual Chinese, Japanese and Korean subtitles in their language, a language's written forms as one, no word check
-# for Chinese and Japanese, and tracks named or flagged as commentary, or as full ones with signs and songs
+# for Chinese and Japanese, tracks named or flagged as commentary, or as full ones with signs and songs, song and sign
+# styles told by their names' whole words, and SRT cues with no blank line between them
 RULE_REVISION = 11

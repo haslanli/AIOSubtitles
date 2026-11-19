@@ -9,6 +9,7 @@ import unittest
 from helpers import AUDIO_BETTER, FakeIndex, realistic, rhythm, timeline_fit
 from subsync import choose, imageref, langs, pipeline, refine, shift, subs
 from subsync import relgate as relgate_mod
+from subsync.addon import as_srt
 from subsync.mkv import oshash
 from subsync.relgate import aligned, clearly_better, relgate
 from subsync.vad import FRAME, timestamps
@@ -72,7 +73,7 @@ class SubsTest(unittest.TestCase):
     def test_drop_and_srt_out(self):
         lines = subs.parse(ASS)
         lines[1]["drop"] = True
-        srt = subs.to_srt(lines)
+        srt = subs.to_srt(lines, "ass")
         self.assertNotIn("SIGN", srt)
         self.assertIn("Hello, there", srt)
         self.assertEqual(len(subs.parse(srt)), 2)
@@ -175,6 +176,87 @@ class SubsTest(unittest.TestCase):
             self.assertEqual(subs.to_srt(subs.parse(text)), text)
             self.assertIsNotNone(subs.timing_recipe(text, text.replace("00:00:01,000", "00:00:01,500")))
             self.assertLess(time.monotonic() - t0, 2.0, opener)
+
+    def test_song_and_sign_styles_are_told_by_their_names_whole_words(self):
+        # "OP_Romaji", "Opening", "Karaoke" and the like were dialogue (only names starting "op "/"op-" or
+        # "song" were songs), "TS" and "Title" too, and any name with "sign" in it ("Design") was a sign
+        kinds = {"song": ("OP_Romaji", "ED_TL", "OPRomaji", "Opening", "Ending", "Karaoke", "Kara", "Lyrics",
+                          "Insert Song", "OP Romaji", "OP-Romaji", "OP", "ed", "ED-English", "Song_JP", "Songs"),
+                 "sign": ("TS", "Title", "Typeset", "Sign", "signs", "Main_Signs"),
+                 "dialogue": ("Default", "Design", "Assignment", "Main_Top", "Italics", "Speaker", "")}
+        for kind, styles in kinds.items():
+            for style in styles:
+                with self.subTest(style=style):
+                    self.assertEqual(subs.kind_of_style(style), kind)
+        ass = ASS.replace(",Song,", ",OP_Romaji,").replace(",Sign,,", ",TS,,")
+        self.assertEqual([l["kind"] for l in subs.parse(ass)], ["dialogue", "sign", "song"])
+
+    def test_srt_cues_without_a_blank_line_between_them_are_read_apart(self):
+        # The second cue was read as the first one's text, so it was in no measure, and the copy showed its
+        # index and its timing line as dialogue
+        srt = ("1\n00:00:01,000 --> 00:00:02,000\nHello\n2\n00:00:03,000 --> 00:00:04,000\nWorld\nagain\n\n"
+               "3\n00:00:05,000 --> 00:00:06,000\n42\n")
+        lines = subs.parse(srt)
+        self.assertEqual([(l["s"], l["text"]) for l in lines], [(1.0, "Hello"), (3.0, "World\nagain"), (5.0, "42")])
+        vtt = "WEBVTT\n\n" + srt.replace(",", ".")
+        self.assertEqual([(l["s"], l["text"]) for l in subs.parse(vtt)], [(l["s"], l["text"]) for l in lines])
+        copy = subs.write_like(srt, [dict(l, s=l["s"] + 10, e=l["e"] + 10) for l in lines])
+        self.assertEqual(copy, "1\n00:00:11,000 --> 00:00:12,000\nHello\n\n2\n00:00:13,000 --> 00:00:14,000\n"
+                               "World\nagain\n\n3\n00:00:15,000 --> 00:00:16,000\n42\n")
+
+    def test_ass_is_written_as_srt_without_drawings_with_whole_lines_and_their_styles(self):
+        # A drawing's commands were shown as text, an empty line inside a line ended the cue (the rest was
+        # lost), and italics, bold and underline were dropped; {\anN} (shown at the top) went too
+        events = ("Dialogue: 0,0:00:01.00,0:00:02.00,Sign,,0,0,0,,"
+                  "{\\an7\\pos(0,0)\\p1}m 0 0 l 100 0 100 100 0 100{\\p0}\n"
+                  "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Hello\\N\\Nworld\n"
+                  "Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,"
+                  "{\\i1}Ital{\\i0}, {\\b1}bold{\\b0} and {\\u1}under\n"
+                  "Dialogue: 0,0:00:07.00,0:00:08.00,Default,,0,0,0,,"
+                  "{\\an8\\fad(100,100)\\t(\\i1)}On top\\hhere{\\r}\n")
+        ass = ASS.split("Dialogue:")[0] + events
+        srt = ("1\n00:00:03,000 --> 00:00:04,000\nHello\nworld\n\n"
+               "2\n00:00:05,000 --> 00:00:06,000\n<i>Ital</i>, <b>bold</b> and <u>under</u>\n\n"
+               "3\n00:00:07,000 --> 00:00:08,000\n{\\an8}On top here\n")
+        self.assertEqual(as_srt(ass), srt)                                    # its "(original)" entry
+        self.assertEqual(subs.to_srt(subs.parse(ass), "ass"), srt)            # a copy, for a player that asks for SRT
+        self.assertEqual([l["text"] for l in subs.parse(srt)][0], "Hello\nworld")
+        self.assertEqual(subs.write_like(ass, subs.parse(ass)), ass)          # the ASS copy itself is unchanged
+
+    def test_webvtt_is_written_as_srt_with_its_codes_as_characters(self):
+        # "Tom &amp; Jerry", "<v Bob>", "<c.yellow>", "&nbsp;" and "&lrm;" showed as they were
+        vtt = ("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v Bob>Tom &amp; Jerry</v> <c.yellow>hi</c>&nbsp;there\n\n"
+               "00:00:03.000 --> 00:00:04.000\n"
+               "<i>It's</i> <lang fr>bon</lang> <b.loud>now</b> <00:00:03.500><u>go</u>\n\n"
+               "00:00:05.000 --> 00:00:06.000\n&lrm;שלום&rlm;\n&nbsp;\n")
+        srt = ("1\n00:00:01,000 --> 00:00:02,000\nTom & Jerry hi\xa0there\n\n"
+               "2\n00:00:03,000 --> 00:00:04,000\n<i>It's</i> bon <b>now</b> <u>go</u>\n\n"
+               "3\n00:00:05,000 --> 00:00:06,000\n‎שלום‏\n")
+        self.assertEqual(as_srt(vtt), srt)                                    # its "(original)" entry
+        lines = subs.parse(vtt)
+        copy = subs.write_like(vtt, [dict(l, s=l["s"] + 1, e=l["e"] + 1) for l in lines])
+        self.assertEqual([l["text"] for l in subs.parse(copy)], [l["text"] for l in subs.parse(srt)])
+        self.assertEqual(subs.apply_recipe(vtt, subs.timing_recipe(vtt, copy)), copy)   # public mode still rebuilds it
+
+    def test_an_srt_copy_keeps_its_originals_text_as_it_is(self):
+        # Every {...} was taken out of an SRT's lines, so a line marked {\an8} moved from the top of the
+        # picture to the bottom in its copy
+        srt = ("1\n00:00:01,000 --> 00:00:02,000\n{\\an8}A sign at the top\n\n"
+               "2\n00:00:03,000 --> 00:00:04,000\n<i>Hello</i> {\\i1}there{\\i0}\n- Hi\n")
+        copy = subs.write_like(srt, [dict(l, s=l["s"] + 1, e=l["e"] + 1) for l in subs.parse(srt)])
+        self.assertEqual(copy, srt.replace("00:00:01,000 --> 00:00:02,000", "00:00:02,000 --> 00:00:03,000")
+                                  .replace("00:00:03,000 --> 00:00:04,000", "00:00:04,000 --> 00:00:05,000"))
+        self.assertEqual(subs.apply_recipe(srt, subs.timing_recipe(srt, copy)), copy)
+
+    def test_the_srt_writers_read_unclosed_tags_in_linear_time(self):
+        n = 64000
+        t0 = time.monotonic()
+        for fmt, text in (("ass", "{" * n), ("ass", "{\\i1" * n), ("ass", "{\\i1}x" * n), ("vtt", "<" * n),
+                          ("vtt", "<a" * n)):
+            subs.to_srt([{"s": 1.0, "e": 2.0, "text": text, "kind": "dialogue"}], fmt)
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertEqual(subs.to_srt([{"s": 1.0, "e": 2.0, "text": "a {b", "kind": "dialogue"}], "ass"),
+                         "1\n00:00:01,000 --> 00:00:02,000\na {b\n")    # an opener with no closer is text
 
 
 class RelgateTest(unittest.TestCase):

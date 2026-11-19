@@ -1,11 +1,13 @@
 """Subtitle text: decode, parse (SRT, WebVTT, ASS/SSA) and write back with new timings.
 
-ASS keeps its header, styles and every field but Start/End; songs and signs are told apart from dialogue by
-style name (they move with their segment but are not part of the dialogue measure).
+ASS keeps its header, styles and every field but Start/End; songs and signs are told apart from dialogue by the words
+of their style name (they move with their segment but are not part of the dialogue measure). SRT and WebVTT come back
+as SRT: an SRT's text as it is, WebVTT's (and ASS's, for a player that asks for SRT) as SRT writes it (to_srt).
 """
 import codecs
 import hashlib
 import re
+from html import unescape
 from typing import NamedTuple
 
 from . import langs, srclimits
@@ -102,11 +104,20 @@ def _t(s):
     return int(h) * 3600 + int(mi) * 60 + int(se) + int(frac.ljust(3, "0")) / 1000
 
 
+# the words of an ASS style name that make its lines songs or signs, whole words only: "OP_Romaji",
+# "ED-English", "Opening", "Insert Song" and "Karaoke" are songs, "TS" and "Title" signs, "Design" dialogue
+SONG_WORDS = frozenset(("op", "ed", "opening", "ending", "song", "songs", "insert", "karaoke", "kara", "lyrics"))
+SIGN_WORDS = frozenset(("sign", "signs", "ts", "title", "typeset"))
+# a style name's words: runs of letters, split before a capital that starts a word ("OPRomaji": OP, Romaji)
+STYLE_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
+
+
 def kind_of_style(style):
-    style = style.strip().lower()
-    if "sign" in style:
+    """'sign', 'song' or 'dialogue': by the style name's words (SIGN_WORDS, SONG_WORDS)."""
+    words = {w.lower() for w in STYLE_WORD.findall(style)}
+    if words & SIGN_WORDS:
         return "sign"
-    if style.startswith("song") or style in ("op", "ed") or style.startswith(("op ", "ed ", "op-", "ed-")):
+    if words & SONG_WORDS:
         return "song"
     return "dialogue"
 
@@ -159,24 +170,39 @@ def _ass_lines(text):
         yield line, event
 
 
+def _cues(text):
+    """The cues of a normalised SRT or WebVTT text, read line by line: every line holding a valid
+    "time --> time" starts one, also with no blank line before it (a number on the line just before it is then its
+    index, not text), and its text runs to the next such line or a blank line. Lines in no cue (WebVTT's header, notes
+    and styles, an index, a cue's identifier) are left out."""
+    out, cue = [], None    # cue: the one being read, (start, end, its text lines), None after a blank line
+    for line in text.strip().split("\n"):
+        if not line.strip():
+            cue = None
+            continue
+        a, arrow, b = line.partition("-->")
+        if arrow:
+            try:
+                s, e = _t(a), _t(b)
+            except ValueError:
+                pass
+            else:
+                if cue is not None and cue[2] and cue[2][-1].strip().isdigit():
+                    cue[2].pop()
+                cue = (s, e, [])
+                out.append(cue)
+                continue
+        if cue is not None:
+            cue[2].append(line)
+    return [{"s": s, "e": e, "text": "\n".join(lines), "kind": "dialogue"} for s, e, lines in out]
+
+
 def parse(text):
     """List of dicts: s, e (seconds), text, kind ('dialogue'|'song'|'sign')."""
     text = _normalised(text)
     if is_ass(text):
         return [event.line() for _, event in _ass_lines(text) if event is not None]
-    out = []
-    for block in re.split(r"\n\s*\n", text.strip()):
-        lines = [l for l in block.split("\n") if l.strip()]
-        arrow = next((i for i, l in enumerate(lines) if "-->" in l), None)
-        if arrow is None:
-            continue
-        a, _, b = lines[arrow].partition("-->")
-        try:
-            s, e = _t(a), _t(b)
-        except ValueError:
-            continue
-        out.append({"s": s, "e": e, "text": "\n".join(lines[arrow + 1:]), "kind": "dialogue"})
-    return out
+    return _cues(text)
 
 
 def dialogue_starts(lines):
@@ -228,27 +254,100 @@ def strip_tags(text, repl="", html=True):
     return "".join(out)
 
 
-def _srt_body(text):
-    """A line's text as an SRT body: ASS override blocks out, ASS line breaks as new lines, hard spaces as spaces."""
-    return strip_tags(text, html=False).replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ")
+# an ASS vector drawing: its commands are letters, not words ("{" left out of the block's class keeps the search linear)
+DRAWING = re.compile(r"\{[^{}]*\\p[1-9]")
+_STYLE_TAG = re.compile(r"([ibu])(\d{0,4})")   # ASS italics, bold, underline: 1 on, 0 off; bold also by weight
+_POSITION_TAG = re.compile(r"an[1-9]")         # ASS's position mark, which players honour in SRT too
+_VTT_TAG = re.compile(r"<(/?)([^<>\s./]*)[^<>]*>")   # a WebVTT tag: its name, then any classes and annotation
+_SRT_STYLES = ("i", "b", "u")                  # the styles SRT writes as tags (<i>, <b>, <u>)
 
 
-def to_srt(lines):
-    out, k = [], 0
+def _no_empty_line(text):
+    """text without its blank lines (in an SRT cue one would end it), and without space at its ends."""
+    return "\n".join(x for x in text.split("\n") if x.strip()).strip()
+
+
+def _override_tags(block):
+    """An ASS override block's tags (its text between the braces), each without its backslash; the ones an animation
+    (\\t(...)) holds are left out."""
+    tags, depth = [], 0
+    for part in block.split("\\")[1:]:   # text before the first backslash is a comment
+        if not depth:
+            tags.append(part.strip())
+        depth = max(0, depth + part.count("(") - part.count(")"))
+    return tags
+
+
+def _ass_srt_text(text):
+    """An ASS line's text as SRT writes it: italics, bold and underline as <i>, <b> and <u>, the position mark
+    {\\anN} kept, every other override block out (an opener with no closer after it is text, as strip_tags reads it);
+    line breaks (\\N, \\n) as new lines and hard spaces (\\h) as spaces."""
+    out, styles, at = [], [], 0     # styles: the ones open, in the order they opened
+    while True:
+        i = text.find("{", at)
+        j = text.find("}", i + 1) if i >= 0 else -1
+        out.append(text[at:i if j >= 0 else None].replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " "))
+        if j < 0:
+            break
+        for tag in _override_tags(text[i + 1:j]):
+            style = _STYLE_TAG.fullmatch(tag)
+            if style:
+                name, n = style[1], int(style[2] or 0)
+                on = n == 1 or (name == "b" and n > 400)
+                if on and name not in styles:
+                    out.append(f"<{name}>")
+                    styles.append(name)
+                elif not on and name in styles:
+                    out.append(f"</{name}>")
+                    styles.remove(name)
+            elif _POSITION_TAG.fullmatch(tag):
+                out.append(f"{{\\{tag}}}")
+            elif tag.startswith("r"):   # back to the line's style: what was turned on in the line is off
+                out += [f"</{s}>" for s in reversed(styles)]
+                styles.clear()
+        at = j + 1
+    out += [f"</{s}>" for s in reversed(styles)]
+    return _no_empty_line("".join(out))
+
+
+def _vtt_srt_text(text):
+    """A WebVTT cue's text as SRT writes it: <i>, <b> and <u> kept (without their classes), every other tag
+    out (voice, class, language, ruby, in-line times), and character references such as &amp; as their characters."""
+    def tag(m):
+        name = m[2].lower()
+        return f"<{m[1]}{name}>" if name in _SRT_STYLES else ""
+    return _no_empty_line(unescape(_VTT_TAG.sub(tag, text)))
+
+
+# a line's text as to_srt writes it, by the format it was read from: an SRT's as it is
+_SRT_TEXT = {"srt": lambda text: text, "vtt": _vtt_srt_text, "ass": _ass_srt_text}
+
+
+def format_of(text):
+    """"ass", "vtt" or "srt": the format of a subtitle's text."""
+    if is_ass(text):
+        return "ass"
+    return "vtt" if text.lstrip("\ufeff").startswith("WEBVTT") else "srt"
+
+
+def to_srt(lines, fmt="srt"):
+    """lines (parse()'s, of a subtitle in format `fmt`: format_of) as SRT: one writer for every source format
+    (_SRT_TEXT), so a copy differs from its original only in timing. Lines marked drop are left out, and so are ASS
+    drawings."""
+    srt_text, out = _SRT_TEXT[fmt], []
     for l in lines:
-        if l.get("drop"):
+        if l.get("drop") or (fmt == "ass" and DRAWING.search(l["text"])):
             continue
-        k += 1
-        out.append(f"{k}\n{ts(l['s'])} --> {ts(l['e'])}\n{_srt_body(l['text']).strip()}\n")
+        out.append(f"{len(out) + 1}\n{ts(l['s'])} --> {ts(l['e'])}\n{srt_text(l['text'])}\n")
     return "\n".join(out)
 
 
 def write_like(src_text, lines):
     """src_text re-timed with lines (same count and order as parse(src_text)); ASS keeps every other field,
-    the header and the styles; SRT/WebVTT come back as SRT. Lines marked drop are left out."""
+    the header and the styles; SRT/WebVTT come back as SRT (to_srt). Lines marked drop are left out."""
     text = _normalised(src_text)
     if not is_ass(text):
-        return to_srt(lines)
+        return to_srt(lines, format_of(text))
     it = iter(lines)
     out = []
     for line, event in _ass_lines(text):
@@ -316,10 +415,13 @@ def fingerprint(text):
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def _srt_text(text):
-    """A line's text as to_srt writes it and parse reads it back (for matching a copy's lines to its original's)."""
-    body = _srt_body(text).strip()
-    return "\n".join(x for x in body.split("\n") if x.strip())
+NO_DIALOGUE = fingerprint("")   # the fingerprint of every text with no dialogue line (an error page, a broken download)
+
+
+def _srt_text(text, fmt):
+    """A line's text, of a subtitle in format `fmt`, as to_srt writes it and parse reads it back (for matching a copy's
+    lines to its original's)."""
+    return _SRT_TEXT[fmt](text).strip()
 
 
 def _keyed_lines(text):
@@ -328,7 +430,8 @@ def _keyed_lines(text):
     text = _normalised(text)
     if is_ass(text):
         return [(event.line(), event.kept()) for _, event in _ass_lines(text) if event is not None]
-    return [(l, _srt_text(l["text"])) for l in parse(text)]
+    fmt = format_of(text)
+    return [(l, _srt_text(l["text"], fmt)) for l in parse(text)]
 
 
 def timing_recipe(original, body):
@@ -365,3 +468,19 @@ def apply_recipe(original, recipe):
         return None
     lines = [dict(l, s=t[0] / 1000, e=t[1] / 1000) if t else dict(l, drop=True) for l, t in zip(src, times)]
     return write_like(original, lines)
+
+
+def line_positions(text):
+    """Where a subtitle's lines are, without their words: a hash of every line's start and end in
+    milliseconds, in file order. A recipe gives each line of its original a time by its place, so an original whose
+    lines moved (a credit line moved from the end to the start) would give each line its neighbour's time."""
+    times = ";".join(f"{round(l['s'] * 1000)},{round(l['e'] * 1000)}" for l in parse(text))
+    return hashlib.sha256(times.encode("ascii")).hexdigest()
+
+
+def recognised(text, recipe):
+    """Is `text`, the original a recipe was made from but with other bytes now, still that subtitle: the same
+    words and timings (fingerprint, recipe["fp"]) and its lines where they were (line_positions, recipe["positions"])?
+    A recipe kept without the positions (before) recognises no changed original, only the same bytes."""
+    return (isinstance(recipe, dict) and recipe.get("positions") is not None
+            and recipe.get("fp") == fingerprint(text) and recipe["positions"] == line_positions(text))

@@ -2,6 +2,7 @@
 
 Pure pieces on synthetic timings and fakes: no network, no alass, no Silero.
 """
+import json
 import os
 import random
 import threading
@@ -391,6 +392,19 @@ class TextConfirmFewAnchorsTest(unittest.TestCase):
         self.assertTrue(self.confirm(25, 3, timing_weak=[(700.0, 800.0)])[0])
         self.assertFalse(self.confirm(25, 3, timing_weak=[(390.0, 480.0)])[0])     # overlaps the tenth
 
+    def test_each_tenths_anchors_and_their_median_error_are_kept(self):
+        # Only which tenths were weak was kept, so a question about the tenth limits (3, 5 and 40
+        # anchors) needed a new capture and replay
+        ok, _, s = self.confirm(45, 3)
+        self.assertEqual(s["tenth_anchors"], [6, 5, 5, 3, 5, 4, 4, 4, 4, 5])      # 45 in all, the 3 off in tenth 3
+        self.assertEqual(s["tenth_median_ms"], [20.0, 20.0, 20.0, 800.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0])
+        # an empty tenth: no anchor and no median, kept as JSON keeps them
+        errs = [(float(c), 0.02, None) for c in range(10)] + [(90.0 + c, -0.03, None) for c in range(11)]
+        ok, why, s = textpair.confirm([{"kind": "line"}] * 21, errs, 200.0)
+        self.assertTrue(ok, why)
+        self.assertEqual(s["tenth_anchors"], [10, 0, 0, 0, 0, 0, 0, 0, 0, 11])
+        self.assertEqual(json.loads(json.dumps(s["tenth_median_ms"])), [20.0] + [None] * 8 + [30.0])
+
     def test_a_tenth_exactly_on_the_bar_is_not_weak(self):
         # Anchors exactly 500 ms off (millisecond times), 500.0000000000001 ms as floats
         exactly = 1074 / 1000 - 574 / 1000
@@ -439,6 +453,14 @@ class PipelineFewAnchorsTest(unittest.TestCase):
         self.assertGreaterEqual(r["text"]["anchors"], textpair.MIN_ANCHORS)
         self.assertLess(r["text"]["anchors"], textpair.FEW_ANCHORS)
         self.assertEqual(r["text"]["spared_tenths"], [3])
+
+    def test_the_verdict_keeps_each_tenths_anchors(self):
+        # In the word check's summary, which the verdict keeps
+        r = self.judge({i: 0.8 for i in self.off})
+        text = r["text"]
+        self.assertEqual((len(text["tenth_anchors"]), sum(text["tenth_anchors"])), (10, text["anchors"]))
+        self.assertGreater(text["tenth_median_ms"][3], textpair.TENTH_MS)      # the spared tenth's
+        self.assertEqual(len(text["tenth_median_ms"]), 10)
 
     def test_three_anchors_off_where_the_timing_is_weak_refuse(self):
         part = {i: 0.35 for i, (s, _, _) in enumerate(self.lines) if 0.3 <= self.at(s) < 0.4}

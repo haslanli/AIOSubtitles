@@ -25,7 +25,7 @@ from subsync import imageref, mkv, pipeline, realdebrid, selftest, sources
 from subsync.addon import App
 from subsync.mkv import MkvIndex, NotMatroska, oshash, pipe_until
 from subsync.mp4 import Mp4Index, open_index
-from subsync.reader import (CapReached, MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused, SIZE_TOLERANCE,
+from subsync.reader import (CapReached, CHUNK, MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused, SIZE_TOLERANCE,
                             Stopped)
 from subsync.settings import Settings
 from subsync.store import REFUSED_BACKOFF_S, Store
@@ -1394,6 +1394,28 @@ class Flaky:
         return r
 
 
+class BreaksOff:
+    """realdebrid.urlopen whose first answer breaks off with a reset after `after` bytes of its body."""
+
+    def __init__(self, after):
+        self.real, self.after, self.calls = realdebrid.urlopen, after, 0
+
+    def __call__(self, request, timeout):
+        r = self.real(request, timeout)
+        self.calls += 1
+        if self.calls == 1:
+            read, left = r.read, [self.after]
+
+            def broken(n=-1):
+                if not left[0]:
+                    raise ConnectionResetError(54, "Connection reset by peer")
+                data = read(left[0] if n is None or n < 0 else min(n, left[0]))
+                left[0] -= len(data)
+                return data
+            r.read = broken
+        return r
+
+
 class ConnectionFaultTest(unittest.TestCase):
     """A read that fails for want of a connection says so (ReadFailed.connection); an answer it can't use doesn't."""
 
@@ -1500,6 +1522,18 @@ class FirstReadRetryTest(unittest.TestCase):
         self.assertEqual(inside, [(0, {self.job.alias})])           # the place free, the file's claim kept
         self.assertIsNotNone(self.store.resolve(self.job.alias))   # read on the second try
         self.assertEqual((turn._inside, turn._claims), (0, set()))
+
+    def test_a_first_read_that_breaks_off_is_counted_and_tried_again(self):
+        # What the read got before it broke off is counted (it was not), and the read is still tried once
+        # more, as one that got no answer is
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            self.run_with(BreaksOff(1000))
+        self.sleep.assert_called_once_with(READ_RETRY_S)
+        self.assertIsNotNone(self.store.resolve(self.job.alias))   # read on the second try
+        self.assertEqual(self.srv.log[0], (0, self.size))          # the read that broke off, after 1000 bytes
+        got = 1000 + sum(n for _, n in self.srv.log[1:])
+        self.assertEqual(self.store.day_count("read"), got)
+        self.assertIn(f" bytes={got} requests={len(self.srv.log)}", [m for m in logs.output if ":done " in m][0])
 
     def test_two_dropped_connections_back_the_file_off_for_ten_minutes(self):
         flaky = Flaky(self.link, faults=2)
@@ -1759,6 +1793,68 @@ class ReadTimeLimitTest(unittest.TestCase):
         r = RangeReader(self.srv.url, "t", timeout=0.5)
         with mock.patch.object(reader, "READ_BYTES_PER_S", 8):  # 0.5 s and a second for every 8 bytes: 3 s for 20
             self.assertEqual(r.get(0, 20), b"x" * 20)               # sent in 2 s
+
+
+class StallAfter:
+    """A local server that answers a range with 206, sends its first `sent` bytes and then nothing for `gap` seconds, as
+    a service whose connection breaks off does."""
+
+    def __init__(self, size, sent, gap):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                a, _, b = self.headers["Range"][6:].partition("-")
+                n = int(b) - int(a) + 1
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {a}-{b}/{size}")
+                self.send_header("Content-Length", str(n))
+                self.end_headers()
+                try:
+                    self.wfile.write(bytes(min(sent, n)))
+                    self.wfile.flush()
+                    time.sleep(gap)
+                except OSError:              # the reader gave up: so does the connection
+                    pass
+                self.close_connection = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/f.mkv"
+
+    def close(self):
+        stop_server(self.server)
+
+
+class BrokenOffReadTest(unittest.TestCase):
+    """The bytes a read got before it broke off were counted nowhere (the reader's count, the job's cap, the
+    day's total, the person's daily data): a read that fails counts what arrived, a CHUNK at a time, as a stream did."""
+
+    def test_what_arrived_before_a_read_broke_off_is_counted(self):
+        sent, asked = 3 * CHUNK, 4 * CHUNK
+        srv = StallAfter(asked, sent, gap=1.5)
+        self.addCleanup(srv.close)
+        for name, read in ReplyCheckTest.reads():
+            with self.subTest(read=name):
+                guard = mock.Mock()
+                r = RangeReader(srv.url, "t", guard=guard, timeout=0.5)
+                with self.assertRaises(ReadFailed) as caught:
+                    read(r, 0, asked)
+                self.assertTrue(caught.exception.connection)    # a first read is still tried once more
+                self.assertEqual((r.bytes, r.requests), (sent, 1))
+                guard.after_read.assert_called_once_with(sent, asked)
+                self.assertEqual(r.finished, 0)
+
+    def test_a_read_that_gets_all_it_asked_for_is_finished(self):
+        n = 3 * CHUNK // 2      # two pieces
+        for name, read in ReplyCheckTest.reads():
+            with self.subTest(read=name):
+                r = RangeReader("http://127.0.0.1:9/f.mkv", "t", opener=lambda request, timeout: Reply(0, n))
+                self.assertEqual(read(r, 0, n), bytes(n))
+                self.assertEqual((r.bytes, r.requests, r.finished), (n, 1, 1))
 
 
 class ReplyCheckTest(unittest.TestCase):

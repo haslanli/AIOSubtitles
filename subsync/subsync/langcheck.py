@@ -19,7 +19,7 @@ import re
 import unicodedata
 
 from .langs import lang3
-from .subs import parse, plain_line
+from .subs import DRAWING, parse, plain_line
 
 PASS, FAIL, NO_VERDICT = "pass", "fail", "no verdict"
 
@@ -89,8 +89,6 @@ _DISTINCT = {code: frozenset(w for w in words if not any(w in other for c, other
              for code, words in WORDS.items()}
 
 _TOKEN = re.compile(r"[^\W\d_]+")
-# an ASS vector drawing: its commands are letters, not words ("{" left out of the block's class keeps the search linear)
-_DRAWING = re.compile(r"\{[^{}]*\\p[1-9]")
 
 
 def script_of(ch):
@@ -106,7 +104,7 @@ def plain_text(text):
     """A subtitle's dialogue with its markup removed, one line of text per subtitle line, lower case."""
     lines = []
     for line in parse(text or ""):
-        if line["kind"] != "dialogue" or _DRAWING.search(line["text"]):
+        if line["kind"] != "dialogue" or DRAWING.search(line["text"]):   # a drawing's commands are letters, not words
             continue
         lines.append(plain_line(line["text"]))
     return unicodedata.normalize("NFC", "\n".join(lines))

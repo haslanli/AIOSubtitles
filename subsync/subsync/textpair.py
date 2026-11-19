@@ -195,7 +195,9 @@ def summary(anchors, errs):
 def confirm(anchors, errs, limit_ms, timing_weak=()):
     """D2: (passes, why, summary). Fewer than MIN_ANCHORS anchors confirm nothing and refuse nothing. timing_weak: the
     (start, end) times of the parts the timing's own check found weak (its tenths are the copy's, not the anchors', so
-    they are matched by time). A tenth the FEW_ANCHORS rule spares is recorded in `spared_tenths`."""
+    they are matched by time). A tenth the FEW_ANCHORS rule spares is recorded in `spared_tenths`. Each tenth's
+    anchors and their median error in ms are kept too (`tenth_anchors`, `tenth_median_ms`: 0 and None for an empty
+    tenth Q16), so the tenth limits can be tuned from the kept verdicts: counts and times, no words."""
     s = summary(anchors, errs)
     if len(errs) < MIN_ANCHORS:
         return True, "too few lines paired by their words to check", s
@@ -203,17 +205,20 @@ def confirm(anchors, errs, limit_ms, timing_weak=()):
         return False, "the lines' words disagree with the timing", s
     starts = [c for c, _, _ in errs]
     lo, hi = min(starts), max(starts)
-    weak, spared = [], []
+    weak, spared, counts, medians = [], [], [], []
     for b in range(TENTHS):
         a, z = lo + (hi - lo) * b / TENTHS, lo + (hi - lo) * (b + 1) / TENTHS
         e = [abs(x) * 1000 for c, x, _ in errs if a <= c < z or (b == TENTHS - 1 and c == hi)]
-        if len(e) >= TENTH_ANCHORS and not within(statistics.median(e), TENTH_MS):
+        median = statistics.median(e) if e else None
+        counts.append(len(e))
+        medians.append(None if median is None else round(median, 1))
+        if len(e) >= TENTH_ANCHORS and not within(median, TENTH_MS):
             if len(errs) < FEW_ANCHORS and len(e) < FEW_TENTH_ANCHORS and \
                     not any(ta < z and a < tz for ta, tz in timing_weak):
                 spared.append(b)
             else:
                 weak.append(b)
-    s["weak_tenths"] = weak
+    s["weak_tenths"], s["tenth_anchors"], s["tenth_median_ms"] = weak, counts, medians
     if spared:
         s["spared_tenths"] = spared
     if weak:

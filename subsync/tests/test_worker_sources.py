@@ -240,6 +240,28 @@ class DuplicateTest(unittest.TestCase):
         self.assertEqual(len([c for c in offered if c in ("a-insync", "b-copy")]), 1)
 
 
+    def test_a_second_download_with_no_dialogue_line_is_left_out_as_such(self):
+        # R3-8: every text with no dialogue line (an error page, a broken download) has one fingerprint, so a
+        # second one is left out as before, but the log said it was the same subtitle as one already judged
+        for name, page in (("gone.srt", "<html><body>404 Not Found</body></html>"),
+                           ("busy.srt", "<html><body>429 Too Many Requests</body></html>")):
+            with open(os.path.join(self.dir, name), "w", encoding="utf-8") as f:
+                f.write(page)
+        cands = [self.cands[0]] + [{"id": f"e-{n}", "url": self.srv.url(n), "lang": "eng", "release": "Movie BluRay"}
+                                   for n in ("gone.srt", "busy.srt")]
+        store = closed_after(self, Store(os.path.join(self.dir, "store")))
+        s = Settings({"SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_BEST_FIT": "on", "SUBSYNC_FAST_PATH": "on",
+                      "SUBSYNC_PARALLEL_LANGUAGES": "off", "SUBSYNC_IMAGE_REF": "off",
+                      "SUBSYNC_ALASS": "/nonexistent/alass"})
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            Worker(s, store, None, None)._sync_language(Job("movie", "tt1"), self.idx, "f-1", "eng", cands, "abcd",
+                                                         "Movie.mkv")
+        left_out = [m for m in logs.output if m.endswith(", left out")]   # the later of the two to download
+        self.assertEqual(len(left_out), 1, logs.output)
+        self.assertRegex(left_out[0], r"^INFO:subsync\.worker:sync movie/tt1 eng rank [12]: "
+                                      r"no dialogue line, left out$")
+
+
 class LanguageCheckWorkerTest(unittest.TestCase):
     """A downloaded subtitle whose text isn't in its language is recorded as kept ("not <Language> text"), never
     judged, offered or anchored on; an original chosen by name before any download is replaced once its text is
