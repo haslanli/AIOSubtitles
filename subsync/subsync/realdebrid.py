@@ -37,7 +37,8 @@ REASON = ("it reads parts of each file you watch from the machine it runs on, an
 REAL_DEBRID_ONLY = (f"AIOSubtitles can't work with Real-Debrid only, because {REASON}. "
                     "Add another supported service, such as TorBox, to use it.")
 
-_PIECES = re.compile(r"[/?&|,;=]")
+_PARTS = re.compile(r"[?&|,;=]")              # an addon link's query and value separators
+_BASE64_SEGMENT = re.compile(r"[A-Za-z0-9+_-]+")   # base64 text between two "/" (standard base64 writes "/" too)
 _WORDS = re.compile(r"[a-z0-9]+")
 _RD_CODE = "rd"   # StremThru's store code, e.g. {"c":"rd"}
 _MIN_ENCODED = 16
@@ -126,9 +127,26 @@ def row_problem(stream):
 
 # ------------------------------------------------------------------------------------------- 1. the config
 
+def _encoded_pieces(link):
+    """The parts of an addon link that may be base64 text: each piece between its separators and its "/", and each
+    whole run of base64 text with the "/" in it kept (standard base64 writes "/" too, and decoded in pieces,
+    settings that hold accented or non-Latin text are read wrong from the first "/" on)."""
+    for part in _PARTS.split(link):
+        segments = part.split("/")
+        yield from segments
+        run = []
+        for segment in segments + [""]:     # the empty one ends the last run
+            if _BASE64_SEGMENT.fullmatch(segment):
+                run.append(segment)
+                continue
+            if len(run) > 1:
+                yield "/".join(run)
+            run = []
+
+
 def _decoded_pieces(link):
     """The parts of an addon link that are base64 text (many addons keep their settings, keys included, that way)."""
-    for piece in _PIECES.split(link):
+    for piece in dict.fromkeys(_encoded_pieces(link)):
         if len(piece) < _MIN_ENCODED:
             continue
         raw = piece.replace("+", "-").replace("/", "_")

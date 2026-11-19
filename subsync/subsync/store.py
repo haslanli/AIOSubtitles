@@ -415,6 +415,14 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,0,NULL)",
                             (file_key, size, oshash, 1 if text_track else 0, json.dumps(detail), self.clock()))
 
+    def file_detail_update(self, file_key, **fields):
+        """Adds `fields` to what the read of a stored file found (file_read's detail), keeping the rest."""
+        with self.lock:
+            row = self.db.execute("SELECT detail FROM files WHERE file_key=?", (file_key,)).fetchone()
+            if row is not None:
+                self.db.execute("UPDATE files SET detail=? WHERE file_key=?",
+                                (json.dumps(dict(json.loads(row[0] or "{}"), **fields)), file_key))
+
     def file_state(self, file_key):
         """(when the file was read, what its first read found as file_detail gives it), or (None, None)."""
         with self.lock:
@@ -423,7 +431,8 @@ class Store:
 
     def file_detail(self, file_key):
         """What the first read of a file found (`file_read`'s detail: its tracks, bytes, whether it has a track a
-        subtitle can be judged against, its audio byte rate), or None."""
+        subtitle can be judged against, its audio byte rate, and the languages first passes left to the audio route,
+        "audio_only"), or None."""
         return self.file_state(file_key)[1]
 
     def file_failed(self, alias, backoff=READ_FAILED_BACKOFF_S):

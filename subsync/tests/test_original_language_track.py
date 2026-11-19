@@ -3,11 +3,16 @@
 it): a plain text track first, else an image track (Kingdom of Heaven DC: Russian to the English PGS track), else a CC or
 SDH-only track, but only for a subtitle whose own language has no plain track (Dan Da Dan: its English and Spanish keep
 their own); with the original language unknown, or no such track, the reference is chosen as before."""
+import os
 import random
 import unittest
+from unittest import mock
 
-from helpers import pgs_track, realistic
-from subsync import pipeline
+from helpers import closed_after, pgs_track, realistic, TempDir
+from subsync import choose, pipeline
+from subsync.settings import Settings
+from subsync.store import Store
+from subsync.worker import Job, Safety, Worker
 
 
 def shifted(cues, by, keep=1.0, seed=1):
@@ -64,6 +69,33 @@ class OriginalLanguageTrackTest(unittest.TestCase):
     def test_the_original_track_is_judged_as_another_languages_for_a_translation(self):
         ref = pipeline.choose_reference(Index(self.tracks, "eng"), 0, "spa")
         self.assertTrue(pipeline.is_cross(ref, "spa"))
+
+
+class LineCountSignalTest(unittest.TestCase):
+    """"as many lines as the release's own track, so made from this release" (choose.order) is counted against
+    the track in the subtitle's own language, as before 1.6.0; its timing is still judged against the title's original
+    language. An English film with an English track of 900 lines and a Spanish one of 760: a Spanish subtitle of 760
+    lines ripped from this release is the one tried first."""
+
+    def setUp(self):
+        self.index = Index([track(3, "eng", [(30.0 + 3 * i, 2.0) for i in range(900)]),
+                            track(4, "spa", [(30.5 + 3.5 * i, 2.0) for i in range(760)])], "eng")
+
+    def test_the_subtitles_own_language_track_without_the_original_rule(self):
+        self.assertEqual(pipeline.choose_reference(self.index, 0, "spa")["number"], 3)                  # timing
+        self.assertEqual(pipeline.choose_reference(self.index, 0, "spa", by_original=False)["number"], 4)
+
+    def test_a_job_ranks_by_its_languages_own_track(self):
+        tmp = TempDir()
+        folder = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        s = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_LANGUAGES": "eng,spa", "SUBSYNC_EXTRA_SOURCES": ""})
+        w = Worker(s, closed_after(self, Store(os.path.join(folder, "store"))), None, Safety())
+        with mock.patch.object(choose, "order", wraps=choose.order) as order:
+            w._sync_language(Job("movie", "tt1"), self.index, "f-1", "spa", [], "abcd", "Movie.mkv")
+        self.assertEqual(order.call_args.kwargs["ref_cues"], 760)
+        cand = {"id": "tsdb-1", "lang": "spa", "release": "Some.Other.Name", "cues": 760}
+        self.assertEqual(choose.tier_of(3, cand, "Movie.2020.1080p.BluRay-GRP.mkv", None, 760), 1)
 
 
 class OriginalImageAndCaptionTrackTest(unittest.TestCase):

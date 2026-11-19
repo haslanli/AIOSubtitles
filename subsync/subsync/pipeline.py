@@ -149,7 +149,8 @@ def agreeing(index, tracks):
     return next(t for t, v in zip(tracks, scores) if v is not None and v <= best + AGREE_MARGIN_MS)
 
 
-def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain=True, fallback=FALLBACK_REFERENCE):
+def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain=True, fallback=FALLBACK_REFERENCE,
+                     by_original=True):
     """A text track first; with image_ref, else an image track whose cue times read as subtitles. The
     returned track's "cues" are line (start, duration) pairs; "route" says which kind it is. With prefer_plain, a plain
     track of the language beats an SDH one (on Game of Thrones S01E01 the SDH track trails the speech). Of
@@ -157,11 +158,13 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
     file's other tracks, else the one with the most lines. With no
     track in the subtitle's language, one in a `fallback` language comes first (Frieren's Russian was checked against a
     Portuguese track, a few lines longer than the English one AutoSync and the scoring use). A language's written forms
-    count as the language (langs.written: a Norwegian subtitle's own track may be tagged nb)."""
+    count as the language (langs.written: a Norwegian subtitle's own track may be tagged nb). The title's
+    original language goes first only `by_original` (a subtitle's timing); without, the track is the subtitle language's
+    own, whose line count ranks it (choose.order)."""
     want = written(cand_lang)
     fallback = {lang3(x) for x in fallback}
     usable = [t for t in text_references(index) if not t["forced"] and len(t["cues"]) >= 0.5 * n_dialogue]
-    original = getattr(index, "original_language", None)
+    original = getattr(index, "original_language", None) if by_original else None
     if original:
         # with the title's original language known (origlang.py looks it up by the title's id), a track in it is every
         # language's reference (Game of Thrones: Spanish to the English track, not to its own es-ES or es-419, which run

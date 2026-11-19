@@ -446,6 +446,98 @@ class SettledLanguageTest(unittest.TestCase):
         self.assertEqual(self.unsettled("es"), {"a": True, "b": False})
 
 
+class AudioInSyncReasonTest(unittest.TestCase):
+    """An original the audio route finds in sync with the file's speech keeps the audio route's own words in
+    the log and the store when it isn't listed as an unchanged copy; never "against the release track", which it wasn't
+    judged by. The pipeline is a stub; downloads are fakes."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        for patcher in (FakeDownloads({"http://subs.test/os-a.srt": dialogue_srt("spa")}).patch(), local_network_only()):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
+
+    def verdict(self, route, reason):
+        s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_BEST_FIT": "off",
+                      "SUBSYNC_LIST_IN_SYNC": "off", "SUBSYNC_FAST_PATH": "off", "SUBSYNC_IMAGE_REF": "off",
+                      "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_LANGUAGES": "spa"})
+        w = Worker(s, self.store, FakeAios(), None)
+        w._publish = lambda *a, **k: None
+        job = Job("movie", "tt1")
+        job.audio = True                      # picked: the audio route judges it
+        result = {"outcome": "in_sync", "reason": reason, "route": route}
+        cands = [{"id": "os-a", "url": "http://subs.test/os-a.srt", "lang": "spa", "release": ""}]
+        with mock.patch.object(pipeline, "sync_subtitle", lambda *a, **k: dict(result)), \
+                self.assertLogs("subsync.worker", "INFO") as logs:
+            w._sync_language(job, FakeIndex(), f"f-{route}", "spa", cands, "abcd", "Movie.mkv")
+        stored = [r["reason"] for r in self.store.results_of(f"f-{route}", "spa")]
+        return stored, [line for line in logs.output if "rank 0: in_sync" in line]
+
+    def test_the_audio_routes_own_words_are_kept(self):
+        for reason in ("original fits the speech as it is (release lead removed)",
+                       "original passes against speech (release lead removed)"):
+            with self.subTest(reason=reason):
+                stored, logged = self.verdict("audio", reason)
+                self.assertEqual(stored, [reason])
+                self.assertEqual(logged, [f"INFO:subsync.worker:sync movie/tt1 spa rank 0: in_sync ({reason})"])
+                self.store.db.execute("DELETE FROM results")
+
+    def test_a_verdict_against_the_release_track_says_so_as_before(self):
+        stored, _ = self.verdict("cues", "passes against the release track")
+        self.assertEqual(stored, ["original passes against the release track"])
+
+
+class TryOrderTest(unittest.TestCase):
+    """One order of a language's subtitles for every choice the worker makes (the subtitles judged, the
+    original a pick serves, the consensus downloads and the other languages' guesses): with SUBSYNC_RANK_BY_RELEASE the
+    likeliest first, else the list's; with SUBSYNC_SKIP_AI never a forced, AI-made or machine-translated one, as its
+    explanation says ("never tried"), whatever the ranking. A language that has only such ones has no original."""
+    CANDS = [{"id": "forced", "lang": "eng", "url": "http://subs.test/f.srt", "release": "Movie.2020.Forced"},
+             {"id": "ai", "lang": "eng", "url": "http://subs.test/a.srt", "release": "Movie.2020", "ai": True},
+             {"id": "ok", "lang": "eng", "url": "http://subs.test/o.srt", "release": "Movie.2020.BluRay"},
+             {"id": "rus-ai", "lang": "rus", "url": "http://subs.test/r.srt", "release": "Movie.2020", "ai": True}]
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
+
+    def worker(self, **env):
+        s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng,rus", "SUBSYNC_EXTRA_SOURCES": "",
+                           "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_ANCHORED_GUESS": "on"}, **env))
+        return Worker(s, self.store, FakeAios(), None)
+
+    def test_never_an_unwanted_subtitle_whatever_the_ranking(self):
+        for rank in ("on", "off"):
+            with self.subTest(rank_by_release=rank):
+                w = self.worker(SUBSYNC_RANK_BY_RELEASE=rank)
+                eng = [c for c in self.CANDS if c["lang"] == "eng"]
+                self.assertEqual([c["id"] for _, c in w._try_order(eng, "Movie.2020.mkv", None)], ["ok"])
+                self.assertEqual([c["id"] for c in w._name_order(eng, "Movie.2020.mkv", None)], ["ok"])
+                w._set_originals("a", self.CANDS, "Movie.2020.mkv", None)
+                self.assertEqual(w.originals["a"], {"eng": {"url": "http://subs.test/o.srt", "id": "ok"}, "rus": None})
+
+    def test_with_skip_ai_off_they_go_last_ranked_or_stay_in_the_lists_order(self):
+        eng = [c for c in self.CANDS if c["lang"] == "eng"]
+        ranked = self.worker(SUBSYNC_SKIP_AI="off")
+        self.assertEqual([c["id"] for c in ranked._name_order(eng, "Movie.2020.mkv", None)], ["ok", "forced", "ai"])
+        listed = self.worker(SUBSYNC_SKIP_AI="off", SUBSYNC_RANK_BY_RELEASE="off")
+        self.assertEqual([c["id"] for c in listed._name_order(eng, "Movie.2020.mkv", None)], ["forced", "ai", "ok"])
+
+    def test_a_waiting_files_downloads_leave_them_out(self):
+        downloads = FakeDownloads({c["url"]: dialogue_srt(c["lang"]) for c in self.CANDS})
+        w = self.worker(SUBSYNC_RANK_BY_RELEASE="off")
+        job = Job("movie", "tt1", {"filename": "Movie.2020.mkv"})
+        w._set_originals(job.alias, self.CANDS, "Movie.2020.mkv", None)
+        w._needs_pick = lambda job: False
+        with downloads.patch(), local_network_only():
+            w._await_pick(job, {lang: [c for c in self.CANDS if c["lang"] == lang] for lang in ("eng", "rus")},
+                          "Movie.2020.mkv", None)
+        self.assertEqual(downloads.asked, ["http://subs.test/o.srt"])
+
+
 class LoggedDownloads(FakeDownloads):
     """FakeDownloads that logs when each download starts and ends; `on_start(url)` is called as one starts."""
 

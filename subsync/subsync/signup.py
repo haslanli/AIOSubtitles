@@ -49,11 +49,12 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 class SignupError(Exception):
     """A plain message for the page; `field` names the form field it is about (the page marks it), or None.
     `refused`: AIOStreams' own reason when it refused a config AIOSubtitles made (sign-up and Refresh then say so
-    plainly, _refusal_explained)."""
+    plainly, _refusal_explained). `unusable`: the person's config itself can't be used as it is (no file AIOSubtitles
+    could read through it), which only they can change; the daily check tells it from an error answer."""
 
-    def __init__(self, message, code=400, field=None, refused=None):
+    def __init__(self, message, code=400, field=None, refused=None, unusable=False):
         super().__init__(message)
-        self.message, self.code, self.field, self.refused = message, code, field, refused
+        self.message, self.code, self.field, self.refused, self.unusable = message, code, field, refused, unusable
 
 
 @dataclass
@@ -367,13 +368,13 @@ def _sync_for(viewer, manifest_url, usenet=False):
     are found first, with realdebrid.real_debrid_only, and get none). `usenet`: this instance reads Usenet files too, so
     the reason a config can't be used names both."""
     if realdebrid.real_debrid_only(viewer):
-        raise SignupError(realdebrid.REAL_DEBRID_ONLY)
+        raise SignupError(realdebrid.REAL_DEBRID_ONLY, unusable=True)
     warning = explain.PUBLIC_REAL_DEBRID_WARNING if realdebrid.SERVICE in realdebrid.debrid_in_use(viewer) else None
     sync = sync_config(viewer, manifest_url, names=OWN_NAMES)
     problems = sync_config_problems(sync, usenet=usenet)
     if problems:
         raise SignupError("AIOSubtitles can't find any file it could read through your AIOStreams: "
-                          + "; ".join(problems) + ".")
+                          + "; ".join(problems) + ".", unusable=True)
     return sync, warning
 
 
@@ -516,6 +517,7 @@ def all_clear(settings, record, now):
     """A record after a sign-up, a refresh or a rebuild: nothing to report, the next check a period from now."""
     record.update(state=None, unreachable=0, checked_at=now, next_check=now + settings.recheck_hours * HOUR)
     record.pop("state_detail", None)
+    record.pop("errors", None)
     record.pop("main_gone_since", None)
 
 

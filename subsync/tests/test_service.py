@@ -925,6 +925,61 @@ class PickTest(AddonFixture):
         self.get("/pick/" + token(self.ALIAS) + "/eng.srt")           # again: nothing more is queued
         self.assertEqual(len(self.worker.jobs), 1)
 
+    def test_a_file_put_off_by_a_stop_holds_no_wait(self):
+        # A job stopped by the day's budget or a back-off is queued again SUBSYNC_RETRY_STOPPED_S ahead and
+        # gives nothing before then: a pick serves the original at once (it waited 3 s of 6 here, 11 of 14 by default)
+        # and a listing's pending wait ends at once; the file keeps its entries
+        self.s.pick_wait, self.s.pending_wait = 6.0, 2.0
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+        put_off = Job(self.job.type, self.job.video_id, self.job.hints)
+        put_off.not_before = time.time() + 600
+        self.worker._requeue(put_off)                           # as a stopped job is
+        self.assertTrue(self.worker.busy_with(self.ALIAS))
+        self.assertFalse(self.worker.busy_reading(self.ALIAS))
+        t0 = time.time()
+        self.assertEqual(self.worker.wait_for(self.ALIAS, "eng", 2.0, final=True), (None, "http://opensubs/x.srt"))
+        self.assertEqual(self.worker.wait_for_originals(self.ALIAS, 2.0), self.worker.originals[self.ALIAS])
+        self.assertLess(time.time() - t0, 0.5)
+        t0 = time.time()
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
+        self.assertLess(time.time() - t0, 1.0)
+        t0 = time.time()
+        subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
+        self.assertLess(time.time() - t0, 1.0)
+        self.assertEqual([(s["lang"], s["label"]) for s in subs], [("eng", "English (synced)")])   # its pending entry
+        self.assertEqual(list(self.worker.jobs.values()), [put_off])
+        put_off.not_before = 0                                  # due: waits are for it again
+        self.assertTrue(self.worker.busy_reading(self.ALIAS))
+        t0 = time.time()
+        self.worker.wait_for(self.ALIAS, "eng", 0.3, final=True)
+        self.assertGreaterEqual(time.time() - t0, 0.25)
+
+    def test_a_language_whose_subtitles_are_all_unwanted_gets_no_entry(self):
+        # With SUBSYNC_SKIP_AI on, a forced, AI-made or machine-translated subtitle is never the original a
+        # pick or "(original)" entry serves, with SUBSYNC_RANK_BY_RELEASE off too: a language that has only such ones gets
+        # no entry once its list is known
+        self.s.rank_by_release = False
+        self.s.languages = type(self.s.languages)(["eng", "rus"])
+        self.worker._set_originals(self.ALIAS, [
+            {"id": "forced", "lang": "eng", "url": "http://opensubs/y.srt", "release": "Movie.Forced"},
+            {"id": "os-9", "lang": "eng", "url": "http://opensubs/x.srt", "release": "Movie"},
+            {"id": "os-r", "lang": "rus", "url": "http://opensubs/r.srt", "release": "Movie", "ai": True}], "b.mp4", None)
+        self.store.file_read("f" * 16 + "-5", 5, "f" * 16, False, {})   # read a moment ago: no new job
+        self.store.alias(self.ALIAS, "f" * 16 + "-5")
+        listed = lambda: [(e["lang"], e["label"], e["variantOf"])   # noqa: E731
+                          for e in json.loads(http(self.base + self.URL)[1])["subtitles"]]
+        self.s.audio_route = False                              # nothing waits for a pick: its "(original)" entries
+        self.assertEqual(listed(), [("eng", "English (original)", "os-9")])
+        self.s.audio_route = True
+        self.worker.pickable[self.ALIAS] = self.job             # it waits for a pick: its "(Subsync)" entries
+        self.assertEqual(listed(), [("eng", "English (Subsync)", "os-9")])
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode()), (200, X_TEXT))
+        code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/rus.srt")   # an entry listed before: the note
+        self.assertEqual(code, 200)
+        self.assertIn(b"No Russian subtitle was found for this file.", body)
+
     def test_a_waiting_file_serves_the_anchored_guess_of_another_language(self):
         self.waiting()
         self.worker.originals[self.ALIAS]["rus"] = {"url": "http://opensubs/r.srt", "id": "os-r"}
@@ -988,8 +1043,12 @@ class PickTest(AddonFixture):
     def test_a_no_track_file_not_picked_yet_waits_for_its_pick(self):
         self.s.anchored_guess = False
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
-        self.worker._fetch_all = lambda *a: self.fail("nothing to download without anchored guesses")
+        fetched = []
+        self.worker._fetch_all = lambda job, lang, tries: (fetched.append((lang, [c["id"] for _, c in tries])), [])[1]
+        self.worker._set_provisional = lambda job: self.fail("no other language lined up without anchored guesses")
         self.worker._await_pick(self.job, self.cands(), "b.mp4", None)
+        # Without anchored guesses too, the main language's guess and its first tries, for a consensus
+        self.assertEqual(fetched, [("eng", ["os-9", "os-8"])])
         self.assertIn(self.ALIAS, self.worker.pickable)
         self.assertEqual(len(self.worker.jobs), 0)
         self.assertEqual(self.worker.judged[self.ALIAS], {"eng", "rus"})
@@ -2140,10 +2199,11 @@ class NameOnlyTest(AddonCase):
         # A request with a file's hash but no size was filed under the title alone, and the file read for it
         # linked to the title: the next such request for another release of the title, and any request naming no
         # file, listed that file's copies, timed for another release, and its own file was never read
-        self.store.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nHi\n", fmt="srt")
+        own = "00112233aabbccdd-1000"     # its file's key starts with its hash (a hash leads to no other file)
+        self.store.put(own, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nHi\n", fmt="srt")
         for alias in Job("movie", "tt1", {"videoHash": "00112233aabbccdd"}).aliases:   # as the worker links its file
-            self.store.alias(alias, FILE)
-        self.store.file_read(FILE, 1000, FILE[:16], True, {})
+            self.store.alias(alias, own)
+        self.store.file_read(own, 1000, own[:16], True, {})
         self.assertEqual([s["label"] for s in self.app.subtitles("movie", "tt1", "videoHash=00112233aabbccdd")],
                          ["English (synced)"])
         other = self.app.subtitles("movie", "tt1", "videoHash=ffffeeee11112222")

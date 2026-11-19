@@ -268,6 +268,43 @@ class SharedStoreTest(unittest.TestCase):
         self.assertEqual(aios.subtitle_requests, 0)
         self.assertEqual(self.store.day_count("read"), 0)
 
+    def test_a_known_torrent_file_of_another_hash_than_the_players_is_not_used(self):
+        # A player that sends its file's hash gets a stored file only of that hash; the torrent file
+        # a listing names (which the person's own listing asserts) may be another one: their own file is read instead
+        from unittest import mock
+        from subsync import worker
+        from subsync.worker import Job
+        stored = "0123456789abcdef-1000"                                   # a stored file's key: its hash and size
+        aios = ListingAios({"url": "http://127.0.0.1:9/never", "streamData": {"torrent": {"infoHash": HASH, "fileIdx": 0}}},
+                           [{"id": "os-1", "url": "http://127.0.0.1:9/sub.srt", "lang": "eng", "release": "", "hash": "",
+                             "hash_match": False, "ai": False}])
+        app = self.app("eng", aios)
+        self.store.alias(f"bt:{HASH}:0", stored)
+        self.store.file_read(stored, 1000, stored[:16], True, {"rule": app.s.rule_id})
+        self.store.judged_put(stored, ["eng"], app.s.rule_id)
+        other = Job("movie", "tt1", {"videoHash": "fedcba9876543210", "videoSize": 1000})
+        with mock.patch.object(worker, "READ_RETRY_S", 0):
+            app.worker.process(other)
+        self.assertEqual(aios.subtitle_requests, 1)                         # its own read (which fails here)
+        self.assertIsNone(self.store.resolve(other.alias))
+        same = Job("movie", "tt1", {"videoHash": stored[:16].upper(), "videoSize": 1000})
+        app.worker.process(same)                                             # the stored file is its own
+        self.assertEqual(aios.subtitle_requests, 1)
+        self.assertEqual(self.store.resolve(same.alias), stored)
+
+    def test_a_file_known_by_its_name_of_another_hash_than_the_players_is_not_listed(self):
+        # The same for a file found by the name and size the request gives
+        from subsync.worker import Job
+        stored = "0123456789abcdef-1000"
+        app = self.app("eng")
+        self.store.put(stored, "a" * 64, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nHi\n",
+                       fmt="srt", candidate_id="os-1")
+        self.store.alias("name:a.mkv|1000", stored)
+        for sent, listed in (("fedcba9876543210", []), (stored[:16], ["English (synced)"]), (None, ["English (synced)"])):
+            with self.subTest(videoHash=sent):
+                job = Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1000, "videoHash": sent})
+                self.assertEqual([e["label"] for e in app.offers(job)[1]], listed)
+
     def test_a_read_records_the_torrent_and_the_languages(self):
         from helpers import FIXTURES, RangeServer
         from subsync.worker import Job
@@ -1153,12 +1190,16 @@ class PublicTextsTest(unittest.TestCase):
         from subsync import explain
         note = re.compile(r"\b(?:AD\d{1,3}|S4-\d+|P-S4-[A-Z0-9-]+)\b")
         self.assertEqual(set(explain.PUBLIC_STATES), {"sync_gone", "main_gone", "password_refused", "cannot_rebuild",
-                                                      "reads_refused", "unreachable"})
+                                                      "reads_refused", "unreachable", "config_refused",
+                                                      "aiostreams_errors"})
         for state, (title, text, action) in explain.PUBLIC_STATES.items():
             with self.subTest(state=state):
                 self.assertFalse(title.endswith("."))
                 self.assertNotIn("\n", text)
-                self.assertTrue(text.endswith("."), text[-30:])
+                if state == "config_refused":   # it ends with AIOStreams' own reason, quoted ('s words)
+                    self.assertTrue(text.endswith(" AIOStreams' reason: \"{detail}\""), text[-30:])
+                else:
+                    self.assertTrue(text.endswith("."), text[-30:])
                 self.assertIsNone(note.search(title + text))
                 self.assertLessEqual(len(text.split()), 60)
                 self.assertIsInstance(action, bool)

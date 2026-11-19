@@ -84,10 +84,11 @@ class WorkerConsensusGuessTest(unittest.TestCase):
                 return [dict(c) for c in subs]
         self.listing = Listing()
 
-    def worker(self):
-        s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng,rus",
-                      "SUBSYNC_EXTRA_SOURCES": ""})
-        return Worker(s, closed_after(self, Store(self.dir)), self.listing, Safety())
+    def worker(self, folder=None, **env):
+        folder = folder or self.dir
+        s = Settings(dict({"SUBSYNC_DATA": folder, "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng,rus",
+                           "SUBSYNC_EXTRA_SOURCES": ""}, **env))
+        return Worker(s, closed_after(self, Store(folder)), self.listing, Safety())
 
     def test_the_consensus_is_served_and_anchors_the_other_languages(self):
         w = self.worker()
@@ -100,6 +101,21 @@ class WorkerConsensusGuessTest(unittest.TestCase):
         refs = [s for s, _ in self.ref]
         errs = sorted(min(abs(s - r) for r in refs) for s in starts)
         self.assertLess(errs[len(errs) // 2], 0.3)             # lined up with the agreement, not with the 9.3 s guess
+
+    def test_one_language_or_no_anchored_guesses_get_the_consensus_too(self):
+        #'s better first guess is the main language's own (Primer's English), whatever the number of
+        # languages or SUBSYNC_ANCHORED_GUESS; only lining up the other languages needs both
+        for n, env in enumerate(({"SUBSYNC_LANGUAGES": "eng"}, {"SUBSYNC_ANCHORED_GUESS": "off"})):
+            with self.subTest(**env):
+                folder = os.path.join(self.dir, f"store{n}")   # a store of its own
+                os.makedirs(folder)
+                w = self.worker(folder, **env)
+                job = Job("movie", "tt1", self.hints)
+                with self.downloads.patch():
+                    w.process(job)
+                self.assertEqual(w.originals[job.alias]["eng"]["id"], "e0")
+                self.assertNotIn(job.alias, w.provisional)    # no other language lined up
+                self.assertTrue(w.waits_for_pick(job.alias))
 
 
 if __name__ == "__main__":

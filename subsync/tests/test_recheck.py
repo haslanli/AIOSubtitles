@@ -331,6 +331,69 @@ class RecheckTest(Base):
                          "AIOSubtitles can't find any file it could read through your AIOStreams: no debrid service "
                          "(AIOSubtitles reads files from debrid services only, not Usenet or torrents).")
 
+    def test_a_refused_config_is_aiosubtitles_fault_and_needs_nothing_from_the_person(self):
+        # AIOStreams refusing the config AIOSubtitles made from theirs is AIOSubtitles' fault, said in's
+        # words on the settings page only: no "action needed" entry in their subtitle lists
+        from subsync import explain
+        from subsync.addon import App
+        uuid, token = self.sign_up(keep=True)
+        self.fake.configs[uuid]["config"]["presets"].insert(0, dict(COMET))   # a change the rebuild follows,
+        self.fake.refusal = lambda config: "Invalid preset options"           # which their AIOStreams refuses
+        self.assertEqual(self.checker().check(token), "config_refused")
+        record = self.record(token)
+        self.assertEqual(record["state_detail"], "Invalid preset options")
+        state = explain.PUBLIC_STATES["config_refused"]
+        self.assertEqual(state.title, "Your AIOStreams didn't accept AIOSubtitles' new config")
+        self.assertEqual(explain.state_text("config_refused", record["state_detail"]),
+                         "AIOSubtitles tried to follow a change in your AIOStreams config, and your AIOStreams didn't "
+                         "accept the config it made from yours. This is a fault in AIOSubtitles, not in your config: "
+                         "nothing needs doing on your side. Until it is fixed, AIOSubtitles keeps using the config it "
+                         "made before. AIOStreams' reason: \"Invalid preset options\"")
+        self.assertIsNone(App(self.s, None, None, None, state="config_refused").action())
+        self.assertEqual(App(self.s, None, None, None, state="cannot_rebuild").action(), "cannot_rebuild")   # unlike
+        del self.fake.refusal                                                 # accepted again: all well
+        self.clock.t += 24 * HOUR
+        self.assertIsNone(self.checker().check(token))
+        self.assertNotIn("state_detail", self.record(token))
+
+    def test_an_error_answer_is_a_note_after_three_checks_in_a_row_never_action_needed(self):
+        # A passing error (busy, a fault, an answer it can't read) is counted as "couldn't reach" is
+        from subsync import explain
+        from subsync.addon import App
+        from subsync.recheck import UNREACHABLE_CHECKS
+        uuid, token = self.sign_up(keep=True)
+        self.fake.configs[uuid]["config"]["presets"].insert(0, dict(COMET))
+        self.fake.refuse_save_for.add(self.record(token)["sync_uuid"])       # its save answers a server error
+        checker = self.checker()
+        for n in range(1, UNREACHABLE_CHECKS):
+            self.assertIsNone(checker.check(token))
+            self.assertEqual(self.record(token)["errors"], n)
+            self.clock.t += 24 * HOUR
+        self.assertEqual(checker.check(token), "aiostreams_errors")
+        state = explain.PUBLIC_STATES["aiostreams_errors"]
+        self.assertEqual(UNREACHABLE_CHECKS, 3)                               # as its text says
+        self.assertEqual((state.title, state.text), (
+            "Your AIOStreams answered with an error",
+            "The last three checks got an error from your AIOStreams (it was busy or had a fault), so AIOSubtitles "
+            "couldn't follow changes in your config. It keeps using the config it made before and tries again at the "
+            "next check; nothing needs doing."))
+        self.assertIsNone(App(self.s, None, None, None, state="aiostreams_errors").action())
+        self.fake.refuse_save_for.clear()
+        self.clock.t += 24 * HOUR
+        self.assertIsNone(checker.check(token))
+        self.assertNotIn("errors", self.record(token))
+
+    def test_the_reason_a_config_cant_be_followed_ends_its_sentence(self):
+        # Case 1 keeps "can't be followed as it is" (action needed), its reason always a sentence of its own
+        from subsync import recheck
+        uuid, token = self.sign_up(keep=True)
+        unusable = self.signup.SignupError("AIOSubtitles can't find any file it could read through your AIOStreams",
+                                           unusable=True)
+        with mock.patch.object(recheck, "rebuild", side_effect=unusable):
+            self.assertEqual(self.checker().check(token), "cannot_rebuild")
+        self.assertEqual(self.record(token)["state_detail"],
+                         "AIOSubtitles can't find any file it could read through your AIOStreams.")
+
     def test_the_kept_password_is_never_in_clear_on_disk_or_in_the_log(self):
         uuid, token = self.sign_up(keep=True)
         self.checker().check(token)

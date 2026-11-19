@@ -43,6 +43,22 @@ class ServicesNamedTest(unittest.TestCase):
         jackettio = f'https://jackettio.example/{encoded({"debridId": "torbox"})}/manifest.json'
         self.assertEqual(realdebrid.services_named(jackettio), {'torbox'})
 
+    def test_standard_base64_of_accented_or_non_latin_settings_is_read_whole(self):
+        # Standard base64 writes "/" too; cut there before it was decoded, settings that hold accented or
+        # non-Latin text were read wrong from that "/" on, and a Real-Debrid name after it was missed
+        for name in ('xxZoë', 'пример'):
+            settings = json.dumps({'debridService': 'torbox', 'name': name, 'fallbackService': 'realdebrid'},
+                                  ensure_ascii=False)
+            standard = base64.b64encode(settings.encode()).decode()
+            self.assertIn('/', standard)
+            for link in (f'https://addon.example/manifest.json?config={standard}',
+                         f'https://addon.example/{standard.replace("/", "%2F")}/manifest.json'):
+                with self.subTest(link=link):
+                    self.assertEqual(realdebrid.services_named(link), {'torbox', 'realdebrid'})
+                    new, changes = realdebrid.without_real_debrid({'services': [TORBOX],
+                                                                   'presets': [link_addon(link, 'Accented')]})
+                    self.assertEqual((new['presets'], changes), ([], ['"Accented" left out: its link names Real-Debrid']))
+
     def test_an_unreadable_link_names_nothing(self):
         self.assertEqual(realdebrid.services_named('https://mediafusion.example/D-q83hf8Hf73hf73Hfh38fh3/manifest.json'), set())
 

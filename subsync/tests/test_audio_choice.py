@@ -922,7 +922,7 @@ class SmallTrackTest(unittest.TestCase):
     """A file whose only track is too small for its subtitles (a signs track not flagged forced) waits for a
     pick after its first pass, which marks its languages judged though only the audio route can judge them: on a torrent
     row (or a Usenet one) the pick's audio job finds those marks, and it still reads the file; once the audio route has
-    judged it, a later audio job reads nothing."""
+    judged it, a later audio job reads nothing. Until then everyone else gets a first pass and a pick of their own."""
 
     def test_the_picks_audio_job_reads_the_file(self):
         from helpers import FakeDownloads, dialogue_srt
@@ -968,6 +968,52 @@ class SmallTrackTest(unittest.TestCase):
         self.assertTrue(w.pick(first.alias))
         audio_job()
         self.assertEqual(len(synced), 1)                            # judged by the audio route: nothing to read
+
+    def test_everyone_else_gets_a_first_pass_and_a_pick_of_their_own(self):
+        # The first pass marks the languages it left to the audio route in the file's detail;
+        # for a person with one of them whose choice isn't off, the file is one with no track until the audio route
+        # has judged it: their own first pass (an index read) and their own pick, as has it for such files
+        from helpers import FakeDownloads, dialogue_srt
+        srv = RangeServer(FIXTURES)
+        self.addCleanup(srv.close)
+        tmp = TempDir()
+        folder = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        url = "http://subs.test/big.srt"
+        patcher = FakeDownloads({url: dialogue_srt("eng", n=200)}).patch()   # 200 lines; the file's track has 30
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        row = {"url": srv.url("tiny.mkv"), "streamData": {"torrent": {"infoHash": "a" * 40, "fileIdx": 0}}}
+        store = closed_after(self, Store(folder))
+        hints = {"filename": "tiny.mkv", "videoSize": os.path.getsize(os.path.join(FIXTURES, "tiny.mkv"))}
+
+        def person(who, choice="pick"):
+            s = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "http://x.test",
+                          "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_EXTRA_SOURCES": ""})
+            s.audio_when = choice
+            limits = Limits(who=who * 16)
+            listing = Listing(row, [{"id": "big", "lang": "eng", "url": url, "release": "Movie"}])
+            return Worker(s, store, listing, Safety(), limits=limits), limits
+
+        a, _ = person("a")
+        job = Job("movie", "tt1", hints)
+        a.process(job)
+        file_key = store.resolve(f"bt:{'a' * 40}:0")
+        self.assertEqual(store.file_detail(file_key)["audio_only"], ["eng"])
+        self.assertTrue(a.waits_for_pick(job.alias))
+        b, b_limits = person("b")
+        b.process(Job("movie", "tt1", hints))
+        self.assertEqual(b_limits.started, 1)                      # their own first pass read the index
+        self.assertTrue(b.waits_for_pick(job.alias))                # and the file waits for their own pick
+        self.assertEqual(store.file_detail(file_key)["audio_only"], ["eng"])
+        c, c_limits = person("c", choice="off")                     # nothing to pick for someone whose choice is off
+        c.process(Job("movie", "tt1", hints))
+        self.assertEqual((c_limits.started, c.waits_for_pick(job.alias)), (0, False))
+        store.put(file_key, "a" * 64, "eng", 0, "keep_original", "x", route="audio", body="1\n", fmt="srt",
+                  candidate_id="big", original="1\n")              # judged by the audio route: nothing to read
+        d, d_limits = person("d")
+        d.process(Job("movie", "tt1", hints))
+        self.assertEqual((d_limits.started, d.waits_for_pick(job.alias)), (0, False))
 
 
 class StartLineTest(unittest.TestCase):

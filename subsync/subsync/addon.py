@@ -245,10 +245,10 @@ class App:
                 "lang": r["lang"], "label": f"{lang_name(r['lang'])} (synced{'' if n == 1 else f' {n}'})",
                 "variantOf": r.get("candidate_id") or "original"}
 
-    def offers(self, aliases):
-        """The finished copies for a file: per language its best fit, the first language up to
-        SUBSYNC_MAIN_ALTERNATIVES, labelled "(synced)", "(synced 2)", "(synced 3)"."""
-        file_key = self.store.resolve(*aliases)
+    def offers(self, job):
+        """The finished copies for a request's file (Worker.file_of): per language its best fit, the first language up
+        to SUBSYNC_MAIN_ALTERNATIVES, labelled "(synced)", "(synced 2)", "(synced 3)"."""
+        file_key = self.worker.file_of(job.aliases, job.hints.get("videoHash"))
         out = []
         if file_key:
             counts = {self.s.languages[0]: self.s.alternatives} if self.s.best_fit and self.s.languages else None
@@ -315,7 +315,7 @@ class App:
 
     def _no_track(self, job):
         """The file's first read found no subtitle track of its own to judge against (False while it isn't read)."""
-        file_key = self.store.resolve(*job.aliases)
+        file_key = self.worker.file_of(job.aliases, job.hints.get("videoHash"))
         detail = self.store.file_detail(file_key) if file_key else None
         return (detail or {}).get("reference") is False
 
@@ -331,7 +331,7 @@ class App:
         here: the original the file's judging kept, else (a file not judged) this person's likeliest by name. Its
         address names only the file; the subtitle comes from this person's own list when it is downloaded."""
         have = {e["lang"] for e in out}
-        file_key = self.store.resolve(*job.aliases)
+        file_key = self.worker.file_of(job.aliases, job.hints.get("videoHash"))
         originals = None
         entries = []
         tok = token(job.alias, self.s.addon_key)
@@ -355,7 +355,7 @@ class App:
     def _subtitles(self, job):
         names_file = bool(job.hints.get("filename") or job.hints.get("videoHash"))
         self.worker.start_lookup(job.video_id)     # the title's original language, in the background (origlang.py)
-        file_key, out = self.offers(job.aliases)
+        file_key, out = self.offers(job)
         if out and names_file:
             # A copy listed here is rebuilt from this person's own subtitle list when it is downloaded; with no
             # job for the file, the list is fetched then, from this request's file
@@ -375,15 +375,18 @@ class App:
                 recent = False
             judged = self.store.judged_all(file_key, self.s.languages, now_rule, now - REPROCESS_S) if recent else None
             no_track = detail.get("reference") is False
+            # this person's languages only the audio route can judge here: all of them on a file with no track of its
+            # own, else those whose subtitles a first pass found too long for its only track
+            audio_langs = self.s.languages if no_track else self.worker.left_to_audio(detail)
             if judged is False and not (no_track and self.s.audio_route and self.s.audio_choice == "off"):
                 # read lately, but not for every language asked here (another person's, in public mode); for a
                 # person whose choice is off, a file with no track can't gain from another read
                 recent = False
-            elif recent and self.s.audio_choice != "off" and no_track and not self.worker.waits_for_pick(job.alias) \
-                    and not self.store.audio_judged(file_key, self.s.languages):
-                # A file with no subtitle track of its own, read lately for someone else and not judged by the
-                # audio route yet: the waiting file is each person's own, so this person gets their own first pass
-                # (an index read) and can pick it, or open it; never someone whose choice is off
+            elif recent and self.s.audio_choice != "off" and audio_langs and not self.worker.waits_for_pick(job.alias) \
+                    and not self.store.audio_judged(file_key, audio_langs):
+                # Such a file, read lately for someone else and not judged by the audio route yet: the waiting
+                # file is each person's own, so this person gets their own first pass (an index read) and can pick it,
+                # or open it; never someone whose choice is off
                 recent = False
         if not recent and not self.worker.recently_unlisted(job.alias):
             # a job of its own for the queue: the worker changes a queued job's state (a pick makes it an audio job),
@@ -399,7 +402,7 @@ class App:
         # A file being synced now: the Cues route takes a fraction of a second, so wait up to SUBSYNC_PENDING_WAIT_MS
         # for it and list what is ready (players and AIOStreams may keep this answer a while).
         originals = self.worker.wait_for_file(job.alias, self.s.pending_wait)
-        file_key, out = self.offers(job.aliases)
+        file_key, out = self.offers(job)
         if not (self.s.pending_entry and originals and self.worker.busy_with(job.alias)):
             return out
         have = {e["lang"] for e in out}

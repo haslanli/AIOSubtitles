@@ -1379,7 +1379,7 @@ PRIVACY_AUDIO_STORED = "your answer for files with no subtitles of their own, " 
 class State(NamedTuple):
     """What the daily check (recheck.py) found, as the settings page and the "action needed" entry say it."""
     title: str
-    text: str                  # "{detail}": the plain reason a rebuild couldn't be made (state_text)
+    text: str                  # "{detail}": the plain reason a rebuild couldn't be made, or AIOStreams' (state_text)
     person_must_act: bool      # only the person can fix it
 
 
@@ -1409,6 +1409,19 @@ PUBLIC_STATES = {
         "AIOSubtitles couldn't reach your AIOStreams",
         "The last three checks couldn't reach your AIOStreams from the internet. While it can't be reached, AIOSubtitles "
         "can't sync new files for you; nothing needs doing once it is back.", False),
+    # AIOStreams refused the config AIOSubtitles made from theirs (as words it on sign-up and Refresh);
+    # an error answer three checks in a row
+    "config_refused": State(
+        "Your AIOStreams didn't accept AIOSubtitles' new config",
+        "AIOSubtitles tried to follow a change in your AIOStreams config, and your AIOStreams didn't accept the config "
+        "it made from yours. This is a fault in AIOSubtitles, not in your config: nothing needs doing on your side. "
+        "Until it is fixed, AIOSubtitles keeps using the config it made before. AIOStreams' reason: \"{detail}\"",
+        False),
+    "aiostreams_errors": State(
+        "Your AIOStreams answered with an error",
+        "The last three checks got an error from your AIOStreams (it was busy or had a fault), so AIOSubtitles "
+        "couldn't follow changes in your config. It keeps using the config it made before and tries again at the next "
+        "check; nothing needs doing.", False),
 }
 PUBLIC_NOTICE_LABEL = "AIOSubtitles: action needed"
 PUBLIC_NOTICE_DONE = "AIOSubtitles: nothing needs doing any more. This entry goes away by itself."

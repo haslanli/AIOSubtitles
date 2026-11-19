@@ -242,6 +242,29 @@ class OwnFirstPassTest(Base):
         self.app(b).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
         self.assertEqual(len(b.jobs), 0)
 
+    def test_also_a_file_whose_only_track_is_too_small_for_your_languages_subtitles(self):
+        # A first pass marks judged the languages it left to the audio route (the file's only track too small
+        # for their subtitles): until the audio route has judged them, everyone with one of those languages gets their
+        # own first pass, as for a file with no track; nobody whose choice is off, nor for other languages
+        self.store.file_read(self.FILE, 5, "f" * 16, True, {"rule": self.settings().rule_id, "reference": True,
+                                                            "audio_only": ["eng"]})
+        self.store.alias(ALIAS, self.FILE)
+        self.store.judged_put(self.FILE, ["eng", "rus"], self.settings().rule_id)
+        b = self.worker(Limits(who="b" * 16))
+        self.app(b).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual([(j.alias, j.audio) for j in b.jobs.values()], [(ALIAS, False)])
+        c = self.worker(Limits(who="c" * 16), settings=self.settings(SUBSYNC_LANGUAGES="rus"))
+        self.app(c).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual(len(c.jobs), 0)
+        d = self.worker(Limits(who="d" * 16))
+        d.s.audio_when = "off"
+        self.app(d).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual(len(d.jobs), 0)
+        self.store.put(self.FILE, "a" * 64, "eng", 0, "keep_original", "below the bar", route="audio")
+        e = self.worker(Limits(who="e" * 16))
+        self.app(e).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual(len(e.jobs), 0)
+
     def test_not_when_the_file_has_its_own_track_or_you_wait_or_it_is_judged_or_the_route_is_off(self):
         self.read_lately(True)
         b = self.worker(Limits(who="b" * 16))

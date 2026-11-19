@@ -29,7 +29,21 @@ REBUILT = SYNC_FIELDS + USENET_FIELDS + ("usenet", "usenet_why", "usenet_service
 log = logging.getLogger("subsync.recheck")
 HOUR = 3600
 CONFIRM_GONE_S = HOUR        # their own config found gone is looked at again this much later before it counts
-UNREACHABLE_CHECKS = 3       # checks in a row that couldn't reach their AIOStreams before the settings page says so
+UNREACHABLE_CHECKS = 3       # checks in a row that couldn't reach their AIOStreams (or, got an error answer
+                             # from it) before the settings page says so
+
+
+def _problem(e):
+    """What a rebuild's SignupError says, as (kind, detail): "password" (the kept password is refused), "unreachable"
+    (their AIOStreams wasn't reached), "refused" (it refused the config AIOSubtitles made: its reason), "rebuild" (their
+    config can't be used as it is), else "error" (an error answer: busy, a fault, an answer AIOSubtitles can't read)."""
+    if e.field == "password":
+        return "password", e.message
+    if e.field == "link":
+        return "unreachable", e.message
+    if e.refused is not None:
+        return "refused", e.refused
+    return ("rebuild" if e.unusable else "error"), e.message
 
 
 class Checker:
@@ -174,22 +188,27 @@ class Checker:
                         found["fields"] = {k: copy.get(k) for k in REBUILT}
                         found["drop"] = list(copy.get("drop") or [])
                 except SignupError as e:
-                    found["problem"] = ("password" if e.field == "password" else
-                                        "unreachable" if e.field == "link" else "rebuild", e.message)
+                    found["problem"] = _problem(e)
         return found
 
     def _apply(self, record, found):
         now = self.clock()
         record["checked_at"] = now
         record["next_check"] = now + self.s.recheck_hours * HOUR
-        if "unreachable" in (found["sync"], found["usenet"]) or (found["problem"] or ("",))[0] == "unreachable":
+        kind, detail = found["problem"] or (None, None)
+        if "unreachable" in (found["sync"], found["usenet"]) or kind == "unreachable":
             record["unreachable"] = (record.get("unreachable") or 0) + 1
+            record.pop("errors", None)
             if record["unreachable"] >= UNREACHABLE_CHECKS and not record.get("state"):
                 record["state"] = "unreachable"
             return
         record["unreachable"] = 0
         if record.get("state") == "unreachable":
             record["state"] = None
+        if kind != "error":
+            record.pop("errors", None)
+            if record.get("state") == "aiostreams_errors":
+                record["state"] = None
         gone = "gone" in (found["sync"], found["usenet"])
         # their own config: gone only when seen gone twice, an hour apart (a slip of their AIOStreams is not a move)
         if found["main"] is False:
@@ -206,13 +225,20 @@ class Checker:
         record.pop("main_gone_since", None)
         if record.get("state") == "main_gone" and found["main"] is True:
             record["state"] = None
-        kind, detail = found["problem"] or (None, None)
+        if kind == "error":      # an error answer passes; counted as "couldn't reach" is, never action needed
+            record["errors"] = (record.get("errors") or 0) + 1
+            if record["errors"] >= UNREACHABLE_CHECKS and not record.get("state"):
+                record["state"] = "aiostreams_errors"
+            return
         if kind == "password":   # the kept password no longer opens their config: it is deleted, Refresh asks again
             record.pop("auto_password", None)
             record["state"] = "password_refused"
             return
         if kind == "rebuild":    # their config can no longer be used (only Real-Debrid, no readable source)
-            record["state"], record["state_detail"] = "cannot_rebuild", detail
+            record["state"], record["state_detail"] = "cannot_rebuild", detail if detail.endswith(".") else detail + "."
+            return
+        if kind == "refused":    # AIOStreams refused AIOSubtitles' config, a fault of AIOSubtitles
+            record["state"], record["state_detail"] = "config_refused", detail
             return
         if found.get("to_store_only"):   # stored copies only from now on; check() removes the old configs
             for name in SYNC_FIELDS + USENET_FIELDS + ("usenet_services",):
