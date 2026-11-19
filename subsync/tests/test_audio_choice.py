@@ -837,6 +837,11 @@ class UsenetTest(Base):
 
     def setUp(self):
         super().setUp()
+        # the listed and asked size is the served file's: the small fixture counts as a video file here, as a real one
+        # would (a served size under sources.MIN_VIDEO_BYTES is no video's, worker.usenet_size_ok)
+        patcher = mock.patch.object(sources, "MIN_VIDEO_BYTES", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.link = Redirect(self.srv.url("tiny-nosub.mp4"))
         self.addCleanup(self.link.close)
         self.counts = Counts()

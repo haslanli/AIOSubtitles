@@ -337,6 +337,25 @@ class RoomTest(Base):
         self.facts(rate=4_000_000)                         # the limit decides
         self.assertEqual(w._audio_need(ALIAS), 10 ** 9 + 1_000_000)
 
+    def test_the_room_is_bounded_by_the_smaller_of_the_audio_limit_and_the_per_file_cap(self):
+        # With SUBSYNC_AUDIO_BUDGET_GB=0 nothing bounded the estimate, so a 96 Mbit/s remux asked for 94.5 GB of
+        # room although its audio job stops at the per-file cap (SUBSYNC_FILE_CAP_GB, 6 GB by default)
+        index = 1_000_000
+        self.facts(rate=12_000_000, tracks=3)
+        self.assertEqual(self.waiting(Limits(), SUBSYNC_AUDIO_BUDGET_GB="0")._audio_need(ALIAS), 6 * 10 ** 9 + index)
+        w = self.waiting(Limits(), SUBSYNC_AUDIO_BUDGET_GB="0", SUBSYNC_FILE_CAP_GB="0")   # neither: unbounded
+        self.assertEqual(w._audio_need(ALIAS), int(2.5 * audiofit.most_read(12_000_000, None, w.s.audio_extra, 3)) + index)
+        self.facts(tracks=3)                                              # 2.5 x 945 MB, within a 2 GB audio limit
+        self.assertEqual(self.waiting(Limits(), SUBSYNC_AUDIO_BUDGET_GB="2")._audio_need(ALIAS), 2 * 10 ** 9 + index)
+        self.assertEqual(self.waiting(Limits(), SUBSYNC_AUDIO_BUDGET_GB="2", SUBSYNC_FILE_CAP_GB="1.5")._audio_need(ALIAS),
+                         int(1.5 * 10 ** 9) + index)                      # a cap set below the audio limit
+        self.facts(rate=None)                                             # the byte rate not known: the bound itself
+        self.assertEqual(self.waiting(Limits(), SUBSYNC_AUDIO_BUDGET_GB="0")._audio_need(ALIAS), 6 * 10 ** 9 + index)
+        self.assertEqual(self.waiting(Limits(), SUBSYNC_FILE_CAP_GB="0.5")._audio_need(ALIAS), int(0.5 * 10 ** 9) + index)
+        self.assertEqual(self.waiting(Limits())._audio_need(ALIAS), 10 ** 9 + index)   # the audio limit, 1 GB
+        w = self.waiting(Limits(), SUBSYNC_AUDIO_BUDGET_GB="0", SUBSYNC_FILE_CAP_GB="0")
+        self.assertEqual(w._audio_need(ALIAS), index)
+
     def test_a_pick_starts_only_with_room_for_the_most_it_could_read(self):
         self.facts()                                       # 2.5 x 315 MB of audio, plus the index's 1 MB
         w = self.waiting(Limits(left=788_000_000))

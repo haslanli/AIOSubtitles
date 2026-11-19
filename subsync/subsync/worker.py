@@ -101,10 +101,11 @@ def usenet_size_ok(listed):
     """The rule a Usenet file's served size must meet: AIOStreams lists a release by its whole NZB (the video and its
     par2 and other files), so the file it serves is a few per cent smaller (3.79 GB served for 4.10 GB
     listed); at least half the listed size and not more than it, so a small error video (AIOStreams answers a release
-    it can't open with a 19,856-byte download_failed.mp4) or another file is still refused."""
+    it can't open with a 19,856-byte download_failed.mp4) or another file is still refused. With no size listed, any
+    size a video file can have (sources.plausible_size), so the error video is refused then too."""
     if not plausible_size(listed):
-        return lambda total: True
-    return lambda total: listed * 0.5 <= total <= listed
+        return plausible_size
+    return lambda total: plausible_size(total) and listed * 0.5 <= total <= listed
 
 
 def audio_facts(index):
@@ -529,8 +530,9 @@ def rewrite(url, rules):
     """Public stream URLs to internal ones (SUBSYNC_URL_REWRITE 'https://public=http://internal,...')."""
     for rule in (rules or "").split(","):
         src, _, dst = rule.partition("=")
-        if src and dst and url.startswith(src.strip()):
-            return dst.strip() + url[len(src.strip()):]
+        src, dst = src.strip(), dst.strip()
+        if src and dst and url.startswith(src):   # a side left empty (or only spaces) is no rule
+            return dst + url[len(src):]
     return url
 
 
@@ -823,17 +825,19 @@ class Worker(threading.Thread):
 
     def _audio_need(self, alias):
         """What an audio job of the file may read: its index again and its audio windows (audiofit.most_read) with
-        AUDIO_NEED_MARGIN, at most the per-file audio limit, from what its first read found; the whole audio limit and
-        the index cap when that isn't known."""
+        AUDIO_NEED_MARGIN, from what its first read found, at most the smaller of the per-file audio limit and the
+        per-file cap (the job stops at either); that bound and the index cap when they aren't known."""
         file_key = self.store.resolve(alias)
         detail = (self.store.file_detail(file_key) if file_key else None) or {}
         audio = detail.get("audio") or {}
-        most = int(AUDIO_NEED_MARGIN * audiofit.most_read(audio.get("rate"), self.s.audio_budget, self.s.audio_extra,
-                                                          audio.get("tracks") or 1))
-        if self.s.audio_budget:
-            most = min(most, int(self.s.audio_budget))
-        elif not audio.get("rate"):
-            most = self.s.file_cap or 0
+        bound = min((int(x) for x in (self.s.audio_budget, self.s.file_cap) if x), default=None)
+        if audio.get("rate"):
+            most = int(AUDIO_NEED_MARGIN * audiofit.most_read(audio["rate"], self.s.audio_budget, self.s.audio_extra,
+                                                              audio.get("tracks") or 1))
+            if bound is not None:
+                most = min(most, bound)
+        else:
+            most = bound or 0
         return most + int(detail.get("bytes") or self.s.index_cap)
 
     @staticmethod

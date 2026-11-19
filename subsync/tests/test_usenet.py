@@ -421,7 +421,14 @@ class ReaderTest(unittest.TestCase):
         self.assertTrue(fits(listed))
         self.assertFalse(fits(19_856))                            # AIOStreams' download_failed.mp4
         self.assertFalse(fits(listed + 50_000_000))
-        self.assertTrue(worker_mod.usenet_size_ok(None)(123))     # nothing listed: the first reply decides
+        # nothing listed: the first reply decides, within the sizes a video file can have; AIOStreams' error video is
+        # refused then too (it was read and indexed as the played file)
+        unknown = worker_mod.usenet_size_ok(None)
+        self.assertTrue(unknown(3_793_335_091))
+        self.assertTrue(unknown(sources.MIN_VIDEO_BYTES))
+        self.assertFalse(unknown(19_856))
+        self.assertFalse(unknown(123))
+        self.assertFalse(worker_mod.usenet_size_ok(15_000_000)(8_000_000))   # half the listed size, yet no video's
 
     def test_the_first_read_waits_longer(self):
         self.d.link_delay = 1.2
@@ -667,9 +674,15 @@ class UsenetJobTest(TempDirTest):
         """A Usenet file with no usable track, once kept out of the audio route, now waits for the
         person's pick like a debrid file, and its languages aren't marked judged, so others can still pick it; the pick
         starts its audio job."""
+        from unittest import mock
         from helpers import FIXTURES, RangeServer
         srv = RangeServer(FIXTURES)
         self.addCleanup(srv.close)
+        # the listed and asked size is the served file's: the small fixture counts as a video file here, as a real one
+        # would (a served size under sources.MIN_VIDEO_BYTES is no video's, worker.usenet_size_ok)
+        patcher = mock.patch.object(sources, "MIN_VIDEO_BYTES", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         size = os.path.getsize(os.path.join(FIXTURES, "tiny-nosub.mp4"))
         hints = {"filename": "tiny-nosub.mp4", "videoSize": size}
         s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_AUDIO_ROUTE": "on",

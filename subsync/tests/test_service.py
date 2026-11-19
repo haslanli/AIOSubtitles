@@ -485,6 +485,12 @@ class SafetyTest(unittest.TestCase):
         self.assertEqual(rewrite("https://jf.example/api/v1/proxy/x", "https://jf.example=http://aiostreams:3000"),
                          "http://aiostreams:3000/api/v1/proxy/x")
         self.assertEqual(rewrite("http://other/x", "https://jf.example=http://aiostreams:3000"), "http://other/x")
+        # A rule whose source is only spaces (a stray ", =..." added by hand) rewrites nothing; it prefixed
+        # every link the rules before it didn't match
+        rules = "https://jf.example=http://aiostreams:3000, =http://other:1"
+        self.assertEqual(rewrite("https://cdn.example.net/play/x", rules), "https://cdn.example.net/play/x")
+        self.assertEqual(rewrite("https://jf.example/x", rules), "http://aiostreams:3000/x")
+        self.assertEqual(rewrite("https://cdn.example.net/x", "https://cdn.example.net= "), "https://cdn.example.net/x")
 
 
 class SourcesTest(unittest.TestCase):
