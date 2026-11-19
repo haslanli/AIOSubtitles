@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 
 from . import langs, net, realdebrid
+from .version import user_agent
 
 
 def _say_wait(seconds):
@@ -448,7 +449,7 @@ def sync_config_problems(sync, usenet=False):
 
 # ------------------------------------------------------------------------------------------- the AIOStreams API
 
-UA = 'AIOSubtitles/1.0 (setup)'   # starts with "AIO": stock AIOStreams then includes file details in stream listings
+UA = user_agent('setup')   # starts with "AIO": stock AIOStreams then includes file details in stream listings
 
 # The client's fixed values: waits in seconds, sizes in bytes
 CALL_TIMEOUT = 30            # a call's wait when neither the call nor the client names its own

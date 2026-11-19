@@ -216,8 +216,12 @@ class Fetch(unittest.TestCase):
     """One GET from this machine (127.0.0.1 here), as hosting.check makes them."""
 
     def setUp(self):
+        self.agents = []
+        agents = self.agents
+
         class Answer(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                agents.append(self.headers.get('User-Agent'))
                 status = 200 if self.path == '/health' else 502
                 self.send_response(status)
                 self.send_header('Content-Length', '2')
@@ -241,6 +245,12 @@ class Fetch(unittest.TestCase):
         self.assertEqual((status, body), (502, b''))
         self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
         self.assertEqual(hosting.fetch(self.base + '/health')[::2], (200, b'ok'))
+
+    def test_it_says_which_release_of_setup_asks(self):
+        # It said "AIOSubtitles-setup", no version; every User-Agent now carries the release's (VERSION)
+        version = (Path(__file__).resolve().parents[2] / 'VERSION').read_text().strip()
+        hosting.fetch(self.base + '/health')
+        self.assertEqual(self.agents, [f'AIOSubtitles/{version} (setup; +https://github.com/haslanli/AIOSubtitles)'])
 
 
 class RouteFixture(AnswersRun, unittest.TestCase):

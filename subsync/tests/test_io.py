@@ -999,6 +999,21 @@ class PlayedFileHashTest(TinyFileFixture):
         self.assertEqual(store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
         self.assertTrue(w.recently_unlisted("name:tiny.mkv|None"))   # the listing has no such file: not looked for again
 
+    def test_a_hash_alone_names_the_played_file_never_its_title(self):
+        # A request with the file's hash but no size was filed under the title alone, and the file read for
+        # it was linked to the title, which then matched every other release of it
+        with open(TINY, "rb") as f:
+            data = f.read()
+        video_hash = oshash(len(data), data[:65536], data[-65536:])
+        store = closed_after(self, Store(os.path.join(self.dir, "store")))
+        w = Worker(Settings({"SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_LANGUAGES": "eng,rus"}), store, self.aios,
+                   Safety())
+        w._sync_all = lambda *a: None                       # the file's links are made before its subtitles are judged
+        job = Job("movie", "tt1", {"videoHash": video_hash})
+        w.process(job)
+        aliases = {alias for (alias,) in store.db.execute("SELECT alias FROM aliases")}
+        self.assertEqual(aliases, {f"hash:{video_hash}|None", f"hash:{video_hash}|{len(data)}"})
+
     @unittest.skipUnless(have(ALASS), "alass not installed")
     def test_the_played_file_is_synced(self):
         with open(TINY, "rb") as f:
@@ -1674,6 +1689,21 @@ class SelfTestTest(unittest.TestCase):
         out = self.run_selftest(self.srv.url("tiny.srt"), None, Settings({}))
         self.assertEqual((out["ok"], out["container"]), (True, None))
         self.assertIn("neither Matroska nor MP4", out["note"])
+
+    def test_an_index_its_parsers_cant_read_is_reported_too(self):
+        # An error of the parsers themselves escaped (in 1.6.0 a damaged index raised IndexError, struct.error
+        # or OverflowError), nothing was printed, and setup said "no answer from subsync" for a file the service just
+        # keeps the originals of, as the worker catches the same errors
+        with mock.patch.object(MkvIndex, "text_tracks", side_effect=IndexError("vint past the buffer")):
+            out = self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({}))
+            self.assertEqual((out["ok"], out["error"], out["detail"]),
+                             (False, "unreadable",
+                              "its index couldn't be read (IndexError): subsync keeps the original subtitles for this "
+                              "file"))
+            self.assertGreater(out["bytes"], 0)                # what it read is still said
+            code, printed = self.main(self.srv.url("tiny.mkv") + "\n")
+        self.assertEqual((code, printed.count("\n"), json.loads(printed)["error"]), (1, 1, "unreadable"))
+        self.assertNotIn("127.0.0.1", printed)
 
     def test_rewrite_applies(self):
         s = Settings({"SUBSYNC_URL_REWRITE": f"https://public.example=http://127.0.0.1:{self.srv.port}"})

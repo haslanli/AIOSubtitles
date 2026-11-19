@@ -23,7 +23,7 @@ from unittest import mock
 from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only,  # noqa: E402
                      RangeServer, start_server, stop_server, TempDir, watch_the_log)
 from subsync import ALGO_VERSION  # noqa: E402
-from subsync.addon import REPROCESS_S, App, serve, token  # noqa: E402
+from subsync.addon import REPROCESS_S, App, file_id, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync import explain, sources  # noqa: E402
 from subsync.sources import (Aios, expected_size, extras, fetch_subtitle, parse_extras, same_hash,  # noqa: E402
@@ -65,6 +65,21 @@ class StoreTest(unittest.TestCase):
             st.put(FILE, "e" * 64, "eng", 0, "in_sync")                       # first subtitle fine as it is: nothing offered
             self.assertEqual(st.offers(FILE, ["eng"]), [])
             self.assertEqual(st.body(k3), "c")
+
+    def test_a_title_is_never_kept_as_a_files_name(self):
+        # An earlier version linked the file read for a request with a hash but no size to the title alone
+        # ("title:<type>/<id>"), so every other release of the title got its copies; those links go when the store
+        # opens, and the file's results and its own names stay
+        with TempDir() as d:
+            st = Store(d)
+            key = st.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt")
+            for alias in ("title:movie/tt1", "title:series/tt2:1:1", "hash:ab|3", "name:a.mkv|3"):
+                st.alias(alias, FILE)
+            st.close()
+            st = closed_after(self, Store(d))
+            self.assertEqual([st.resolve(a) for a in ("title:movie/tt1", "title:series/tt2:1:1", "hash:ab|3",
+                                                      "name:a.mkv|3")], [None, None, FILE, FILE])
+            self.assertEqual([r["key"] for r in st.offers(FILE, ["eng"])], [key])
 
     def test_cap_evicts_least_recently_served(self):
         with TempDir() as d:
@@ -761,6 +776,40 @@ class AddonTest(AddonFixture):
         self.assertEqual(code, 200)
         self.assertIn(b"No English subtitle was found for this file.", body)
 
+    def test_every_srt_link_sends_srt_whatever_the_copys_format(self):
+        # An OpenSubtitles V3+ subtitle (WebVTT) in sync as it is is listed unchanged, and its .srt link, its
+        # pick entry and its pending entry sent the WebVTT text as SRT: players that read SRT strictly show nothing
+        alias = "name:v.mkv|1000"
+        key = self.store.put(FILE, SHA_A, "eng", 0, "synced", detail={"unchanged": True}, fmt="srt",
+                             body="WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nHello\n", candidate_id="osp-1")
+        self.store.alias(alias, FILE)
+        srt = "1\n00:00:01,000 --> 00:00:02,500\nHello\n"
+        for path in (f"/file/{file_id(key)}.srt", f"/pick/{token(alias)}/eng.srt", f"/pending/{token(alias)}/eng.srt"):
+            with self.subTest(path=path):
+                code, body, headers = http(self.base + path)
+                self.assertEqual((code, body.decode(), headers["Content-Type"]),
+                                 (200, srt, "application/x-subrip; charset=utf-8"))
+
+    def test_a_pending_entry_answers_as_the_pick_entry_does(self):
+        # After a restart, or for a file subsync knows nothing of, a pending entry answered "busy, try again in
+        # 1 second" on every try, where the pick entry answers "not found", and never looked at a copy stored for its
+        # file; now both answer alike in each state (a file worked on: test_unknown_file_queues_a_job_and_lists_...)
+        alias = "name:p.mkv|1000"
+        routes = [f"/{route}/{token(alias)}/eng.srt" for route in ("pending", "pick")]
+        self.assertEqual([http(self.base + path)[0] for path in routes], [404, 404])    # nothing known of the file
+        self.store.alias(alias, FILE)                    # read before (its list not known any more): the player retries
+        for path in routes:
+            with self.subTest(path=path):
+                code, _, headers = http(self.base + path)
+                self.assertEqual((code, headers.get("Retry-After")), (503, "1"))
+        text = "1\n00:00:01,000 --> 00:00:02,000\nstored\n"
+        self.store.put(FILE, SHA_A, "eng", 0, "synced", body=text, fmt="srt")    # a copy stored before the restart
+        for path in routes:
+            with self.subTest(path=path):
+                code, body, headers = http(self.base + path)
+                self.assertEqual((code, body.decode(), headers.get(SERVED)), (200, text, "copy"))
+        self.assertEqual(len(self.worker.jobs), 0)
+
     def test_no_hints_no_job(self):
         code, body, _ = http(self.base + "/subtitles/movie/tt3.json")
         self.assertEqual(json.loads(body)["subtitles"], [])
@@ -1412,7 +1461,7 @@ class PickTest(AddonFixture):
 
     def test_each_answer_of_the_pending_route_says_what_it_served(self):
         pending = "/pending/" + token(self.ALIAS) + "/eng.srt"
-        self.assertEqual(self.served(pending), (503, None, None))         # nothing known yet: the player asks again
+        self.assertEqual(self.served(pending), (404, None, None))         # a file subsync knows nothing of
         self.waiting()
         self.assertEqual(self.served(pending), (200, "original", SERVED))
         self.downloads.files["http://opensubs/x.srt"] = dialogue_srt("spa").encode()   # its text isn't English
@@ -1428,6 +1477,86 @@ class PickTest(AddonFixture):
         self.assertEqual(self.get("/pick/" + token("name:other.mp4|9") + "/eng.srt")[0], 404)
         self.assertEqual(self.get("/pick/!!!/eng.srt")[0], 404)
         self.assertEqual(len(self.worker.jobs), 0)
+
+    def test_a_waiting_files_guess_made_from_an_ass_subtitle_is_sent_as_srt(self):
+        # The anchored guess keeps its subtitle's format (subs.write_like), and an ASS guess (common for
+        # anime) went out as ASS under the .srt link
+        self.waiting()
+        self.worker.provisional[self.ALIAS] = {"rus": (
+            "[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, "
+            "MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,anchored\n")}
+        code, body, headers = self.get("/pick/" + token(self.ALIAS) + "/rus.srt")
+        self.assertEqual((code, body.decode(), headers.get(SERVED)),
+                         (200, "1\n00:00:01,000 --> 00:00:02,000\nanchored\n", "guess"))
+
+    def test_a_copy_ready_before_the_deadline_wins_over_the_original(self):
+        # A pick waits for the copy until 3 s before its deadline, then spent those 3 s on the original and
+        # never looked again: a copy published meanwhile lost to the original or its redirect (Game of Thrones S01E01
+        # in the 1.6.0 T2: the copy ready 1.7 s before the deadline, the pick answered with the original's redirect).
+        # The download now stops waiting once a copy is published, and the copy is looked for once more before an
+        # original goes out; the pending entry too
+        copy = "1\n00:00:01,000 --> 00:00:02,000\nsynced\n"
+        for route in ("pick", "pending"):
+            with self.subTest(route=route):
+                self.s.pick_wait = 3.0
+                self.waiting()
+                with self.worker.cv:
+                    self.worker.done.clear()
+                    self.worker.fetched_subs.clear()
+                release = threading.Event()
+                self.addCleanup(release.set)
+                self.downloads.hold["http://opensubs/x.srt"] = release     # the original's download outlasts the pick
+
+                def published():
+                    key = self.store.put("f" * 16 + "-5", SHA_A, "eng", 0, "synced", body=copy, fmt="srt", offer=False)
+                    self.worker._publish(self.ALIAS, "eng", key)
+                timer = threading.Timer(0.5, published)
+                self.addCleanup(timer.cancel)
+                timer.start()
+                t0 = time.time()
+                code, body, headers = self.get(f"/{route}/{token(self.ALIAS)}/eng.srt")
+                self.assertEqual((code, body.decode(), headers.get(SERVED)), (200, copy, "copy"))
+                self.assertLess(time.time() - t0, 2.0)                   # as it was published, not at the deadline
+
+    def test_a_copy_stored_while_the_original_downloaded_is_served_instead(self):
+        # The original arrived in time, but a copy came first: the copy is looked for once more before the
+        # original goes out
+        self.s.pick_wait = 3.0
+        self.waiting()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.downloads.hold["http://opensubs/x.srt"] = release
+        copy = "1\n00:00:01,000 --> 00:00:02,000\nsynced\n"
+
+        def stored_then_downloaded():
+            self.store.put("f" * 16 + "-5", SHA_A, "eng", 0, "synced", body=copy, fmt="srt")
+            self.store.alias(self.ALIAS, "f" * 16 + "-5")
+            release.set()
+        timer = threading.Timer(0.3, stored_then_downloaded)
+        self.addCleanup(timer.cancel)
+        timer.start()
+        code, body, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
+        self.assertEqual((code, body.decode(), headers.get(SERVED)), (200, copy, "copy"))
+        self.assertEqual(self.downloads.asked, ["http://opensubs/x.srt"])
+
+    def test_a_head_answers_with_the_headers_only_and_starts_nothing(self):
+        # A HEAD ran the whole GET: on a pick entry it started the audio route (60-350 MB read, one of the
+        # day's audio syncs) and waited, on a subtitle list it queued the file, on an original it downloaded it. Now
+        # the list and the entries answer 200 with their content type and do nothing; /health, /manifest.json, /file
+        # and /notice.srt as before (test_a_head_is_answered_with_the_headers_only)
+        self.waiting()
+        srt, tok = "application/x-subrip; charset=utf-8", token(self.ALIAS)
+        for path, ctype in ((self.URL, "application/json; charset=utf-8"), (f"/pick/{tok}/eng.srt", srt),
+                            (f"/pending/{tok}/eng.srt", srt), (f"/original/{tok}/eng.srt", srt)):
+            with self.subTest(path=path):
+                data = exchange(self.port, f"HEAD {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+                head, _, rest = data.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 200 "), head)
+                self.assertIn(f"\r\nContent-Type: {ctype}\r\n".encode(), head + b"\r\n")
+                self.assertNotIn(b"Content-Length", head)               # a HEAD's length must be its GET's
+                self.assertEqual(rest, b"")
+        self.assertIn(self.ALIAS, self.worker.pickable)                 # not picked: no audio route started
+        self.assertEqual((len(self.worker.jobs), self.app.subtitle_requests, self.downloads.asked), (0, 0, []))
 
 
 class NoTrack:
@@ -1981,6 +2110,8 @@ class NameOnlyTest(AddonCase):
     def test_alias(self):
         self.assertEqual(Job("movie", "tt1", {"filename": "a.mkv"}).alias, "name:a.mkv|None")
         self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "videoSize": 3}).alias, "hash:ab|3")
+        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab"}).alias, "hash:ab|None")
+        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "videoSize": 0}).alias, "hash:ab|None")
         self.assertEqual(Job("movie", "tt1").alias, "title:movie/tt1")
 
     def test_aliases(self):
@@ -1991,7 +2122,7 @@ class NameOnlyTest(AddonCase):
         self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "filename": "a.mkv"}).aliases, ("name:a.mkv|None",))
         self.assertEqual(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 3}).aliases, ("name:a.mkv|3",))
         self.assertEqual(Job("movie", "tt1", {"videoHash": "ab", "videoSize": 3}).aliases, ("hash:ab|3",))
-        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab"}).aliases, ("title:movie/tt1",))
+        self.assertEqual(Job("movie", "tt1", {"videoHash": "ab"}).aliases, ("hash:ab|None",))
         self.assertEqual(Job("movie", "tt1").aliases, ("title:movie/tt1",))
 
     def test_another_release_of_the_title_gets_nothing_of_this_file(self):
@@ -2003,6 +2134,22 @@ class NameOnlyTest(AddonCase):
         # b.mkv is queued for its own sync: only its own "(Subsync)" entries, nothing made for a.mkv
         self.assertEqual([s["label"] for s in other], ["English (Subsync)"])
         self.assertTrue(other[0]["url"].endswith("/pick/" + token("name:b.mkv|None") + "/eng.srt"))
+        self.assertEqual(self.app.subtitles("movie", "tt1", ""), [])
+
+    def test_a_hash_without_a_size_names_its_own_file(self):
+        # A request with a file's hash but no size was filed under the title alone, and the file read for it
+        # linked to the title: the next such request for another release of the title, and any request naming no
+        # file, listed that file's copies, timed for another release, and its own file was never read
+        self.store.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nHi\n", fmt="srt")
+        for alias in Job("movie", "tt1", {"videoHash": "00112233aabbccdd"}).aliases:   # as the worker links its file
+            self.store.alias(alias, FILE)
+        self.store.file_read(FILE, 1000, FILE[:16], True, {})
+        self.assertEqual([s["label"] for s in self.app.subtitles("movie", "tt1", "videoHash=00112233aabbccdd")],
+                         ["English (synced)"])
+        other = self.app.subtitles("movie", "tt1", "videoHash=ffffeeee11112222")
+        self.assertEqual([s["label"] for s in other], ["English (Subsync)"])     # queued for its own read
+        self.assertTrue(other[0]["url"].endswith("/pick/" + token("hash:ffffeeee11112222|None") + "/eng.srt"))
+        self.assertEqual(list(self.worker.jobs), ["hash:ffffeeee11112222|None"])
         self.assertEqual(self.app.subtitles("movie", "tt1", ""), [])
 
 
@@ -2267,6 +2414,37 @@ class StreamDataTest(unittest.TestCase):
         aios.check_config = lambda: None
         self.assertEqual((aios.streams("movie", "tt1"), aios.subtitles("movie", "tt1", {"videoSize": 3})), ([], []))
         self.assertEqual(asked, [("stream", sources.USER_AGENT), ("subtitles", sources.USER_AGENT)])
+
+
+class VersionTest(unittest.TestCase):
+    """The version was written by hand in ten places, mostly wrong for 1.6.0 (the manifests' 1.0.0, User-Agents
+    with 1.0, 1.6 or none): one module reads the release's VERSION once, and both manifests and every User-Agent take it
+    from there, each User-Agent starting with "AIO" and naming the project's address."""
+
+    def release(self):
+        from helpers import SOURCE
+        with open(os.path.join(os.path.dirname(SOURCE), "VERSION"), encoding="utf-8") as f:
+            return f.read().strip()
+
+    def test_the_manifest_and_every_user_agent_carry_the_releases_version(self):
+        from subsync import aiosconfig, extra, origlang, reader, signup, version
+        from subsync.addon import manifest
+        release = self.release()
+        self.assertRegex(release, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(version.VERSION, release)
+        self.assertEqual(manifest(Settings({}))["version"], release)
+        agent = f"AIOSubtitles/{release} ({{}}; +https://github.com/haslanli/AIOSubtitles)"
+        self.assertEqual({sources.USER_AGENT, extra.USER_AGENT, origlang.USER_AGENT, reader.USER_AGENT},
+                         {agent.format("subsync")})                     # the file reads too ("subsync/1" before)
+        self.assertEqual((signup.USER_AGENT, aiosconfig.UA), (agent.format("public"), agent.format("setup")))
+
+    def test_no_other_module_writes_a_version_or_a_user_agent_of_its_own(self):
+        from subsync import version
+        code = os.path.dirname(os.path.abspath(version.__file__))
+        for name in sorted(os.listdir(code)):
+            if name.endswith(".py") and name != "version.py":
+                with self.subTest(module=name), open(os.path.join(code, name), encoding="utf-8") as f:
+                    self.assertNotRegex(f.read(), r"AIOSubtitles/\d|subsync/\d|[\"']version[\"']: [\"']\d")
 
 
 class AudioOffEntryTest(AddonCase):

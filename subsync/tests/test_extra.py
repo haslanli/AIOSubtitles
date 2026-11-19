@@ -250,6 +250,28 @@ class ExtraSourcesTest(unittest.TestCase):
         self.assertEqual([c["id"] for c in got], ["tsdb-11", "tsdb-12", "tsdb-13"])
         self.assertEqual(len(ex.health.failures["osv3plus"]), 1)
 
+    def test_only_the_keyless_sites_are_taken_by_name(self):
+        # A keyed site written in SUBSYNC_EXTRA_SOURCES was asked with an empty key (each search failed and
+        # paused it), Wyzie even in public mode, which otherwise refuses it, and a misspelt name went without a word
+        from subsync import explain
+        from subsync.extra import asked_sources, make_sources
+        written = "osv3,Wyzie,subdl,subsource,opensubs"
+        s = Settings(dict(self.env, SUBSYNC_EXTRA_SOURCES=written))
+        self.assertEqual((s.extra_sources, s.extra_sources_ignored), (["osv3"], ["wyzie", "subdl", "subsource",
+                                                                                "opensubs"]))
+        public = Settings(dict(self.env, SUBSYNC_EXTRA_SOURCES=written, SUBSYNC_PUBLIC="on"))
+        self.assertEqual([asked_sources(x, "series") for x in (s, public)], [["osv3"], ["osv3"]])
+        self.assertEqual(self.extra(SUBSYNC_EXTRA_SOURCES="wyzie,subdl,subsource").search("series", "tt2:1:2"), [])
+        self.assertEqual(self.fake.calls, [])                                     # none asked without its key
+        with tempfile.TemporaryDirectory() as data, self.assertLogs("subsync.extra", "WARNING") as logs:
+            make_sources(Settings(dict(self.env, SUBSYNC_EXTRA_SOURCES=written, SUBSYNC_DATA=data)))
+        self.assertEqual(logs.output, [f'WARNING:subsync.extra:SUBSYNC_EXTRA_SOURCES: "{name}" ignored: it takes only '
+                                       'osv3, osv3plus, tsdb and gestdown; SubDL, SubSource and Wyzie Subs have their '
+                                       'own key settings.' for name in ("wyzie", "subdl", "subsource", "opensubs")])
+        self.assertTrue(explain.SETTINGS["SUBSYNC_EXTRA_SOURCES"][1].endswith(
+            "A site that is already an addon in your config isn't asked twice. Other names are ignored: SubDL, "
+            "SubSource and Wyzie Subs have their own key settings."))
+
     def test_off_means_nothing_is_asked(self):
         self.assertEqual(self.extra(SUBSYNC_EXTRA_SOURCES="").search("series", "tt2:1:2"), [])
         self.assertEqual(self.fake.calls, [])

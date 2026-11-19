@@ -230,8 +230,9 @@ APPROVED = {
     "SUBSYNC_ACTIVE_WORKERS":
         "How many people can have a worker (the part that finds and syncs their files) running at once. A worker with "
         "nothing to do stops after a while (30 minutes by default). Past the limit, a person's requests get only "
-        "copies already in the shared store until a worker frees up. Each worker takes about 2.5 MB of memory, so 100 "
-        "take about 250 MB; keep the limit within what the server's memory allows.",
+        "copies already in the shared store until a worker frees up. Each worker takes about 2.5 MB of memory, plus up "
+        "to 32 MB for the subtitles it downloaded in the last 10 minutes, so 100 take from about 250 MB to about 3.5 "
+        "GB; keep the limit within what the server's memory allows.",
     "SUBSYNC_MAX_CONNECTIONS":
         "Requests handled at once. Each one takes a thread and some memory, so past it the service answers \"busy, "
         "try again\" (HTTP 503) at once instead of running out of memory. Apps ask for subtitles again on their own. "
@@ -666,6 +667,14 @@ class NumbersTest(unittest.TestCase):
                       f"{WORDS[per_file['subsource']]} subtitles per file and language", subsource)
         self.assertIn(f"from {per(('tsdb', 'download', False), 3600)} an hour to "
                       f"{per(('tsdb', 'download', True), day)} a day", explain.SETTINGS["SUBSYNC_TSDB_KEY"][1])
+
+    def test_a_workers_memory(self):
+        # The text said about 2.5 MB a worker, leaving out the downloads each keeps for the audio job after a
+        # pick; its numbers are worker.FETCHED_CAP and worker.LIST_TTL_S
+        from subsync.settings import MB
+        from subsync.worker import FETCHED_CAP, LIST_TTL_S
+        self.assertIn(f"plus up to {FETCHED_CAP // MB} MB for the subtitles it downloaded in the last "
+                      f"{LIST_TTL_S // 60} minutes, so 100 take", explain.SETTINGS["SUBSYNC_ACTIVE_WORKERS"][1])
 
     def test_the_language_check_and_the_shared_timing(self):
         from subsync.langcheck import MIN_WORDS

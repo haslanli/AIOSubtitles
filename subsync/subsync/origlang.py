@@ -28,10 +28,11 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from . import langs, net, realdebrid
+from .version import user_agent
 
 log = logging.getLogger("subsync.origlang")
 
-USER_AGENT = "AIOSubtitles/1.6 (https://github.com/haslanli/AIOSubtitles)"
+USER_AGENT = user_agent("subsync")
 TIMEOUT_S = 5.0
 MAX_BYTES = 64 * 1024
 DAY = 86400

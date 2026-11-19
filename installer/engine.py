@@ -1286,7 +1286,12 @@ class Engine:
             self.out.note('subsync itself is installed and waits a while after a refusal. Try ./setup again later.')
             return False
         self.out.warn("The test read didn't work: " + (result.get('detail') or 'no answer from subsync') + '.')
-        self.out.note('subsync is installed. Run ./setup again later, or send the output of ./setup --status with a bug report.')
+        if result.get('error') == 'unreadable':   # an index subsync can't parse: maybe a fault of subsync's
+            self.out.note('subsync is installed. If many of your files get no synced copy, send the output of ./setup '
+                          '--status with a bug report.')
+        else:
+            self.out.note('subsync is installed. Run ./setup again later, or send the output of ./setup --status '
+                          'with a bug report.')
         return False
 
     def subsync_status(self):

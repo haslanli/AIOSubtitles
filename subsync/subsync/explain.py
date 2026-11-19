@@ -547,7 +547,8 @@ GROUPS = [
             "from your exact release, which fits best. Remove one to stop asking it. Each search sends the title's IMDb "
             "id, season and episode and your languages; the OpenSubtitles ones also get the file's fingerprint (hash), "
             "size and name, as your player sends them, and TheSubtitleDB the torrent's hash and the file's name. A site "
-            "that is already an addon in your config isn't asked twice."),
+            "that is already an addon in your config isn't asked twice. Other names are ignored: SubDL, SubSource and "
+            "Wyzie Subs have their own key settings."),
         "SUBSYNC_SOURCE_TIMEOUT_S": (
             "5",
             "How long AIOSubtitles waits for each subtitle site it searches itself, in seconds. A site that answers later "
@@ -916,7 +917,8 @@ GROUPS = [
             "How many people can have a worker (the part that finds and syncs their files) running at once. A worker "
             "with nothing to do stops after a while (30 minutes by default). Past the limit, a person's requests get "
             "only copies already in the shared store until a worker frees up. Each worker takes about 2.5 MB of "
-            "memory, so 100 take about 250 MB; keep the limit within what the server's memory allows."),
+            "memory, plus up to 32 MB for the subtitles it downloaded in the last 10 minutes, so 100 take from about "
+            "250 MB to about 3.5 GB; keep the limit within what the server's memory allows."),
         "SUBSYNC_WORKER_IDLE_MIN": (
             "30",
             "Minutes without a request before a person's worker stops and their opened record leaves memory. Shorter "

@@ -417,6 +417,9 @@ class Job:
             # a file name without a size still names one file; the title alone would let another release of the
             # same title match this file's result
             return f"name:{h['filename']}|None"
+        if h.get("videoHash"):   # so does a hash without a size
+            return f"hash:{h['videoHash']}|None"
+        # a request that names no file: it queues nothing, so no file is ever linked to a bare title
         return f"title:{self.type}/{self.video_id}"
 
     @property
@@ -1138,6 +1141,17 @@ class Worker(threading.Thread):
         viewer's reads."""
         return any(self.store.file_blocked(key) for key in dict.fromkeys((alias, self._refusal_key(alias))))
 
+    def _backing_off(self, job):
+        """Whether the job's file backs off (_file_blocked): then nothing of it is read, its marks stay (asked for,
+), and an audio job's file waits for another pick."""
+        if not self._file_blocked(job.alias):
+            return False
+        log.info("file backing off after read failures %s", job.label)
+        self.store.marks_asked(job.alias, self._refusal_key(job.alias))
+        if job.audio:
+            self._wait_again(job)
+        return True
+
     def _wait_again(self, job):
         """An audio job that ended without its sync: the file waits for the viewer's pick again."""
         with self.cv:
@@ -1164,6 +1178,11 @@ class Worker(threading.Thread):
                 self.judged.setdefault(alias, set()).add(lang)
             self.cv.notify_all()
 
+    def _wake(self, _future=None):
+        """Wakes every wait on the worker's condition (an original's download ended: original_for)."""
+        with self.cv:
+            self.cv.notify_all()
+
     def process(self, job):
         if job.audio and not (self._audio_room(job.alias) and (job.counted or self._may_start_audio(job.opened))):
             # the data left, or today's audio syncs (a job counted already is queued again), were used meanwhile:
@@ -1187,6 +1206,10 @@ class Worker(threading.Thread):
         else:
             row = self.aios.find_row(job.type, job.video_id, hints)   # none without a sync config (Usenet only)
         if row is None and self.usenet is not None:
+            # A file that backs off spends no Usenet listing on a first pass (indexers limit them a day); a
+            # debrid file's listing above still leads to its known-file and capped outcomes (_process_row)
+            if not job.audio and self._backing_off(job):
+                return
             row = self._usenet_row(job, hints)
             job.usenet = row is not None
         if row is None:
@@ -1305,11 +1328,7 @@ class Worker(threading.Thread):
         if counts and not self.limits.may_start_file():
             raise OverLimit("files per day")
         url = row["url"]
-        if self._file_blocked(job.alias):
-            log.info("file backing off after read failures %s", job.label)
-            self.store.marks_asked(job.alias, self._refusal_key(job.alias))    # asked for: the marks stay
-            if job.audio:   # nothing read: the file waits for another pick
-                self._wait_again(job)
+        if self._backing_off(job):
             return
         # the subtitle list first (AIOStreams answers it from its cache), so a pending entry can fall back to the original
         candidates = self._candidates(job, hints)
@@ -1682,7 +1701,7 @@ class Worker(threading.Thread):
             best = (pick["id"] if pick else None, None)
         self.store.kept_original_put(file_key, lang, *best)
 
-    def original_for(self, alias, lang, deadline, first=None):
+    def original_for(self, alias, lang, deadline, first=None, until_copy=False):
         """The text of an original subtitle to serve unchanged for a file and language (a pick or pending entry
         while there is no copy, or the "(original)" entry), from this person's own subtitle list only:
         `first` (a candidate id), else the file's original (_set_originals), downloaded if it wasn't; if the language
@@ -1690,7 +1709,9 @@ class Worker(threading.Thread):
         langcheck.MORE_DOWNLOADS more downloads. Nothing of the video is read and no job is queued. Returns (text, None,
         None), or (None, why, address): "late" when `deadline` (a time) came first, with the address in this person's
         list of the original being downloaded then when a player can use it as it is (player_address; else None), "none"
-        when none passes, "unknown" when this person has no subtitle of the language listed for the file."""
+        when none passes, "unknown" when this person has no subtitle of the language listed for the file. With
+        `until_copy` (a pick or pending entry), a download also stops waiting, as "late", once the file's job
+        publishes a synced copy of the language: the entry serves that copy."""
         with self.cv:
             self._restore(alias)
             listed = self.lists.get(alias)
@@ -1733,10 +1754,14 @@ class Worker(threading.Thread):
             left = deadline - time.time()
             if left <= 0:
                 return False
-            try:
-                got = self.original_pool.submit(self._fetch_one, job, lang, 0, c).result(timeout=left)
-            except FutureTimeout:   # it goes on and is kept (fetched_subs): the player's next try gets it at once
+            future = self.original_pool.submit(self._fetch_one, job, lang, 0, c)
+            future.add_done_callback(self._wake)
+            with self.cv:
+                self.cv.wait_for(lambda: future.done() or (until_copy and self.published(alias, lang) is not None),
+                                 left)
+            if not future.done():   # it goes on and is kept (fetched_subs): the player's next try gets it at once
                 return False
+            got = future.result()
             return decode(got[2], lang) if got else None
 
         def late(c):

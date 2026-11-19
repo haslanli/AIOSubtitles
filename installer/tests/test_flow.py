@@ -688,6 +688,27 @@ class Flow(FlowFixture):
         self.assertNotIn('The test read failed', out)
         self.assertIn('its index is larger than subsync reads', out)
 
+    def test_an_index_subsync_cant_parse_is_a_warning_with_its_reason(self):
+        # subsync's own test printed nothing for an index its parsers couldn't read, and setup said "no
+        # answer from subsync"; it says why now, and asks for a bug report only if many files get no copy
+        self.selftest = {'ok': False, 'error': 'unreadable', 'bytes': 4096, 'requests': 1,
+                         'detail': "its index couldn't be read (IndexError): subsync keeps the original subtitles for "
+                                   "this file"}
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertEqual(code, 3, out)                       # installed, with warnings
+        self.assertIn("The test read didn't work: its index couldn't be read (IndexError): subsync keeps the original "
+                      "subtitles for this file.", out)
+        self.assertIn('subsync is installed. If many of your files get no synced copy, send the output of ./setup '
+                      '--status with a bug report.', out)
+        self.assertNotIn('no answer from subsync', out)
+        self.assertNotIn('Run ./setup again later', out)
+        self.assertIn(engine.WARNED_ABOVE, out)
+        self.selftest = {}                                  # a test that gives no answer still says so
+        code, out = self.run_setup(self.ANSWERS)
+        self.assertIn("The test read didn't work: no answer from subsync.", out)
+        self.assertIn('subsync is installed. Run ./setup again later, or send the output of ./setup --status with a '
+                      'bug report.', out)
+
     def test_closing_text(self):
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)

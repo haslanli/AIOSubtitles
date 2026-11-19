@@ -158,10 +158,14 @@ class ImageBuildTest(unittest.TestCase):
 
     def setUp(self):
         tmp = TempDir()
-        self.image = tmp.__enter__()
+        root = tmp.__enter__()
         self.addCleanup(tmp.__exit__, None, None, None)
+        # laid out as the image is: its folder (WORKDIR /opt/aiosubtitles/subsync) holds the package, and the release's
+        # VERSION is beside that folder (/opt/aiosubtitles/VERSION), where the package reads it (version.py)
+        self.image = os.path.join(root, "subsync")
         shutil.copytree(os.path.join(SOURCE, "subsync"), os.path.join(self.image, "subsync"),
                         ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy(os.path.join(os.path.dirname(SOURCE), "VERSION"), root)
 
     def python(self, image_build, *args):
         env = {k: v for k, v in os.environ.items() if k != "AIOSUBTITLES_IMAGE_BUILD"}

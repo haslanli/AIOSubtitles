@@ -84,6 +84,44 @@ class PublicManifestTest(Base):
                                                           "each file's own subtitle track or its speech; below the bar "
                                                           "the original is kept.")
 
+    def test_the_addons_version_is_the_releases(self):
+        # It said 1.0.0 whatever the release (AIOStreams shows it)
+        from subsync.version import VERSION
+        self.start()
+        _, _, _, _, token = self.sign_up()
+        code, body, _ = http(f"{self.base}/u/{token}/manifest.json")
+        self.assertEqual((code, json.loads(body)["version"]), (200, VERSION))
+        self.assertNotEqual(VERSION, "1.0.0")
+
+    def test_a_head_of_a_list_or_an_entry_starts_nothing(self):
+        # A HEAD ran the whole GET: the person's service was started for it, their daily check too, and the
+        # list, pick, pending and "(original)" routes did their work; now they answer 200 with their content type
+        from subsync.addon import token as entry_token
+        from subsync.users import new_token
+        self.start(SUBSYNC_RECHECK_HOURS="24")
+        _, _, _, _, token = self.sign_up()
+        read_key, tok = self.users.read_key(token), entry_token("name:a.mkv|5")
+        srt = "application/x-subrip; charset=utf-8"
+        port = self.server.server_address[1]
+
+        def head(path):
+            data = exchange(port, f"HEAD {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+            return data.partition(b"\r\n\r\n")
+        for path, ctype in ((f"/u/{token}/subtitles/movie/tt1/filename=a.mkv&videoSize=5.json",
+                             "application/json; charset=utf-8"), (f"/r/{read_key}/pick/{tok}/eng.srt", srt),
+                            (f"/r/{read_key}/pending/{tok}/eng.srt", srt),
+                            (f"/r/{read_key}/original/{tok}/eng.srt", srt)):
+            with self.subTest(path=path):
+                headers, _, rest = head(path)
+                self.assertTrue(headers.startswith(b"HTTP/1.1 200 "), headers)
+                self.assertIn(f"\r\nContent-Type: {ctype}\r\n".encode(), headers + b"\r\n")
+                self.assertNotIn(b"Content-Length", headers)
+                self.assertEqual(rest, b"")
+        self.assertIsNone(self.pool.live_app(token))                    # no service of theirs started
+        self.assertEqual(self.service.checker.next, {})                 # nor their daily check
+        unknown = head(f"/u/{new_token()}/subtitles/movie/tt1/filename=a.mkv&videoSize=5.json")[0]
+        self.assertTrue(unknown.startswith(b"HTTP/1.1 404 "), unknown)   # a link nobody signed up with, as a GET
+
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class PublicHttpTest(Base):

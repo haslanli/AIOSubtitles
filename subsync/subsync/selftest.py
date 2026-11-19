@@ -3,8 +3,9 @@
 Reads the stream link from standard input (never from the command line, so it doesn't show in process lists), applies
 SUBSYNC_URL_REWRITE as the worker does, reads what subsync reads first for any file (the start, the seek index and the
 64 KiB at each end for the file's hash), at most --cap-mb (default: subsync's own index cap, SUBSYNC_INDEX_CAP_MB, so
-the test reads what subsync would), with subsync's listed-size slack, and prints one JSON line: the container (mkv or
-mp4), its size, the subtitle tracks found, the bytes and requests used. Never prints the link.
+the test reads what subsync would), with subsync's listed-size slack, and prints one JSON line, whatever the read
+gives (an index it can't parse too): the container (mkv or mp4), its size, the subtitle tracks found, the bytes
+and requests used. Never prints the link.
 """
 import argparse
 import json
@@ -56,6 +57,9 @@ def run(url, cap_bytes=None, settings=None, size=None):
                                        "keeps the original subtitles for this file")
     except ReadFailed as e:
         out.update(error="read", detail=str(e))
+    except Exception as e:   # an index the parsers can't read: the worker keeps the file's originals, as said here
+        out.update(error="unreadable", detail=f"its index couldn't be read ({type(e).__name__}): subsync keeps the "
+                                              "original subtitles for this file")
     out.update(bytes=reader.bytes, requests=reader.requests, ms=int((time.monotonic() - t0) * 1000))
     return out
 

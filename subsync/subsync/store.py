@@ -132,6 +132,15 @@ class Store:
         self.db.executescript(SCHEMA)
         self.lock = threading.RLock()
         self._language_in_keys()
+        self._drop_title_aliases()
+
+    def _drop_title_aliases(self):
+        """Links from a bare title to a file ("title:<type>/<id>"), which an earlier version made for a request that
+        gave a file's hash without its size: every other release of the title, and every request that named
+        no file, then got that file's copies. A title names no file: those links go; the file's results and its own
+        names stay."""
+        with self.lock:
+            self.db.execute("DELETE FROM aliases WHERE alias LIKE 'title:%'")
 
     def _language_in_keys(self):
         """Results stored before a result's key named its language get it, their copies, offers and

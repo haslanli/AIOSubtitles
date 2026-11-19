@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 
 from installer import limits, plan
+from subsync.version import user_agent
 
 LIMITS = limits.hosting(audio=True)
 PORT = plan.SUBSYNC_PORT
@@ -104,7 +105,7 @@ def web_server_rule(address, target):
 
 def fetch(url, timeout=10):
     """(status, headers, body) of one GET from this machine. OSError when nothing answers."""
-    request = urllib.request.Request(url, headers={'User-Agent': 'AIOSubtitles-setup'})
+    request = urllib.request.Request(url, headers={'User-Agent': user_agent('setup')})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, dict(response.headers.items()), response.read(4096)

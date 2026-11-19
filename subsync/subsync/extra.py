@@ -25,9 +25,10 @@ from . import choose, net, realdebrid, srclimits
 from .langs import lang2, lang3, name as lang_name
 from .sourcestate import Health, Ledger
 from .sources import extras, release_info, release_name, resource_path
+from .version import user_agent
 
 log = logging.getLogger("subsync.extra")
-USER_AGENT = "AIOSubtitles/1.6 (subsync)"
+USER_AGENT = user_agent("subsync")
 # SubSource names its languages in words
 SUBSOURCE_LANGS = {"eng": "english", "rus": "russian", "jpn": "japanese", "fre": "french", "ger": "german",
                    "spa": "spanish", "ita": "italian", "por": "portuguese", "kor": "korean", "chi": "chinese",
@@ -541,7 +542,12 @@ class ExtraSources:
 
 def make_sources(settings):
     """The service's ExtraSources (one per process; in public mode shared by everyone, so answers and pauses are
-    shared too), with its ledger in SUBSYNC_DATA/sources.sqlite3; None when no source is on."""
+    shared too), with its ledger in SUBSYNC_DATA/sources.sqlite3; None when no source is on. Each name
+    SUBSYNC_EXTRA_SOURCES holds that it doesn't take (a keyed site, a misspelling) is said here, once, at the start
+."""
+    for name in settings.extra_sources_ignored:
+        log.warning('SUBSYNC_EXTRA_SOURCES: "%s" ignored: it takes only osv3, osv3plus, tsdb and gestdown; SubDL, '
+                    'SubSource and Wyzie Subs have their own key settings.', name)
     if not (settings.extra_sources or settings.subdl_key or settings.subsource_key or settings.wyzie_key):
         return None
     keyed = {"tsdb": bool(settings.tsdb_key), "subdl": bool(settings.subdl_key),

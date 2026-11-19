@@ -25,13 +25,14 @@ import zipfile
 from . import net, realdebrid, srclimits
 from .aiosconfig import USENET_READABLE, AiosApi, AiosError
 from .langs import lang3
+from .version import user_agent
 
 log = logging.getLogger("subsync.sources")
 MAX_SUBTITLE_BYTES = 5 * 1024 * 1024
 # Stock AIOStreams adds `streamData` (file name, size, service, cache flag) to stream listings only for
-# clients whose User-Agent starts with "AIO" (unless its PROVIDE_STREAM_DATA setting says otherwise). Without it no
-# listed row passes `unreadable`, and no file is ever found.
-USER_AGENT = "AIOSubtitles/1.0 (subsync)"
+# clients whose User-Agent starts with "AIO" (version.user_agent). Without it no listed row passes `unreadable`, and no
+# file is ever found.
+USER_AGENT = user_agent("subsync")
 
 
 def manifest_base(url):

@@ -14,6 +14,7 @@ import struct
 from . import ALGO_VERSION, RULE_REVISION, explain
 from .aiosconfig import MAX_LANGUAGES
 from .langs import known, lang_list
+from .srclimits import KEYLESS
 
 # The units of the size settings, each chosen once and kept (changing one would change every limit set in it): a *_MB
 # setting counts MiB, a *_GB setting 10^9 bytes. A figure shown for a setting is shown in that setting's unit.
@@ -228,11 +229,13 @@ class Settings:
         self.skip_ai = read.switch("SUBSYNC_SKIP_AI")             # AI-made, machine-translated, forced: never tried
         # the plain track as the reference, not the SDH one
         self.prefer_plain = read.switch("SUBSYNC_PREFER_PLAIN_TRACK")
-        # Sources subsync searches itself (extra.py): the keyless ones by default; SubDL,
-        # SubSource and Wyzie only with a key (in public mode the service's keys, and never Wyzie); TheSubtitleDB's key
-        # only raises its download limit
-        self.extra_sources = [x.strip().lower() for x in g("SUBSYNC_EXTRA_SOURCES").split(",")
-                              if x.strip()]
+        # Sources subsync searches itself (extra.py): the keyless ones by default, and
+        # SUBSYNC_EXTRA_SOURCES takes only those (any other name is ignored, said at the start by
+        # extra.make_sources); SubDL, SubSource and Wyzie only with a key (in public mode the service's keys, and never
+        # Wyzie); TheSubtitleDB's key only raises its download limit
+        named = [x.strip().lower() for x in g("SUBSYNC_EXTRA_SOURCES").split(",") if x.strip()]
+        self.extra_sources = [x for x in named if x in KEYLESS]
+        self.extra_sources_ignored = [x for x in named if x not in KEYLESS]
         self.subdl_key = g("SUBSYNC_SUBDL_KEY").strip()
         self.subsource_key = g("SUBSYNC_SUBSOURCE_KEY").strip()
         self.tsdb_key = g("SUBSYNC_TSDB_KEY").strip()

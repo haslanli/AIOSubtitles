@@ -28,10 +28,11 @@ import urllib.error
 import urllib.request
 
 from . import net, realdebrid
+from .version import user_agent
 
 log = logging.getLogger("subsync.read")
 
-USER_AGENT = "subsync/1"
+USER_AGENT = user_agent("subsync")
 
 
 MAX_RE_RESOLVE = 3     # look-ups of a redirecting link per reader after its first

@@ -433,8 +433,9 @@ class WikidataTest(Base):
         self.assertIn('wdt:P345 "tt0047478"', q["query"][0])
         self.assertIn("wdt:P364", q["query"][0])
         self.assertEqual(call["headers"]["accept"], "application/sparql-results+json")
+        # Wikidata's terms ask for contact details: the project's address (and the release's whole version)
         self.assertRegex(call["headers"]["user-agent"],
-                         r"^AIOSubtitles/\d+\.\d+ \(https://github\.com/haslanli/AIOSubtitles\)$")
+                         r"^AIOSubtitles/\d+\.\d+\.\d+ \(subsync; \+https://github\.com/haslanli/AIOSubtitles\)$")
 
     def test_several_values_dialects_and_other_codes(self):
         self.srv.wikidata["tt1375666"] = [binding("Q5287", iso1="ja"), binding("Q1860", iso1="en"),

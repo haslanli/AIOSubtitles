@@ -540,6 +540,25 @@ class WorkerTest(TempDirTest):
                 w.process(Job("movie", "tt2", dict(HINTS, filename="b.mkv")))
                 self.assertEqual(u.listings, 1)
 
+    def test_a_file_that_backs_off_spends_no_usenet_listing(self):
+        # Each request for a file that backs off queued a job that made a counted Usenet listing (at most one
+        # per file an hour, within the day's limit), only to stop at the back-off. Its debrid listing stays, for a file
+        # read lately under another name, and so does an audio job's Usenet listing
+        u, debrid = FakeUsenet([row()]), FakeDebrid()
+        w = self.make(u, debrid=debrid)
+        job = Job("movie", "tt1", HINTS)
+        for _ in range(4):
+            self.store.file_failed(job.alias)                # after four failures: never read again
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            w.process(job)
+        self.assertEqual((u.config_checks, u.listings, self.counts.n, self.rows), (0, 0, 0, []))
+        self.assertEqual(debrid.calls, ["find_row"])
+        self.assertIn(f"INFO:subsync.worker:file backing off after read failures {job.label}", logs.output)
+        audio = Job("movie", "tt1", HINTS)
+        audio.audio = audio.counted = True
+        w.process(audio)
+        self.assertEqual((u.listings, self.rows), (1, [(True, row())]))
+
     def test_no_usenet_without_a_usenet_config(self):
         w = self.make(None)
         w.process(Job("movie", "tt1", HINTS))

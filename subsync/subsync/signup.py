@@ -33,12 +33,13 @@ from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .settings import AUDIO_CHOICES
 from .users import new_token
+from .version import user_agent
 
 log = logging.getLogger("subsync.signup")
 
 ADDON_NAME = "AIOSubtitles"
 OWN_NAMES = ("aiosubtitles", "subsync")    # left out of the sync config: this service, and a self-hosted subsync
-USER_AGENT = "AIOSubtitles/1.0 (public)"
+USER_AGENT = user_agent("public")
 MAX_LINK = 2000
 MAX_PASSWORD = 500
 HOUR = 3600

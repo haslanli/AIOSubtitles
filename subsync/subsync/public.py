@@ -20,7 +20,7 @@ import time
 import urllib.parse
 
 from . import pages, ui
-from .addon import App, Handler, Server, is_entry, manifest
+from .addon import App, Handler, Server, head_type, is_entry, manifest
 from .aiosconfig import MAX_LANGUAGES, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
@@ -30,6 +30,7 @@ from .sources import Aios
 from .store import day_of
 from .ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS   # the setup page sends the same
 from .users import READ_KEY, TOKEN
+from .version import VERSION
 from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 
 log = logging.getLogger("subsync.public")
@@ -376,7 +377,7 @@ USER_PATH = re.compile(f"^/u/({TOKEN})(/.*)?$")
 ENTRY_PATH = re.compile(f"^/r/({READ_KEY})(/.*)$")
 PUBLIC_MANIFEST = {     # its description made for the instance by addon.manifest
     "id": "org.aiosubtitles.public",
-    "version": "1.0.0",
+    "version": VERSION,
     "name": "AIOSubtitles",
     "description": "Synced copies of the subtitles you see, checked against each file's own subtitle track{speech}; "
                    "below the bar the original is kept.",
@@ -591,8 +592,13 @@ class PublicHandler(Handler):
             return self._failed(path)
 
     def _person(self, token, rest):
-        """A request of a person's own service (their subtitle lists, and their entries), answered by their App."""
+        """A request of a person's own service (their subtitle lists, and their entries), answered by their App. A HEAD
+        of a list or an entry (head_type) is answered from their record alone: neither their service nor their daily
+        check starts for it."""
         svc = self.service
+        head = head_type(rest) if self.command == "HEAD" else None
+        if head:
+            return self._not_found() if svc.users.open(token) is None else self._headers_only(head)
         app = svc.pool.app(token)
         if app is None:
             return self._not_found()
