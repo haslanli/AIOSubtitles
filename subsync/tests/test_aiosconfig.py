@@ -382,6 +382,66 @@ class EveryFailureIsAnAiosErrorTest(ClientCase):
         self.assertEqual((status, waits), (429, [aiosconfig.SLOW_DOWN_WAIT] * (aiosconfig.TRIES - 1)))
 
 
+    def test_a_retry_after_longer_than_int_reads_is_no_wait(self):
+        # Int refuses more than 4,300 digits: such a Retry-After made a call's 429 "can't reach AIOStreams"
+        # and raised ValueError out of an alias lookup
+        long = "1" * 5000
+        self.stand.routes[("GET", "/api/v1/status")] = answer(429, {}, **{"Retry-After": long})
+        waits = []
+        with no_sleep(waits):
+            status, _ = self.api(on_wait=lambda s: None).call("GET", "/api/v1/status")
+        self.assertEqual((status, waits), (429, [aiosconfig.SLOW_DOWN_WAIT] * (aiosconfig.TRIES - 1)))
+        self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = answer(429, {}, **{"Retry-After": long})
+        with no_sleep([]), self.assertRaises(AiosError) as e:
+            self.api(on_wait=lambda s: None).alias_config_id("fam")
+        self.assertEqual((e.exception.code, e.exception.message), ("RATE_LIMIT_EXCEEDED", aiosconfig.LIMITED))
+
+
+class ErrorKindsTest(ClientCase):
+    """Aiosconfig's own errors carry codes of their own and AIOStreams' keep its codes; what a refusal means
+    (AiosError.kind) is read once, from AIOStreams' code and its own words, so the message says exactly that."""
+
+    def test_aiosconfigs_own_errors_have_codes_and_aiostreams_codes_are_kept(self):
+        with self.assertRaises(AiosError) as e:
+            AiosApi("http://127.0.0.1:9", timeout=2).status()
+        self.assertEqual(e.exception.code, aiosconfig.UNREACHABLE)
+        self.assertTrue(e.exception.message.startswith("Can't reach AIOStreams at http://127.0.0.1:9 ("))
+        self.stand.routes[("GET", "/api/v1/status")] = answer(404, {"nothing": "here"})
+        with self.assertRaises(AiosError) as e:
+            self.api().status()
+        self.assertEqual((e.exception.code, e.exception.message),
+                         (aiosconfig.NOT_AIOSTREAMS, f"{self.stand.url} answered, but not like AIOStreams (HTTP 404)."))
+        for code in ("USER_INVALID_CONFIG", "INTERNAL", "RATE_LIMIT_EXCEEDED"):
+            with self.subTest(code=code):
+                self.stand.routes[("GET", "/api/v1/user")] = answer(400, {"error": {"code": code, "message": "x"}})
+                with no_sleep([]), self.assertRaises(AiosError) as e:
+                    self.api().get_config(UUID, "pw")
+                self.assertEqual(e.exception.code, code)
+
+    def test_the_kind_is_what_the_message_says(self):
+        # a sign-in or a limit is told by AIOStreams' code or its own words, the error's own (its message) or the
+        # answer's detail beside it: the message says so exactly when the kind does
+        for body, kind, words in (
+                ({"error": {"code": "FORBIDDEN"}}, aiosconfig.SIGN_IN, "asks you to sign in"),
+                ({"error": {"message": "Not allowed without an account"}}, aiosconfig.SIGN_IN, "asks you to sign in"),
+                ({"detail": "Not allowed"}, aiosconfig.SIGN_IN, "asks you to sign in"),
+                ({"error": {"code": "X", "message": "Too many configs"}}, aiosconfig.LIMITING, "is limiting requests"),
+                ({"detail": "Too many requests"}, aiosconfig.LIMITING, "is limiting requests"),
+                ({"error": {"code": "USER_INVALID_PASSWORD", "message": "not allowed"}}, aiosconfig.NO_CONFIG,
+                 "don't match a config"),
+                ({"error": {"code": "USER_INVALID_CONFIG", "message": "too many presets"}}, aiosconfig.CONFIG_REFUSED,
+                 "refused the config: too many presets"),
+                ({"error": {"code": "X", "message": "please sign in first"}}, None, "please sign in first")):
+            with self.subTest(body=body):
+                self.stand.routes[("PUT", "/api/v1/user")] = answer(400, body)
+                with self.assertRaises(AiosError) as e:
+                    self.api().save_config(UUID, "pw", CONFIG)
+                self.assertEqual(e.exception.kind, kind)
+                self.assertIn(words, e.exception.message)
+                self.assertIs(aiosconfig.needs_sign_in(e.exception), kind == aiosconfig.SIGN_IN)
+                self.assertIs(aiosconfig.is_limited(e.exception), kind == aiosconfig.LIMITING)
+
+
 GARBLED = {"cut short": b'{"success": true, "data": {"vers', "not UTF-8": b'{"success": true, "x": "\xff"}'}
 
 
@@ -615,6 +675,52 @@ class SignupCallersTest(ClientCase):
                 self.assertEqual(e.exception.message, "Reading your AIOStreams config: your AIOStreams answered in a "
                                                       "way AIOSubtitles doesn't know. Try again in a few minutes.")
                 self.assertIsNone(e.exception.field)
+
+    def test_aiostreams_own_words_are_never_taken_for_another_kind_of_error(self):
+        # Signup told an unreachable AIOStreams, an answer that isn't AIOStreams' and a limit by words in the
+        # error's message, which quotes AIOStreams' own words for a refused config or an error it names; such a refusal
+        # was said to be "can't reach your AIOStreams" or "limiting requests", and marked the link
+        self.stand.routes[("GET", "/api/v1/status")] = answer(200, {"success": True, "data": {"version": "2.37.0"}})
+        for words in ("Can't reach TorBox", "Its answer was not like AIOStreams' own", "limiting requests to TorBox"):
+            with self.subTest(words=words):
+                self.stand.routes[("PUT", "/api/v1/user")] = answer(400, {"success": False, "error": {
+                    "code": "USER_INVALID_CONFIG", "message": words}})
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.signup._put_sync(self.public(), self.record(), CONFIG)
+                self.assertEqual((e.exception.message, e.exception.refused, e.exception.field),
+                                 (f'Updating AIOSubtitles\' config on your AIOStreams: your AIOStreams refused the '
+                                  f'config: "{words}".', words, None))
+                self.stand.routes[("GET", "/api/v1/user")] = answer(500, {"success": False, "error": {
+                    "code": "INTERNAL", "message": words}})
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.signup._read_viewer(self.public(), UUID, "pw")
+                self.assertEqual((e.exception.message, e.exception.field),
+                                 (f'Reading your AIOStreams config: your AIOStreams answered "{words}".', None))
+
+    def test_an_unreachable_aiostreams_and_one_that_isnt_aiostreams_are_still_told_apart(self):
+        # The same words and the same field as before, now told by the error's code
+        dead = self.signup.public_api("http://127.0.0.1:9", 5)
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._read_viewer(dead, UUID, "pw")
+        self.assertEqual((e.exception.message, e.exception.field),
+                         ("Reading your AIOStreams config: AIOSubtitles can't reach your AIOStreams from the internet. "
+                          "Check the link, and that your AIOStreams can be opened from outside your home network.",
+                          "link"))
+        self.stand.routes[("GET", "/api/v1/status")] = answer(404, {"nothing": "here"})
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._read_viewer(self.public(), UUID, "pw")
+        self.assertEqual((e.exception.message, e.exception.field),
+                         (f"Reading your AIOStreams config: {self.stand.url} answered, but not like AIOStreams (HTTP "
+                          "404).", "link"))
+        for body in ({"success": False, "error": {"code": "X", "message": "Too many configs"}},
+                     {"success": False, "detail": "Too many requests"}):
+            with self.subTest(body=body):
+                self.stand.routes[("PUT", "/api/v1/user")] = answer(400, body)
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.signup._put_sync(self.public(), self.record(), CONFIG)
+                self.assertEqual(e.exception.message,
+                                 "Updating AIOSubtitles' config on your AIOStreams: your AIOStreams is limiting "
+                                 "requests from AIOSubtitles right now. Try again in a few minutes.")
 
     def test_an_alias_link_on_a_busy_or_failing_aiostreams(self):
         # The link is fine; the page names what its AIOStreams did

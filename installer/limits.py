@@ -13,7 +13,7 @@ import math
 from collections import namedtuple
 
 from installer import plan
-from subsync import explain
+from subsync import digits, explain
 
 Limit = namedtuple('Limit', 'setting label unit kind options')
 Limit.__new__.__defaults__ = ((),)
@@ -101,8 +101,8 @@ def _whole(text, least=1):
     parts = value.split(',')
     if len(parts) > 1 and not (1 <= len(parts[0]) <= 3 and all(len(p) == 3 for p in parts[1:])):
         return None
-    value = ''.join(parts)
-    return str(int(value)) if value.isdigit() and int(value) >= least else None
+    number = digits.whole(''.join(parts))     # the digits 0 to 9 only: never "²" nor "１２"
+    return str(number) if number is not None and number >= least else None
 
 
 def _above_zero(text):
@@ -110,11 +110,8 @@ def _above_zero(text):
     value = text.strip()
     if len(value) > LONGEST:
         return None
-    try:
-        number = float(value)
-    except ValueError:
-        return None
-    if not (math.isfinite(number * GB) and number > 0):
+    number = digits.decimal(value)
+    if number is None or not (math.isfinite(number * GB) and number > 0):
         return None
     return str(int(number)) if number == int(number) else str(number)
 
@@ -159,7 +156,8 @@ def choose(lim):
 def shown(lim, value):
     """A value as the page shows it: thousands marked in whole numbers (one too long to be a limit as it was typed)."""
     value = str(value)
-    return f'{int(value):,}' if lim.kind in ('number', 'count') and value.isdigit() and len(value) <= LONGEST else value
+    number = digits.whole(value) if lim.kind in ('number', 'count') and len(value) <= LONGEST else None
+    return f'{number:,}' if number is not None else value
 
 
 def current(lim, env):

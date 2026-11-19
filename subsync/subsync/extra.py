@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 
-from . import choose, net, realdebrid, srclimits
+from . import choose, digits, net, realdebrid, srclimits
 from .langs import lang2, lang3, name as lang_name
 from .sourcestate import Health, Ledger
 from .sources import extras, release_info, release_name, resource_path
@@ -51,10 +51,11 @@ def split_id(video_id):
     """'tt1:2:3' -> ('tt1', 2, 3); 'tt1' -> ('tt1', None, None). Any other id (Kitsu, MAL, TMDB) gives no IMDb id
     and no season or episode: only the lookups that need no id can be made for it."""
     parts = str(video_id).split(":")
-    if not re.fullmatch(r"tt\d+", parts[0]):
+    if not re.fullmatch(r"tt[0-9]+", parts[0]):        # ASCII digits only, as every number of a request
         return None, None, None
-    if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
-        return parts[0], int(parts[1]), int(parts[2])
+    season, episode = (digits.whole(parts[1]), digits.whole(parts[2])) if len(parts) >= 3 else (None, None)
+    if season is not None and episode is not None:
+        return parts[0], season, episode
     return parts[0], None, None
 
 

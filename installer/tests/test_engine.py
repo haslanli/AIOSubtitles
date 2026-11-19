@@ -196,6 +196,44 @@ class ErrorCodes(TmpState):
         self.assertEqual((caught.exception.field, caught.exception.missing), ('AIOS_USERNAME', True))
 
 
+class OtherDigits(TmpState):
+    """str.isdigit also takes superscripts, which int refuses, and int reads every script's decimal
+    digits as if they were ASCII ones; an answer written so is refused as any other answer that isn't a number."""
+
+    def choose(self, answer):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return ui.Asker({'AUDIO': answer}, yes=True).choose('AUDIO', screens.LABELS['AUDIO'], plan.AUDIO_ANSWERS)
+
+    def test_a_choice_in_other_digits_is_no_choice(self):
+        # "²" raised ValueError out of the question; "١" and "２" chose the first and second option
+        self.assertEqual(self.choose('2'), plan.AUDIO_ANSWERS[1][0])
+        for answer in ('²', '١', '２', '1²'):
+            with self.subTest(answer=answer):
+                with self.assertRaises(ui.Stop) as caught:
+                    self.choose(answer)
+                self.assertEqual(caught.exception.message,
+                                 f'AUDIO: Type a number from 1 to {len(plan.AUDIO_ANSWERS)}.')
+
+    def test_the_audio_answer_in_other_digits_is_no_number(self):
+        # "²" and "١" were refused as a number (plan.AUDIO_NUMBER_REFUSED); they are no number, so the question's own
+        # refusal of an answer it doesn't know says what to type, as for "maybe"
+        def asked(answer):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ui.Stop) as caught:
+                engine.Engine({'AUDIO': answer}).ask_audio()
+            return caught.exception.message
+        self.assertEqual(asked('2'), plan.AUDIO_NUMBER_REFUSED)
+        for answer in ('maybe', '²', '١'):
+            with self.subTest(answer=answer):
+                self.assertEqual(asked(answer), f'AUDIO: Type a number from 1 to {len(plan.AUDIO_ANSWERS)}.')
+
+    def test_the_files_synced_at_a_time_are_read_in_ascii_digits_only(self):
+        e = engine.Engine({})
+        for value, places in (('4', 4), ('１２', None), ('²', None), ('', None), (None, None)):
+            with self.subTest(value=value):
+                e.limit_values = {'SUBSYNC_SYNCS_AT_ONCE': value}
+                self.assertEqual(e.places(), places)
+
+
 class Offline(FlowFixture):
     """The flow fixture with every connection beyond this machine refused (an address on the LAN included), and no
     colour in what is printed."""

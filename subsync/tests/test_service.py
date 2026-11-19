@@ -532,8 +532,9 @@ class SourcesTest(unittest.TestCase):
 
     def test_a_size_in_other_digits_is_no_size(self):
         # Isdigit took "²", which int refuses (the request failed), and read other scripts' digits
-        for size in ("\u00b2", "\u0661\u0662", "\uff11\uff12", "1\u00b2"):
-            with self.subTest(size=size):
+        # and int() refuses more than 4,300 digits: such a size failed the request too
+        for size in ("\u00b2", "\u0661\u0662", "\uff11\uff12", "1\u00b2", "1" * 5000):
+            with self.subTest(size=size[:8]):
                 self.assertEqual(parse_extras("filename=a.mkv&videoSize=" + urllib.parse.quote(size)),
                                  {"filename": "a.mkv"})
 

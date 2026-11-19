@@ -187,7 +187,8 @@ def _cues(text):
             except ValueError:
                 pass
             else:
-                if cue is not None and cue[2] and cue[2][-1].strip().isdigit():
+                # an index: the digits TIME reads (\d, isdecimal), never a superscript isdigit also takes
+                if cue is not None and cue[2] and cue[2][-1].strip().isdecimal():
                     cue[2].pop()
                 cue = (s, e, [])
                 out.append(cue)

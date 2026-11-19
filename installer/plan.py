@@ -9,7 +9,7 @@ import os
 import re
 import urllib.parse
 
-from subsync import explain
+from subsync import digits, explain
 from subsync.aiosconfig import (  # noqa: F401  (the rules live in subsync, shared with the public sign-up)
     USENET_SERVICES, SYNC_SETTINGS, LANGUAGES, parse_languages, language_names, names_of_codes, config_id_from,
     alias_from, new_key, debrid_names, is_subtitle_preset, is_subsync_preset, subtitle_sources, subsync_preset,
@@ -107,8 +107,10 @@ def subtitle_cache_value(current, host):
     elif isinstance(current, str):
         for part in current.split(','):
             k, _, v = part.partition(':')
-            if k.strip() and v.strip().lstrip('-').isdigit():
-                value[k.strip()] = int(v)
+            v = v.strip()
+            number = digits.whole(v.removeprefix('-'))     # never "²", "--5" or "１"
+            if k.strip() and number is not None:
+                value[k.strip()] = -number if v.startswith('-') else number
     elif isinstance(current, (int, float)):
         value['*'] = int(current)
     value.setdefault('*', 300)
@@ -190,11 +192,8 @@ def _gigabytes(text):
     value = (text or '').strip().lower()
     if value.endswith('gb'):
         value = value[:-2].strip()
-    try:
-        number = float(value)
-    except ValueError:
-        return None
-    if not (math.isfinite(number) and number > 0):
+    number = digits.decimal(value)
+    if number is None or not (math.isfinite(number) and number > 0):
         return None
     return str(int(number)) if number == int(number) else str(number)
 

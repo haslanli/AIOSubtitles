@@ -120,6 +120,30 @@ class RecheckTest(Base):
         self.assertIsNone(checker.check(token))
         self.assertEqual(self.record(token)["unreachable"], 0)
 
+    def test_aiostreams_own_words_are_never_taken_for_an_unreachable_aiostreams(self):
+        # A refused config read whose words hold "Can't reach" (AIOStreams naming a service it can't reach)
+        # was counted as their AIOStreams not reached, and three such checks said "unreachable"
+        from subsync.recheck import UNREACHABLE_CHECKS
+        uuid, token = self.sign_up()
+        make = self.api
+
+        def refusing(base, timeout):
+            api = make(base, timeout)
+
+            def get_config(config_id, password):
+                refusal = {"success": False, "error": {"code": "INTERNAL", "message": "Can't reach TorBox"}}
+                raise api._error(500, refusal, "Reading the config")
+            api.get_config = get_config
+            return api
+        self.api = refusing
+        checker = self.checker()
+        for _ in range(UNREACHABLE_CHECKS):
+            checker.check(token)
+            self.clock.t += 24 * HOUR
+        record = self.record(token)
+        self.assertEqual(record["unreachable"], 0)
+        self.assertNotEqual(record.get("state"), "unreachable")
+
     def test_a_garbled_answer_is_not_counted_as_unreachable(self):
         # It answered, so it is reached: an error, never three of them making the page say "unreachable"
         uuid, token = self.sign_up()

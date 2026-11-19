@@ -204,6 +204,11 @@ class SubsTest(unittest.TestCase):
         self.assertEqual(copy, "1\n00:00:11,000 --> 00:00:12,000\nHello\n\n2\n00:00:13,000 --> 00:00:14,000\n"
                                "World\nagain\n\n3\n00:00:15,000 --> 00:00:16,000\n42\n")
 
+    def test_a_superscript_before_a_timing_line_is_text_not_an_index(self):
+        # Isdigit takes "²", which no index is: a cue whose last line was it lost that line
+        srt = "1\n00:00:01,000 --> 00:00:02,000\nE = mc\n\u00b2\n00:00:03,000 --> 00:00:04,000\nWorld\n"
+        self.assertEqual([(l["s"], l["text"]) for l in subs.parse(srt)], [(1.0, "E = mc\n\u00b2"), (3.0, "World")])
+
     def test_ass_is_written_as_srt_without_drawings_with_whole_lines_and_their_styles(self):
         # A drawing's commands were shown as text, an empty line inside a line ended the cue (the rest was
         # lost), and italics, bold and underline were dropped; {\anN} (shown at the top) went too

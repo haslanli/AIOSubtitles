@@ -82,6 +82,21 @@ class NumbersTest(unittest.TestCase):
             "Days without a single request before a person's record is deleted (a whole number from 1). Their sync "
             "config can't be removed "))
 
+    def test_a_number_in_another_scripts_digits_is_written_wrong(self):
+        # Int and float read every script's decimal digits as if they were ASCII ones, so these were read
+        # as 6, 8791, 1.5 GB, 1024 MB and 60 s
+        for name, value, line in (
+                ("SUBSYNC_MAX_TRIES", "٦", "SUBSYNC_MAX_TRIES must be a whole number from 1, like 6."),
+                ("SUBSYNC_PORT", "８７９１", "SUBSYNC_PORT must be a whole number from 1 to 65535."),
+                ("SUBSYNC_DAILY_BUDGET_GB", "١.٥", "SUBSYNC_DAILY_BUDGET_GB must be a number from 0, like 100."),
+                ("SUBSYNC_STORE_CAP_MB", "\uff11\uff10\uff12\uff14",
+                 "SUBSYNC_STORE_CAP_MB must be a number from 0, like 2048."),
+                ("SUBSYNC_READ_TIMEOUT_S", "６０", "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60.")):
+            with self.subTest(name=name, value=value):
+                s = Settings({name: value})
+                self.assertEqual(s.conflicts(), [line])
+                self.assertEqual(s.written_wrong, [line])
+
     def test_every_documented_zero_keeps_its_meaning(self):
         # "0 removes the limit" (the audio and per-file limits), "0 turns Usenet off", "0 turns the check off", "0 stops
         # new audio syncs", "0: the first check decides", nothing read in a day

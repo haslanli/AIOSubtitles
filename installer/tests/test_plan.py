@@ -261,6 +261,13 @@ class Addresses(unittest.TestCase):
         self.assertEqual(plan.subtitle_cache_value({'*': 600}, 'aiosubtitles-subsync'), {'*': 600, 'aiosubtitles-subsync': -1})
         self.assertEqual(plan.subtitle_cache_value('*:300,other:10', 'h'), {'*': 300, 'other': 10, 'h': -1})
         self.assertEqual(plan.subtitle_cache_value(None, 'h'), {'*': 300, 'h': -1})
+        self.assertEqual(plan.subtitle_cache_value('*:300, a: -5 ', 'h'), {'*': 300, 'a': -5, 'h': -1})
+
+    def test_a_subtitle_cache_value_aiostreams_writes_in_other_digits_is_left_out(self):
+        # "²" and "--5" passed the isdigit test and raised ValueError out of int; "١٢" was read as 12
+        for written in ('x:²', 'x:--5', 'x:١٢', 'x:-１', 'x:1_0'):
+            with self.subTest(written=written):
+                self.assertEqual(plan.subtitle_cache_value('*:300,' + written, 'h'), {'*': 300, 'h': -1})
 
 
 class Files(unittest.TestCase):
@@ -329,7 +336,7 @@ class Files(unittest.TestCase):
         for typed, value in (('1', '1'), ('0.5', '0.5'), ('.5', '0.5'), ('2 GB', '2'), ('4gb', '4'), ('1.0', '1')):
             with self.subTest(typed=typed):
                 self.assertEqual(plan.audio_budget(typed), value)
-        for typed in ('3', '0', '-1', 'lots', '', '8'):
+        for typed in ('3', '0', '-1', 'lots', '', '8', '１', '٢ GB'):   # no other script's digits
             with self.subTest(typed=typed):
                 self.assertIsNone(plan.audio_budget(typed))
         self.assertEqual(plan.audio_budget('3', allowed_too='3'), '3')   # a value set by hand before is kept

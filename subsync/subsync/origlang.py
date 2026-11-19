@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from . import langs, net, realdebrid
+from . import digits, langs, net, realdebrid
 from .version import user_agent
 
 log = logging.getLogger("subsync.origlang")
@@ -51,8 +51,9 @@ WIKIDATA_QUERY = ('SELECT ?lang ?iso1 ?iso2 ?iso3 ?ietf WHERE {{ ?item wdt:P345 
                   'OPTIONAL {{ ?lang wdt:P220 ?iso3 }} OPTIONAL {{ ?lang wdt:P305 ?ietf }} }}')
 ANILIST_QUERY = "query($id:Int){Media(idMal:$id,type:ANIME){countryOfOrigin}}"
 V3_KEY = re.compile(r"[0-9a-fA-F]{32}")
-IMDB = re.compile(r"tt\d{1,10}")
-NUMBER = re.compile(r"\d{1,9}")
+# ASCII digits only: \d also takes other scripts' digits, which int would read as a different title
+IMDB = re.compile(r"tt[0-9]{1,10}")
+NUMBER = re.compile(r"[0-9]{1,9}")
 
 
 class Failed(Exception):
@@ -410,10 +411,11 @@ class Lookup:
                 continue
             item = items[0]
             code = item.get("original_language")
-            if code is None and str(item.get("id", "")).isdigit():
+            tmdb_id = digits.whole(item.get("id", ""))
+            if code is None and tmdb_id is not None:
                 rest = {k: v for k, v in params.items() if k == "api_key"}
-                details = self._get("tmdb", f"{base}/{kind}/{item['id']}" + (f"?{urllib.parse.urlencode(rest)}"
-                                                                            if rest else ""), auth) or {}
+                details = self._get("tmdb", f"{base}/{kind}/{tmdb_id}" + (f"?{urllib.parse.urlencode(rest)}"
+                                                                         if rest else ""), auth) or {}
                 code = details.get("original_language")
             if code is None:
                 return None

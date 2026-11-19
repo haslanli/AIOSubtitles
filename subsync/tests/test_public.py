@@ -85,15 +85,16 @@ class PublicSettingsTest(unittest.TestCase):
 
     def test_a_number_int_cannot_read_is_a_conflict_not_a_crash(self):
         # Isdigit takes superscripts ("2²") that int refuses, and int reads no more than 4,300 digits;
-        # either was a traceback at start instead of the setting's sentence
+        # either was a traceback at start instead of the setting's sentence. Another script's digits, which
+        # int() reads as if they were ASCII ones ("٣" was 3, "２" 2), are written wrong too, as any other non-number
         for name, field in (("SUBSYNC_SYNCS_AT_ONCE", "syncs_at_once"), ("SUBSYNC_AUDIO_AT_ONCE", "audio_at_once"),
                             ("SUBSYNC_MAX_LANGUAGES", "max_languages")):
-            for wrong in ("²", "2²", "1" * 5000):
+            for wrong in ("²", "2²", "1" * 5000, "٣", "２"):
                 with self.subTest(name=name, value=wrong[:8]):
                     s = Settings({name: wrong, "SUBSYNC_PUBLIC": "on"})
                     self.assertIsNone(getattr(s, field))
                     self.assertTrue(any(p.startswith(name + " must be a whole number") for p in s.conflicts()))
-        self.assertEqual(Settings({"SUBSYNC_MAX_LANGUAGES": "٣"}).max_languages, 3)   # a decimal digit int() reads
+        self.assertEqual(Settings({"SUBSYNC_MAX_LANGUAGES": "3"}).max_languages, 3)
 
     def test_available_cpus_follows_the_containers_limit(self):
         from subsync import settings as settings_module

@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import net, realdebrid
+from . import digits, net, realdebrid
 from .version import user_agent
 
 log = logging.getLogger("subsync.read")
@@ -69,11 +69,10 @@ def reply_range(headers, status):
     say. Content-Range ("bytes A-B/T") gives both; a whole file (status 200) without a total there, its Content-Length."""
     content_range = headers.get("Content-Range") or ""
     first = FIRST_BYTE.match(content_range)
-    total = content_range.rsplit("/", 1)[1].strip() if "/" in content_range else ""
-    if not (total.isascii() and total.isdigit()):
-        length = headers.get("Content-Length") if status == 200 else None
-        total = length if length and length.isascii() and length.isdigit() else None
-    return (int(first.group(1)) if first else None), (int(total) if total is not None else None)
+    total = digits.whole(content_range.rsplit("/", 1)[1].strip()) if "/" in content_range else None
+    if total is None and status == 200:
+        total = digits.whole(headers.get("Content-Length") or "")
+    return (digits.whole(first.group(1)) if first else None), total
 
 
 class LinkUsedUp(ReadFailed):

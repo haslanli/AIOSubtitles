@@ -5,7 +5,7 @@ import re
 import sys
 import textwrap
 
-from subsync import explain
+from subsync import digits, explain
 
 COLOR = sys.stdout.isatty() and os.environ.get('NO_COLOR') is None
 WIDTH = 72
@@ -197,8 +197,9 @@ class Asker:
         def check(answer):
             if answer in values:
                 return True, '', answer
-            if answer.isdigit() and 1 <= int(answer) <= len(options):
-                return True, '', values[int(answer) - 1]
+            number = digits.whole(answer)      # never "²" (int refuses it) nor "１"
+            if number is not None and 1 <= number <= len(options):
+                return True, '', values[number - 1]
             return False, f'Type a number from 1 to {len(options)}.', answer
         return self.text(key, 'Your choice (number)', default=str(values.index(default) + 1), check=check)
 

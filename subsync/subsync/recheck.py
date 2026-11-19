@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 
-from .aiosconfig import AiosError, install_link
+from .aiosconfig import UNREACHABLE, AiosError, install_link
 from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, drop_sync,
                      instance_key, public_api, rebuild, store_only)
 
@@ -166,7 +166,7 @@ class Checker:
                     found[f"{kind}_checked"] = record[f"{kind}_uuid"]
                 except AiosError as e:
                     found[kind] = "gone" if str(e.code) in WRONG_PASSWORD_CODES else \
-                        "unreachable" if "Can't reach" in e.message else "error"
+                        "unreachable" if e.code == UNREACHABLE else "error"     # by its code, never its words
                 if found[kind] == "unreachable":
                     return found
             try:

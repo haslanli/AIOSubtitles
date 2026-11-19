@@ -22,8 +22,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from . import net, realdebrid, srclimits
-from .aiosconfig import USENET_READABLE, AiosApi, AiosError
+from . import digits, net, realdebrid, srclimits
+from .aiosconfig import UNREACHABLE, USENET_READABLE, AiosApi, AiosError
 from .langs import lang3
 from .version import user_agent
 
@@ -65,8 +65,8 @@ def parse_extras(text):
     for k, v in urllib.parse.parse_qsl(text, keep_blank_values=True):
         if k in ("videoHash", "filename"):
             out[k] = v
-        elif k == "videoSize" and v.isascii() and v.isdigit():   # isdigit alone takes "²", which int() refuses
-            out[k] = int(v)
+        elif k == "videoSize" and (size := digits.whole(v)) is not None:   # never "²" nor "１２"
+            out[k] = size
     return out
 
 
@@ -230,7 +230,8 @@ class Aios:
         try:
             config = self._read_config()
         except AiosError as e:   # named by its code only: its words can hold the AIOStreams address
-            reason = f"HTTP {e.code}" if isinstance(e.code, int) else e.code or "no answer"
+            reason = f"HTTP {e.code}" if isinstance(e.code, int) else \
+                "no answer" if not e.code or e.code == UNREACHABLE else e.code
         except ValueError as e:
             reason = str(e)
         else:

@@ -356,6 +356,18 @@ class ListingCheckTest(unittest.TestCase):
         self.assertIn("can't read", logs.output[0])
         self.assertNotIn('wrong', logs.output[0])
 
+    def test_why_the_config_cant_be_read_is_logged_by_its_code_as_before(self):
+        # An AIOStreams that doesn't answer has a code of its own now (UNREACHABLE); its line still says
+        # "no answer", and a refusal still names AIOStreams' code
+        dead = Aios(f'http://127.0.0.1:9/stremio/{OneConfigAiostreams.UUID}/ENCRYPTED/manifest.json',
+                    password=OneConfigAiostreams.PASSWORD, timeout=2)
+        for aios, reason in ((dead, 'no answer'), (self.aios(self.SAFE, password='wrong'), 'USER_INVALID_DETAILS')):
+            with self.subTest(reason=reason):
+                with self.assertLogs('subsync.sources', 'WARNING') as logs:
+                    with self.assertRaises(realdebrid.Blocked):
+                        aios.streams('movie', 'tt1')
+                self.assertIn(f"can't read subsync's config ({reason}), so nothing is listed", logs.output[0])
+
     def test_a_rate_limited_config_read_is_tried_again(self):
         aios = self.aios(self.SAFE)
         self.fake.limited = 1

@@ -54,6 +54,23 @@ class Guard:
         self.got += n
 
 
+class ReplyRangeTest(unittest.TestCase):
+    def test_a_number_a_reply_writes_is_read_in_ascii_digits_only(self):
+        # A first byte, a total or a Content-Length longer than int converts (4,300 digits) raised ValueError
+        # out of the read; such a number is none, as one written in other digits
+        from subsync.reader import reply_range
+        self.assertEqual(reply_range({"Content-Range": "bytes 5-9/100"}, 206), (5, 100))
+        self.assertEqual(reply_range({"Content-Range": "bytes 0-9/*", "Content-Length": "100"}, 200), (0, 100))
+        long = "1" * 5000
+        for headers, status, got in (({"Content-Range": f"bytes 0-9/{long}"}, 206, (0, None)),
+                                     ({"Content-Range": f"bytes {long}-9/100"}, 206, (None, 100)),
+                                     ({"Content-Length": long}, 200, (None, None)),
+                                     ({"Content-Range": "bytes 0-9/\u00b9\u00b2"}, 206, (0, None)),
+                                     ({"Content-Length": "\u00b2"}, 200, (None, None))):
+            with self.subTest(headers={k: v[:12] for k, v in headers.items()}):
+                self.assertEqual(reply_range(headers, status), got)
+
+
 class ReaderTest(unittest.TestCase):
     def setUp(self):
         self.srv = RangeServer(FIXTURES)

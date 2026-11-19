@@ -30,7 +30,7 @@ from installer import docs, dockerenv, hosting, limits, plan, screens, ui, updat
 from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the client through here)
 from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
-from subsync import explain, origlang, realdebrid
+from subsync import digits, explain, origlang, realdebrid
 from subsync.settings import Settings
 
 REPO = Path(__file__).resolve().parent.parent      # the code (/opt/aiosubtitles in the image)
@@ -754,7 +754,7 @@ class Engine:
         is refused (plan.AUDIO_NUMBER_REFUSED): with --yes setup stops, else the question is asked; typed in the
         terminal, a number is its option as listed."""
         given = self.ask.answers.get('AUDIO')
-        if given is not None and str(given).strip().isdigit():
+        if given is not None and digits.whole(str(given).strip()) is not None:
             if getattr(self.ask, 'yes', False):
                 stop(plan.AUDIO_NUMBER_REFUSED)
             self.out.warn(plan.AUDIO_NUMBER_REFUSED)
@@ -1440,7 +1440,7 @@ class Engine:
         value = self.limit_values.get('SUBSYNC_SYNCS_AT_ONCE')
         if value == 'auto':
             return os.cpu_count() or 1
-        return int(value) if value and value.isdigit() else None
+        return digits.whole(value) if value else None
 
     def host_install(self):
         self.show_step('hostinstall', 'host')

@@ -211,6 +211,16 @@ class IdsTest(SourcesBase):
         for vid in ("kitsu:7442:5", "mal:52991:3", "kitsu:7442", "tmdb:1234"):
             self.assertEqual(split_id(vid)[0], None, vid)          # 'kitsu' was read as an IMDb id
 
+    def test_an_id_in_other_digits_is_no_imdb_id_nor_episode(self):
+        # "²" passed isdigit and raised ValueError out of int, as did a number longer than int reads;
+        # other scripts' digits were read as ASCII ones (season 1, episode 2) or kept as an IMDb id
+        for vid in ("tt1:\u00b2:3", "tt1:1:\u00b2", "tt1:\u0661:\u0662", "tt1:\uff11:2", "tt1:" + "1" * 5000 + ":2"):
+            with self.subTest(vid=vid[:12]):
+                self.assertEqual(split_id(vid), ("tt1", None, None))
+        for vid in ("tt\u0661\u0662", "tt\uff11:1:2"):
+            with self.subTest(vid=vid):
+                self.assertEqual(split_id(vid), (None, None, None))
+
     def test_an_anime_episode_is_found_by_torrent_hash_and_release_name(self):
         hints = {"filename": "[SubsPlease] Show - 02 (1080p).mkv", "infoHash": HASH, "fileIdx": 1}
         got = self.extra().search("series", "kitsu:7442:2", hints=hints)

@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import langs, net, realdebrid
+from . import digits, langs, net, realdebrid
 from .version import user_agent
 
 
@@ -469,18 +469,24 @@ BAD_ANSWER = 'BAD_ANSWER'    # AiosError.code: an answer AIOStreams doesn't give
                              # large, a redirect of a call that carries a password)
 UNREADABLE = 'UNREADABLE'    # AiosError.code: an answer that came but isn't whole JSON (cut short by a proxy, not
                              # UTF-8): AIOStreams was reached
+UNREACHABLE = 'UNREACHABLE'  # AiosError.code: no answer at all (a name not found, a connection refused or timed out, a
+                             # request the address rules stop): "Can't reach AIOStreams at …"
+NOT_AIOSTREAMS = 'NOT_AIOSTREAMS'   # AiosError.code: something answered the status call, but not as AIOStreams does
 # A "too many requests" of any call but making a config: AIOStreams' short limit (5 calls in 5 seconds)
 LIMITED = 'AIOStreams is limiting requests from this machine; try again in a few minutes.'
 
 
 class AiosError(Exception):
-    """`detail`: AIOStreams' own words for a refusal, when it gave some (shown by the public sign-up for a refused
-    config). `reason`: the message without the step it names, for the public pages, which name their own
-."""
+    """`code`: AIOStreams' own error code (or the HTTP status of a refusal without one), or aiosconfig's for the errors
+    it finds itself (UNREACHABLE, NOT_AIOSTREAMS, BAD_ANSWER, UNREADABLE, ALIAS_UNKNOWN, ALIAS_NO_CONFIG). `kind`: what
+    an AIOStreams refusal means as aiosconfig read it (_reading; None for any other error). Callers decide by these two,
+    never by the message's words, which may quote AIOStreams. `detail`: AIOStreams' own words for a refusal,
+    when it gave some (shown by the public sign-up for a refused config). `reason`: the message without the step
+    it names, for the public pages, which name their own."""
 
-    def __init__(self, message, fix=None, code=None, detail=None, reason=None):
+    def __init__(self, message, fix=None, code=None, detail=None, reason=None, kind=None):
         super().__init__(message)
-        self.message, self.fix, self.code, self.detail = message, fix, code, detail
+        self.message, self.fix, self.code, self.detail, self.kind = message, fix, code, detail, kind
         self.reason = reason or message
 
 
@@ -488,42 +494,58 @@ ALIAS_REDIRECTS = (301, 302, 303, 307, 308)
 # AIOStreams' codes for a config ID and password that open no config: a wrong password, or a config that is gone
 WRONG_PASSWORD_CODES = ('USER_INVALID_DETAILS', 'USER_INVALID_PASSWORD', 'USER_NOT_FOUND')
 
+# What an AIOStreams refusal means (AiosError.kind), read once from its code and its own words: for the sentence the
+# error gets (_plain) and for the callers that act on it (needs_sign_in, is_limited)
+NO_CONFIG = 'NO_CONFIG'              # the config ID and password open no config: a wrong password, or a config gone
+CONFIG_REFUSED = 'CONFIG_REFUSED'    # AIOStreams refused the config itself (its reason: AiosError.detail)
+SIGN_IN = 'SIGN_IN'                  # it makes and saves configs only for a signed-in account
+LIMITING = 'LIMITING'                # it is limiting requests from this machine
 
-# AIOStreams' codes for a config ID and password that open no config: a wrong password, or a config that is gone
-WRONG_PASSWORD_CODES = ('USER_INVALID_DETAILS', 'USER_INVALID_PASSWORD', 'USER_NOT_FOUND')
 
-
-def _asks_sign_in(code, message):
-    """AIOStreams refusing until an account signs in: its code says so, or its own words do (a wrong password or a
-    refused config is that, whatever the words)."""
-    code = str(code or '')
-    if code in WRONG_PASSWORD_CODES or code == 'USER_INVALID_CONFIG':
-        return False
-    return code in ('FORBIDDEN', 'UNAUTHORIZED') or 'not allowed' in (message or '').lower()
+def _reading(code, message):
+    """The kind of an AIOStreams refusal, from its code (`code`) and its own words (`message`), or None: a wrong
+    password or a refused config by its code alone, whatever the words; a sign-in or a limit by its code or its
+    words."""
+    code, words = str(code or ''), (message or '').lower()
+    if code in WRONG_PASSWORD_CODES:
+        return NO_CONFIG
+    if code == 'USER_INVALID_CONFIG':
+        return CONFIG_REFUSED
+    if code in ('FORBIDDEN', 'UNAUTHORIZED') or 'not allowed' in words:
+        return SIGN_IN
+    if code == 'RATE_LIMIT_EXCEEDED' or 'too many' in words:
+        return LIMITING
+    return None
 
 
 def needs_sign_in(e):
     """Whether an AiosError is AIOStreams asking for a signed-in account, as its message then says: told by AIOStreams'
     code and own words, never by the message's wording."""
-    return _asks_sign_in(e.code, e.detail)
+    return e.kind == SIGN_IN
+
+
+def is_limited(e):
+    """Whether an AiosError is AIOStreams limiting requests as aiosconfig read it, its message then saying so: told by
+    AIOStreams' code and own words, never by the message's wording."""
+    return e.kind == LIMITING
 
 
 def _plain(code, message, making=False):
     """AIOStreams error codes, in plain words. `making`: the call made a config, which AIOStreams limits per hour; its
     limit on every other call lasts seconds."""
-    code = str(code or '')
-    if code in WRONG_PASSWORD_CODES:
+    kind = _reading(code, message)
+    if kind == NO_CONFIG:
         return 'That config ID and password don\'t match a config on this AIOStreams.'
-    if code == 'USER_INVALID_CONFIG':
+    if kind == CONFIG_REFUSED:
         return f'AIOStreams refused the config: {message}'
-    if _asks_sign_in(code, message):
+    if kind == SIGN_IN:
         return 'This AIOStreams asks you to sign in before configs can be saved.'
-    if code == 'RATE_LIMIT_EXCEEDED' or 'too many' in (message or '').lower():
+    if kind == LIMITING:
         if making:
             return ('AIOStreams is limiting requests from this machine (it allows 10 new configs an hour); try again '
                     'later.')
         return LIMITED
-    return message or code or 'AIOStreams gave an error without a message.'
+    return message or str(code or '') or 'AIOStreams gave an error without a message.'
 
 
 def _error_code(body):
@@ -634,8 +656,9 @@ class AiosApi:
     def _asked_wait(self, headers):
         """The seconds a "too many requests" asks to wait (Retry-After, else RateLimit-Reset); SLOW_DOWN_WAIT, never
         more than this client's cap, when it names none, so a short limit is waited out on the public service too."""
-        value = ((headers or {}).get('Retry-After') or (headers or {}).get('RateLimit-Reset') or '').strip()
-        return int(value) if value.isascii() and value.isdigit() else min(SLOW_DOWN_WAIT, self.retry_wait_cap)
+        headers = headers or {}
+        value = digits.whole((headers.get('Retry-After') or headers.get('RateLimit-Reset') or '').strip())
+        return value if value is not None else min(SLOW_DOWN_WAIT, self.retry_wait_cap)
 
     def _blocked(self):
         return AiosError('Stopped a request to Real-Debrid: AIOSubtitles never uses Real-Debrid.',
@@ -646,7 +669,7 @@ class AiosApi:
         # encrypted password
         reason = type(e).__name__ if isinstance(e, http.client.HTTPException) else getattr(e, 'reason', e)
         return AiosError(f'Can\'t reach AIOStreams at {self.base} ({reason}).',
-                         'Check the address, and that AIOStreams is running (docker ps).')
+                         'Check the address, and that AIOStreams is running (docker ps).', code=UNREACHABLE)
 
     def _bad_answer(self, status):
         return AiosError(f'{self.base} answered in a way AIOSubtitles doesn\'t know (HTTP {status}).',
@@ -686,8 +709,10 @@ class AiosApi:
             return self._bad_answer(status)
         said, detail = err.get('message'), body.get('detail')
         said = said if isinstance(said, str) else None
-        message = _plain(err.get('code'), said or (detail if isinstance(detail, str) else None), making)
-        return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=said, reason=message)
+        words = said or (detail if isinstance(detail, str) else None)
+        message = _plain(err.get('code'), words, making)
+        return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=said, reason=message,
+                         kind=_reading(err.get('code'), words))
 
     def _succeeded(self, status, body, doing, ok=(200,), making=False):
         """The answer of a call AIOStreams says succeeded; raises its refusal (_error) otherwise."""
@@ -702,7 +727,7 @@ class AiosApi:
         data = body.get('data') if isinstance(body, dict) else None
         if status != 200 or not isinstance(data, dict) or 'version' not in data:
             raise AiosError(f'{self.base} answered, but not like AIOStreams (HTTP {status}).',
-                            'Give the address you open AIOStreams\' configure page at.')
+                            'Give the address you open AIOStreams\' configure page at.', code=NOT_AIOSTREAMS)
         return data
 
     def config_exists(self, uuid):
@@ -719,7 +744,7 @@ class AiosApi:
         "too many requests" is waited out and asked once more, as `call` does. Raises AiosError: code
         ALIAS_UNKNOWN when this AIOStreams doesn't know the alias, ALIAS_NO_CONFIG when its answer holds no config ID on
         this AIOStreams, RATE_LIMIT_EXCEEDED while it limits requests, the HTTP status of its server error (500 to 599),
-        and the usual "Can't reach" one when it can't be reached."""
+        and UNREACHABLE (the usual "Can't reach" message) when it can't be reached."""
         status, location, body, headers = self._ask_alias(alias)
         if status == 429 and (wait := self._asked_wait(headers)) <= self.retry_wait_cap:
             self.on_wait(wait)
@@ -732,7 +757,7 @@ class AiosApi:
         elif status == 404 or (status == 400 and _error_code(body) == 'USER_INVALID_DETAILS'):
             raise AiosError('This AIOStreams doesn\'t know that alias.', code='ALIAS_UNKNOWN')
         elif status == 429:
-            raise AiosError(LIMITED, code='RATE_LIMIT_EXCEEDED')
+            raise AiosError(LIMITED, code='RATE_LIMIT_EXCEEDED', kind=LIMITING)
         elif 500 <= status <= 599:
             raise AiosError(f'AIOStreams answered HTTP {status} for the alias link; try again in a few minutes.',
                             code=status)

@@ -24,10 +24,10 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, PUBLIC_RETRY_WAIT_CAP, UNREADABLE, UUID_RE,
-                         WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link, is_subsync_preset, needs_sign_in,
-                         new_key, parse_languages, sync_config, sync_config_problems, usenet_route, usenet_sync_config,
-                         viewer_change, without_builtin_twins, without_subsync)
+from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, NOT_AIOSTREAMS, PUBLIC_RETRY_WAIT_CAP, UNREACHABLE,
+                         UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link, is_limited,
+                         is_subsync_preset, needs_sign_in, new_key, parse_languages, sync_config, sync_config_problems,
+                         usenet_route, usenet_sync_config, viewer_change, without_builtin_twins, without_subsync)
 from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
@@ -241,15 +241,16 @@ def _plain(e, doing, own_password=False, making=False):
     """An AIOStreams error in plain words, without the link or the password: the page's own step (`doing`) only, then
     AIOStreams' reason, its own words quoted as its words (./setup's words, e.message, stay its own).
     own_password: the call used the person's own password, so a refused config is about that password. making: the
-    call made a config, which AIOStreams limits per hour."""
+    call made a config, which AIOStreams limits per hour. Told by the error's code and kind, never by words
+    in its message, which may be AIOStreams' own."""
     if own_password and str(e.code) in WRONG_PASSWORD_CODES:
         return WRONG_PASSWORD
-    if "Can't reach" in e.message:
+    if e.code == UNREACHABLE:
         return (f"{doing}: AIOSubtitles can't reach your AIOStreams from the internet. Check the link, and that "
                 "your AIOStreams can be opened from outside your home network.")
     if e.code == UNREADABLE:     # it answered, so it is reached
         return f"{doing}: your AIOStreams answered in a way AIOSubtitles doesn't know. Try again in a few minutes."
-    if e.code in ("RATE_LIMIT_EXCEEDED", 429) or "limiting requests" in e.message:
+    if e.code in ("RATE_LIMIT_EXCEEDED", 429) or is_limited(e):
         if making:
             return (f"{doing}: your AIOStreams limits how many configs one address can make in an hour, and "
                     "AIOSubtitles has made many there lately. Try again in an hour.")
@@ -311,10 +312,11 @@ def _read_viewer(api, uuid, password):
 
 
 def _field_of(e):
-    """The field an AIOStreams error is about: the password it refused, or the link it couldn't reach."""
+    """The field an AIOStreams error is about: the password it refused, or the link it couldn't reach (or where
+    something else than AIOStreams answered)."""
     if str(e.code) in WRONG_PASSWORD_CODES:
         return "password"
-    if "Can't reach" in e.message or "not like AIOStreams" in e.message:
+    if e.code in (UNREACHABLE, NOT_AIOSTREAMS):
         return "link"
     return None
 

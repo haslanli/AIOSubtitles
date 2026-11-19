@@ -11,7 +11,7 @@ import os
 import socket
 import struct
 
-from . import ALGO_VERSION, RULE_REVISION, explain
+from . import ALGO_VERSION, RULE_REVISION, digits, explain
 from .aiosconfig import MAX_LANGUAGES
 from .langs import known, lang_list
 from .srclimits import KEYLESS
@@ -90,25 +90,19 @@ def available_cpus(cpu_max=None, cfs_dir=None, processors=None):
 
 
 def _whole(value, least=1, most=None):
-    """A whole number from `least` (to `most`) written in digits; None otherwise. isdecimal, not isdigit, which also
-    takes the superscripts int() refuses ("2²")."""
-    value = str(value).strip()
-    if not value.isdecimal():
-        return None
-    try:
-        n = int(value)
-    except ValueError:                      # more digits than int() converts
-        return None
-    return n if n >= least and (most is None or n <= most) else None
+    """A whole number from `least` (to `most`) written in the digits 0 to 9 (digits.whole: no superscript, which int()
+    refuses, nor another script's digits, which it would read); None otherwise."""
+    n = digits.whole(str(value).strip())
+    return n if n is not None and n >= least and (most is None or n <= most) else None
 
 
 def _number(value, above_zero=False, scale=1):
-    """A number from 0 (above 0 with `above_zero`) times `scale`, finite; None otherwise ("nan", "inf", or a value too
-    large to count in `scale`'s unit)."""
-    try:
-        n = float(str(value).strip()) * scale
-    except ValueError:
+    """A number from 0 (above 0 with `above_zero`) times `scale`, finite, written in ASCII (digits.decimal); None
+    otherwise ("nan", "inf", another script's digits, or a value too large to count in `scale`'s unit)."""
+    n = digits.decimal(str(value).strip())
+    if n is None:
         return None
+    n *= scale
     return n if math.isfinite(n) and (n > 0 if above_zero else n >= 0) else None
 
 

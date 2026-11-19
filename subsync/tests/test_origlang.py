@@ -167,6 +167,11 @@ class IdsTest(unittest.TestCase):
                          "", None, "tt1375666 OR 1", 'tt1" . ?x ?y ?z'):
             self.assertIsNone(origlang.title_of(video_id), video_id)
 
+    def test_an_id_in_other_digits_is_not_looked_up(self):
+        # \d also took other scripts' digits: "mal:١٢" was looked up as MyAnimeList's 12 (int reads them)
+        for video_id in ("mal:\u0661\u0662", "kitsu:\uff11", "tt\u0661\u0662", "tt\uff11:1:1", "mal:\u00b2"):
+            self.assertIsNone(origlang.title_of(video_id), video_id)
+
 
 class TmdbTest(Base):
     def test_a_film(self):
@@ -201,6 +206,17 @@ class TmdbTest(Base):
         got = self.ask("tt2788316:1:1")
         self.assertEqual(got["tmdb"], "eng")
         self.assertEqual([c["path"] for c in self.srv.of("tmdb")], ["/tmdb/find/tt2788316", "/tmdb/tv/126308"])
+
+    def test_an_item_whose_id_is_no_ascii_number_asks_no_details(self):
+        # Isdigit took "²" and other scripts' digits for TMDB's id; asking its details by it failed before
+        # anything was sent (no ASCII address), so TMDB was taken for not answering, as if it were down
+        for tt, item_id in (("tt2788317", "\u00b2"), ("tt2788318", "\u0661\u0662")):
+            with self.subTest(item_id=item_id):
+                self.srv.find[tt] = {"tv_results": [{"id": item_id, "name": "Shogun"}]}
+                got = self.ask(tt + ":1:1")
+                self.assertEqual((got["tmdb"], got["tmdb_asked"], got["failed"]), (None, True, []))
+                self.assertEqual([c["path"] for c in self.srv.of("tmdb") if not c["path"].startswith("/tmdb/find/")],
+                                 [])
 
     def test_tmdbs_own_codes(self):
         self.srv.find["tt1"] = {"movie_results": [{"id": 1, "original_language": "cn"}]}

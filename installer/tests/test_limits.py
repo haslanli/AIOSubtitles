@@ -144,6 +144,24 @@ class Checks(unittest.TestCase):
             with self.subTest(setting=setting, good='15 characters'):
                 self.assertEqual(limits.check(by[setting], '999,999,999,999'), ('999999999999', None))
 
+    def test_a_number_in_other_digits_is_refused_with_the_fields_words(self):
+        # Isdigit took "²", which int refuses (ValueError out of the check, and with it the setup page's
+        # request), and int() and float() read other scripts' digits ("１２", "٣") as numbers
+        by = {lim.setting: lim for lim in limits.hosting(usenet=True, audio=True)}
+        for setting, words in (('SUBSYNC_MAX_USERS', 'A whole number from 1, like 200.'),
+                               ('SUBSYNC_USER_AUDIO_PER_DAY', 'A whole number from 0, like 20.'),
+                               ('SUBSYNC_SYNCS_AT_ONCE', 'A whole number from 1, or auto.'),
+                               ('SUBSYNC_DAILY_BUDGET_GB', 'A number above 0, like 100.')):
+            for bad in ('²', '1²', '１２', '٣', '١.٥'):
+                with self.subTest(setting=setting, bad=bad):
+                    self.assertEqual(limits.check(by[setting], bad), (None, words))
+        self.assertEqual(limits.check(by['SUBSYNC_AUDIO_AT_ONCE'], '٣', places=4),
+                         (None, 'A whole number from 1, or auto.'))
+        self.assertEqual(limits.check(by['SUBSYNC_AUDIO_BUDGET_GB'], '１'), (None, 'Type 0.5, 1, 2 or 4 (GB per file).'))
+        for value in ('²', '１２'):                             # a value set by hand: shown as it is written
+            with self.subTest(shown=value):
+                self.assertEqual(limits.shown(self.lim('SUBSYNC_USER_DAILY_MB'), value), value)
+
     def test_the_segmented_choices(self):
         audio, langs = self.lim('SUBSYNC_AUDIO_BUDGET_GB'), self.lim('SUBSYNC_MAX_LANGUAGES')
         self.assertEqual(limits.check(audio, '2'), ('2', None))
