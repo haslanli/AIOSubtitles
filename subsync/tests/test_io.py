@@ -30,7 +30,7 @@ from subsync.reader import (CapReached, CHUNK, MAX_RE_RESOLVE, RangeReader, Read
 from subsync.settings import Settings
 from subsync.store import REFUSED_BACKOFF_S, Store
 from subsync.subs import parse, to_srt, ts
-from subsync.worker import Job, JobGuard, READ_RETRY_S, Safety, Turn, Worker
+from subsync.worker import Job, JobGuard, READ_RETRY_S, Safety, Turn, UsenetFinder, Worker
 
 TINY = os.path.join(FIXTURES, "tiny.mkv")
 ALASS = os.environ.get("SUBSYNC_ALASS", "alass")
@@ -1545,7 +1545,7 @@ class FirstReadRetryTest(unittest.TestCase):
                 run_once(self.w, self.job)
                 return
             stopped = []
-            self.w.usenet_gate = mock.Mock(stop=stopped.append)
+            self.w.usenet_finder = UsenetFinder(None, mock.Mock(stop=stopped.append))   # its gate records the stop
             self.job.usenet = True
             self.w._process_row(self.job, dict(self.job.hints), {"url": self.link}, None)
             return stopped

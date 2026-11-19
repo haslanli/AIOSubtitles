@@ -869,8 +869,8 @@ class UsenetTest(Base):
 
     def test_after_the_rows_hour_a_pick_lists_again_only_through_the_gate(self):
         job = self.picked()
-        when, kept_row, address = self.w.usenet_rows[self.alias]
-        self.w.usenet_rows[self.alias] = (when - worker_mod.USENET_ROW_KEPT_S - 1, kept_row, address)
+        when, kept_row, address = self.w.usenet_finder.rows[self.alias]
+        self.w.usenet_finder.rows[self.alias] = (when - worker_mod.USENET_ROW_KEPT_S - 1, kept_row, address)
         self.counts.stopped_ = True                                     # Usenet stopped for the day: nothing listed
         self.w._sync_all = lambda *a: None
         self.w.process(job)
@@ -895,20 +895,30 @@ class UsenetTest(Base):
         self.assertFalse(self.store.file_blocked(self.alias))
 
     def test_the_usenet_rows_are_read_and_written_under_the_lock(self):
-        # Both lanes find and keep Usenet rows; a request thread waits for the lock like for every other map
-        job = Job("movie", "tt1", self.hints)
-        with self.w.cv:
-            t = threading.Thread(target=self.w._usenet_row, args=(job, dict(self.hints)), daemon=True)
+        # Both lanes find and keep Usenet rows, through the worker's one finder, under its lock
+        finder, job = self.w.usenet_finder, Job("movie", "tt1", self.hints)
+        with finder.lock:
+            t = threading.Thread(target=finder.find, args=(job, dict(self.hints)), daemon=True)
             t.start()
             t.join(0.3)
             self.assertTrue(t.is_alive())
         t.join(5)
-        self.assertIn(self.alias, self.w.usenet_rows)
+        self.assertIn(self.alias, finder.rows)
+        address = self.srv.url("tiny-nosub.mp4")
+        with finder.lock:   # the address its first read resolved, kept with it
+            t = threading.Thread(target=finder.keep_address, args=(self.alias, finder.rows[self.alias][1], address),
+                                 daemon=True)
+            t.start()
+            t.join(0.3)
+            self.assertTrue(t.is_alive())
+        t.join(5)
+        self.assertEqual(finder.rows[self.alias][2], address)
 
     def test_an_index_read_that_fails_in_the_audio_job_doesnt_stop_usenet(self):
         job = self.picked()
         self.link.target = self.srv.url("gone.mp4")
-        self.w.usenet_rows[self.alias] = self.w.usenet_rows[self.alias][:2] + (self.srv.url("gone.mp4"),)
+        rows = self.w.usenet_finder.rows
+        rows[self.alias] = rows[self.alias][:2] + (self.srv.url("gone.mp4"),)
         self.w.process(job)
         self.assertFalse(self.counts.stopped_)
         self.assertFalse(self.store.file_blocked(self.alias))

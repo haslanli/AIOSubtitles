@@ -206,6 +206,92 @@ class UsenetGate:
         log.info("Usenet stopped until 00:00 UTC: %s", why)
 
 
+class UsenetFinder:
+    """A file's row in the Usenet config's listing, for a file the sync config's listing doesn't have:
+    listed only when the gate allows one. A file found is kept USENET_ROW_KEPT_S with the address its first read
+    resolved, so a retry or its audio job lists nothing again and reads where its first pass did (the NZB isn't
+    fetched again). `config`: the Usenet config's sources.Aios; `gate`: its UsenetGate. Both lanes of a worker find and
+    keep rows through its one finder, under the finder's lock."""
+
+    def __init__(self, config, gate):
+        self.config, self.gate = config, gate
+        self.rows = {}   # alias -> (when, row, address) of a file found on Usenet
+        self.lock = threading.Lock()
+
+    def _kept(self, alias):
+        """The file's (when, row, address), found within USENET_ROW_KEPT_S; else None."""
+        with self.lock:
+            kept = self.rows.get(alias)
+        return kept if kept and time.time() - kept[0] < USENET_ROW_KEPT_S else None
+
+    def audio_row(self, job):
+        """An audio job's Usenet row and the address its first pass resolved, kept with the job for its life (a
+        job stopped and queued again keeps them), taken from the first pass's within USENET_ROW_KEPT_S; None
+        otherwise."""
+        if job.kept is None:
+            kept = self._kept(job.alias)
+            if kept is None:
+                return None
+            job.kept = kept[1:]
+        return job.kept[0]
+
+    def keep_address(self, alias, row, address):
+        """The address a Usenet file's link pointed to, kept with its row for the audio job that follows."""
+        with self.lock:
+            kept = self.rows.get(alias)
+            if address and kept and kept[1] is row:
+                self.rows[alias] = (kept[0], row, address)   # the same entry: its time and place stay
+
+    def find(self, job, hints):
+        """The played file's row in one Usenet listing, when the gate allows one: the listing is counted once the
+        config is checked; an error row, an HTTP error or no answer stops Usenet for the day and nothing is read; a
+        file not listed isn't looked up there again for a day."""
+        kept = self._kept(job.alias)
+        if kept is not None:     # a retry, or the same file asked for again
+            return kept[1]
+        if not self.gate.may_take(job.alias):
+            return None
+        try:
+            # the config first: one that can't be checked lists nothing, so no listing of the day is spent on it
+            self.config.check_config()
+        except realdebrid.Blocked:
+            return None
+        if not self.gate.take(job.alias):
+            return None
+        try:
+            listed = self.config.streams(job.type, job.video_id)
+            error_row = any((s.get("streamData") or {}).get("type") == "error" for s in listed)
+        except realdebrid.Blocked:       # the Usenet config couldn't be checked: nothing was listed
+            return None
+        except urllib.error.HTTPError as e:
+            e.close()
+            self.gate.stop(f"HTTP {e.code} from the Usenet listing")
+            return None
+        # no answer, a cut one (http.client.IncompleteRead is no OSError) or one that isn't a listing (not a JSON
+        # object of rows)
+        except (OSError, ValueError, http.client.HTTPException, AttributeError, TypeError) as e:
+            self.gate.stop(f"the Usenet listing failed ({type(e).__name__})")
+            return None
+        if error_row:
+            self.gate.stop("an error in the Usenet listing")
+            return None
+        found = self.config.match(listed, hints, usenet=True)
+        if found is None:
+            self.gate.missed(job.alias)
+        else:
+            with self.lock:
+                put_bounded(self.rows, job.alias, (time.time(), found, None), USENET_ROWS_ENTRIES)
+        return found
+
+    def missed(self, alias):
+        """The file isn't on Usenet (its listed row is another file): not looked up there again for a day."""
+        self.gate.missed(alias)
+
+    def stop(self, why):
+        """No Usenet listing until 00:00 UTC (a Usenet file's first read failed or was refused)."""
+        self.gate.stop(why)
+
+
 class Safety:
     """The refusal back-off every read checks first."""
 
@@ -453,8 +539,8 @@ class Worker(threading.Thread):
         super().__init__(daemon=True, name="subsync-worker")
         self.s, self.store, self.aios, self.safety = settings, store, aios, safety
         # Usenet: the Usenet config's sources.Aios and its UsenetGate, both or neither
-        self.usenet, self.usenet_gate = (usenet, usenet_gate) if usenet is not None and usenet_gate is not None \
-            else (None, None)
+        self.usenet_finder = UsenetFinder(usenet, usenet_gate) if usenet is not None and usenet_gate is not None \
+            else None
         # public mode: the turn every person's worker shares, and this person's limits (public.UserLimits, or
         # public.StoreOnly: who, rows_key, may_queue, may_start_file, file_started, before_read, after_read,
         # has_room, may_start_audio, audio_started); None on a self-hosted install
@@ -490,9 +576,6 @@ class Worker(threading.Thread):
         self.fetched_subs = {}    # subtitle url -> (time, bytes): downloads shared by a file's text pass and audio job
         self.fetching = {}        # subtitle url -> Future of its download running now (_fetch_one): waited for, once
         self.unlisted = {}        # alias -> when a file was last not found in the listing
-        # alias -> (when, row, address) of a file found on Usenet: a retry or its audio job doesn't list again,
-        # and the audio job reads at the address its first pass resolved, so the NZB isn't fetched again
-        self.usenet_rows = {}
         self.pickable = {}        # alias -> job of a file that needs the audio route and waits for the viewer's pick
         self.picked_early = {}    # alias -> when its entry was downloaded before the file was known to need audio
         self.seen = {}            # alias -> (type, video_id, hints) of its last job, so a pick can ask for the list again
@@ -506,6 +589,11 @@ class Worker(threading.Thread):
         # the originals' downloads and subtitle lists on a request's own time (original_for), timed out there; threads
         # start when needed
         self.original_pool = ThreadPoolExecutor(max_workers=ORIGINAL_DOWNLOADS_AT_ONCE, thread_name_prefix="subsync-original")
+
+    @property
+    def usenet(self):
+        """The Usenet config's sources.Aios, or None when Usenet is off for this worker."""
+        return self.usenet_finder.config if self.usenet_finder is not None else None
 
     # -- queue -------------------------------------------------------------------------------------------------
     def remember(self, job):
@@ -1218,18 +1306,19 @@ class Worker(threading.Thread):
             if time.time() < job.budget_until:
                 raise BudgetSpent(BUDGET_SPENT)
         hints = dict(job.hints)
+        finder = self.usenet_finder
         job.usenet = False
-        row = self._kept_usenet_row(job) if job.audio else None
+        row = finder.audio_row(job) if job.audio and finder is not None else None
         if row is not None:     # the audio job of a file its first pass found on Usenet: nothing listed again
             job.usenet = True
         else:
             row = self.aios.find_row(job.type, job.video_id, hints)   # none without a sync config (Usenet only)
-        if row is None and self.usenet is not None:
+        if row is None and finder is not None:
             # A file that backs off spends no Usenet listing on a first pass (indexers limit them a day); a
             # debrid file's listing above still leads to its known-file and capped outcomes (_process_row)
             if not job.audio and self._backing_off(job):
                 return
-            row = self._usenet_row(job, hints)
+            row = finder.find(job, hints)
             job.usenet = row is not None
         if row is None:
             log.info("file not in the listing %s", job.label)
@@ -1248,68 +1337,6 @@ class Worker(threading.Thread):
         # another person playing the same torrent file under another name waits, then reads nothing
         with self._claim(job, bt):
             return self._process_row(job, hints, row, bt)
-
-    def _kept_usenet_row(self, job):
-        """An audio job's Usenet row and the address its first pass resolved, kept with the job for its life
-        (a job stopped and queued again keeps them), taken from the first pass's within USENET_ROW_KEPT_S; None
-        otherwise."""
-        if job.kept is None:
-            with self.cv:
-                kept = self.usenet_rows.get(job.alias)
-            if self.usenet is None or not kept or time.time() - kept[0] >= USENET_ROW_KEPT_S:
-                return None
-            job.kept = (kept[1], kept[2])
-        return job.kept[0]
-
-    def _keep_address(self, alias, row, address):
-        """The address a Usenet file's link pointed to, kept with its row for the audio job that follows."""
-        with self.cv:
-            kept = self.usenet_rows.get(alias)
-            if address and kept and kept[1] is row:
-                self.usenet_rows[alias] = (kept[0], row, address)   # the same entry: its time and place stay
-
-    def _usenet_row(self, job, hints):
-        """The played file's row in one Usenet listing, when the gate allows one: the listing is
-        counted once the config is checked; an error row, an HTTP error or no answer stops Usenet for the day and
-        nothing is read; a file not listed isn't looked up there again for a day."""
-        with self.cv:
-            kept = self.usenet_rows.get(job.alias)
-        if kept and time.time() - kept[0] < USENET_ROW_KEPT_S:     # a retry, or the same file asked for again
-            return kept[1]
-        gate = self.usenet_gate
-        if not gate.may_take(job.alias):
-            return None
-        try:
-            # the config first: one that can't be checked lists nothing, so no listing of the day is spent on it
-            self.usenet.check_config()
-        except realdebrid.Blocked:
-            return None
-        if not gate.take(job.alias):
-            return None
-        try:
-            listed = self.usenet.streams(job.type, job.video_id)
-            error_row = any((s.get("streamData") or {}).get("type") == "error" for s in listed)
-        except realdebrid.Blocked:       # the Usenet config couldn't be checked: nothing was listed
-            return None
-        except urllib.error.HTTPError as e:
-            e.close()
-            gate.stop(f"HTTP {e.code} from the Usenet listing")
-            return None
-        # no answer, a cut one (http.client.IncompleteRead is no OSError) or one that isn't a listing (not a JSON
-        # object of rows)
-        except (OSError, ValueError, http.client.HTTPException, AttributeError, TypeError) as e:
-            gate.stop(f"the Usenet listing failed ({type(e).__name__})")
-            return None
-        if error_row:
-            gate.stop("an error in the Usenet listing")
-            return None
-        found = self.usenet.match(listed, hints, usenet=True)
-        if found is None:
-            gate.missed(job.alias)
-        else:
-            with self.cv:
-                put_bounded(self.usenet_rows, job.alias, (time.time(), found, None), USENET_ROWS_ENTRIES)
-        return found
 
     def _process_row(self, job, hints, row, bt):
         """The file's work once its listed row is known (`bt`: the row's torrent file, or None)."""
@@ -1386,7 +1413,7 @@ class Worker(threading.Thread):
                 return
             except Refused:
                 if job.usenet and not job.audio:
-                    self.usenet_gate.stop("the first read of a Usenet file was refused")
+                    self.usenet_finder.stop("the first read of a Usenet file was refused")
                 raise
             except ReadFailed as e:
                 if job.usenet and job.audio:
@@ -1404,7 +1431,7 @@ class Worker(threading.Thread):
                         time.sleep(READ_RETRY_S)
                     continue
                 if job.usenet:      # an NZB fetch that failed can't be told apart from other faults here
-                    self.usenet_gate.stop("the first read of a Usenet file failed")
+                    self.usenet_finder.stop("the first read of a Usenet file failed")
                 retry = self.store.file_failed(job.alias, REFUSED_BACKOFF_S if job.usenet else READ_FAILED_BACKOFF_S)
                 log.info("read failed %s (%s), retry %s", job.label, e, "never" if retry is None else time.strftime("%H:%M", time.gmtime(retry)))
                 if job.audio:   # a debrid file's audio job: it backs off as any read, and waits for another pick
@@ -1413,14 +1440,14 @@ class Worker(threading.Thread):
         # the file could be read: a back-off is for failures in a row, so the earlier ones no longer count
         self.store.file_ok(job.alias, self._refusal_key(job.alias))
         if job.usenet:
-            self._keep_address(job.alias, row, reader.resolved)
+            self.usenet_finder.keep_address(job.alias, row, reader.resolved)
         if hints.get("videoHash") and not same_hash(hints["videoHash"], oshash):
             # 18a: the listed row is another file than the one played (same name, another release): nothing of it is
             # this file's, and the listing is not asked for it again for an hour
             log.info("the listed row is not the played file %s: not synced", job.label)
             self._note_unlisted(job.alias)
             if job.usenet:
-                self.usenet_gate.missed(job.alias)
+                self.usenet_finder.missed(job.alias)
             return
         if not hints.get("videoHash"):   # the file's own hash is known now: a subtitle made for it is the better guess
             self._set_originals(job.alias, candidates, hints.get("filename"), oshash)
@@ -1876,287 +1903,9 @@ class Worker(threading.Thread):
         unchanged "(synced)" copy, so the viewer can tell which one fits this file; the first one needs no copy.
         With SUBSYNC_FAST_PATH on, every try is downloaded at once and its original checked first (a gate, no
         alass), so an in-sync original is listed within seconds; re-timing runs only when none is in sync. With the audio
-        route off, a file with no text or image subtitle track stores nothing, so turning the route on later syncs it."""
-        best_fit = self.s.best_fit
-        # the release's own track in the subtitle's language, whose line count says a subtitle was made from this
-        # release (choose.order); its timing is still judged against the title's original language
-        ref = pipeline.choose_reference(index, 0, lang, False, self.s.prefer_plain, self.s.fallback_reference,
-                                        by_original=False) if hasattr(index, "text_tracks") else None
-        ref_cues = len(ref["cues"]) if ref else None
-        first = self.viewer_first(candidates)
-        tries = self._within_limits(self._try_order(candidates, filename, oshash, ref_cues, first), filename, oshash,
-                                    ref_cues, first)
-        # best fit with the fast path: the originals of up to SUBSYNC_GATE_TRIES are checked (cheap); alass runs on at
-        # most SUBSYNC_MAX_TRIES of them
-        tries = tries[: max(self.s.max_tries, self.s.gate_tries) if best_fit and self.s.fast_path else self.s.max_tries]
-        passed = []        # best fit: the keys of passing results
-        best_so_far = []   # best fit: (fit rank, key) of the best pass published so far
-        settled = []       # D1: a subtitle of this language passed the main rule against its own language
-        audio = self.audio_allowed(job)
-        def entry(rank, cand, raw):
-            sha = hashlib.sha256(raw).hexdigest()
-            return {"rank": rank, "cand": cand, "raw": raw, "sha": sha,
-                    "got": self.fresh(result_key(file_key, lang, sha), job.rule)}
-
-        texts, refused = {}, set()   # the downloads' texts by candidate id, and those refused by the language check
-        not_language = f"not {lang_name(lang)} text"
-
-        def wrong_language(e):
-            """A download whose text isn't in this language is recorded as kept, and never judged, offered or
-            anchored on."""
-            e.setdefault("text", decode(e["raw"], lang))
-            m = langcheck.measure(e["text"], lang)
-            if langcheck.verdict(m, lang) != langcheck.FAIL:
-                texts[e["cand"]["id"]] = e["text"]
-                return False
-            refused.add(e["cand"]["id"])
-            got = e["got"]
-            if not (got and got["outcome"] == "keep_original" and got.get("reason") == not_language):
-                detail = {"rule": job.rule or self.s.rule_id, "release": (e["cand"].get("release") or "")[:120],
-                          "language": {"verdict": langcheck.FAIL, "words": m["words"], "script": m["script"],
-                                       "common": {c: v for c, v in m["common"].items() if v}}}
-                self.store.put(file_key, e["sha"], lang, e["rank"], "keep_original", not_language, None, detail,
-                               "ass" if is_ass(e["text"]) else "srt", None, e["cand"]["id"], offer=not best_fit)
-            log.info("sync %s %s rank %d: keep_original (%s)", job.label, lang, e["rank"], not_language)
-            return True
-
-        streamed = best_fit and self.s.fast_path   # each download judged as it ends (below)
-        fingerprints = set()
-
-        def duplicate(e):
-            """The same subtitle (same words and timing; another encoding, line ending or credit line doesn't
-            count) already came from another source for this file and language: judged and listed once, as the first."""
-            if e["sha"] in fingerprints:
-                return True
-            try:
-                e["text"] = decode(e["raw"], lang)   # kept: the judging below reads it again
-                fp = fingerprint(e["text"])
-            except Exception:   # unreadable: judged on its own, as before
-                return False
-            if fp in fingerprints:   # R3-8: every text with no dialogue line has one fingerprint (subs.NO_DIALOGUE)
-                why = "no dialogue line" if fp == NO_DIALOGUE else "the same subtitle as one already judged"
-                log.info("sync %s %s rank %d: %s, left out", job.label, lang, e["rank"], why)
-                return True
-            fingerprints.update((fp, e["sha"]))
-            return False
-        if streamed:
-            entries = []
-        elif self.s.fast_path:   # every try at once, so the originals can be checked first
-            entries = [e for e in (entry(*f) for f in self._fetch_all(job, lang, tries)) if not wrong_language(e)]
-        else:                  # as in v3: one at a time, stopping at the first that passes
-            entries = (e for e in (entry(*f) for f in (self._fetch_one(job, lang, rank, cand) for rank, cand in tries)
-                                   if f) if not wrong_language(e))
-
-        def listed_cached(e):
-            """A stored outcome (with an in-sync original further down listed now if it wasn't): passes?"""
-            got = e["got"]
-            outcome = got["outcome"]
-            if outcome == "in_sync" and (e["rank"] > 0 or best_fit) and self.s.list_in_sync:
-                text = decode(e["raw"], lang)   # stored before the switch was on: list it now, unchanged
-                self.store.put(file_key, e["sha"], lang, e["rank"], "synced",
-                               f"in sync as it is (viewer's #{e['rank'] + 1}): listed unchanged", got.get("route"),
-                               dict(got.get("detail") or {}, unchanged=True,
-                                    stacked=round(pipeline.stacked_share(parse(text)), 3)), "ass" if is_ass(text) else "srt", text,
-                               e["cand"]["id"], offer=not best_fit, original=text)
-                outcome = "synced"
-            ok = outcome in ("synced", "in_sync")
-            if ok and pipeline.settles(dict(got, reference=(got.get("detail") or {}).get("reference")), lang):
-                settled.append(result_key(file_key, lang, e["sha"]))
-            if ok and best_fit and outcome == "synced":
-                offer(result_key(file_key, lang, e["sha"]))
-            return ok
-
-        def offer(key):
-            """Best fit: a passing result; a pick waiting for this language gets the best one so far."""
-            passed.append(key)
-            rank = self.fit_rank(self.store.get(key) or {})
-            if not best_so_far or rank < best_so_far[0][0]:
-                best_so_far[:] = [(rank, key)]
-                self._publish(job.alias, lang, key)
-
-        def record(e, r, t0):
-            detail = {k: r[k] for k in ("route", "reference", "gate_original", "gate_synced", "gate_snapped", "refined",
-                                        "unchanged", "magnet", "shift", "model", "windows", "audio_s", "lines", "dialogue",
-                                        "alass_error", "fast", "better", "audio_track", "shift_fit", "cross", "aligned",
-                                        "recentred_ms", "text", "text_original", "sections", "section_checks", "close_call") if k in r}
-            detail["seconds"] = round(time.time() - t0, 2)
-            detail["rule"] = job.rule or self.s.rule_id
-            detail["release"] = (e["cand"].get("release") or "")[:120]
-            detail["stacked"] = round(pipeline.stacked_share(parse(e.get("text") or decode(e["raw"], lang))), 3)
-            key = self.store.put(file_key, e["sha"], lang, e["rank"], r["outcome"], r.get("reason"), r.get("route"), detail,
-                                 e["ext"], r.get("body"), e["cand"]["id"], offer=not best_fit,
-                                 original=e.get("text") or decode(e["raw"], lang))
-            log.info("sync %s %s rank %d: %s (%s)", job.label, lang, e["rank"], r["outcome"], r.get("reason"))
-            if pipeline.settles(r, lang):
-                settled.append(key)
-            if best_fit and r["outcome"] == "synced":
-                offer(key)
-            return r["outcome"] in ("synced", "in_sync")
-
-        def in_sync_result(e, base):
-            """An original in sync as it is: listed (when listing is on) as its magnet copy, else unchanged, with the
-            reason of how it was judged (the audio route's own)."""
-            r = dict(base, outcome="in_sync", reason=base["reason"] if base.get("route") == "audio"
-                     else "original passes against the release track")
-            if not ((e["rank"] > 0 or best_fit) and self.s.list_in_sync):
-                return {k: v for k, v in r.items() if k not in ("body", "magnet")}
-            listed = f"in sync as it is (viewer's #{e['rank'] + 1})"
-            if r.get("cross"):
-                listed += ", aligned to another language's track"
-            if r.get("body") is not None:
-                return dict(r, outcome="synced", reason=f"{listed}: lines snapped to the release's own")
-            return dict(r, outcome="synced", reason=f"{listed}: listed unchanged", body=e["text"], unchanged=True)
-
-        def check_one(e):
-            """The fast path for one download: its original against the release track (a gate, no alass). In sync?"""
-            t0 = time.time()
-            e.setdefault("text", decode(e["raw"], lang))
-            e["ext"] = "ass" if is_ass(e["text"]) else "srt"
-            chk = pipeline.check_original(index, e["text"], lang, splits=self.s.gate_splits, image_ref=self.s.image_ref,
-                                          prefer_plain=self.s.prefer_plain,
-                                          snap_within=self.s.snap_within if self.s.snap else None,
-                                          better=self.s.better, fallback=self.s.fallback_reference,
-                                          text_pairing=self.s.text_pairing)
-            e["checked"] = chk is not None
-            if chk is not None:   # for a pick's answer when nothing passes
-                self._note_measure(job.alias, lang, e["cand"]["id"], (chk.get("gate_original") or {}).get("within200"))
-            if chk and chk["in_sync"]:
-                record(e, in_sync_result(e, dict(chk, fast=True)), t0)
-                e["got"] = self.fresh(result_key(file_key, lang, e["sha"]), job.rule)
-                return True
-            return False
-
-        def shift_one(e):
-            """The shift path for one download whose original was judged and not in sync: one steady offset, in
-            milliseconds. A pass by the main rule against its own language (no alass needed)?"""
-            t0 = time.time()
-            r = pipeline.shift_sync(index, e["text"], lang, snap=self.s.snap, snap_within=self.s.snap_within,
-                                    splits=self.s.gate_splits, image_ref=self.s.image_ref, better=self.s.better,
-                                    prefer_plain=self.s.prefer_plain, fallback=self.s.fallback_reference,
-                                    text_pairing=self.s.text_pairing)
-            if not (r and r["outcome"] == "synced"):
-                return False
-            record(e, dict(r, fast=True), t0)
-            e["got"] = self.fresh(result_key(file_key, lang, e["sha"]), job.rule)
-            return self.passed_as(r, r["reason"]) == "main"
-
-        fitted, shas = 0, set()   # best fit: alass runs so far, and the subtitles fitted (each once)
-
-        def fit(e):
-            """alass (or the audio route) on one download: (result, start time)."""
-            t0 = time.time()
-            e.setdefault("text", decode(e["raw"], lang))
-            e.setdefault("ext", "ass" if is_ass(e["text"]) else "srt")
-            return pipeline.sync_subtitle(index, e["text"], lang, alass=self.s.alass, audio=audio,
-                                          audio_lead=self.s.audio_lead, vad=self.vad() if audio else None,
-                                          ffmpeg=self.s.ffmpeg, snap=self.s.snap, snap_within=self.s.snap_within,
-                                          splits=self.s.gate_splits, image_ref=self.s.image_ref,
-                                          audio_lock=self.audio_lock, better=self.s.better,
-                                          audio_better=self.s.audio_better, audio_budget=self.s.audio_budget,
-                                          prefer_plain=self.s.prefer_plain, fallback=self.s.fallback_reference,
-                                          text_pairing=self.s.text_pairing, unsettled=not settled,
-                                          sectioned=self.s.sections, audio_extra=self.s.audio_extra), t0
-
-        def fit_early(checked, position):
-            """A picked language none of whose first checked downloads fits as it is or by
-            one shift: alass at once on the first of them in try order (an "as it is" measure can't see a subtitle
-            that is only offset), published if it passes. It counts toward SUBSYNC_MAX_TRIES and isn't fitted again."""
-            nonlocal fitted
-            free = [x for x in checked if not x["got"] and x["sha"] not in shas]
-            if not free or fitted >= self.s.max_tries:
-                return
-            e = min(free, key=lambda x: position[x["rank"]])
-            shas.add(e["sha"])
-            fitted += 1
-            log.info("sync %s %s rank %d: picked, none of %d checked fits: alass now", job.label, lang, e["rank"],
-                     len(checked))
-            r, t0 = fit(e)
-            record(e, in_sync_result(e, r) if r["outcome"] == "in_sync" else r, t0)
-
-        done = False
-        if streamed:
-            # best fit: each download judged as it ends, its original and then its one shift, so a waiting pick is
-            # served a pass within seconds (Kingdom of Heaven's first passes came 18 s after the request when all 20
-            # downloads per language were waited for); alass below, in try order (for a picked language, on one of
-            # them as soon as FETCH_AT_ONCE are checked, fit_early)
-            position = {rank: i for i, (rank, _) in enumerate(tries)}
-            checked, early = [], False
-            for f in self._fetch_stream(job, lang, tries):
-                e = entry(*f)
-                if duplicate(e) or wrong_language(e):
-                    continue
-                entries.append(e)
-                if e["got"]:
-                    done = listed_cached(e) or done
-                elif check_one(e):
-                    done = True
-                elif e["checked"] and self.s.shift_path:
-                    done = shift_one(e) or done
-                if e.get("checked"):
-                    checked.append(e)
-                if not (done or early) and lang in job.picked and len(checked) >= FETCH_AT_ONCE:
-                    early = True
-                    fit_early(checked, position)
-            entries.sort(key=lambda x: position[x["rank"]])
-        elif best_fit:
-            entries = list(entries)
-        elif self.s.fast_path:   # the viewer's order: originals first, stopping at the first that passes
-            for e in entries:
-                if e["got"]:
-                    if listed_cached(e):
-                        done = True
-                        break
-                    continue
-                if check_one(e):
-                    done = True
-                    break
-            if self.s.shift_path and not done:
-                for e in entries:
-                    if not e["got"] and e.get("checked") and shift_one(e):
-                        done = True
-                        break
-        if not done:
-            for e in entries:
-                if not streamed and duplicate(e):
-                    continue
-                if e["got"]:
-                    if not self.s.fast_path and listed_cached(e) and not best_fit:
-                        break
-                    continue
-                if best_fit:   # the same subtitle from two sources is fitted once; alass on SUBSYNC_MAX_TRIES at most
-                    if e["sha"] in shas or fitted >= self.s.max_tries:
-                        continue
-                    shas.add(e["sha"])
-                    fitted += 1
-                r, t0 = fit(e)
-                if not audio and r.get("waits_audio"):   # no text or image track: only the audio route can judge it
-                    job.to_audio.add(lang)
-                    if self.s.audio_choice != "off":   # a Usenet file too
-                        if isinstance(entries, list) and self.s.anchored_guess:   # for an anchored guess (_set_provisional)
-                            job.fetched[lang] = [(x["cand"], x.get("text") or decode(x["raw"], lang)) for x in entries]
-                        if not self._needs_pick(job):   # a sync that starts at once logs its own line
-                            log.info("sync %s %s rank %d: no text or image subtitle track; the audio route waits for "
-                                     "the viewer to pick the Subsync entry", job.label, lang, e["rank"])
-                    else:   # the instance's audio route is off, or this person's choice is
-                        log.info("sync %s %s rank %d: no text or image subtitle track, and the audio route is off",
-                                 job.label, lang, e["rank"])
-                    break   # nothing stored
-                if r["outcome"] == "in_sync":
-                    r = in_sync_result(e, r)
-                if record(e, r, t0) and not best_fit:
-                    break
-        if best_fit:
-            # every candidate judged: the best fit first, up to SUBSYNC_MAIN_ALTERNATIVES offered
-            ranked = sorted(dict.fromkeys(passed), key=lambda k: self.fit_rank(self.store.get(k) or {}))
-            self.store.set_offers(file_key, lang, ranked[: self.s.alternatives])
-            key = ranked[0] if ranked else None
-        else:
-            lg = self.store.last_good(file_key, lang)
-            key = lg["key"] if lg else None
-        self._recheck_original(job.alias, lang, candidates, texts, refused, filename, oshash)
-        if key is None and candidates:
-            self._keep_original(file_key, lang, candidates, texts, refused, filename, oshash, rule=job.rule)
-        return key
+        route off, a file with no text or image subtitle track stores nothing, so turning the route on later syncs it.
+        Each step is a method of LanguageSync."""
+        return LanguageSync(self, job, index, file_key, lang, candidates, oshash, filename).run()
 
     @staticmethod
     def viewer_first(candidates):
@@ -2284,3 +2033,352 @@ class Worker(threading.Thread):
             with ThreadPoolExecutor(max_workers=FETCH_AT_ONCE, thread_name_prefix="subsync-fetch") as pool:
                 got = list(pool.map(lambda rc: self._fetch_one(job, lang, *rc), tries))
         return [g for g in got if g is not None]
+
+
+class LanguageSync:
+    """One language of a file judged (Worker._sync_language), each step a method. The state the steps share is the
+    language's: its tries, the downloads' texts and those the language check refused, the passes so far and the fits
+    made. Everything is read, stored, downloaded and published through the worker, as when these steps were its own."""
+
+    # a judged result's facts kept in its stored detail (_record)
+    RECORDED = ("route", "reference", "gate_original", "gate_synced", "gate_snapped", "refined", "unchanged", "magnet",
+                "shift", "model", "windows", "audio_s", "lines", "dialogue", "alass_error", "fast", "better",
+                "audio_track", "shift_fit", "cross", "aligned", "recentred_ms", "text", "text_original", "sections",
+                "section_checks", "close_call")
+
+    def __init__(self, worker, job, index, file_key, lang, candidates, oshash=None, filename=None):
+        self.w, self.s, self.store = worker, worker.s, worker.store
+        self.job, self.index, self.file_key, self.lang = job, index, file_key, lang
+        self.candidates, self.oshash, self.filename = candidates, oshash, filename
+        self.best_fit = self.s.best_fit
+        self.streamed = self.best_fit and self.s.fast_path   # each download judged as it ends (_stream)
+        self.tries = self._tries()
+        self.audio = worker.audio_allowed(job)
+        self.not_language = f"not {lang_name(lang)} text"
+        # the downloads' texts by candidate id, and the ids of those the language check refused
+        self.texts, self.refused = {}, set()
+        self.fingerprints = set()   # the subtitles judged so far, by fingerprint and sha256 (_duplicate)
+        self.passed = []            # best fit: the keys of passing results
+        self.best_rank = None       # best fit: the fit rank of the best pass published so far (_offer)
+        # D1: a subtitle of this language passed the main rule against its own language
+        self.settled = False
+        self.fitted, self.shas = 0, set()   # best fit: alass runs so far, and the subtitles fitted (each once)
+
+    def run(self):
+        """The language's result key to offer, if any (Worker._sync_language); then its original is checked again and,
+        when nothing passed, the one its "(original)" entry serves is kept."""
+        if self.streamed:
+            entries, done = self._stream()
+        else:
+            entries = self._downloads()
+            done = self.s.fast_path and not self.best_fit and self._originals_first(entries)
+        if not done:
+            self._fit_all(entries)
+        key = self._result()
+        w = self.w
+        w._recheck_original(self.job.alias, self.lang, self.candidates, self.texts, self.refused, self.filename,
+                            self.oshash)
+        if key is None and self.candidates:
+            w._keep_original(self.file_key, self.lang, self.candidates, self.texts, self.refused, self.filename,
+                             self.oshash, rule=self.job.rule)
+        return key
+
+    def _tries(self):
+        """The (rank, candidate) tried, in try order within the sources' limits: with best fit and the fast path the
+        originals of up to SUBSYNC_GATE_TRIES are checked (cheap) and alass runs on at most SUBSYNC_MAX_TRIES of them;
+        else up to SUBSYNC_MAX_TRIES."""
+        w, s = self.w, self.s
+        # the release's own track in the subtitle's language, whose line count says a subtitle was made from this
+        # release (choose.order); its timing is still judged against the title's original language
+        ref = pipeline.choose_reference(self.index, 0, self.lang, False, s.prefer_plain, s.fallback_reference,
+                                        by_original=False) if hasattr(self.index, "text_tracks") else None
+        ref_cues = len(ref["cues"]) if ref else None
+        first = w.viewer_first(self.candidates)
+        tries = w._within_limits(w._try_order(self.candidates, self.filename, self.oshash, ref_cues, first),
+                                 self.filename, self.oshash, ref_cues, first)
+        return tries[: max(s.max_tries, s.gate_tries) if self.streamed else s.max_tries]
+
+    # -- the downloads ---------------------------------------------------------------------------------------------
+    def _entry(self, rank, cand, raw):
+        """A download as the steps pass it on: its rank, candidate and bytes, their sha256, and the stored result of
+        those bytes that needs no new attempt ("got", Worker.fresh), if any."""
+        e = {"rank": rank, "cand": cand, "raw": raw, "sha": hashlib.sha256(raw).hexdigest()}
+        e["got"] = self._fresh(e)
+        return e
+
+    def _fresh(self, e):
+        """The download's stored result that needs no new attempt (Worker.fresh), if any."""
+        return self.w.fresh(result_key(self.file_key, self.lang, e["sha"]), self.job.rule)
+
+    def _downloads(self):
+        """The downloads when they aren't judged as each ends (_stream), those in another language left out
+        (_wrong_language): with the fast path every try at once (Worker._fetch_all), so the originals can be checked
+        first; else one at a time, all of them for best fit, and otherwise (as in v3) only as they are judged, so the
+        downloads stop at the first that passes (a generator)."""
+        job, lang = self.job, self.lang
+        if self.s.fast_path:
+            fetched = self.w._fetch_all(job, lang, self.tries)
+        else:
+            fetched = (f for f in (self.w._fetch_one(job, lang, rank, cand) for rank, cand in self.tries) if f)
+        entries = (e for e in (self._entry(*f) for f in fetched) if not self._wrong_language(e))
+        return list(entries) if self.s.fast_path or self.best_fit else entries
+
+    def _wrong_language(self, e):
+        """A download whose text isn't in this language is recorded as kept, and never judged, offered or
+        anchored on."""
+        lang = self.lang
+        e.setdefault("text", decode(e["raw"], lang))
+        m = langcheck.measure(e["text"], lang)
+        if langcheck.verdict(m, lang) != langcheck.FAIL:
+            self.texts[e["cand"]["id"]] = e["text"]
+            return False
+        self.refused.add(e["cand"]["id"])
+        got = e["got"]
+        if not (got and got["outcome"] == "keep_original" and got.get("reason") == self.not_language):
+            detail = {"rule": self.job.rule or self.s.rule_id, "release": (e["cand"].get("release") or "")[:120],
+                      "language": {"verdict": langcheck.FAIL, "words": m["words"], "script": m["script"],
+                                   "common": {c: v for c, v in m["common"].items() if v}}}
+            self.store.put(self.file_key, e["sha"], lang, e["rank"], "keep_original", self.not_language, None, detail,
+                           "ass" if is_ass(e["text"]) else "srt", None, e["cand"]["id"], offer=not self.best_fit)
+        log.info("sync %s %s rank %d: keep_original (%s)", self.job.label, lang, e["rank"], self.not_language)
+        return True
+
+    def _duplicate(self, e):
+        """The same subtitle (same words and timing; another encoding, line ending or credit line doesn't
+        count) already came from another source for this file and language: judged and listed once, as the first."""
+        if e["sha"] in self.fingerprints:
+            return True
+        try:
+            e["text"] = decode(e["raw"], self.lang)   # kept: the judging below reads it again
+            fp = fingerprint(e["text"])
+        except Exception:   # unreadable: judged on its own, as before
+            return False
+        if fp in self.fingerprints:   # R3-8: every text with no dialogue line has one fingerprint (subs.NO_DIALOGUE)
+            why = "no dialogue line" if fp == NO_DIALOGUE else "the same subtitle as one already judged"
+            log.info("sync %s %s rank %d: %s, left out", self.job.label, self.lang, e["rank"], why)
+            return True
+        self.fingerprints.update((fp, e["sha"]))
+        return False
+
+    # -- the passes ------------------------------------------------------------------------------------------------
+    def _stream(self):
+        """Best fit with the fast path: each download judged as it ends, its original and then its one shift, so a
+        waiting pick is served a pass within seconds (Kingdom of Heaven's first passes came 18 s after the request when
+        all 20 downloads per language were waited for); alass after (_fit_all), in try order, and for a picked language
+        on one of them as soon as FETCH_AT_ONCE are checked (_fit_early). Returns (the downloads in try order, whether
+        one passed)."""
+        position = {rank: i for i, (rank, _) in enumerate(self.tries)}
+        entries, checked, done, early = [], [], False, False
+        for f in self.w._fetch_stream(self.job, self.lang, self.tries):
+            e = self._entry(*f)
+            if self._duplicate(e) or self._wrong_language(e):
+                continue
+            entries.append(e)
+            if e["got"]:
+                done = self._listed_cached(e) or done
+            elif self._check_one(e):
+                done = True
+            elif e["checked"] and self.s.shift_path:
+                done = self._shift_one(e) or done
+            if e.get("checked"):
+                checked.append(e)
+            if not (done or early) and self.lang in self.job.picked and len(checked) >= FETCH_AT_ONCE:
+                early = True
+                self._fit_early(checked, position)
+        entries.sort(key=lambda x: position[x["rank"]])
+        return entries, done
+
+    def _originals_first(self, entries):
+        """The fast path in the viewer's order (not best fit): the originals first, stopping at the first that passes
+        (a stored pass counts), then each checked one's single shift. Whether one passed."""
+        for e in entries:
+            if e["got"]:
+                if self._listed_cached(e):
+                    return True
+                continue
+            if self._check_one(e):
+                return True
+        if not self.s.shift_path:
+            return False
+        return any(not e["got"] and e.get("checked") and self._shift_one(e) for e in entries)
+
+    def _fit_all(self, entries):
+        """alass (or the audio route) on the downloads in try order, stopping at the first that passes, unless best fit
+        judges them all; a file with no text or image subtitle track stops at the first: only the audio route can judge
+        it (_to_audio)."""
+        for e in entries:
+            if not self.streamed and self._duplicate(e):
+                continue
+            if e["got"]:
+                if not self.s.fast_path and self._listed_cached(e) and not self.best_fit:
+                    return
+                continue
+            if self.best_fit and not self._fitting(e):
+                continue
+            r, t0 = self._fit(e)
+            if not self.audio and r.get("waits_audio"):   # no text or image track: only the audio route can judge it
+                self._to_audio(e, entries)
+                return   # nothing stored
+            if r["outcome"] == "in_sync":
+                r = self._in_sync_result(e, r)
+            if self._record(e, r, t0) and not self.best_fit:
+                return
+
+    def _fitting(self, e):
+        """Best fit: one of the SUBSYNC_MAX_TRIES alass runs taken for the download; False when the same subtitle from
+        another source was fitted already, or none is left."""
+        if e["sha"] in self.shas or self.fitted >= self.s.max_tries:
+            return False
+        self.shas.add(e["sha"])
+        self.fitted += 1
+        return True
+
+    def _fit_early(self, checked, position):
+        """A picked language none of whose first checked downloads fits as it is or by
+        one shift: alass at once on the first of them in try order (an "as it is" measure can't see a subtitle
+        that is only offset), published if it passes. It counts toward SUBSYNC_MAX_TRIES and isn't fitted again."""
+        free = [x for x in checked if not x["got"] and x["sha"] not in self.shas]
+        e = min(free, key=lambda x: position[x["rank"]]) if free else None
+        if e is None or not self._fitting(e):
+            return
+        log.info("sync %s %s rank %d: picked, none of %d checked fits: alass now", self.job.label, self.lang, e["rank"],
+                 len(checked))
+        r, t0 = self._fit(e)
+        self._record(e, self._in_sync_result(e, r) if r["outcome"] == "in_sync" else r, t0)
+
+    def _to_audio(self, e, entries):
+        """A file with no text or image subtitle track: the language is left to the audio route (job.to_audio) and,
+        unless the audio route is off, the file waits for the viewer's pick (Worker._needs_pick), with the downloads
+        made so far kept for the anchored guesses when every try was downloaded before the fits."""
+        job, lang = self.job, self.lang
+        job.to_audio.add(lang)
+        if self.s.audio_choice != "off":   # a Usenet file too
+            # every try downloaded before the fits (not one at a time): kept for an anchored guess (_set_provisional)
+            if (self.best_fit or self.s.fast_path) and self.s.anchored_guess:
+                job.fetched[lang] = [(x["cand"], x.get("text") or decode(x["raw"], lang)) for x in entries]
+            if not self.w._needs_pick(job):   # a sync that starts at once logs its own line
+                log.info("sync %s %s rank %d: no text or image subtitle track; the audio route waits for "
+                         "the viewer to pick the Subsync entry", job.label, lang, e["rank"])
+        else:   # the instance's audio route is off, or this person's choice is
+            log.info("sync %s %s rank %d: no text or image subtitle track, and the audio route is off",
+                     job.label, lang, e["rank"])
+
+    # -- one download judged ---------------------------------------------------------------------------------------
+    def _listed_cached(self, e):
+        """A stored outcome (with an in-sync original further down listed now if it wasn't): passes?"""
+        got, lang = e["got"], self.lang
+        outcome = got["outcome"]
+        if outcome == "in_sync" and (e["rank"] > 0 or self.best_fit) and self.s.list_in_sync:
+            text = decode(e["raw"], lang)   # stored before the switch was on: list it now, unchanged
+            self.store.put(self.file_key, e["sha"], lang, e["rank"], "synced",
+                           f"in sync as it is (viewer's #{e['rank'] + 1}): listed unchanged", got.get("route"),
+                           dict(got.get("detail") or {}, unchanged=True,
+                                stacked=round(pipeline.stacked_share(parse(text)), 3)),
+                           "ass" if is_ass(text) else "srt", text, e["cand"]["id"], offer=not self.best_fit,
+                           original=text)
+            outcome = "synced"
+        ok = outcome in ("synced", "in_sync")
+        if ok and pipeline.settles(dict(got, reference=(got.get("detail") or {}).get("reference")), lang):
+            self.settled = True
+        if ok and self.best_fit and outcome == "synced":
+            self._offer(result_key(self.file_key, lang, e["sha"]))
+        return ok
+
+    def _check_one(self, e):
+        """The fast path for one download: its original against the release track (a gate, no alass). In sync?"""
+        s, lang = self.s, self.lang
+        t0 = time.time()
+        e.setdefault("text", decode(e["raw"], lang))
+        e["ext"] = "ass" if is_ass(e["text"]) else "srt"
+        chk = pipeline.check_original(self.index, e["text"], lang, splits=s.gate_splits, image_ref=s.image_ref,
+                                      prefer_plain=s.prefer_plain, snap_within=s.snap_within if s.snap else None,
+                                      better=s.better, fallback=s.fallback_reference, text_pairing=s.text_pairing)
+        e["checked"] = chk is not None
+        if chk is not None:   # for a pick's answer when nothing passes
+            self.w._note_measure(self.job.alias, lang, e["cand"]["id"],
+                                 (chk.get("gate_original") or {}).get("within200"))
+        if chk and chk["in_sync"]:
+            self._record(e, self._in_sync_result(e, dict(chk, fast=True)), t0)
+            e["got"] = self._fresh(e)
+            return True
+        return False
+
+    def _shift_one(self, e):
+        """The shift path for one download whose original was judged and not in sync: one steady offset, in
+        milliseconds. A pass by the main rule against its own language (no alass needed)?"""
+        s = self.s
+        t0 = time.time()
+        r = pipeline.shift_sync(self.index, e["text"], self.lang, snap=s.snap, snap_within=s.snap_within,
+                                splits=s.gate_splits, image_ref=s.image_ref, better=s.better,
+                                prefer_plain=s.prefer_plain, fallback=s.fallback_reference, text_pairing=s.text_pairing)
+        if not (r and r["outcome"] == "synced"):
+            return False
+        self._record(e, dict(r, fast=True), t0)
+        e["got"] = self._fresh(e)
+        return self.w.passed_as(r, r["reason"]) == "main"
+
+    def _fit(self, e):
+        """alass (or the audio route) on one download: (result, start time)."""
+        s, w = self.s, self.w
+        t0 = time.time()
+        e.setdefault("text", decode(e["raw"], self.lang))
+        e.setdefault("ext", "ass" if is_ass(e["text"]) else "srt")
+        return pipeline.sync_subtitle(self.index, e["text"], self.lang, alass=s.alass, audio=self.audio,
+                                      audio_lead=s.audio_lead, vad=w.vad() if self.audio else None,
+                                      ffmpeg=s.ffmpeg, snap=s.snap, snap_within=s.snap_within,
+                                      splits=s.gate_splits, image_ref=s.image_ref,
+                                      audio_lock=w.audio_lock, better=s.better,
+                                      audio_better=s.audio_better, audio_budget=s.audio_budget,
+                                      prefer_plain=s.prefer_plain, fallback=s.fallback_reference,
+                                      text_pairing=s.text_pairing, unsettled=not self.settled,
+                                      sectioned=s.sections, audio_extra=s.audio_extra), t0
+
+    def _in_sync_result(self, e, base):
+        """An original in sync as it is: listed (when listing is on) as its magnet copy, else unchanged, with the
+        reason of how it was judged (the audio route's own)."""
+        r = dict(base, outcome="in_sync", reason=base["reason"] if base.get("route") == "audio"
+                 else "original passes against the release track")
+        if not ((e["rank"] > 0 or self.best_fit) and self.s.list_in_sync):
+            return {k: v for k, v in r.items() if k not in ("body", "magnet")}
+        listed = f"in sync as it is (viewer's #{e['rank'] + 1})"
+        if r.get("cross"):
+            listed += ", aligned to another language's track"
+        if r.get("body") is not None:
+            return dict(r, outcome="synced", reason=f"{listed}: lines snapped to the release's own")
+        return dict(r, outcome="synced", reason=f"{listed}: listed unchanged", body=e["text"], unchanged=True)
+
+    def _record(self, e, r, t0):
+        """A judged download's result stored (offered at once unless best fit offers it) and logged. Passes?"""
+        lang = self.lang
+        detail = {k: r[k] for k in self.RECORDED if k in r}
+        detail["seconds"] = round(time.time() - t0, 2)
+        detail["rule"] = self.job.rule or self.s.rule_id
+        detail["release"] = (e["cand"].get("release") or "")[:120]
+        detail["stacked"] = round(pipeline.stacked_share(parse(e.get("text") or decode(e["raw"], lang))), 3)
+        key = self.store.put(self.file_key, e["sha"], lang, e["rank"], r["outcome"], r.get("reason"), r.get("route"),
+                             detail, e["ext"], r.get("body"), e["cand"]["id"], offer=not self.best_fit,
+                             original=e.get("text") or decode(e["raw"], lang))
+        log.info("sync %s %s rank %d: %s (%s)", self.job.label, lang, e["rank"], r["outcome"], r.get("reason"))
+        if pipeline.settles(r, lang):
+            self.settled = True
+        if self.best_fit and r["outcome"] == "synced":
+            self._offer(key)
+        return r["outcome"] in ("synced", "in_sync")
+
+    def _offer(self, key):
+        """Best fit: a passing result; a pick waiting for this language gets the best one so far."""
+        self.passed.append(key)
+        rank = self.w.fit_rank(self.store.get(key) or {})
+        if self.best_rank is None or rank < self.best_rank:
+            self.best_rank = rank
+            self.w._publish(self.job.alias, self.lang, key)
+
+    def _result(self):
+        """The key to offer: with best fit, every candidate judged, the best fit first, up to SUBSYNC_MAIN_ALTERNATIVES
+        offered; else the last good result stored."""
+        if self.best_fit:
+            ranked = sorted(dict.fromkeys(self.passed), key=lambda k: self.w.fit_rank(self.store.get(k) or {}))
+            self.store.set_offers(self.file_key, self.lang, ranked[: self.s.alternatives])
+            return ranked[0] if ranked else None
+        lg = self.store.last_good(self.file_key, self.lang)
+        return lg["key"] if lg else None

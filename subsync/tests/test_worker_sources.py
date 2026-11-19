@@ -1,6 +1,7 @@
 """in the worker: a source the config already has is asked once; the same subtitle from two places counts
 once; a site with a tight limit gives a file only a few subtitles, and near its limit only the likeliest; downloads carry
 a source's key in a header and are counted. No network."""
+import hashlib
 import json
 import os
 import shutil
@@ -15,9 +16,9 @@ from helpers import (closed_after, dialogue_srt, FakeDownloads, FakeIndex, local
 from subsync import choose, pipeline, srclimits  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync.sourcestate import Ledger  # noqa: E402
-from subsync.store import Store  # noqa: E402
+from subsync.store import result_key, Store  # noqa: E402
 from subsync.subs import decode, fingerprint  # noqa: E402
-from subsync.worker import Job, Worker  # noqa: E402
+from subsync.worker import Job, LanguageSync, Worker  # noqa: E402
 
 RU = "1\n00:00:01,000 --> 00:00:02,000\nПривет\n\n2\n00:00:03,500 --> 00:00:04,000\nКак дела?\n"
 
@@ -402,6 +403,103 @@ class LanguageCheckWorkerTest(unittest.TestCase):
         w._set_originals(job.alias, per_lang["eng"] + per_lang["rus"], "b.mp4", None)
         w._await_pick(job, per_lang, "b.mp4", None)
         self.assertEqual(w.known_originals(job.alias)["rus"]["id"], "os-gone")
+
+
+class LanguageSyncStepsTest(unittest.TestCase):
+    """A language's judging, step by step (LanguageSync, Worker._sync_language's closures before): the same
+    subtitle judged once, a stored result reused (an in-sync original further down listed now, unchanged; a stored pass
+    ending the search before anything else is downloaded), best fit's alass places, and a waiting pick served only a
+    better pass. The pipeline is a stub; downloads are fakes: no network."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.texts = {f"http://subs.test/{cid}.srt": dialogue_srt("eng", start=start)
+                      for cid, start in (("os-a", 30.0), ("os-b", 31.0), ("os-c", 32.0))}
+        self.downloads = FakeDownloads(self.texts)
+        for patcher in (self.downloads.patch(), local_network_only()):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
+
+    def steps(self, cands=(), **env):
+        s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_BEST_FIT": "on",
+                           "SUBSYNC_FAST_PATH": "off", "SUBSYNC_LIST_IN_SYNC": "on", "SUBSYNC_MAX_TRIES": "2",
+                           "SUBSYNC_PARALLEL_LANGUAGES": "off", "SUBSYNC_IMAGE_REF": "off", "SUBSYNC_EXTRA_SOURCES": "",
+                           "SUBSYNC_LANGUAGES": "eng"}, **env))
+        self.w = Worker(s, self.store, FakeAios(), None)
+        self.published = []
+        self.w._publish = lambda alias, lang, key, final=False: self.published.append(key)
+        return LanguageSync(self.w, Job("movie", "tt1"), FakeIndex(), "f-1", "eng", list(cands), "abcd", "Movie.mkv")
+
+    @staticmethod
+    def cand(cid):
+        return {"id": cid, "url": f"http://subs.test/{cid}.srt", "lang": "eng", "release": ""}
+
+    def raw(self, cid):
+        return self.texts[f"http://subs.test/{cid}.srt"].encode()
+
+    def stored(self, cid, rank, outcome, reason, within=0.9):
+        """A result of the subtitle's bytes stored under the current rule; its key."""
+        sha = hashlib.sha256(self.raw(cid)).hexdigest()
+        return self.store.put("f-1", sha, "eng", rank, outcome, reason, "cues",
+                              {"rule": self.w.s.rule_id, "gate_synced": {"within200": within, "median_ms": 40},
+                               "gate_original": {"within200": within, "median_ms": 40}},
+                              "srt", self.texts[f"http://subs.test/{cid}.srt"] if outcome == "synced" else None, cid)
+
+    def test_the_same_subtitle_from_another_source_is_judged_once(self):
+        sync = self.steps()
+        self.assertFalse(sync._duplicate(sync._entry(0, self.cand("os-a"), self.raw("os-a"))))
+        self.assertTrue(sync._duplicate(sync._entry(1, self.cand("os-a2"), self.raw("os-a"))))      # the same bytes
+        other_ending = self.raw("os-a").replace(b"\n", b"\r\n")                                   # the same subtitle
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            self.assertTrue(sync._duplicate(sync._entry(2, self.cand("os-a3"), other_ending)))
+        self.assertEqual(logs.output, ["INFO:subsync.worker:sync movie/tt1 eng rank 2: the same subtitle as one "
+                                       "already judged, left out"])
+        self.assertFalse(sync._duplicate(sync._entry(3, self.cand("os-b"), self.raw("os-b"))))
+
+    def test_a_stored_in_sync_original_further_down_is_listed_now_unchanged_and_offered(self):
+        sync = self.steps()
+        self.stored("os-b", 1, "in_sync", "original passes against the release track")
+        e = sync._entry(1, self.cand("os-b"), self.raw("os-b"))
+        self.assertEqual(e["got"]["outcome"], "in_sync")
+        self.assertTrue(sync._listed_cached(e))
+        row = self.store.get(e["got"]["key"])
+        self.assertEqual((row["outcome"], row["reason"]),
+                         ("synced", "in sync as it is (viewer's #2): listed unchanged"))
+        self.assertTrue(row["detail"]["unchanged"])
+        self.assertEqual((sync.passed, self.published), ([row["key"]], [row["key"]]))   # best fit: offered and served
+        kept = self.stored("os-c", 2, "keep_original", "below the bar")   # not tried again before its retry
+        e = sync._entry(2, self.cand("os-c"), self.raw("os-c"))
+        self.assertEqual(e["got"]["key"], kept)
+        self.assertFalse(sync._listed_cached(e))
+        self.assertEqual((self.store.get(kept)["outcome"], sync.passed), ("keep_original", [row["key"]]))
+
+    def test_a_stored_pass_ends_the_search_before_anything_else_is_downloaded(self):
+        # neither best fit nor the fast path: one download at a time, stopping at the first that passes
+        sync = self.steps([self.cand("os-a"), self.cand("os-b")], SUBSYNC_BEST_FIT="off")
+        key = self.stored("os-a", 0, "synced", "passes against the release track (snapped)")
+        with mock.patch.object(pipeline, "sync_subtitle", lambda *a, **k: self.fail("nothing is fitted")):
+            self.assertEqual(sync.run(), key)
+        self.assertEqual(self.downloads.asked, ["http://subs.test/os-a.srt"])
+
+    def test_best_fit_fits_each_subtitle_once_and_at_most_max_tries(self):
+        sync = self.steps()
+        entries = [sync._entry(r, self.cand(cid), self.raw(raw)) for r, cid, raw in
+                   ((0, "os-a", "os-a"), (1, "os-a2", "os-a"), (2, "os-b", "os-b"), (3, "os-c", "os-c"))]
+        self.assertEqual([sync._fitting(e) for e in entries], [True, False, True, False])
+        self.assertEqual(sync.fitted, 2)
+
+    def test_a_waiting_pick_is_served_only_a_better_pass(self):
+        sync = self.steps(SUBSYNC_MAIN_ALTERNATIVES="2")
+        keys = [self.stored(cid, r, "synced", "re-timed", within) for r, (cid, within) in
+                enumerate((("os-a", 0.6), ("os-b", 0.9), ("os-c", 0.7)))]
+        for key in keys:
+            sync._offer(key)
+        self.assertEqual(sync.passed, keys)
+        self.assertEqual(self.published, keys[:2])
+        self.assertEqual(sync._result(), keys[1])          # every one judged: the best fit first, two offered
+        self.assertEqual([r["candidate_id"] for r in self.store.offers("f-1", ["eng"], {"eng": 3})], ["os-b", "os-c"])
 
 
 class SettledLanguageTest(unittest.TestCase):

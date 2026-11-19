@@ -574,6 +574,63 @@ class WorkerTest(TempDirTest):
         self.assertEqual([c["id"] for c in w._candidates(Job("movie", "tt1", HINTS), HINTS)], ["s"])
         self.assertEqual(u.calls, ["subtitles"])
 
+    def test_the_worker_finds_through_one_finder_with_both_or_neither(self):
+        # The Usenet config and its gate come together in the worker's finder, or Usenet is off
+        u = FakeUsenet([row()])
+        w = self.make(u)
+        self.assertIs(w.usenet, u)
+        self.assertIs(w.usenet_finder.config, u)
+        for usenet, gate in ((u, None), (None, worker_mod.UsenetGate(self.store, 10, Counts()))):
+            with self.subTest(usenet=usenet, gate=gate):
+                alone = Worker(w.s, self.store, FakeDebrid(), worker_mod.Safety(), usenet=usenet, usenet_gate=gate)
+                self.assertEqual((alone.usenet, alone.usenet_finder), (None, None))
+
+
+class FinderTest(TempDirTest):
+    """The Usenet finder alone: a found row is kept USENET_ROW_KEPT_S, with the address its first read
+    resolved, for a retry and the audio job that follows; a file listed once isn't listed again meanwhile."""
+
+    def finder(self, listed):
+        self.store = closed_after(self, Store(self.dir))
+        self.counts, self.usenet = Counts(), FakeUsenet(listed)
+        return worker_mod.UsenetFinder(self.usenet, worker_mod.UsenetGate(self.store, 10, self.counts, who="w"))
+
+    def test_a_found_row_is_kept_with_its_address_for_the_audio_job(self):
+        finder, job = self.finder([row()]), Job("movie", "tt1", HINTS)
+        found = finder.find(job, HINTS)
+        self.assertEqual(found, row())
+        self.assertIs(finder.find(Job("movie", "tt1", HINTS), HINTS), found)      # a retry: nothing listed again
+        self.assertEqual((self.usenet.listings, self.counts.n), (1, 1))
+        finder.keep_address(job.alias, dict(found), "http://127.0.0.1:1/other")   # another row: nothing kept
+        finder.keep_address(job.alias, found, None)                               # no address: nothing kept
+        self.assertIsNone(finder.rows[job.alias][2])
+        finder.keep_address(job.alias, found, "http://127.0.0.1:1/file")
+        audio = Job("movie", "tt1", HINTS)
+        self.assertIs(finder.audio_row(audio), found)
+        self.assertEqual(audio.kept, (found, "http://127.0.0.1:1/file"))
+        when, kept_row, address = finder.rows[job.alias]
+        finder.rows[job.alias] = (when - worker_mod.USENET_ROW_KEPT_S, kept_row, address)   # the row's hour is over
+        self.assertIs(finder.audio_row(audio), found)                             # the job keeps its own for its life
+        self.assertIsNone(finder.audio_row(Job("movie", "tt1", HINTS)))
+        self.assertEqual(finder.find(Job("movie", "tt1", HINTS), HINTS), row())   # listed again, counted
+        self.assertEqual((self.usenet.listings, self.counts.n), (2, 2))
+
+    def test_a_file_not_listed_is_missed_and_a_failed_read_stops_usenet(self):
+        finder, job = self.finder([row(name="other.mkv")]), Job("movie", "tt1", HINTS)
+        self.assertIsNone(finder.find(job, HINTS))
+        self.assertEqual(finder.rows, {})
+        self.assertIsNone(finder.find(job, HINTS))                                # not looked up again for a day
+        self.assertEqual(self.usenet.listings, 1)
+        other = Job("movie", "tt2", dict(HINTS, filename="b.mkv"))
+        finder.missed(other.alias)
+        self.assertTrue(self.store.usenet_recently_missed(finder.gate.key_of("w", other.alias),
+                                                          worker_mod.USENET_UNLISTED_S))
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            finder.stop("the first read of a Usenet file failed")
+        self.assertTrue(self.counts.stopped_)
+        self.assertEqual(logs.output, ["INFO:subsync.worker:Usenet stopped until 00:00 UTC: the first read of a Usenet "
+                                       "file failed"])
+
 
 class UsenetJobTest(TempDirTest):
     """A Usenet file's first pass: the index cap, and a failed first read stops Usenet for the day; with no track it
