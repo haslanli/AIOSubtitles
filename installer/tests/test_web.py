@@ -20,6 +20,7 @@ from installer import engine, screens, tests, update, web
 from installer.tests import samples
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
+from installer.tests.test_screens import terminal_only_shown
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
 from subsync import explain, ui
 
@@ -837,10 +838,10 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertIn(update.ABOUT, text)
         self.assertNotIn('action="rollback"', text)                                     # no earlier version yet
         self.assertIn(f'Password of your config {UUID[:8]}…', text)
-        _, _, text = b.post('remove', {'AIOS_CONFIG_PASSWORD': 'wrong', 'CONFIRM': 'yes'})
+        _, _, text = b.post('remove', {'AIOS_CONFIG_PASSWORD': 'wrong', 'REMOVE': 'yes'})
         self.assertIn("don't match", text)
         self.assertTrue((self.state / 'settings.json').exists())
-        _, _, text = b.post('remove', {'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes', 'REMOVE_OPENSUBTITLES': 'yes'})
+        _, _, text = b.post('remove', {'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes', 'REMOVE_OPENSUBTITLES': 'yes'})
         self.assertIn('These stay, in case you set it up again', text)
         self.assertFalse((self.state / 'settings.json').exists())
         self.assertFalse(any(PASSWORD in page for page in b.pages))
@@ -1134,6 +1135,12 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertIn('<h2 id="rm-h">Removing AIOSubtitles</h2>', text)
         self.assertNotIn('subsync status', text)
         self.assertEqual(text.count(screens.REMOVE_HOST_TEXT), 1)
+        form = text.split('action="remove">')[1].split('</form>')[0]
+        self.assertRegex(form, r'<input type="checkbox" id="confirm" name="REMOVE" value="yes"')
+        self.assertNotIn('CONFIRM', form)
+        _, _, text = b.post('remove', {'CONFIRM': 'yes'})               # the answer to "Save these changes?" only
+        self.assertIn('Tick "Delete everyone\'s records and stored copies" to remove AIOSubtitles.', text)
+        self.assertTrue((self.state / 'subsync.env').exists())
         _, _, text = b.post('remove', {})
         self.assertIn('Tick "Delete everyone\'s records and stored copies" to remove AIOSubtitles.', text)
         self.assertNotIn('Its password', text)
@@ -1141,11 +1148,26 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertIn('aria-describedby="confirm-error confirm-help" aria-invalid="true"', box)
         self.assertIn('<p class="field-error" id="confirm-error">', b.pages[-1])
         self.assertTrue((self.state / 'subsync.env').exists())                          # nothing removed
-        _, _, text = b.post('remove', {'CONFIRM': 'yes'})
+        _, _, text = b.post('remove', {'REMOVE': 'yes'})
         self.assertIn('<h1>Removing AIOSubtitles</h1>', text)
         self.assertIn(f'this folder, {self.state.parent}</li>', text)                   # no database copies here
         self.assertNotIn('--restore', text)
         self.assertFalse((self.state / 'subsync.env').exists())
+
+    def test_no_removal_page_shows_the_terminals_remove_or_restore_text(self):
+        # REMOVE's text names ./setup --uninstall; the box sends REMOVE under its own label, never that text
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        b = Browser(web.App(port=8812))
+        b.get('')                                                                       # the page with the box
+        b.post('remove', {})                                                            # not ticked
+        b.post('remove', {'CONFIRM': 'yes'})                                            # not ticked either
+        self.assertTrue((self.state / 'subsync.env').exists())
+        _, _, text = b.post('remove', {'REMOVE': 'yes'})                                # removed
+        self.assertIn('<h1>Removing AIOSubtitles</h1>', text)
+        self.assertFalse((self.state / 'subsync.env').exists())
+        self.assertEqual(len(b.pages), 4)
+        self.assertEqual([found for page in b.pages for found in terminal_only_shown(page)], [])
 
 
 class OnBridge(BackgroundWork, FlowFixture):
@@ -1197,7 +1219,7 @@ class Removing(BackgroundWork, FlowFixture):
         self.b = Browser(web.App(port=8811))
 
     def remove(self, **form):
-        return self.b.post('remove', dict({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, **form))[2]
+        return self.b.post('remove', dict({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}, **form))[2]
 
     def test_the_text_names_the_configs_this_install_has(self):
         # it said "(1 entry)" and "subsync's own config" also when the Usenet config goes too
@@ -1225,6 +1247,37 @@ class Removing(BackgroundWork, FlowFixture):
         self.assertFalse((self.state / 'settings.json').exists())
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
         self.assertFalse(any('adminpw' in page or PASSWORD in page for page in self.b.pages))
+
+    def test_the_form_sends_remove_and_confirm_alone_removes_nothing(self):
+        # The page's Remove subsync sent CONFIRM=yes, the answer to "Save these changes?" too; it sends REMOVE
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        page = self.b.get('')[2]
+        form = page.split('action="remove">')[1].split('</form>')[0]
+        self.assertIn('<input type="hidden" name="REMOVE" value="yes">', form)
+        self.assertNotIn('CONFIRM', form)
+        text = self.b.post('remove', {'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'})[2]
+        self.assertIn('Nothing was changed.', text)
+        self.assertNotIn('These stay, in case you set it up again', text)
+        self.assertTrue((self.state / 'settings.json').exists())
+        self.assertNotEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
+        text = self.remove(REMOVE_OPENSUBTITLES='yes')
+        self.assertIn('These stay, in case you set it up again', text)
+        self.assertFalse((self.state / 'settings.json').exists())
+        self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
+
+    def test_no_removal_page_shows_the_terminals_remove_or_restore_text(self):
+        # REMOVE's text names ./setup --uninstall; the form sends REMOVE hidden, never showing that text
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.b.get('')                                                                  # the page with the form
+        text = self.b.post('remove', {'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'})[2]
+        self.assertIn('Nothing was changed.', text)
+        self.b.post('remove', {'REMOVE': 'yes'})                                        # no password: asked for it
+        self.assertTrue((self.state / 'settings.json').exists())
+        text = self.remove(REMOVE_OPENSUBTITLES='yes')                                  # removed
+        self.assertIn('These stay, in case you set it up again', text)
+        self.assertFalse((self.state / 'settings.json').exists())
+        self.assertEqual(len(self.b.pages), 4)
+        self.assertEqual([found for page in self.b.pages for found in terminal_only_shown(page)], [])
 
     def test_a_failed_container_removal_keeps_setups_files_and_says_what_docker_said(self):
         # it said "Removed the subsync container" and deleted setup's files while the container kept running

@@ -1,6 +1,7 @@
 """Every ./setup question has its one explanation, and the README's settings section and docs/answers.example are the
 texts of subsync/subsync/explain.py, written by installer/docs.py."""
 import ast
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,18 @@ from subsync import explain
 
 REPO = Path(__file__).resolve().parent.parent.parent
 ASKS = {'text', 'yesno', 'choose'}
+# The only questions whose texts may name a command, each its own, once: REMOVE's and RESTORE's texts are asked
+# only in the terminal, never shown on a setup page (test_screens.TerminalOnly, test_web's removal pages)
+OWN_COMMAND = {'REMOVE': './setup --uninstall', 'RESTORE': './setup --restore FILE'}
+
+
+def terminal_words(key, text):
+    """Each ./setup a question's text names besides "./setup again": a question's text is also its field's explanation
+    on the setup page. REMOVE's and RESTORE's may name their own command once: that one occurrence is taken out
+    first, and only where it is the whole command (not the start of a longer one); the same check then applies."""
+    if key in OWN_COMMAND:
+        text = re.sub(re.escape(OWN_COMMAND[key]) + r'(?![\w-])', '', text, count=1)
+    return re.findall(r'\./setup(?! again)', text)
 
 
 def wizard_tree():
@@ -51,11 +64,35 @@ class QuestionTexts(unittest.TestCase):
                          "file, keep that file private.")
 
     def test_the_confirm_text(self):
+        # it said removing and restoring "also ask": they asked CONFIRM itself
         self.assertEqual(explain.QUESTIONS['CONFIRM'][1],
                          "Saves the changes shown here: subsync added to your config (after a backup copy) and "
                          "subsync's own config created or updated. Until then nothing is changed: go back to change an "
                          "answer, or leave and run ./setup again any time. Removing subsync and restoring a saved copy "
-                         "also ask before they change anything.")
+                         "ask their own questions before they change anything.")
+        self.assertEqual(explain.QUESTIONS['CONFIRM'][0], 'yes')
+
+    def test_removing_and_restoring_ask_their_own_yes(self):
+        # CONFIRM answered "Save these changes?", "Remove subsync?" and the restore question alike, and the
+        # example's CONFIRM=yes removed subsync; each now has its own key, its approved text and the example "no"
+        self.assertEqual(explain.QUESTIONS['REMOVE'],
+                         ('no', "Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your "
+                                "config, deletes its own config and removes its container with its stored copies; on a "
+                                "public instance, everyone's records go too. No changes nothing. It is kept apart from "
+                                "CONFIRM, so an answers file made for installing never removes anything."))
+        self.assertEqual(explain.QUESTIONS['RESTORE'],
+                         ('no', "Asked by ./setup --restore FILE before the saved copy is put back into your config. "
+                                "Yes replaces your config with that copy, after saving the current one. No changes "
+                                "nothing."))
+        engine_source = (REPO / 'installer' / 'engine.py').read_text()
+        wizard_source = (REPO / 'installer' / 'wizard.py').read_text()
+        self.assertEqual(engine_source.count("self.ask.yesno('CONFIRM', "), 1)          # Save these changes? only
+        self.assertIn("self.ask.yesno('CONFIRM', 'Save these changes?', True)", engine_source)
+        self.assertIn("self.ask.yesno('REMOVE', 'Remove subsync?', False)", engine_source)
+        self.assertIn("self.ask.yesno('REMOVE', screens.DELETE_RECORDS, False)", engine_source)
+        self.assertNotIn("'CONFIRM'", wizard_source)
+        self.assertIn("e.ask.yesno('RESTORE', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', "
+                      "False)", wizard_source)
 
     def test_the_languages_text_starts_with_the_slots(self):
         text = explain.QUESTIONS['LANGUAGES'][1]
@@ -76,11 +113,34 @@ class QuestionTexts(unittest.TestCase):
         self.assertIn("(setup shows it)", explain.QUESTIONS['PUBLIC_ADDRESS'][1])
 
     def test_no_question_speaks_of_the_terminal(self):
-        import re
         for key, (_, text) in explain.QUESTIONS.items():
             with self.subTest(key=key):
                 self.assertNotIn('Enter with nothing typed', text)
-                self.assertEqual(re.findall(r'\./setup(?! again)', text), [])
+                self.assertEqual(terminal_words(key, text), [])
+
+    def test_only_remove_and_restore_may_name_a_command_their_own_once(self):
+        # The exemption is exactly "./setup --uninstall" in REMOVE and "./setup --restore FILE" in RESTORE
+        remove, restore = explain.QUESTIONS['REMOVE'][1], explain.QUESTIONS['RESTORE'][1]
+        self.assertEqual(terminal_words('REMOVE', remove), [])
+        self.assertEqual(terminal_words('RESTORE', restore), [])
+        refused = [
+            ('REMOVE', remove + ' Then run ./setup --uninstall.'),                         # its own command twice
+            ('REMOVE', remove + ' ./setup --restore FILE puts a copy back.'),               # the other's command
+            ('REMOVE', remove + ' ./setup --status shows it.'),                             # any other command
+            ('REMOVE', remove.replace('./setup --uninstall', './setup --uninstall-finish')),    # a longer command
+            ('REMOVE', remove.replace('./setup --uninstall', './setup')),
+            ('RESTORE', restore + ' ./setup --restore FILE again.'),
+            ('RESTORE', restore + ' ./setup --uninstall takes it out.'),
+            ('RESTORE', restore.replace('./setup --restore FILE', './setup --restore FILES')),
+            ('RESTORE', restore.replace('./setup --restore FILE', './setup --restore')),
+            ('CONFIRM', explain.QUESTIONS['CONFIRM'][1] + ' ./setup --uninstall removes it.'),
+            ('REMOVE_OPENSUBTITLES', explain.QUESTIONS['REMOVE_OPENSUBTITLES'][1] + ' Asked by ./setup --uninstall.'),
+            ('AIOS_CONFIG_PASSWORD', explain.QUESTIONS['AIOS_CONFIG_PASSWORD'][1] + ' ./setup --restore FILE asks it.')]
+        for key, text in refused:
+            with self.subTest(key=key, text=text):
+                self.assertNotEqual(terminal_words(key, text), [])
+        for key in ('CONFIRM', 'REMOVE', 'RESTORE'):                # "./setup again" stays allowed in every question
+            self.assertEqual(terminal_words(key, 'Run ./setup again any time.'), [])
 
 
 class Documents(unittest.TestCase):
@@ -159,14 +219,17 @@ class Documents(unittest.TestCase):
                 comment = [] if not line else comment
         return parts
 
-    def test_the_answers_example_has_its_three_parts_each_key_with_its_explanation(self):
-        # one list mixed both routes and removal, and left out the keys asked under a setting's name
+    def test_the_answers_example_has_its_four_parts_each_key_with_its_explanation(self):
+        # one list mixed both routes and removal, and left out the keys asked under a setting's name;
+        # removing asked CONFIRM, and no part said when restoring asks its keys (the headings)
         parts = self.example_parts()
         self.assertEqual([heading for heading, _ in parts], [
             None, 'Install it for yourself (ROUTE=yourself)',
             'Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.',
-            'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD and CONFIRM above are asked here '
-            'too; on a public instance only CONFIRM.'])
+            'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too; on a '
+            'public instance only REMOVE.',
+            'Restoring a saved copy (./setup --restore FILE --answers FILE). AIOS_CONFIG_PASSWORD above is asked here '
+            'too.'])
         keys = [[key for key, _, _ in lines] for _, lines in parts]
         self.assertEqual(keys[0], ['ROUTE'])
         self.assertEqual(keys[1], ['AIOS_CONTAINER', 'AIOS_URL', 'AIOS_CONFIG_ID', 'AIOS_CONFIG_PASSWORD', 'LANGUAGES',
@@ -178,7 +241,9 @@ class Documents(unittest.TestCase):
                                        'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_TMDB_PERSONAL', 'SUBSYNC_USENET',
                                        'SUBSYNC_AUDIO_ROUTE'])
         self.assertEqual(keys[2][7:], [lim.setting for lim in limits.hosting(usenet=True, audio=True)])
-        self.assertEqual(keys[3], ['REMOVE_OPENSUBTITLES'])
+        self.assertEqual(keys[3], ['REMOVE', 'REMOVE_OPENSUBTITLES'])
+        self.assertEqual(keys[4], ['RESTORE'])
+        self.assertEqual(len(keys), 5)
         for _, lines in parts:
             for key, text, value in lines:
                 with self.subTest(key=key):

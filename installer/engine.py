@@ -1583,7 +1583,7 @@ class Engine:
             if self.ask.yesno('REMOVE_OPENSUBTITLES', screens.LABELS['REMOVE_OPENSUBTITLES'], True):
                 new['presets'] = [p for p in new['presets'] if p.get('instanceId') != added]
                 removed += 1
-        if not self.ask.yesno('CONFIRM', 'Remove subsync?', False):
+        if not self.ask.yesno('REMOVE', 'Remove subsync?', False):       # its own yes, never CONFIRM's
             stop('Nothing was changed.')
         if (STATE / 'compose.yaml').exists():
             guard(s.get('install_id'), unlabelled_own(s))
@@ -1619,9 +1619,9 @@ class Engine:
         s = self.prev
         if not s:
             stop('subsync is not set up here.')
-        if not self.ask.yesno('CONFIRM', screens.DELETE_RECORDS, False):
+        if not self.ask.yesno('REMOVE', screens.DELETE_RECORDS, False):     # its own yes, never CONFIRM's
             if self.page:
-                raise Problem('CONFIRM', screens.TICK_TO_REMOVE)
+                raise Problem('REMOVE', screens.TICK_TO_REMOVE)
             stop('Nothing was changed.')
         if (STATE / 'compose.yaml').exists():
             guard(s.get('install_id'), unlabelled_own(s))

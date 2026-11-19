@@ -508,8 +508,8 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
                      f'<form class="controls" method="post" action="answers"><div class="actions">'
                      f'{ui.button("Change your answers", "secondary", type="submit")}</div></form>')
     if route == 'host':
-        error = _error(problem, 'CONFIRM')
-        box = ui.choice('confirm', DELETE_RECORDS, '', name='CONFIRM', value='yes',
+        error = _error(problem, 'REMOVE')
+        box = ui.choice('confirm', DELETE_RECORDS, '', name='REMOVE', value='yes',
                         error_id='confirm-error' if error else None)
         controls = (ui.choices(box) + (f'<p class="field-error" id="confirm-error">{e(error)}</p>' if error else '')
                     + f'<div class="actions">{ui.button(REMOVE_HOST, "danger", type="submit")}</div>')
@@ -522,7 +522,7 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
                          + _input('AIOS_PASSWORD', LABELS['AIOS_PASSWORD'], '', problem, kind='password', reveal=True))
         if offer_opensubtitles:
             controls += ui.choices(_choice('REMOVE_OPENSUBTITLES', LABELS['REMOVE_OPENSUBTITLES'], True))
-        controls += ('<input type="hidden" name="CONFIRM" value="yes">'
+        controls += ('<input type="hidden" name="REMOVE" value="yes">'
                      f'<div class="actions">{ui.button("Remove subsync", "danger", type="submit")}</div>')
         about = removing or remove_text({})
     remove = ui.row('rm-h', REMOVING[route], f'<p class="help">{e(about)}</p>',

@@ -51,6 +51,25 @@ def approved():
     return texts
 
 
+# REMOVE's and RESTORE's texts name their own commands (./setup --uninstall, ./setup --restore FILE), so they are
+# the terminal's only: the page's Remove forms send REMOVE without showing its text, and --restore has no page
+TERMINAL_ONLY = ('REMOVE', 'RESTORE')
+
+
+def terminal_only_shown(html):
+    """Each of REMOVE's and RESTORE's texts, and each sentence of them, that this page shows: in its words (across
+    tags) or in an attribute, its character references read."""
+    words = ' '.join(htmllib.unescape(re.sub(r'<[^>]*>', ' ', html)).split())
+    source = ' '.join(htmllib.unescape(html).split())
+    found = []
+    for key in TERMINAL_ONLY:
+        text = explain.QUESTIONS[key][1]
+        for part in [text] + re.split(r'(?<=\.)\s+', text):
+            if part in words or part in source:
+                found.append(f'{key}: {part}')
+    return found
+
+
 class Words(unittest.TestCase):
     def test_every_text_is_an_approved_text(self):
         corpus = approved()
@@ -357,7 +376,7 @@ class Rules(unittest.TestCase):
             'done': screens.done('yourself', HOSTILE, [HOSTILE, HOSTILE], [('code', HOSTILE), ('p', HOSTILE)]),
             'after-setup': screens.after_setup('yourself', rows, [(HOSTILE, HOSTILE)], HOSTILE, None, config=HOSTILE),
             'after-setup-host': screens.after_setup('host', rows, [(HOSTILE, HOSTILE)], HOSTILE,
-                                                    update.Ready(HOSTILE, 'ready'), problem=('CONFIRM', HOSTILE),
+                                                    update.Ready(HOSTILE, 'ready'), problem=('REMOVE', HOSTILE),
                                                     rollback=(HOSTILE, HOSTILE)),
             'working': screens.working(HOSTILE, rows, running=False, stop=stop),
             'removed': screens.removed(HOSTILE, rows, [HOSTILE]),
@@ -554,6 +573,31 @@ class Removal(unittest.TestCase):
         for html in shown:
             self.assertNotIn('<script>alert', html)
             self.assertNotIn('"&gt;&lt;script', html)
+
+
+class TerminalOnly(unittest.TestCase):
+    """REMOVE's and RESTORE's texts may name their commands (test_explain.terminal_words) because no setup page
+    shows them; test_web checks the removal pages the page itself serves."""
+
+    REMOVING = ('after', 'after-newest', 'after-newer-here', 'after-rollback', 'after-usenet', 'after-sign-in',
+                'after-host', 'after-host-not-ticked', 'removing-failed', 'removed', 'removed-host')
+
+    def test_neither_text_is_on_any_page(self):
+        states = samples.every_state()
+        self.assertLessEqual(set(self.REMOVING), set(states))          # both routes' removal pages are among them
+        for name, (html, _) in states.items():
+            with self.subTest(screen=name):
+                self.assertEqual(terminal_only_shown(html), [])
+
+    def test_the_check_finds_either_text_on_a_page(self):
+        # not a check that can't fail: either question asked as a field would show its text, every sentence of it
+        for key in TERMINAL_ONLY:
+            with self.subTest(key=key):
+                field = screens._page(screens._choice(key, 'x', False))
+                text = explain.QUESTIONS[key][1]
+                sentences = re.split(r'(?<=\.)\s+', text)
+                self.assertGreaterEqual(len(sentences), 3)
+                self.assertLessEqual({f'{key}: {part}' for part in [text] + sentences}, set(terminal_only_shown(field)))
 
 
 class StepsAndEnd(unittest.TestCase):

@@ -333,7 +333,8 @@ QUESTIONS = {
         "yes",
         "Saves the changes shown here: subsync added to your config (after a backup copy) and subsync's own config "
         "created or updated. Until then nothing is changed: go back to change an answer, or leave and run ./setup "
-        "again any time. Removing subsync and restoring a saved copy also ask before they change anything."),
+        "again any time. Removing subsync and restoring a saved copy ask their own questions before they change "
+        "anything."),
     "TEST_READ": (
         "no",
         "A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as "
@@ -359,6 +360,18 @@ QUESTIONS = {
         "yes",
         "Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, "
         "leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles."),
+    # removing and restoring each ask their own yes, never CONFIRM's, so an answers file made for installing never
+    # removes or restores anything
+    "REMOVE": (
+        "no",
+        "Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your config, deletes its "
+        "own config and removes its container with its stored copies; on a public instance, everyone's records go "
+        "too. No changes nothing. It is kept apart from CONFIRM, so an answers file made for installing never removes "
+        "anything."),
+    "RESTORE": (
+        "no",
+        "Asked by ./setup --restore FILE before the saved copy is put back into your config. Yes replaces your config "
+        "with that copy, after saving the current one. No changes nothing."),
 }
 
 # ------------------------------------------------------------------------------------------- subsync's settings

@@ -18,7 +18,7 @@ from html import escape as html_escape
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, hosting, plan, screens, ui, wizard
+from installer import dockerenv, docs, engine, hosting, plan, screens, ui, wizard
 from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
 from subsync import aiosconfig, explain
@@ -313,7 +313,7 @@ class StateFlows(Offline):
     def test_restore_reads_its_answers_file_as_every_answers_file_is_read(self):
         self.install()
         copy = next((self.state / 'backups').iterdir())
-        text = 'AIOS_CONFIG_PASSWORD="pass #word"\nCONFIRM=yes\n'
+        text = 'AIOS_CONFIG_PASSWORD="pass #word"\nRESTORE=yes\n'
         self.aios.users[UUID]['password'] = plan.parse_env(text)['AIOS_CONFIG_PASSWORD']    # as --answers reads it
         answers = Path(self.tmp.name) / 'restore-answers'
         answers.write_text(text)
@@ -482,7 +482,7 @@ class ConfigRecovery(Offline):
         # half way had deleted it, and the next removal, which finishes the job, skips what is already done
         sync_id = self.install()['SYNC_UUID']
         del self.aios.users[sync_id]
-        code, out = self.again('--uninstall', CONFIRM='yes')
+        code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
         self.assertNotIn("don't match", out)
         self.assertNotIn('!  ', out)                                    # no warning at all
@@ -732,7 +732,7 @@ class SavedAiostreams(Offline):
         self.joined.clear()                                 # the next ./setup: a new container
 
     def test_removing_on_the_page_joins_aiostreams_network_again(self):
-        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'}, page=True)
+        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'REMOVE': 'yes'}, page=True)
         e.remove()
         self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
         self.assertEqual(self.ours(), [])
@@ -740,7 +740,7 @@ class SavedAiostreams(Offline):
 
     def test_uninstall_in_a_terminal_joins_aiostreams_network_again(self):
         sync_id = self.keys()['SYNC_UUID']
-        code, out = self.again('--uninstall', CONFIRM='yes')
+        code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
         self.assertEqual(self.ours(), [])
         self.assertNotIn(sync_id, self.aios.users)
@@ -748,7 +748,7 @@ class SavedAiostreams(Offline):
     def test_restore_joins_aiostreams_network_again(self):
         copy = next((self.state / 'backups').iterdir())
         answers = Path(self.tmp.name) / 'restore-answers'
-        answers.write_text(f'AIOS_CONFIG_PASSWORD={PASSWORD}\nCONFIRM=yes\n')
+        answers.write_text(f'AIOS_CONFIG_PASSWORD={PASSWORD}\nRESTORE=yes\n')
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = wizard.main(['--restore', str(copy), '--answers', str(answers), '--yes'])
@@ -761,12 +761,12 @@ class SavedAiostreams(Offline):
         # http://127.0.0.1:3000, setup's own container here
         copy = (self.state / 'backups').glob('viewer-*').__next__()       # the install's: before subsync was added
         copy = copy.rename(copy.with_name(f'viewer-{UUID[:8]}-20261117-120000.json'))    # one the removal can't reuse
-        code, out = self.again('--uninstall', CONFIRM='yes')
+        code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
         self.assertFalse((self.state / 'settings.json').exists())
         self.aios.users[UUID]['config']['presets'].append({'type': 'custom', 'options': {'manifestUrl': 'x'}})
         self.joined.clear()                                 # the next ./setup: a new container
-        answers = self.answers_file({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'})
+        answers = self.answers_file({'AIOS_CONFIG_PASSWORD': PASSWORD, 'RESTORE': 'yes'})
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = wizard.main(['--restore', str(copy), '--answers', answers, '--yes'])
@@ -783,7 +783,7 @@ class SavedAiostreams(Offline):
         self.joins = False                                   # its network is gone (renamed by its compose project)
         s = engine.load_settings()
         engine.save_settings(dict(s, aios_public=self.aios.url))
-        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'}, page=True)
+        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'REMOVE': 'yes'}, page=True)
         e.remove()
         self.assertEqual(self.ours(), [])
 
@@ -1217,7 +1217,7 @@ class CacheRecord(Offline):
         flat_out = flat(out.replace('│', ' '))
         self.assertIn('the synced copy shows the next time you open that file.', flat_out)
         self.assertNotIn('after up to 5 minutes', flat_out)
-        code, out = self.again('--uninstall', CONFIRM='yes', REMOVE_OPENSUBTITLES='yes')
+        code, out = self.again('--uninstall', REMOVE='yes', REMOVE_OPENSUBTITLES='yes')
         self.assertEqual(code, 0, out)
         self.assertIn("AIOStreams' subtitle cache setting for subsync stays; it does nothing without subsync.", out)
 
@@ -1264,7 +1264,7 @@ class Removal(Offline):
         # it stopped with "This AIOStreams asks you to sign in before configs can be saved." and never asked
         self.aios.gated = True
         self.install(**self.SIGN_IN)
-        code, out = self.again('--uninstall', CONFIRM='yes', **self.SIGN_IN)
+        code, out = self.again('--uninstall', REMOVE='yes', **self.SIGN_IN)
         self.assertEqual(code, 0, out)
         self.assertIn('!  Saving the config: This AIOStreams asks you to sign in before configs can be saved.', out)
         self.assertIn('AIOStreams sign-in to save configs: username', out)
@@ -1276,7 +1276,7 @@ class Removal(Offline):
         self.aios.gated = True
         self.install(**self.SIGN_IN)
         copy = next((self.state / 'backups').iterdir())
-        answers = self.answers_file(dict(AIOS_CONFIG_PASSWORD=PASSWORD, CONFIRM='yes', **self.SIGN_IN))
+        answers = self.answers_file(dict(AIOS_CONFIG_PASSWORD=PASSWORD, RESTORE='yes', **self.SIGN_IN))
         code, out = self.run_main('--restore', str(copy), '--answers', answers, '--yes')
         self.assertEqual(code, 0, out)
         self.assertIn('Restored.', out)
@@ -1290,14 +1290,14 @@ class Removal(Offline):
         def compose(state, *args, **kw):
             return (1, '', 'Error response from daemon: timeout') if 'down' in args else (0, '', '')
         with mock.patch.object(dockerenv, 'compose', compose):
-            code, out = self.again('--uninstall', CONFIRM='yes')
+            code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 1, out)
         self.assertIn("✗  Removing the subsync container failed; setup's files were kept, so removing it again finishes "
                       'the job.\n      Error response from daemon: timeout\n', out)
         self.assertNotIn('Removed the subsync container', out)
         for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
             self.assertTrue((self.state / name).exists(), name)
-        code, out = self.again('--uninstall', CONFIRM='yes')                 # its sync config is gone already
+        code, out = self.again('--uninstall', REMOVE='yes')                 # its sync config is gone already
         self.assertEqual(code, 0, out)
         self.assertNotIn('!  ', out)
         self.assertIn('Removed the subsync container and its stored copies', out)
@@ -1306,7 +1306,7 @@ class Removal(Offline):
     def test_uninstall_names_the_configs_it_deletes(self):
         # it said "deletes subsync's own config" also when the Usenet config goes too, from a second copy of the page's
         self.install(USENET='yes')
-        code, out = self.again('--uninstall', CONFIRM='yes')
+        code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
         self.assertIn("This takes subsync out of your config (1 entry), deletes subsync's own config and its Usenet "
                       'config, and removes the subsync container with its stored copies. Your other subtitle sources '
@@ -1328,7 +1328,7 @@ class Restore(Offline):
         self.copy = next(p for p in (self.state / 'backups').iterdir() if p.name.startswith('viewer-'))
 
     def restore(self, path, **answers):
-        answers = self.answers_file(dict({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, **answers))
+        answers = self.answers_file(dict({'AIOS_CONFIG_PASSWORD': PASSWORD, 'RESTORE': 'yes'}, **answers))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = wizard.main(['--restore', str(path), '--answers', answers, '--yes'])
@@ -1358,7 +1358,7 @@ class Restore(Offline):
 
     def test_answering_no_changes_nothing(self):
         before = self.unchanged()
-        code, out = self.restore(self.copy, CONFIRM='no')
+        code, out = self.restore(self.copy, RESTORE='no')
         self.assertEqual(code, 1, out)
         self.assertIn('Nothing was changed.', out)
         self.assertEqual(self.unchanged(), before)
@@ -1386,7 +1386,7 @@ class Restore(Offline):
 
     def test_after_an_uninstall_aiostreams_is_found_or_asked_as_installing_does(self):
         copy = self.copy.rename(self.copy.with_name(f'viewer-{UUID[:8]}-20261117-120000.json'))   # the removal's own
-        code, out = self.again('--uninstall', CONFIRM='yes')                                     # copy can't reuse it
+        code, out = self.again('--uninstall', REMOVE='yes')                                     # copy can't reuse it
         self.assertEqual(code, 0, out)
         self.assertFalse((self.state / 'settings.json').exists())
         saved = json.loads(copy.read_text())['config']
@@ -1434,6 +1434,88 @@ class Restore(Offline):
                     self.assertEqual((self.unchanged(), engine.load_settings()), before)
 
 
+class OwnYes(Offline):
+    """Removing and restoring each ask their own yes, REMOVE and RESTORE, never CONFIRM's. CONFIRM answered
+    "Save these changes?", "Remove subsync?" and the restore question alike, and docs/answers.example ships CONFIRM=yes,
+    so the answers file you installed with, given to ./setup --uninstall, removed subsync and asked nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.copy = next(p for p in (self.state / 'backups').iterdir() if p.name.startswith('viewer-'))
+
+    def run_main(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wizard.main(list(argv))
+        return code, out.getvalue()
+
+    def everything(self):
+        """What removing or restoring changes: setup's files with the copies, every config on AIOStreams, the service."""
+        return (sorted(str(p.relative_to(self.state)) for p in self.state.rglob('*')),
+                json.dumps(self.aios.users, sort_keys=True, default=str), self.aios.subsync_up)
+
+    def changes_nothing(self, argv, question):
+        before = self.everything()
+        code, out = self.run_main(*argv)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'{question} [y/n]', out)
+        self.assertIn('(default)', out.split(question)[1])                           # not answered by the file
+        self.assertTrue(out.rstrip().endswith('Nothing was changed.'), out[-200:])
+        self.assertNotIn('Restored.', out)
+        self.assertNotIn('Done.', out)
+        self.assertEqual(self.everything(), before)
+
+    def test_confirm_yes_without_remove_removes_nothing(self):
+        install = self.answers_file(dict(self.ANSWERS, TEST_READ='no', CONFIRM='yes'))   # the file it installed with
+        self.changes_nothing(['--uninstall', '--answers', install, '--yes'], 'Remove subsync?')
+        self.assertNotEqual(self.ours(), [])
+        self.assertTrue(self.aios.subsync_up)
+        code, out = self.run_main('--uninstall', '--answers', self.answers_file(
+            {'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'no', 'REMOVE': 'yes'}), '--yes')
+        self.assertEqual(code, 0, out)                                                  # REMOVE alone decides
+        self.assertIn('Done.', out)
+        self.assertEqual(self.ours(), [])
+        self.assertFalse(self.aios.subsync_up)
+        self.assertFalse((self.state / 'settings.json').exists())
+
+    def test_confirm_yes_without_restore_restores_nothing(self):
+        self.aios.users[UUID]['config']['presets'].append({'type': 'custom', 'options': {'manifestUrl': 'x'}})
+        answers = self.answers_file({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'})
+        self.changes_nothing(['--restore', str(self.copy), '--answers', answers, '--yes'],
+                             f'Put the copy from {self.copy.name} back into config {UUID[:8]}…?')
+        self.assertFalse([p for p in (self.state / 'backups').iterdir() if p.name.startswith('before-restore-')])
+        answers = self.answers_file({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'no', 'RESTORE': 'yes'})
+        code, out = self.run_main('--restore', str(self.copy), '--answers', answers, '--yes')
+        self.assertEqual(code, 0, out)                                                  # RESTORE alone decides
+        self.assertIn('Restored.', out)
+        self.assertEqual(self.aios.users[UUID]['config'], json.loads(self.copy.read_text())['config'])
+
+    def test_the_example_answers_file_removes_and_restores_nothing(self):
+        # docs/answers.example as docs.py writes it, with the one line it leaves for you to fill in, the password
+        text = docs.answers_example()
+        self.assertEqual(text.count('\nAIOS_CONFIG_PASSWORD=\n'), 1)
+        for line in ('\nCONFIRM=yes\n', '\nREMOVE=no\n', '\nRESTORE=no\n'):
+            self.assertEqual(text.count(line), 1, line)
+        answers = Path(self.tmp.name) / 'example-answers'
+        answers.write_text(text.replace('\nAIOS_CONFIG_PASSWORD=\n', f'\nAIOS_CONFIG_PASSWORD={PASSWORD}\n'))
+        before = self.everything()
+        code, out = self.run_main('--uninstall', '--answers', str(answers), '--yes')
+        self.assertEqual(code, 1, out)
+        self.assertIn('Remove subsync? [y/n]\n', out)
+        self.assertIn('  > no   (from the answers file)\n', out.split('Remove subsync?')[1])
+        self.assertTrue(out.rstrip().endswith('Nothing was changed.'), out[-200:])
+        self.assertEqual(self.everything(), before)
+        question = f'Put the copy from {self.copy.name} back into config {UUID[:8]}…?'
+        code, out = self.run_main('--restore', str(self.copy), '--answers', str(answers), '--yes')
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'{question} [y/n]\n', out)
+        self.assertIn('  > no   (from the answers file)\n', out.split(question)[1])
+        self.assertTrue(out.rstrip().endswith('Nothing was changed.'), out[-200:])
+        self.assertNotIn('Restored.', out)
+        self.assertEqual(self.everything(), before)
+
+
 class Advice(Offline):
     """The way out the terminal gives after an answer refused or not given: by the answers file, and none to give for a
     public instance's removal answered no."""
@@ -1469,8 +1551,8 @@ class Advice(Offline):
         self.assertEqual(code, 1, out)
         self.assertIn(f'✗  "Password of your config {UUID[:8]}…" needs an answer.\n      Give AIOS_CONFIG_PASSWORD=... in '
                       'an answers file: ./setup --answers FILE --yes.\n', out)
-        for lines, advice in (({'CONFIRM': 'yes'}, 'Add AIOS_CONFIG_PASSWORD=... to the answers file.'),
-                              ({'AIOS_CONFIG_PASSWORD': '', 'CONFIRM': 'yes'},
+        for lines, advice in (({'REMOVE': 'yes'}, 'Add AIOS_CONFIG_PASSWORD=... to the answers file.'),
+                              ({'AIOS_CONFIG_PASSWORD': '', 'REMOVE': 'yes'},
                                'Change AIOS_CONFIG_PASSWORD in the answers file.')):
             with self.subTest(lines=lines):
                 code, out = self.run_main('--uninstall', '--answers', self.answers_file(lines), '--yes')
@@ -1682,7 +1764,7 @@ class TakeOver(Offline):
 
     def test_removing_it_takes_its_volume_by_name(self):
         self.take_over()
-        code, out = self.again('--uninstall', CONFIRM='yes')
+        code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
         self.assertEqual(self.volume_calls, [['docker', 'volume', 'rm', KEPT_VOLUME]])   # Compose never removes it
         self.assertEqual(self.docker, {})
@@ -1691,14 +1773,14 @@ class TakeOver(Offline):
     def test_a_removal_that_stopped_after_the_volume_went_finishes(self):
         self.take_over()
         self.docker.pop(('volume', KEPT_VOLUME))
-        code, out = self.again('--uninstall', CONFIRM='yes')
+        code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
         self.assertFalse((self.state / 'settings.json').exists())
 
     def test_removing_it_before_it_is_taken_over(self):
         # it is this folder's own: Compose removes it with its volume, which the 1.3.0 compose file doesn't declare
         # external
-        code, out = self.again('--uninstall', CONFIRM='yes')
+        code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
         self.assertEqual(self.docker, {})
         self.assertEqual(self.volume_calls, [])
@@ -1711,13 +1793,13 @@ class TakeOver(Offline):
         self.docker = {('container', 'aiosubtitles-subsync'): 'id-1', ('volume', KEPT_VOLUME): '',
                        ('network', 'aiosubtitles_default'): 'id-1'}
         with self.assertRaises(ui.Stop) as caught:
-            engine.Engine({'CONFIRM': 'no'}).remove_host()
+            engine.Engine({'REMOVE': 'no'}).remove_host()
         self.assertEqual(caught.exception.message, 'Nothing was changed.')
         self.assertIn(('volume', KEPT_VOLUME), self.docker)
         self.assertEqual(self.volume_calls, [])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            engine.Engine({'CONFIRM': 'yes'}).remove_host()
+            engine.Engine({'REMOVE': 'yes'}).remove_host()
         self.assertEqual(self.docker, {})
         self.assertEqual(self.volume_calls, [['docker', 'volume', 'rm', KEPT_VOLUME]])
 

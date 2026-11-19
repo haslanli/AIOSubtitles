@@ -90,7 +90,7 @@ class Personal(FlowFixture):
         code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', TEST_READ='no'))
         self.assertEqual(code, 0, out)
         usenet_id = self.keys()['USENET_UUID']
-        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
         self.assertNotIn(usenet_id, self.aios.users)
 

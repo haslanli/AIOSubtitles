@@ -16,9 +16,9 @@ START = '<!-- settings: written by python3 -I installer/docs.py from subsync/sub
 END = '<!-- end of settings -->'
 WIDTH = 116
 
-# The keys of an answers file, in three parts, as ./setup asks them (a test checks them against the engine's questions).
-# Your own install: every question but the route's, the public instance's and removing's, with the limits it asks under
-# their setting names after the audio limit's question.
+# The keys of an answers file, in four parts, as ./setup asks them (a test checks them against the engine's questions).
+# Your own install: every question but the route's, the public instance's, removing's and restoring's, with the limits
+# it asks under their setting names after the audio limit's question.
 YOURSELF_LIMITS = limits.names(limits.personal(audio=False, usenet=True))
 # A public instance: its address, the settings it asks under their own names (its trusted proxy, its invite code, its
 # choices, its audio question), then every limit; SUBDL_KEY and TMDB_KEY are asked as for your own install. The audio
@@ -27,11 +27,15 @@ YOURSELF_LIMITS = limits.names(limits.personal(audio=False, usenet=True))
 HOSTING_SETTINGS = ('SUBSYNC_TRUSTED_PROXY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_TMDB_PERSONAL',
                     'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE')
 HOSTING = ('HOST_ADDRESS', *HOSTING_SETTINGS) + limits.names(limits.hosting(usenet=True, audio=True))
-REMOVING = ('REMOVE_OPENSUBTITLES',)
+# Removing and restoring each ask their own yes (REMOVE, RESTORE), never CONFIRM's
+REMOVING = ('REMOVE', 'REMOVE_OPENSUBTITLES')
+RESTORING = ('RESTORE',)
 PARTS = ('Install it for yourself (ROUTE=yourself)',
          'Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.',
-         'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD and CONFIRM above are asked here too; '
-         'on a public instance only CONFIRM.')
+         'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too; on a public '
+         'instance only REMOVE.',
+         'Restoring a saved copy (./setup --restore FILE --answers FILE). AIOS_CONFIG_PASSWORD above is asked here '
+         'too.')
 EXAMPLE_ON_GITHUB = 'https://github.com/haslanli/AIOSubtitles/blob/main/docs/answers.example'   # the image has no docs/
 # A comment line under a key's explanation in docs/answers.example, for what only an answers file needs; the question's
 # own text stays as setup shows it
@@ -42,7 +46,7 @@ def yourself():
     """Your own install's keys, in the questions' order."""
     keys = []
     for key in explain.QUESTIONS:
-        if key != 'ROUTE' and key not in HOSTING + REMOVING:
+        if key != 'ROUTE' and key not in HOSTING + REMOVING + RESTORING:
             keys += [key] + (list(YOURSELF_LIMITS) if key == 'AUDIO_BUDGET' else [])
     return keys
 
@@ -102,13 +106,13 @@ def example(key):
 
 
 def answers_example():
-    """docs/answers.example: the header, the route's question, then the three parts (PARTS), each under its heading."""
+    """docs/answers.example: the header, the route's question, then the four parts (PARTS), each under its heading."""
     out = comment('Answers for ./setup --answers state/FILE (add --yes to ask nothing). Leave a line out to be asked, '
                   "or to keep the current value on a re-run; an optional key's empty line (TMDB_KEY=) removes the "
                   'saved key. A " #" starts a comment, except inside quotes. Keep this file private if it holds a '
                   'password.')
     out += example('ROUTE')
-    for heading, keys in zip(PARTS, (yourself(), HOSTING, REMOVING)):
+    for heading, keys in zip(PARTS, (yourself(), HOSTING, REMOVING, RESTORING)):
         out += ['', '', '# ' + '=' * (WIDTH - 2)] + comment(heading)
         for key in keys:
             out += example(key)

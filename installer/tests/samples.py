@@ -254,7 +254,7 @@ def every_state():
         *[r[1] for r in host_status], 'read today: 0.0 GB of 50 GB', 'docker logs aiosubtitles-subsync',
         update.RUNNING.format(version='1.1.0'), update.READY.format(version='1.2.0'))
     add('after-host-not-ticked', screens.after_setup('host', host_status, [('logs', 'docker logs aiosubtitles-subsync')],
-                                                     '1.1.0', ready, problem=('CONFIRM', screens.TICK_TO_REMOVE)),
+                                                     '1.1.0', ready, problem=('REMOVE', screens.TICK_TO_REMOVE)),
         *[r[1] for r in host_status], 'read today: 0.0 GB of 50 GB', 'docker logs aiosubtitles-subsync',
         update.RUNNING.format(version='1.1.0'), update.READY.format(version='1.2.0'))
     add('after-usenet', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),

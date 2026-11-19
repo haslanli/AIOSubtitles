@@ -15,7 +15,7 @@ import warnings
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, hosting, limits, plan, wizard
+from installer import dockerenv, docs, engine, hosting, limits, plan, screens, wizard
 from installer.tests.test_flow import AnswersRun
 from subsync import explain
 
@@ -385,7 +385,7 @@ class Route(RouteFixture):
         with self.assertRaises(engine.Problem):
             e.remove_host()                                          # the box isn't ticked: nothing happens
         self.assertTrue((self.state / 'subsync.env').exists())
-        e = engine.Engine({'CONFIRM': 'yes'}, page=True)
+        e = engine.Engine({'REMOVE': 'yes'}, page=True)
         e.remove_host()
         self.assertFalse((self.state / 'subsync.env').exists())
         self.assertFalse(self.up)
@@ -396,7 +396,7 @@ class Route(RouteFixture):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
         self.assertEqual(code, 0, out)
         (self.state / 'backups' / 'databases-20261114-061500').mkdir(parents=True)
-        code, out = self.run_setup({'CONFIRM': 'yes'}, '--uninstall')
+        code, out = self.run_setup({'REMOVE': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
         self.assertIn('These stay, in case you set it up again; remove them when you no longer need them:\n'
                       '    • the subsync image (about 1 GB): docker image rm ', out)
@@ -409,22 +409,53 @@ class Route(RouteFixture):
         # it ended "CONFIRM needs an answer." and "Add CONFIRM=... to the answers file."
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
         self.assertEqual(code, 0, out)
-        code, out = self.run_setup({'CONFIRM': 'no'}, '--uninstall')
+        code, out = self.run_setup({'REMOVE': 'no'}, '--uninstall')
         self.assertEqual(code, 1, out)
         self.assertTrue(out.rstrip().endswith('Nothing was changed.'), out[-200:])
-        self.assertNotIn('CONFIRM needs an answer', out)
+        self.assertNotIn('needs an answer', out)                         # neither CONFIRM's nor REMOVE's
         self.assertTrue((self.state / 'subsync.env').exists())
         with self.assertRaises(engine.Problem) as caught:                   # the page: the box not ticked
             engine.Engine({}, page=True).remove_host()
         self.assertEqual((caught.exception.field, caught.exception.message),
-                         ('CONFIRM', 'Tick "Delete everyone\'s records and stored copies" to remove AIOSubtitles.'))
+                         ('REMOVE', 'Tick "Delete everyone\'s records and stored copies" to remove AIOSubtitles.'))
+
+    def test_an_answers_file_with_confirm_and_no_remove_removes_nothing(self):
+        # CONFIRM answered "Delete everyone's records and stored copies" too, and docs/answers.example ships
+        # CONFIRM=yes, so the answers file a public instance was set up with, given to ./setup --uninstall, deleted
+        # everyone's records and asked nothing; REMOVE alone decides now, and the example's REMOVE=no keeps them
+        install = {'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'CONFIRM': 'yes'}
+        code, out = self.run_setup(install)
+        self.assertEqual(code, 0, out)
+        example = Path(self.tmp.name) / 'example-answers'
+        example.write_text(docs.answers_example())
+        files = sorted(p.name for p in self.state.iterdir())
+        for name, answers in (('the install', self.answers_file(install)), ('the example', str(example))):
+            argv = ['--answers', answers, '--yes']
+            with self.subTest(answers=name):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = wizard.main([*argv, '--uninstall'])
+                out = out.getvalue()
+                self.assertEqual(code, 1, out)
+                self.assertIn("Delete everyone's records and stored copies [y/n]", out)
+                self.assertTrue(out.rstrip().endswith('Nothing was changed.'), out[-200:])
+                self.assertEqual(sorted(p.name for p in self.state.iterdir()), files)
+                self.assertTrue(self.up)
+        with self.assertRaises(engine.Problem) as caught:                   # the page: CONFIRM is not its box
+            engine.Engine({'CONFIRM': 'yes'}, page=True).remove_host()
+        self.assertEqual((caught.exception.field, caught.exception.message), ('REMOVE', screens.TICK_TO_REMOVE))
+        self.assertTrue(self.up)
+        code, out = self.run_setup({'CONFIRM': 'no', 'REMOVE': 'yes'}, '--uninstall')
+        self.assertEqual(code, 0, out)
+        self.assertFalse((self.state / 'subsync.env').exists())
+        self.assertFalse(self.up)
 
     def test_a_failed_container_removal_keeps_the_public_instances_files(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
         self.assertEqual(code, 0, out)
         with mock.patch.object(dockerenv, 'compose', lambda state, *args, **kw: (1, 'still running', '')):
             with self.assertRaises(engine.Stop) as caught:
-                engine.Engine({'CONFIRM': 'yes'}, page=True).remove_host()
+                engine.Engine({'REMOVE': 'yes'}, page=True).remove_host()
         self.assertEqual((caught.exception.message, caught.exception.fix), (engine.REMOVE_FAILED, 'still running'))
         for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
             self.assertTrue((self.state / name).exists(), name)

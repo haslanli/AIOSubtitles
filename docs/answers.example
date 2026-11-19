@@ -130,7 +130,7 @@ AIOS_PASSWORD=
 
 # Saves the changes shown here: subsync added to your config (after a backup copy) and subsync's own config created
 # or updated. Until then nothing is changed: go back to change an answer, or leave and run ./setup again any time.
-# Removing subsync and restoring a saved copy also ask before they change anything.
+# Removing subsync and restoring a saved copy ask their own questions before they change anything.
 CONFIRM=yes
 
 # A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as it
@@ -286,9 +286,22 @@ SUBSYNC_MAX_CONNECTIONS=256
 
 
 # ==================================================================================================================
-# Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD and CONFIRM above are asked here too; on a
-# public instance only CONFIRM.
+# Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too; on a public
+# instance only REMOVE.
+
+# Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your config, deletes its own
+# config and removes its container with its stored copies; on a public instance, everyone's records go too. No
+# changes nothing. It is kept apart from CONFIRM, so an answers file made for installing never removes anything.
+REMOVE=no
 
 # Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, leaving
 # your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.
 REMOVE_OPENSUBTITLES=yes
+
+
+# ==================================================================================================================
+# Restoring a saved copy (./setup --restore FILE --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too.
+
+# Asked by ./setup --restore FILE before the saved copy is put back into your config. Yes replaces your config with
+# that copy, after saving the current one. No changes nothing.
+RESTORE=no

@@ -419,7 +419,7 @@ class Flow(FlowFixture):
         self.assertEqual(len(list((self.state / 'backups').iterdir())), 1)
 
         # uninstall: subsync out of the viewer config, its own config deleted, state files gone
-        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])   # as before
         self.assertNotIn(sync_id, self.aios.users)
@@ -731,7 +731,7 @@ class Flow(FlowFixture):
     def test_uninstall_says_what_stays(self):
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
-        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
         self.assertIn(f'docker image rm {IMAGE}', out)
         self.assertIn('this folder, /home/me/aiosubtitles, ', out)        # its path on the machine
@@ -1003,7 +1003,7 @@ class Flow(FlowFixture):
     def test_removing_on_the_page(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
-        e =self.page_engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'CONFIRM': 'yes'})
+        e =self.page_engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'REMOVE': 'yes'})
         e.remove()
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
         self.assertIn(('ok', 'Done.'), [tuple(r[:2]) for r in e.out.rows])
@@ -1013,7 +1013,7 @@ class Flow(FlowFixture):
     def test_removing_needs_the_config_password(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
-        e =self.page_engine({'CONFIRM': 'yes'})
+        e =self.page_engine({'REMOVE': 'yes'})
         with self.assertRaises(engine.Problem) as caught:
             e.remove()
         self.assertEqual(caught.exception.field, 'AIOS_CONFIG_PASSWORD')
@@ -1163,7 +1163,7 @@ class ImageNames(FlowFixture):
                 return 0, 'sha256:3320f59e4ec8' + '0' * 52 + '\n', ''
             return 0, '', ''
         with mock.patch.object(dockerenv, 'run', run):
-            code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'CONFIRM': 'yes'}, '--uninstall')
+            code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
         self.assertIn('the subsync image (about 1 GB): docker image rm 3320f59e4ec8\n', out)
 

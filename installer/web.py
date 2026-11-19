@@ -545,7 +545,7 @@ class App:
         if method != 'POST':
             return self.go('')
         e = engine.Engine({k: v for k, v in one.items() if k in ('AIOS_CONFIG_PASSWORD', 'REMOVE_OPENSUBTITLES',
-                                                                    'CONFIRM', *SIGN_IN)}, page=True)
+                                                                    'REMOVE', *SIGN_IN)}, page=True)
         host = e.prev.get('route') == 'host'
         heading = screens.REMOVING['host' if host else 'yourself']
         if not host and 'REMOVE_OPENSUBTITLES' not in one:

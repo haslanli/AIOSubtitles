@@ -89,7 +89,8 @@ def cmd_restore(args, path):
     else:           # no settings (./setup --uninstall deletes them): AIOStreams found as installing finds it
         e.reach_aios()
     password = e.ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)
-    if not e.ask.yesno('CONFIRM', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):
+    # its own yes, never CONFIRM's: an answers file made for installing never restores anything
+    if not e.ask.yesno('RESTORE', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):
         stop('Nothing was changed.')
     current, _ = e.aios.get_config(uuid, password)
     backup(current, uuid, 'before-restore')
