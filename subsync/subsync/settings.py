@@ -327,7 +327,7 @@ class Settings:
         self.max_languages = _language_limit(g("SUBSYNC_MAX_LANGUAGES"))
         self.active_workers = read.whole("SUBSYNC_ACTIVE_WORKERS")
         self.worker_idle_s = read.number("SUBSYNC_WORKER_IDLE_MIN", above_zero=True, scale=60)
-        self.user_keep_days = read.whole("SUBSYNC_USER_KEEP_DAYS")
+        self.user_keep_days = read.whole("SUBSYNC_USER_KEEP_DAYS", 1)    # 0 would delete everyone
         # what the pages say about the host's own setup: the Questions link, the service in front that sees
         # every request, how many days backups keep records; empty, words true of any host instead (0 days: empty)
         self.contact = g("SUBSYNC_CONTACT").strip()

@@ -675,6 +675,18 @@ class NumbersTest(unittest.TestCase):
         self.assertIn(days, dict(explain.RULES)["Public mode: what is kept, and for how long"])
         self.assertIn(days, dict(explain.PRIVACY_PARTS)["What is stored"])
 
+    def test_the_privacy_page_names_the_rows_kept_for_a_person_alone(self):
+        # The files a person waits to pick and the original subtitles listed for what they play were kept
+        # (for up to 7 days, Delete or not) and not named among what is stored
+        from subsync.store import KEEP_PICKABLE_S
+        for s in (Group3Test.public(), Group3Test.public(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_TMDB_PERSONAL="on")):
+            self.assertIn(
+                "and how much was read for you each day. For up to "
+                f"{KEEP_PICKABLE_S // 86400} days after you play a file, the original subtitles listed for it in your "
+                "languages are kept too (and, while it waits for your pick, its title, name and size), under a key "
+                "that only your personal link leads to. AIOSubtitles' own config holds your debrid keys, as your own "
+                "config does", Group3Test.privacy(s)["What is stored"])
+
     @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
     def test_the_unreachable_state(self):
         from subsync.recheck import UNREACHABLE_CHECKS

@@ -158,6 +158,58 @@ class OwnRowsTest(Base):
         self.assertTrue(self.worker(Limits(who="a" * 16)).waits_for_pick(ALIAS))   # the person's own rows stay
 
 
+    def own_rows(self, rows_key):
+        """How many rows of the person whose rows key this is the store holds: waiting files, originals, refusals."""
+        mine = f"p:{rows_key}:%"
+        return sum(self.store.db.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} LIKE ?", (mine,)).fetchone()[0]
+                   for table, column in (("pickable", "alias"), ("originals", "alias"), ("files", "file_key")))
+
+    def test_a_persons_rows_go_at_once_by_their_rows_key(self):
+        # Delete left a person's waiting files and original subtitles in the store for up to 7 days: their
+        # keys couldn't be found by person; now each is under the person's rows key, and anyone else's stay
+        from subsync.store import REFUSED_BACKOFF_S
+        a, b = self.worker(Limits(who="a" * 16)), self.worker(Limits(who="b" * 16))
+        for w in (a, b):
+            self.waiting(w)
+            self.store.file_failed(w._refusal_key(ALIAS), REFUSED_BACKOFF_S)
+        self.assertTrue(a._row_key(ALIAS).startswith("p:" + "a" * 16 + ":"))
+        self.assertEqual((self.own_rows("a" * 16), self.own_rows("b" * 16)), (3, 3))
+        self.assertEqual(self.store.drop_rows_of("a" * 16), 3)
+        self.assertEqual((self.own_rows("a" * 16), self.own_rows("b" * 16)), (0, 3))
+        again = self.worker(Limits(who="a" * 16))
+        self.assertFalse(again.waits_for_pick(ALIAS))
+        self.assertIsNone(again.known_originals(ALIAS))
+        self.assertFalse(again._file_blocked(ALIAS))
+        other = self.worker(Limits(who="b" * 16))
+        self.assertTrue(other.waits_for_pick(ALIAS))
+        self.assertEqual(other.known_originals(ALIAS), ORIGINALS)
+        self.assertTrue(other._file_blocked(ALIAS))
+
+    def test_once_the_persons_data_is_deleted_their_worker_writes_nothing_more(self):
+        # Delete stops the person's worker with forget: a pick still queued and a job still running leave no
+        # row of theirs after it (a plain stop keeps the queued pick waiting, as before)
+        from subsync.reader import Refused
+        kept, gone = self.worker(Limits(who="b" * 16)), self.worker(Limits(who="a" * 16))
+        for w in (kept, gone):
+            w.submit(job(audio=True))
+        kept.stop()
+        gone.stop(forget=True)
+        self.assertEqual((self.own_rows("b" * 16), self.own_rows("a" * 16)), (1, 0))
+        a = self.worker(Limits(who="a" * 16))
+
+        def running(j):
+            a.stop(forget=True)                              # their data is deleted while this job runs
+            a._set_originals(ALIAS, [{"id": "a-1", "url": ORIGINALS["eng"]["url"], "lang": "eng"}], "b.mp4", None)
+            a._needs_pick(job())
+            raise Refused("HTTP 429")
+        a.process = running
+        a.submit(Job("movie", "tt8", {"filename": "c.mp4", "videoSize": 5}))
+        a._loop("main")
+        self.assertEqual(self.own_rows("a" * 16), 0)
+        self.assertEqual(a.originals[ALIAS], ORIGINALS)              # in memory only, for this worker's last moments
+        self.assertTrue(a.waits_for_pick(ALIAS))
+
+
 class OwnFirstPassTest(Base):
     """A file someone else read lately and that has no subtitle track: your own first pass (an index read) is queued,
     so you can pick it; it isn't, once you wait for your pick or the file's languages are judged."""

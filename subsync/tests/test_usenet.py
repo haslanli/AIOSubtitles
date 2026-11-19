@@ -830,6 +830,27 @@ class PublicUsenetTest(TempDirTest):
         self.assertTrue(record["store_only"])
         self.assertEqual(len(self.fake.configs), 1)
 
+    def test_the_time_the_config_was_copied_is_kept_for_usenet_only_too(self):
+        # A Usenet-only person's Refresh left no time (taking the sync config out took it), so the settings
+        # page said "copied from yours at sign-up" right after it
+        from subsync import pages
+        now = [1_800_000_000.0]
+        self.users.clock = lambda: now[0]
+        _, result = self.run_signup(setup_of([ENGINE], [NEWZNAB, SUBS]))           # Usenet only from the start
+        self.assertEqual(self.users.open(result.token)["synced_at"], now[0])
+        now[0] += 5 * 86400
+        self.refresh(result.token)
+        record = self.users.open(result.token)
+        self.assertEqual(record["synced_at"], now[0])
+        self.assertEqual(pages.days_ago(record["synced_at"], now[0]), "today")
+        uuid, result = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
+        now[0] += 5 * 86400
+        self.fake.configs[uuid]["config"] = setup_of([ENGINE], [NEWZNAB, SUBS])    # TorBox removed: Usenet only now
+        self.refresh(result.token)
+        record = self.users.open(result.token)
+        self.assertNotIn("sync_uuid", record)
+        self.assertEqual(record["synced_at"], now[0])
+
     # -- the kept password's rebuild and the daily check ----------------------------------------------------------
     def test_the_daily_check_rebuilds_and_repairs_the_usenet_config(self):
         from subsync.recheck import Checker

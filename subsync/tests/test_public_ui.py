@@ -1497,12 +1497,13 @@ class PartsTest(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class FormLanguagesTest(unittest.TestCase):
-    def test_chips_in_the_order_picked(self):
+    def test_the_slots_order_is_kept_whatever_lang_order_says(self):
+        # R3-7: no page sends lang_order any more (it was the chips' picking order): the slots' order is the
+        # order
         from subsync.signup import form_languages
-        self.assertEqual(form_languages({"lang_ui": "1", "lang": ["eng", "rus"], "lang_order": "rus,eng"}), "rus, eng")
-        # without the script the order field is what the page showed: new boxes follow in the page's order
+        self.assertEqual(form_languages({"lang_ui": "1", "lang": ["eng", "rus"], "lang_order": "rus,eng"}), "eng, rus")
         self.assertEqual(form_languages({"lang_ui": "1", "lang": ["eng", "fre", "rus"], "lang_order": "rus"}),
-                         "rus, eng, fre")
+                         "eng, fre, rus")
         self.assertEqual(form_languages({"lang_ui": "1", "lang": ["eng"], "lang_order": "zzz,eng,eng"}), "eng")
 
     def test_typed_languages_still_work(self):
@@ -1639,7 +1640,7 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(a[1], c[1])
         self.assertEqual(http(f"{self.b.base}/u/{new_token()}/manifest.json")[1], b"")     # apps: as before
 
-    def test_signup_with_chips_keeps_the_order(self):
+    def test_signup_keeps_the_slots_order_whatever_lang_order_says(self):   # R3-7
         from test_public_http import INSTANCE, PASSWORD, VIEWER, form, http
         import json
         uuid = self.b.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
@@ -1648,7 +1649,7 @@ class RoutesTest(unittest.TestCase):
         code, text, _ = http(self.b.base + "/signup", body)
         self.assertEqual(code, 200, text)
         token = text.decode().split("https://subs.test/u/")[1][:43]
-        self.assertEqual(self.b.users.open(token)["languages"], ["rus", "eng"])
+        self.assertEqual(self.b.users.open(token)["languages"], ["eng", "rus"])
 
     def test_signup_with_slots_keeps_their_order(self):
         from test_public_http import INSTANCE, PASSWORD, VIEWER, form, http
@@ -1712,6 +1713,73 @@ class RoutesTest(unittest.TestCase):
         self.assertIn("problem-message", tree.all("input", name="password")[0]["aria-describedby"])
         self.assertNotIn(f"stremio/{uuid}", text)
         self.assertNotIn('value="wrong"', text)
+
+    def test_a_link_that_cant_be_read_is_marked_at_its_box_not_a_blank_page(self):
+        # A port that isn't a number, or an unmatched "[", ended the sign-up and Refresh in a blank
+        # error page
+        from subsync.signup import NOT_A_LINK
+        from test_public_http import PASSWORD, form, http
+        uuid = "1a2b3c4d-1111-2222-3333-444455556666"
+        for link in (f"https://aios.test:abc/stremio/{uuid}/ENCRYPTED/manifest.json",
+                     "https://[aios.test/stremio/u/Family.TV/manifest.json"):
+            with self.subTest(link=link):
+                code, body, _ = http(self.b.base + "/signup", form(link=link, password=PASSWORD, languages="English"))
+                tree = Tree(body.decode())
+                self.assertEqual(code, 400)
+                self.assertEqual(tree.text_of["problem-message"], NOT_A_LINK)
+                self.assertEqual(tree.all("input", name="link")[0].get("aria-invalid"), "true")
+        _, _, _, _, token = self.b.sign_up()
+        self.b.fake.requests.clear()
+        code, body, _ = http(f"{self.b.base}/u/{token}/configure",
+                             form(action="refresh", password=PASSWORD, link=f"https://aios.test:abc/stremio/{uuid}/E/"
+                                                                             "manifest.json"))
+        tree = Tree(body.decode())
+        self.assertEqual(code, 400)
+        self.assertEqual(tree.text_of["new_link-error"], NOT_A_LINK)
+        self.assertEqual(self.b.fake.requests, [])
+
+    def test_an_unreachable_aiostreams_on_refresh_marks_the_new_link_box_only_when_one_was_typed(self):
+        # With the optional box left empty, the error about the stored AIOStreams was shown under it and the
+        # box marked wrong
+        from subsync.aiosconfig import AiosApi
+        from test_public_http import INSTANCE, PASSWORD, form, http
+        _, _, _, _, token = self.b.sign_up()
+        self.b.service.api_factory = lambda base, timeout: AiosApi("https://127.0.0.1:9", timeout=timeout,
+                                                                   max_timeout=timeout, retry_wait_cap=5)
+        url = f"{self.b.base}/u/{token}/configure"
+        reach = "Reading your AIOStreams config: AIOSubtitles can't reach your AIOStreams from the internet."
+        code, body, _ = http(url, form(action="refresh", password=PASSWORD))
+        tree = Tree(body.decode())
+        self.assertEqual(code, 400)
+        self.assertTrue(tree.text_of["problem-message"].startswith(reach))   # at the top only
+        self.assertEqual(tree.all("a", href="#new_link"), [])
+        self.assertNotIn("new_link-error", tree.text_of)
+        self.assertNotIn("aria-invalid", tree.all("input", name="link")[0])
+        uuid = self.b.users.open(token)["main_uuid"]
+        code, body, _ = http(url, form(action="refresh", password=PASSWORD,
+                                       link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json"))
+        tree = Tree(body.decode())
+        self.assertEqual(code, 400)
+        self.assertTrue(tree.text_of["new_link-error"].startswith(reach))    # a link typed: at its box
+        self.assertEqual(tree.all("input", name="link")[0].get("aria-invalid"), "true")
+
+    def test_an_unticked_box_deletes_the_kept_password_even_when_the_refresh_fails(self):
+        # After a failed Refresh the password stayed kept, and the page showed the box ticked again with "Stop
+        # keeping my password"
+        from test_public_http import PASSWORD, form, http
+        self.b.tearDown()
+        self.b = __import__("test_public_http").Base()
+        self.b.start(SUBSYNC_RECHECK_HOURS="24")
+        _, _, _, _, token = self.b.sign_up(keep_password="on")
+        self.assertEqual(self.b.users.open(token)["auto_password"], PASSWORD)
+        code, body, _ = http(f"{self.b.base}/u/{token}/configure", form(action="refresh", password="not-the-password"))
+        text = body.decode()
+        tree = Tree(text)
+        self.assertEqual(code, 400)
+        self.assertIn("didn't accept this password", tree.text_of["problem-message"])
+        self.assertNotIn("auto_password", self.b.users.open(token))
+        self.assertNotIn("checked", tree.all("input", name="keep_password")[0])
+        self.assertNotIn('value="forget-password"', text)
 
     def test_saving_languages_redirects_and_says_so_once(self):
         from test_public_http import form, http

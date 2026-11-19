@@ -1116,7 +1116,7 @@ class GuardReservationTest(unittest.TestCase):
 
 class CountedLimits:
     """A person's limits that allow everything and count the files started."""
-    who = None
+    who = rows_key = None
 
     def __init__(self):
         self.started = 0
@@ -1293,6 +1293,25 @@ class CapReachedTest(unittest.TestCase):
         self.assertEqual(self.srv.log, read)                     # nothing more read
         self.assertEqual(w.limits.started, 1)                    # no new file counted
         self.assertTrue(w.capped(Job("movie", "tt1", dict(other.hints))))   # its next listing has no "(Subsync)" entry
+
+    def test_a_file_still_asked_for_keeps_its_marks(self):
+        # A mark goes 180 days after the last request it met; each request that meets one renews it, so a file
+        # still asked for isn't read again (its byte cap here, then its read failures)
+        run_once(self.worker(), self.job)
+        read = list(self.srv.log)
+        self.store.db.execute("UPDATE over_cap SET at=0")
+        run_once(self.worker(), Job("movie", "tt1", dict(self.job.hints)))
+        self.assertEqual(self.srv.log, read)                     # nothing more read
+        at = self.store.db.execute("SELECT at FROM over_cap WHERE alias=?", (self.job.alias,)).fetchone()[0]
+        self.assertGreater(at, time.time() - 60)
+        self.store.db.execute("DELETE FROM over_cap")
+        for _ in range(5):
+            self.store.file_failed(self.job.alias)                # 10 min, 1 h, 6 h, 24 h, then never again
+        self.store.db.execute("UPDATE files SET read_at=0")
+        run_once(self.worker(), Job("movie", "tt1", dict(self.job.hints)))
+        self.assertEqual(self.srv.log, read)
+        at = self.store.db.execute("SELECT read_at FROM files WHERE file_key=?", (self.job.alias,)).fetchone()[0]
+        self.assertGreater(at, time.time() - 60)
 
     def test_a_raised_cap_reads_it_again(self):
         run_once(self.worker(), self.job)

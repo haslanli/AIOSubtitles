@@ -924,10 +924,10 @@ GROUPS = [
             "when someone pauses between episodes. Reopening is quick, so 30 is a fair middle."),
         "SUBSYNC_USER_KEEP_DAYS": (
             "180",
-            "Days without a single request before a person's record is deleted. Their sync config can't be removed "
-            "from their AIOStreams then, because opening the record needs their personal link; the privacy page says "
-            "so. Shorter keeps less data about people who left; longer spares people who come back after a long break "
-            "from signing up again."),
+            "Days without a single request before a person's record is deleted (a whole number from 1). Their sync "
+            "config can't be removed from their AIOStreams then, because opening the record needs their personal link; "
+            "the privacy page says so. Shorter keeps less data about people who left; longer spares people who come "
+            "back after a long break from signing up again."),
         # what the pages say about the host's own setup: empty, they say it in words true of any host
         "SUBSYNC_CONTACT": (
             "",
@@ -1343,9 +1343,11 @@ PRIVACY_PARTS = (
      "one record, encrypted so that it opens only with your personal link (your AIOStreams address, AIOSubtitles' own "
      "config there and its password (and its Usenet config's, with Usenet on), your config's id, your languages, "
      "{audio_answer}{tmdb}and when "
-     "your AIOStreams was last checked), and how much was read for you each day. AIOSubtitles' own config holds your "
-     "debrid keys, as your own config does (its Usenet config your Usenet and indexer keys), and the service can open "
-     "them while your requests come in. Your AIOStreams password is stored only if you tick \"Keep "
+     "your AIOStreams was last checked), and how much was read for you each day. For up to 7 days after you play a "
+     "file, the original subtitles listed for it in your languages are kept too (and, while it waits for your pick, "
+     "its title, name and size), under a key that only your personal link leads to. AIOSubtitles' own config holds "
+     "your debrid keys, as your own config does (its Usenet config your Usenet and indexer keys), and the service can "
+     "open them while your requests come in. Your AIOStreams password is stored only if you tick \"Keep "
      "my password\", in the same encrypted record, until you untick it ({backups}). For each synced subtitle only "
      "its new timing (never its text), with the names and sizes of the files it fits, is shared and kept 180 days "
      "after last use, without who played them. Logs name the titles synced, never who asked."),

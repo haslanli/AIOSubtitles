@@ -11,6 +11,7 @@ judged     per (file, language): when every subtitle of that language was last j
            pass rule; a language with no subtitle at all counts as judged. With many people of different languages
            sharing the store (public mode), a file read for one language is read again for another.
 files      per file: served size, hash, whether it has a usable text track; per file hint: its read failures and back-off
+           (read_at: the last failure, or the last request the back-off met)
 aliases    file hints (AIOS videoHash, or file name + size) -> file key, so a listing finds a file read earlier
 budget     counters per UTC day and kind (day_add, day_count): "read" is the bytes received (the daily budget); a
            self-hosted install also counts "usenet" (Usenet listings), "usenet_stop" (1: none for the rest of the day),
@@ -18,6 +19,7 @@ budget     counters per UTC day and kind (day_add, day_count): "read" is the byt
 pickable   files that wait for the viewer's pick before the audio route may start (kept across a restart)
 originals  per file hint: the original subtitle per language (the pick entries' fallback, kept across a restart)
 over_cap   per file hint: the byte cap a job of the file stopped at; it isn't read again under that cap
+           (at: when it was reached, or the last request it met)
 kept_original  per (file, language) with nothing passing: the original its "<Language> (original)" entry serves,
            by candidate id (none when every subtitle of the language is in another language), and its measure
 
@@ -30,7 +32,13 @@ Lifetimes: synced/in_sync rows live 180 days after last served; keep_original is
 (or when ALGO_VERSION changes, which changes the key), and a kept_original row goes after 30 days unless the file is
 judged again; a file that couldn't be read backs off 10 min / 1 h / 6 h / 24 h, a refused one (and one neither
 MKV nor MP4, or a Usenet file) 1 h / 6 h / 24 h, then it stops. Those are failures in a row, each back-off counting its
-own: a read of the file that succeeds clears them.
+own: a read of the file that succeeds clears them. A file's names and details (aliases, files) go once nobody asked
+for it for 180 days and no result of it is left, and its marks (its read failures, its byte cap) 180 days after the last
+request they met, so a file still asked for is never read again.
+
+In public mode the rows of one person alone (their waiting files, their original subtitles and the refusals of their
+reads) are keyed "p:<their rows key>:<hash>" (worker.Worker._person_key), so Delete removes them (drop_rows_of,
+).
 """
 import contextlib
 import gzip
@@ -440,6 +448,18 @@ class Store:
         retry = self.file_retry(alias)
         return retry is not None and retry > self.clock()
 
+    def marks_asked(self, *aliases):
+        """A request for a file met its marks (its read failures, a refusal's, its byte cap; by alias, None left out):
+        each is kept 180 days from now (expire), so a file still asked for isn't read again."""
+        aliases = [a for a in aliases if a]
+        keys = [key for alias in aliases for key in (alias, alias + OTHER_BACKOFF_SUFFIX)]
+        now = self.clock()
+        with self._tx():
+            self.db.execute(f"UPDATE files SET read_at=? WHERE fails>0 AND file_key IN ({','.join('?' * len(keys))})",
+                            (now, *keys))
+            self.db.execute(f"UPDATE over_cap SET at=? WHERE alias IN ({','.join('?' * len(aliases))})",
+                            (now, *aliases))
+
     # -- a file over the job's byte cap -------------------------------------------------------------
     def cap_reached(self, alias, cap):
         """A job of the file (by alias, since its index wasn't read) stopped at this byte cap. A new table, so an older
@@ -524,6 +544,15 @@ class Store:
             have = {row[0] for row in self.db.execute(
                 "SELECT DISTINCT lang FROM results WHERE file_key=? AND route='audio'", (file_key,))}
         return all(lang in have for lang in langs)
+
+    def drop_rows_of(self, rows_key):
+        """Public mode, when a person's data is deleted: their own rows (keys "p:<rows_key>:", users.rows_key), the
+        files they wait to pick, their original subtitles and the refusals of their reads, go at once.
+        Returns how many went."""
+        mine = f"p:{rows_key}:%"       # a hex key: nothing in it that LIKE reads as a pattern
+        with self._tx():
+            return sum(self.db.execute(f"DELETE FROM {table} WHERE {column} LIKE ?", (mine,)).rowcount
+                       for table, column in (("pickable", "alias"), ("originals", "alias"), ("files", "file_key")))
 
     def drop_shared_waiting(self):
         """Public mode: waiting files and their original subtitles are each person's own (keys starting "p:");
@@ -611,6 +640,14 @@ class Store:
             self.db.execute("DELETE FROM judged WHERE at < ?", (now - 2 * JUDGED_FOR_S,))
             self.db.execute("DELETE FROM kept_original WHERE at < ?", (now - RETRY_KEEP_ORIGINAL_S,))
             self.db.execute("DELETE FROM title_language WHERE until IS NOT NULL AND until < ?", (now,))
+            # a file nobody asked for in 180 days and with no result left: its names and details; and the marks no
+            # request met in as long
+            cutoff = now - KEEP_SERVED_S
+            self.db.execute("DELETE FROM aliases WHERE file_key IN (SELECT file_key FROM aliases GROUP BY file_key "
+                            "HAVING MAX(updated) < ? EXCEPT SELECT file_key FROM results)", (cutoff,))
+            self.db.execute("DELETE FROM files WHERE read_at < ? AND file_key NOT IN (SELECT file_key FROM aliases) "
+                            "AND file_key NOT IN (SELECT file_key FROM results)", (cutoff,))
+            self.db.execute("DELETE FROM over_cap WHERE at < ?", (cutoff,))
         return len(old)
 
     # -- titles' original languages (origlang.py): codes only, shared by everyone ------------------------------

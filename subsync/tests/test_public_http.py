@@ -588,6 +588,30 @@ class PublicCheckTest(Base):
         page = http(f"{self.base}/u/{token}/configure?done=forgot")[1].decode()
         self.assertNotIn('value="forget-password"', page)
 
+    def test_delete_removes_the_persons_own_rows_in_the_store_at_once(self):
+        # The files a person waited to pick and their original subtitles stayed in the shared store for up to
+        # 7 days after "Your data is deleted"; a delete that doesn't go through (a mistyped password) removes nothing
+        from subsync.users import new_token
+        from subsync.store import REFUSED_BACKOFF_S
+        uuid, code, text, headers, token = self.sign_up()
+        mine, other = self.users.rows_key(token), self.users.rows_key(new_token())
+        for key in (mine, other):
+            self.store.pickable_put(f"p:{key}:f1", "movie", "tt1", {"filename": "a.mkv", "videoSize": 5})
+            self.store.originals_put(f"p:{key}:f1", {"eng": {"url": "https://subs.example/1.srt", "id": "1"}})
+            self.store.file_failed(f"p:{key}:f2", REFUSED_BACKOFF_S)
+
+        def left(key):
+            return (self.store.pickable_get(f"p:{key}:f1") is not None,
+                    self.store.originals_get(f"p:{key}:f1") is not None, self.store.file_blocked(f"p:{key}:f2"))
+        code, _, _ = http(f"{self.base}/u/{token}/configure", form(action="delete", password="not-the-password"))
+        self.assertEqual(code, 400)
+        self.assertEqual(left(mine), (True, True, True))
+        code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="delete"))
+        self.assertEqual(code, 200)
+        self.assertIsNone(self.users.open(token))
+        self.assertEqual(left(mine), (False, False, False))
+        self.assertEqual(left(other), (True, True, True))
+
     def test_with_the_check_off_no_password_is_offered_or_kept(self):
         # This harness runs with SUBSYNC_RECHECK_HOURS 0; a kept password would never be used
         self.assertNotIn('name="keep_password"', http(self.base + "/")[1].decode())

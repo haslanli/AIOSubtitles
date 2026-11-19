@@ -540,12 +540,38 @@ class SignupTest(PublicParts, unittest.TestCase):
                               ("aio.example.com.", "https://aio.example.com"),
                               ("aio.example.com:443", "https://aio.example.com"),
                               ("AIO.example.com:8443", "https://aio.example.com:8443"),
-                              ("[2001:DB8::1]:443", "https://[2001:db8::1]"), ("[::1]:8443", "https://[::1]:8443"),
-                              ("aio.example.com:abc", "https://aio.example.com:abc")):   # not a port: kept as typed
+                              ("[2001:DB8::1]:443", "https://[2001:db8::1]"), ("[::1]:8443", "https://[::1]:8443")):
             with self.subTest(host=host):
                 self.assertEqual(self.signup.parse_link(f"https://{host}/Aio/stremio/{uuid}/abc/manifest.json"),
                                  (f"{address}/Aio", uuid, None))
                 self.assertEqual(self.signup.instance_key(f"https://{host}/Aio"), f"{address}/Aio")
+        # not a port: a link with it is refused; an address with it is kept as typed
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.parse_link(f"https://aio.example.com:abc/Aio/stremio/{uuid}/abc/manifest.json")
+        self.assertEqual((e.exception.message, e.exception.field), (self.signup.NOT_A_LINK, "link"))
+        self.assertEqual(self.signup.instance_key("https://aio.example.com:abc/Aio"), "https://aio.example.com:abc/Aio")
+
+    # -- a link that can't be read ----------------------------------------------------------------
+    def test_a_link_that_cant_be_read_is_the_link_error_before_anything_is_asked(self):
+        # a port that isn't a number, or out of range, or an unmatched "[": a blank page at sign-up and Refresh, or
+        # "can't reach your AIOStreams", instead of the link error
+        uuid, result = self.run_signup(viewer())
+        self.fake.requests.clear()
+        for link in (f"https://aios.test:abc/stremio/{uuid}/ENCRYPTED/manifest.json",
+                     f"https://aios.test:99999/stremio/{uuid}/ENCRYPTED/manifest.json",
+                     f"https://[aios.test/stremio/{uuid}/ENCRYPTED/manifest.json",
+                     "https://[aios.test/stremio/u/Family.TV/manifest.json"):
+            for step, call in (
+                    ("sign-up", lambda: self.signup.signup(self.s, self.users, dict(self.form(uuid), link=link),
+                                                           api_factory=self.api, timeout=10)),
+                    ("refresh", lambda: self.signup.refresh(self.s, self.users, result.token,
+                                                            {"password": PASSWORD, "link": link},
+                                                            api_factory=self.api, timeout=10))):
+                with self.subTest(link=link, step=step):
+                    with self.assertRaises(self.signup.SignupError) as e:
+                        call()
+                    self.assertEqual((e.exception.message, e.exception.field), (self.signup.NOT_A_LINK, "link"))
+        self.assertEqual(self.fake.requests, [])
 
     def test_a_refresh_on_the_same_aiostreams_spelled_otherwise_is_not_a_move(self):
         import urllib.parse
@@ -637,6 +663,49 @@ class SignupTest(PublicParts, unittest.TestCase):
                 self.assertEqual(self.signup.delete(self.s, self.users, result.token, form,
                                                     api_factory=self.faulty(method)), outcome)
                 self.assertIsNone(self.users.open(result.token))
+
+    def test_a_config_already_gone_counts_as_removed_at_delete(self):
+        # Delete said a config AIOStreams no longer has stays there with the person's debrid keys; one that may
+        # really be left (an error of AIOStreams') still says so
+        from subsync.aiosconfig import AiosError
+        from unittest import mock
+        uuid, result = self.run_signup(viewer())
+        del self.fake.configs[self.users.open(result.token)["sync_uuid"]]      # removed in AIOStreams meanwhile
+        self.assertEqual(self.signup.delete(self.s, self.users, result.token, {}, api_factory=self.api),
+                         {"sync_removed": True, "addon_removed": False})
+        self.assertIsNone(self.users.open(result.token))
+
+        def failing(base, timeout):
+            api = self.api(base, timeout)
+            api.delete_config = mock.Mock(side_effect=AiosError("Internal error", code="INTERNAL"))
+            return api
+        uuid, result = self.run_signup(viewer())
+        self.assertEqual(self.signup.delete(self.s, self.users, result.token, {}, api_factory=failing),
+                         {"sync_removed": False, "addon_removed": False})
+        self.assertIsNone(self.users.open(result.token))
+
+    def test_unticking_keep_my_password_deletes_it_even_when_the_refresh_fails(self):
+        # The kept password went only once the whole refresh had worked, so after a mistyped password or an
+        # AIOStreams that was down it stayed, and the daily rebuild went on using it
+        from subsync.aiosconfig import AiosApi
+
+        def down(base, timeout):
+            return AiosApi("https://127.0.0.1:9", timeout=timeout, max_timeout=timeout, retry_wait_cap=5)
+        for why, form, api in (("a mistyped password", {"password": "not-the-password"}, self.api),
+                               ("AIOStreams down", {"password": PASSWORD}, down)):
+            with self.subTest(why=why):
+                uuid, result = self.run_signup(viewer(), keep_password="on")
+                self.assertEqual(self.users.open(result.token)["auto_password"], PASSWORD)
+                self.logs.lines.clear()
+                with self.assertRaises(self.signup.SignupError):
+                    self.signup.refresh(self.s, self.users, result.token, form, api_factory=api, timeout=5)
+                self.assertNotIn("auto_password", self.users.open(result.token))
+                self.assertEqual(self.logs.lines.count("a kept password was deleted"), 1)
+        uuid, result = self.run_signup(viewer(), keep_password="on")       # ticked: kept as before, the refresh failing
+        with self.assertRaises(self.signup.SignupError):
+            self.signup.refresh(self.s, self.users, result.token, {"password": "x", "keep_password": "on"},
+                                api_factory=self.api)
+        self.assertEqual(self.users.open(result.token)["auto_password"], PASSWORD)
 
     def test_delete_waits_for_the_record_lock(self):
         import threading

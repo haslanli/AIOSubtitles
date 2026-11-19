@@ -77,6 +77,7 @@ class UserLimits:
         self.s, self.users, self.token = settings, users, token
         # the sources' fair shares count per person under this opaque key (not the token, never logged)
         self.who = (users.user_id(token) or "")[:16] or None
+        self.rows_key = users.rows_key(token)   # their own rows in the shared store
 
     def may_queue(self, queued):
         return queued < self.s.user_queue
@@ -137,6 +138,7 @@ class StoreOnly:
     """The limits of a person answered from the shared store only (a record for stored copies, or no worker free
     now): nothing is queued or read."""
     who = None   # no person's key: the sources' fair shares count no one for them (Worker.who)
+    rows_key = None   # nor rows of their own in the shared store (Worker._person_key)
 
     def may_queue(self, queued):
         return False
@@ -309,7 +311,7 @@ class Pool:
         """Stops the person's App (a settings save, a refresh, a delete, a change the daily check found); the next
         request opens their record again. Their next App keeps their refusal back-off and the files this one knew,
         except: `reset` drops the back-off (a refresh: they may have changed their debrid key), `forget` drops both (a
-        delete)."""
+        delete), and its worker then writes nothing more of theirs to the store (Worker.stop)."""
         uid = self.users.user_id(token)
         with self.lock:
             self.stops += 1
@@ -321,7 +323,7 @@ class Pool:
             if forget:
                 self.seen.pop(uid, None)
         if entry is not None:
-            entry["app"].worker.stop()
+            entry["app"].worker.stop(forget=forget)
 
     def reap(self):
         """Stops the Apps idle longer than SUBSYNC_WORKER_IDLE_MIN with nothing waiting or running (the files they knew
@@ -657,9 +659,12 @@ class PublicHandler(Handler):
                                      {"password": form.get("password"), "add_addon": "on", "link": form.get("link"),
                                       "keep_password": form.get("keep_password"), "usenet": form.get("usenet")},
                                      api_factory=svc.api_factory, timeout=svc.timeout)
-                except SignupError as e:      # the password field is called "refresh" on this page, the link "new_link"
+                except SignupError as e:      # the password field is called "refresh" on this page, the link
+                    # "new_link"; with that box left empty, a link error is about the stored AIOStreams: no box is
+                    # marked
+                    link = "new_link" if (form.get("link") or "").strip() else None
                     return page(e.code, error=e.message,
-                                field={"password": "refresh", "link": "new_link"}.get(e.field, e.field))
+                                field={"password": "refresh", "link": link}.get(e.field, e.field))
                 svc.pool.stop(token, reset=True)   # reads start again at once: they may have changed their debrid key
                 svc.checker.forget(token)
                 if result.store_only:          # stored copies only: moved there by this refresh, or still
@@ -695,6 +700,8 @@ class PublicHandler(Handler):
                 # stops now that the record is gone (Pool.app opens a record again after a stop, and finds none)
                 svc.pool.stop(token, forget=True)
                 svc.checker.forget(token)
+                # then their own rows in the shared store: their waiting files and original subtitles
+                svc.store.drop_rows_of(svc.users.rows_key(token))
                 return self._html(200, pages.deleted_page(outcome, svc.s), personal=True)
         except SignupError as e:
             return page(e.code, error=e.message, field=e.field)

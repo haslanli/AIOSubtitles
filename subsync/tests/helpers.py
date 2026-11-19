@@ -776,10 +776,12 @@ class Listing:
 
 
 class Limits:
-    """A person's limits (public.UserLimits' methods), with today's data left and today's audio syncs."""
+    """A person's limits (public.UserLimits' methods), with today's data left and today's audio syncs. Their own rows
+    in the store are keyed by `who` too (UserLimits.rows_key)."""
 
     def __init__(self, who="a" * 16, queue=3, left=10 ** 12, per_day=20, opened_per_day=5, room=True):
         self.who, self.queue, self.left, self.room = who, queue, left, room
+        self.rows_key = who
         self.per_day, self.opened_per_day = per_day, opened_per_day
         self.started, self.read, self.syncs, self.opened = 0, 0, 0, 0
 

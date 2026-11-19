@@ -24,8 +24,7 @@ from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, S
 KINDS = ("sync", "usenet")   # AIOSubtitles' configs on a person's AIOStreams: the sync config and the Usenet config
 # the record fields a rebuild may change (signup.rebuild), copied from its working copy into the record (_apply sets
 # synced_at itself)
-REBUILT = tuple(f for f in SYNC_FIELDS if f != "synced_at") + USENET_FIELDS + \
-    ("usenet", "usenet_why", "usenet_services", "store_only")
+REBUILT = SYNC_FIELDS + USENET_FIELDS + ("usenet", "usenet_why", "usenet_services", "store_only")
 
 log = logging.getLogger("subsync.recheck")
 HOUR = 3600

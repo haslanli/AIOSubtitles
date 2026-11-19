@@ -126,6 +126,35 @@ class UsersTest(unittest.TestCase):
         self.assertIsNone(self.users.open(old))
         self.assertIsNotNone(self.users.open(recent))
 
+    def test_a_keep_days_below_1_deletes_nothing(self):
+        # 0 deleted every record not used today, less than 0 every record, a sign-up of a minute ago included
+        self.users.create(self.token, RECORD)
+        self.clock.t += DAY
+        for keep_days in (0, -1, 1.5, "180"):
+            with self.subTest(keep_days=keep_days):
+                with self.assertRaises(ValueError):
+                    self.users.expire(keep_days)
+                self.assertIsNotNone(self.users.open(self.token))
+        self.assertEqual(self.users.expire(1), 0)                          # seen a day ago: kept for a whole day
+        self.clock.t += DAY
+        self.assertEqual(self.users.expire(1), 1)
+
+    def test_a_persons_rows_key_is_made_from_their_link_alone(self):
+        # The key of a person's own rows in the shared store: the same for their token each time, another for
+        # another token or secret, and not their record's id (stored), so only their link leads to it
+        key = self.users.rows_key(self.token)
+        self.assertRegex(key, "^[0-9a-f]{32}$")
+        self.assertEqual(self.users.rows_key(self.token), key)
+        self.assertNotEqual(self.users.rows_key(self.users_module.new_token()), key)
+        self.assertNotIn(key[:16], self.users.user_id(self.token))
+        self.assertNotIn(self.users.user_id(self.token)[:16], key)
+        other = self.users_module.Users(self.path, bytes(32), clock=self.clock)
+        try:
+            self.assertNotEqual(other.rows_key(self.token), key)
+        finally:
+            other.close()
+        self.assertEqual(self.users.count(), 0)                            # nothing was stored
+
     def test_touch_keeps_a_record(self):
         self.users.create(self.token, RECORD)
         self.clock.t += 170 * DAY

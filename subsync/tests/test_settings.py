@@ -61,6 +61,27 @@ class NumbersTest(unittest.TestCase):
             with self.subTest(name=name, value=value):
                 self.assertEqual(Settings({name: value}).conflicts(), [line])
 
+    def test_a_keep_days_below_1_stops_the_start(self):
+        # 0 (which may be read as "keep for ever") deleted every record not used today at the first
+        # housekeeping, -1 every record; the owner's start line, word for word
+        from subsync import __main__ as entry
+        line = "SUBSYNC_USER_KEEP_DAYS must be a whole number from 1, like 180."
+        for value in ("0", "-1", "1.5", "a year", ""):
+            with self.subTest(value=value):
+                self.assertEqual(Settings(dict(PUBLIC, SUBSYNC_USER_KEEP_DAYS=value)).conflicts(), [line])
+        self.assertEqual((Settings({"SUBSYNC_USER_KEEP_DAYS": "1"}).user_keep_days,
+                          Settings({"SUBSYNC_USER_KEEP_DAYS": "1"}).conflicts()), (1, []))
+        env = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": helpers.KEY, "SUBSYNC_PUBLIC_BASE": "https://subs.test",
+               "SUBSYNC_USER_KEEP_DAYS": "0"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(entry.logging, "basicConfig"), \
+                self.assertLogs("subsync", "INFO") as logs, self.assertRaises(SystemExit) as stopped:
+            entry.main()
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertEqual(logs.output, ["ERROR:subsync:not started: " + line])
+        self.assertTrue(explain.SETTINGS["SUBSYNC_USER_KEEP_DAYS"][1].startswith(
+            "Days without a single request before a person's record is deleted (a whole number from 1). Their sync "
+            "config can't be removed "))
+
     def test_every_documented_zero_keeps_its_meaning(self):
         # "0 removes the limit" (the audio and per-file limits), "0 turns Usenet off", "0 turns the check off", "0 stops
         # new audio syncs", "0: the first check decides", nothing read in a day

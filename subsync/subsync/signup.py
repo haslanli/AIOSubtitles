@@ -108,8 +108,8 @@ def _install_tail(tail, bare=False):
 
 def _address(parts):
     """https://<host>[:<port>] of a link, one spelling for each AIOStreams: the host in lower case without a trailing
-    dot, the port only when it isn't https' own (443). A port that isn't one stays as typed: nothing answers there, and
-    the person is told so."""
+    dot, the port only when it isn't https' own (443). A port that isn't one stays as typed, so instance_key never fails
+    on an address (parse_link refuses such links)."""
     host = parts.hostname.rstrip(".") or parts.hostname
     if ":" in host:                     # an IPv6 address
         host = f"[{host}]"
@@ -134,7 +134,11 @@ def parse_link(text):
     text = (text or "").strip()
     if not text or len(text) > MAX_LINK or _CONTROL.search(text):
         raise SignupError("Paste the link of your AIOStreams config: the one that ends in /manifest.json.", field="link")
-    parts = urllib.parse.urlsplit(text)
+    try:
+        parts = urllib.parse.urlsplit(text)
+        parts.port              # read now: a port that isn't one (":abc", ":99999") raises ValueError too
+    except ValueError:          # that, or an unmatched "[": the link error, before anything is asked
+        raise SignupError(NOT_A_LINK, field="link") from None
     if parts.scheme != "https":
         raise SignupError("The link must start with https://, so your password crosses the internet encrypted. "
                           "Use the address your AIOStreams has on the internet.", field="link")
@@ -214,9 +218,8 @@ def _languages(text, limit=MAX_LANGUAGES):
 
 def form_languages(form):
     """The languages a form chose, as text for _languages. The pages' language slots (ui.language_slots, marked by
-    `lang_ui`) send each slot's choice (`lang`, empty when unused) in the page's order, which is the order kept. A
-    `lang_order` field (the order chips were picked in; no page sends it now) still puts the codes it names first. An
-    older form sends typed names (`languages`). None when the form has neither."""
+    `lang_ui`) send each slot's choice (`lang`, empty when unused) in the page's order, which is the order kept
+. An older form sends typed names (`languages`). None when the form has neither."""
     if form.get("lang_ui") != "1":
         return form.get("languages")
     chosen = form.get("lang") or []
@@ -225,8 +228,7 @@ def form_languages(form):
     chosen = [c.strip() for c in chosen if c.strip()]
     if not chosen:
         raise SignupError("Choose at least one language.", field="languages")
-    order = [c for c in (form.get("lang_order") or "").split(",") if c in chosen]
-    return ", ".join(dict.fromkeys(order + chosen))
+    return ", ".join(dict.fromkeys(chosen))
 
 
 WRONG_PASSWORD = ("Your AIOStreams didn't accept this password for this link. Type the password of this config: the one "
@@ -315,7 +317,9 @@ def _field_of(e):
     return None
 
 
-SYNC_FIELDS = ("sync_uuid", "sync_link", "sync_password", "sync_fp", "synced_at")
+# synced_at (when AIOSubtitles last copied the person's config, into either of its configs) is neither's: taking the
+# sync config out leaves it
+SYNC_FIELDS = ("sync_uuid", "sync_link", "sync_password", "sync_fp")
 USENET_FIELDS = ("usenet_uuid", "usenet_link", "usenet_password", "usenet_fp", "usenet_subtitles")
 
 
@@ -406,10 +410,14 @@ def _usenet_state(record, want, services, why):
             record.pop(name, None)
 
 
-def _usenet_synced(record, usenet, fields, subtitles):
+def _usenet_synced(record, usenet, fields, subtitles, now=None):
+    """The Usenet config as AIOSubtitles made or saved it; `now`: when (sign-up and Refresh, as _synced for the sync
+    config,; the daily rebuild's time is set by the check, recheck.py)."""
     record["usenet_uuid"], record["usenet_link"], record["usenet_password"] = fields
     record["usenet_fp"] = sync_fingerprint(usenet)
     record["usenet_subtitles"] = bool(subtitles)
+    if now is not None:
+        record["synced_at"] = now
 
 
 def _log_fault(e, doing):
@@ -490,11 +498,14 @@ def _put_sync(api, record, sync, gone=False, kind="sync"):
 
 
 def drop_sync(api, fields):
-    """Removes a config this service made and won't use, (id, link, password); best effort: True when it was removed.
-    Never raises, so a clean-up never hides the error that started it, nor stops before the next config."""
+    """Removes a config this service made and won't use, (id, link, password); best effort: True when it is gone,
+    removed now or already (its AIOStreams no longer opens it, as the daily check reads that). Never raises,
+    so a clean-up never hides the error that started it, nor stops before the next config."""
     try:
         api.delete_config(fields[0], fields[2])
         return True
+    except AiosError as e:
+        return str(e.code) in WRONG_PASSWORD_CODES
     except Exception as e:
         _log_fault(e, "removing a config")
         return False
@@ -655,7 +666,7 @@ def _signup(settings, users, form, api_factory, timeout):
         if usenet is not None:
             fields = _new_sync(api, instance, usenet)
             made.append(fields)
-            _usenet_synced(record, usenet, fields, not has_sync)
+            _usenet_synced(record, usenet, fields, not has_sync, users.clock())
         _usenet_state(record, want, services, why)
         # the person chose it (unticked by default): AIOSubtitles refreshes by itself
         if keeps_password(settings, form):
@@ -675,8 +686,8 @@ def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
     """Rebuilds the sync config, and with the Usenet box ticked the Usenet config, from the person's config as it is now
     (and puts AIOSubtitles back if it is missing). A gone config is made again. With a new config link (`link`), that
     config becomes theirs; on another AIOStreams their configs move there and the old ones are removed. The kept
-    password follows the box (`keep_password`): ticked keeps this password, unticked deletes a kept one. Unticking the
-    Usenet box removes the Usenet config."""
+    password follows the box (`keep_password`): ticked keeps this password once the refresh works, unticked deletes a
+    kept one at once, even when the refresh then fails. Unticking the Usenet box removes the Usenet config."""
     with _refusal_explained():
         return _refresh(settings, users, token, form, api_factory, timeout)
 
@@ -694,6 +705,11 @@ def _locked_record(users, token, missing=NOT_SIGNED_UP):
 
 def _refresh(settings, users, token, form, api_factory, timeout):
     with _locked_record(users, token) as record:
+        # a kept password the box no longer keeps is deleted first, before anything is checked or read, so it goes
+        # whatever becomes of the refresh
+        if not keeps_password(settings, form) and record.pop("auto_password", None) is not None:
+            users.update(token, record)
+            log.info("a kept password was deleted")
         link = (form.get("link") or "").strip()
         instance, main_uuid, alias = parse_link(link) if link else (record["instance"], record["main_uuid"], None)
         moved = instance_key(instance) != instance_key(record["instance"])
@@ -749,14 +765,12 @@ def _refresh(settings, users, token, form, api_factory, timeout):
                 _take_config(record, "sync")
                 all_clear(settings, record, users.clock())
             if usenet is not None:
-                _usenet_synced(record, usenet, usenet_fields, not has_sync)
+                _usenet_synced(record, usenet, usenet_fields, not has_sync, users.clock())
             else:
                 _take_config(record, "usenet")
             _usenet_state(record, want, services, why)
             if keeps_password(settings, form):
                 record["auto_password"] = password
-            else:
-                record.pop("auto_password", None)
             if not users.update(token, record):   # deleted meanwhile (it expired): nothing holds what was made here
                 raise SignupError(NOT_SIGNED_UP)
     for where, gone in old:   # the configs they no longer use: removed

@@ -287,7 +287,7 @@ class SharedStoreTest(unittest.TestCase):
 
 
 class StubLimits:
-    who = None
+    who = rows_key = None
 
     def __init__(self, queue=10, files=True, fail_read=False):
         self.queue, self.files, self.fail_read = queue, files, fail_read
@@ -530,7 +530,7 @@ class WorkerHooksTest(unittest.TestCase):
 
         def person(who):
             limits = StubLimits()
-            limits.who = who
+            limits.who = limits.rows_key = who
             w = Worker(self.settings(SUBSYNC_PUBLIC="on"), self.store, ListingAios(row), Safety(), limits=limits)
             self.workers.append(w)
             return w

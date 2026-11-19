@@ -795,7 +795,7 @@ class MapsTest(Base):
         self.assertFalse(w._audio_room(self.alias))
 
         class Partial:                                      # a limits object without the audio counts or the room
-            who = None
+            who = rows_key = None
 
             def may_queue(self, queued):
                 return True

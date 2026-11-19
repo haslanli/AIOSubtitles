@@ -450,8 +450,8 @@ class Worker(threading.Thread):
         self.usenet, self.usenet_gate = (usenet, usenet_gate) if usenet is not None and usenet_gate is not None \
             else (None, None)
         # public mode: the turn every person's worker shares, and this person's limits (public.UserLimits, or
-        # public.StoreOnly: who, may_queue, may_start_file, file_started, before_read, after_read, has_room,
-        # may_start_audio, audio_started); None on a self-hosted install
+        # public.StoreOnly: who, rows_key, may_queue, may_start_file, file_started, before_read, after_read,
+        # has_room, may_start_audio, audio_started); None on a self-hosted install
         self.turn = turn if turn is not None else NoTurn()
         # public mode: the audio syncs' own places, shared by everyone (audio_places), taken before a place of the turn
         self.audio_turn = audio_turn if audio_turn is not None else NoTurn()
@@ -464,6 +464,10 @@ class Worker(threading.Thread):
         self.lookup = lookup
         # public mode: an opaque key of this person for the sources' fair shares (sourcestate.Ledger), never logged
         self.who = limits.who if limits is not None else None
+        # public mode: the key of this person's own rows in the shared store (users.rows_key, _person_key); and once
+        # their data is deleted (stop(forget=True)), nothing more of theirs is written there
+        self.rows_key = limits.rows_key if limits is not None else None
+        self.forgotten = False
         self.vad_factory = vad_factory
         self._vad = None
         self.queue, self.jobs = [], {}   # jobs in arrival order; alias -> queued job
@@ -556,15 +560,22 @@ class Worker(threading.Thread):
             return self.aios
         return self.usenet
 
+    def _person_key(self, alias):
+        """In public mode, the store's key of a file for this person alone, under the key of their own rows
+        (users.rows_key: only their personal link leads to it), so Delete removes them all; None on a
+        self-hosted install and for a public worker without a person's key."""
+        if not (self.s.public and self.rows_key):
+            return None
+        return f"p:{self.rows_key}:" + hashlib.sha256(f"{self.rows_key}|{alias}".encode()).hexdigest()[:32]
+
     def _row_key(self, alias):
         """The store's key for a file this person waits to pick and its original subtitles: the file itself on a
-        self-hosted install; in public mode the person's own, so nobody's waiting files or subtitle links
-        reach anyone else, and None (memory only) for a public worker without a person's key."""
+        self-hosted install; in public mode the person's own (_person_key), so nobody's waiting files or subtitle links
+        reach anyone else, and None (memory only) for a public worker without a person's key, or once the person's
+        data is deleted (stop(forget=True)): a job still running then writes nothing more of theirs."""
         if not self.s.public:
             return alias
-        if not self.who:
-            return None
-        return "p:" + hashlib.sha256(f"{self.who}|{alias}".encode()).hexdigest()[:32]
+        return None if self.forgotten else self._person_key(alias)
 
     def _restore(self, alias):
         """After a restart: a file that waited for a pick, and its original subtitles, from the store (cv held)."""
@@ -691,8 +702,14 @@ class Worker(threading.Thread):
         key = self._row_key(job.alias)
         if key is not None:
             self.store.pickable_put(key, job.type, job.video_id, job.hints)
-            if self.originals.get(job.alias) is not None:
-                self.store.originals_put(key, self.originals[job.alias])
+            self._keep_originals(job.alias)
+
+    def _keep_originals(self, alias):
+        """A file's original subtitles (self.originals) kept in the store too, so a pick after a restart finds them (cv
+        held, as when stop(forget=True) is set: a deletion never comes between the key and the write)."""
+        key = self._row_key(alias)
+        if key is not None and self.originals.get(alias) is not None:
+            self.store.originals_put(key, self.originals[alias])
 
     def _may_queue(self):
         """This person may queue one more job (cv held)."""
@@ -948,11 +965,14 @@ class Worker(threading.Thread):
         self.audio_worker = threading.Thread(target=self._loop, args=("audio",), daemon=True, name="subsync-audio")
         self.audio_worker.start()
 
-    def stop(self):
+    def stop(self, forget=False):
         """Ends the loop once the job it runs (if any) is done. The jobs still queued are not run; the file of an audio
-        job among them (a pick not started yet) waits for another pick, as when an audio job ends without its sync."""
+        job among them (a pick not started yet) waits for another pick, as when an audio job ends without its sync.
+        `forget` (public mode: the person's data is being deleted): from now on nothing of theirs is written to the
+        store, those waiting files included, so Delete leaves none of their rows."""
         with self.cv:
             self.stop_flag = True
+            self.forgotten = self.forgotten or forget
             for job in self.queue:
                 if job.audio:
                     self._put_waiting(job.again())
@@ -1027,7 +1047,9 @@ class Worker(threading.Thread):
             unfinished = True
             wait = self._refused(job)
             if not (job.audio and job.usenet):
-                self.store.file_failed(self._refusal_key(job.alias), REFUSED_BACKOFF_S)
+                with self.cv:       # nothing more of a person's once their data is deleted (stop(forget=True))
+                    if not self.forgotten:
+                        self.store.file_failed(self._refusal_key(job.alias), REFUSED_BACKOFF_S)
             log.warning("refused %s (%s): no reads for %d s", job.label, e, wait)
         except ReadFailed as e:
             if job.audio:
@@ -1106,10 +1128,10 @@ class Worker(threading.Thread):
         return job.refused_wait
 
     def _refusal_key(self, alias):
-        """The store's mark of a file whose read was refused (1 h / 6 h / 24 h): in public mode the person's own (a
-        refusal is most likely their account's limit, so it never backs the file off for anyone else), else the
-        file's (a self-hosted install, or a public worker without a person's key)."""
-        return self._row_key(alias) or alias
+        """The store's mark of a file whose read was refused (1 h / 6 h / 24 h): in public mode the person's own
+        (_person_key: a refusal is most likely their account's limit, so it never backs the file off for anyone else),
+        else the file's (a self-hosted install, or a public worker without a person's key)."""
+        return self._person_key(alias) or alias
 
     def _file_blocked(self, alias):
         """The file backs off: after its read failures (anyone's: they are about the file) or a refusal of this
@@ -1271,6 +1293,7 @@ class Worker(threading.Thread):
             # is marked too, so its listing has no pick entry either
             if not self.capped(job):
                 self.store.cap_reached(job.alias, self.store.over_cap(bt))
+            self.store.marks_asked(job.alias, bt)    # asked for: the mark stays
             candidates = self._candidates(job, hints)
             if candidates:
                 self._set_originals(job.alias, candidates, hints.get("filename"), hints.get("videoHash"))
@@ -1284,6 +1307,7 @@ class Worker(threading.Thread):
         url = row["url"]
         if self._file_blocked(job.alias):
             log.info("file backing off after read failures %s", job.label)
+            self.store.marks_asked(job.alias, self._refusal_key(job.alias))    # asked for: the marks stay
             if job.audio:   # nothing read: the file waits for another pick
                 self._wait_again(job)
             return
@@ -1505,10 +1529,8 @@ class Worker(threading.Thread):
             langs = dict(self.originals.get(job.alias) or {})
             langs[lang] = {"url": cand["url"], "id": cand["id"]}
             self.originals[job.alias] = langs
+            self._keep_originals(job.alias)
             self.cv.notify_all()
-        key = self._row_key(job.alias)
-        if key is not None:
-            self.store.originals_put(key, langs)
         log.info("guess %s %s: %d subtitles agree and the guess by name sits %.1f s from them: another served",
                  job.label, lang, got["group"], got["offset_s"])
 
@@ -1599,10 +1621,8 @@ class Worker(threading.Thread):
             fallbacks[lang] = {"url": pick["url"], "id": pick["id"]} if pick else None
         with self.cv:
             self.originals[alias] = fallbacks
+            self._keep_originals(alias)
             self.cv.notify_all()
-        key = self._row_key(alias)
-        if key is not None:
-            self.store.originals_put(key, fallbacks)
 
     def _name_order(self, candidates, filename, file_hash, first=()):
         """A language's subtitles in the order an original is chosen by name (_set_originals): with
@@ -1636,10 +1656,8 @@ class Worker(threading.Thread):
             langs = dict(self.originals.get(alias) or {})
             langs[lang] = {"url": pick["url"], "id": pick["id"]} if pick else None
             self.originals[alias] = langs
+            self._keep_originals(alias)
             self.cv.notify_all()
-        key = self._row_key(alias)
-        if key is not None:
-            self.store.originals_put(key, langs)
         why = f"not {lang_name(lang)} text" if current["id"] in refused else "its download failed"
         log.info("original %s: %s, %s served instead", lang, why, "another" if pick else "none")
 

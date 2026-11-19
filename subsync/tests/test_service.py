@@ -134,6 +134,45 @@ class StoreTest(unittest.TestCase):
             st.expire()
             self.assertIsNone(st.get(ks))                  # 180 days after last served
 
+    def test_a_files_names_details_and_marks_go_180_days_after_it_was_last_asked_for(self):
+        # Aliases, files and over_cap rows were never deleted, so a file's names outlived its timings for
+        # good; a mark a request still meets stays, so such a file is still never read again
+        DAY = 86400
+        with TempDir() as d:
+            clock = Clock()
+            st = closed_after(self, Store(d, clock=clock))
+
+            def rows():
+                return {table: sorted(r[0] for r in st.db.execute(f"SELECT {column} FROM {table}"))
+                        for table, column in (("aliases", "alias"), ("files", "file_key"), ("over_cap", "alias"))}
+            served, unused, again = "1" * 16 + "-5", "2" * 16 + "-5", "3" * 16 + "-5"
+            for key in (served, unused, again):          # three files read, each known by two names
+                for alias in (f"name:{key[:1]}.mkv|5", f"hash:{key[:16]}|5"):
+                    st.alias(alias, key)
+                st.file_read(key, 5, key[:16], True, {"tracks": []})
+            copy = st.put(served, SHA_A, "eng", 0, "synced", body="x", fmt="srt")
+            for alias in ("name:broken.mkv|5", "name:asked.mkv|5"):    # read failures: the second never read again
+                for _ in range(5 if alias == "name:asked.mkv|5" else 1):
+                    st.file_failed(alias)
+            st.cap_reached("name:huge.mkv|5", 1000)
+            st.cap_reached("name:asked-huge.mkv|5", 1000)
+            clock.t += 100 * DAY
+            st.served(copy)                                          # its copy is still served
+            st.alias(f"name:{again[:1]}.mkv|5", again)              # asked for again under one of its names
+            st.marks_asked("name:asked.mkv|5", "name:asked-huge.mkv|5", None)   # requests met these marks
+            clock.t += 100 * DAY                                     # 200 days after the reads
+            st.expire()
+            self.assertEqual(rows(), {"aliases": sorted(["name:1.mkv|5", "hash:1111111111111111|5", "name:3.mkv|5",
+                                                         "hash:3333333333333333|5"]),
+                                      "files": sorted([served, again, "name:asked.mkv|5"]),
+                                      "over_cap": ["name:asked-huge.mkv|5"]})
+            self.assertTrue(st.file_blocked("name:asked.mkv|5"))
+            self.assertEqual(st.over_cap("name:asked-huge.mkv|5"), 1000)
+            self.assertEqual(st.resolve("name:1.mkv|5"), served)
+            clock.t += 181 * DAY                                     # nobody asked since, the copy not served since
+            st.expire()
+            self.assertEqual(rows(), {"aliases": [], "files": [], "over_cap": []})
+
     def test_budget_per_day_and_kind(self):
         with TempDir() as d:
             clock = Clock()
