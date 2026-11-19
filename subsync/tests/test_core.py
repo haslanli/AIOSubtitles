@@ -875,6 +875,32 @@ class MissingSceneTest(unittest.TestCase):
         g = self.gate(self.without(self.ref, 0.0, 400.0))           # a late start is the span rule's business
         self.assertFalse(g["missing_scene"])
 
+    def test_a_credits_song_the_subtitle_lacks_is_no_missing_scene(self):
+        # the file's track transcribes a 200 s closing song (40 lines) after the dialogue; the subtitle stops before it
+        song = [self.ref[-1] + self.dur[-1] + 5.0 + 5.0 * k for k in range(40)]
+        r = random.Random(1)
+        g = relgate(self.ref + song, sorted(s + r.gauss(0, 0.04) for s in self.ref), self.dur + [3.0] * 40, min_span=0.7)
+        self.assertFalse(g["missing_scene"])
+        self.assertTrue(g["pass"])
+
+    def test_a_subtitle_that_stops_long_before_the_end_is_missing_it(self):
+        # The last 28 % of the film (over 17 minutes, 244 lines) has no line; its span (72 %) passed, and
+        # every line it has pairs; across languages, as it is or moved by one shift, it isn't excused (never
+        # beyond the subtitle's ends)
+        r = random.Random(1)
+        cand = [s + r.gauss(0, 0.04) for s in self.ref if s < self.ref[0] + 0.72 * (self.ref[-1] - self.ref[0])]
+        g = self.gate(cand)
+        self.assertGreaterEqual(g["span"], 0.7)
+        self.assertEqual((g["missing_scene"], g["missing_at_end"], g["missing_lines"], g["missing_s"], g["pass"]),
+                         (True, True, 244, 1026.5, False))
+        self.assertEqual(clearly_better({"median_ms": 5000.0}, g, min_span=0.7),
+                         (False, "a scene of the release is missing (another cut)"))
+        self.assertEqual(aligned(g, min_span=0.7, one_shift=True), (False, "a scene of the release is missing (another cut)"))
+        late = self.gate(self.without(self.ref, 0.0, 1100.0))       # the same at the start: 18 minutes, 268 lines
+        self.assertEqual((late["missing_scene"], late["missing_lines"], late["pass"]), (True, 268, False))
+        short = self.gate(self.without(self.ref, 3300.0, 4000.0))   # a credits song's length: 400 s, 94 lines
+        self.assertEqual((short["missing_scene"], short["pass"]), (False, True))
+
 
 class AlignedTest(unittest.TestCase):
     """relgate.aligned: a translation against another language's track must pair in every part of the runtime, but its
@@ -1406,12 +1432,15 @@ class ImageRefTest(unittest.TestCase):
         self.assertFalse(imageref.reference({"codec": "S_HDMV/PGS", "cues": noise})["plausible"])
 
     def test_calibration_compares_an_image_track_with_the_text_track(self):
-        text = [{"number": 3, "language": "eng", "codec": "S_TEXT/ASS", "forced": False, "cues": self.lines}]
-        image = [{"number": 7, "language": "en", "codec": "S_HDMV/PGS", "forced": False, "cues": pgs_events(self.lines)}]
-        got = pipeline.image_check(text, image)
-        self.assertEqual(len(got), 1)
-        self.assertTrue(got[0]["vs_text"]["pass"])
-        self.assertEqual(pipeline.image_check(text, [dict(image[0], language="ger")]), [])
+        # An image track whose starts can't be told (one line kept of 400) no longer passes against the text
+        # track: the 399 lines after its only line are left uncovered; a Blu-ray style track (82 % sure) does pass
+        for lines, plausible in ((self.lines, False), (realistic(400, 5), True)):
+            text = [{"number": 3, "language": "eng", "codec": "S_TEXT/ASS", "forced": False, "cues": lines}]
+            image = [{"number": 7, "language": "en", "codec": "S_HDMV/PGS", "forced": False, "cues": pgs_events(lines)}]
+            got = pipeline.image_check(text, image)
+            self.assertEqual(len(got), 1)
+            self.assertEqual((got[0]["plausible"], got[0]["vs_text"]["pass"]), (plausible, plausible))
+            self.assertEqual(pipeline.image_check(text, [dict(image[0], language="ger")]), [])
 
 
 class HashTest(unittest.TestCase):

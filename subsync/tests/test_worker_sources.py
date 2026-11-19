@@ -382,6 +382,48 @@ class LanguageCheckWorkerTest(unittest.TestCase):
         self.assertEqual(w.known_originals(job.alias)["rus"]["id"], "os-gone")
 
 
+class SettledLanguageTest(unittest.TestCase):
+    """D1: a language is settled, so the track's words are no longer read to confirm its later
+    subtitles, only by a pass against a track in its own language. The pipeline is a stub; downloads are fakes."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        texts = {f"http://subs.test/{cid}.srt": dialogue_srt("spa", start=start)
+                 for cid, start in (("os-a", 30.0), ("os-b", 31.0))}
+        for patcher in (FakeDownloads(texts).patch(), local_network_only()):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
+
+    def unsettled(self, track_language):
+        """Spanish subtitle A passes the main rule against a track in `track_language`; then B is re-timed. Whether
+        each was re-timed with the language unsettled."""
+        seen = {}
+
+        def sync_subtitle(index, text, lang, **kw):
+            first = "00:00:30,000" in text.split("\n")[1]
+            seen["a" if first else "b"] = kw["unsettled"]
+            if not first:
+                return {"outcome": "keep_original", "reason": "below the bar", "route": "cues"}
+            return {"outcome": "synced", "reason": "passes against the release track (snapped)", "route": "cues",
+                    "reference": {"track": 3, "language": track_language, "codec": "S_TEXT/UTF8", "cues": 1200},
+                    "body": text}
+        s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_BEST_FIT": "on",
+                      "SUBSYNC_FAST_PATH": "off", "SUBSYNC_RANK_BY_RELEASE": "off", "SUBSYNC_PARALLEL_LANGUAGES": "off",
+                      "SUBSYNC_IMAGE_REF": "off", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_LANGUAGES": "spa"})
+        w = Worker(s, self.store, FakeAios(), None)
+        w._publish = lambda *a, **k: None
+        cands = [{"id": cid, "url": f"http://subs.test/{cid}.srt", "lang": "spa", "release": ""} for cid in ("os-a", "os-b")]
+        with mock.patch.object(pipeline, "sync_subtitle", sync_subtitle):
+            w._sync_language(Job("movie", "tt1"), FakeIndex(), f"f-{track_language}", "spa", cands, "abcd", "Movie.mkv")
+        return seen
+
+    def test_a_pass_against_another_languages_track_leaves_it_unsettled(self):
+        self.assertEqual(self.unsettled("en"), {"a": True, "b": True})      # before: B re-timed with Spanish settled
+        self.assertEqual(self.unsettled("es"), {"a": True, "b": False})
+
+
 class LoggedDownloads(FakeDownloads):
     """FakeDownloads that logs when each download starts and ends; `on_start(url)` is called as one starts."""
 

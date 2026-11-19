@@ -339,11 +339,12 @@ def track_words(index, ref, may_read):
     return kept[key]
 
 
-def settles(r):
+def settles(r, lang):
     """D1: a result that settles its language by timing, so the track's words are not read for it: a pass by the
-    main rule against a track in the subtitle's own language (as it is, moved by one shift, re-timed or snapped)."""
+    main rule against a track in the subtitle's own language (as it is, moved by one shift, re-timed or snapped). The
+    track is the one the result records (reference), whichever rule it passed by."""
     reason = r.get("reason") or ""
-    if r.get("outcome") not in ("synced", "in_sync") or r.get("cross") or "aligned" in reason:
+    if r.get("outcome") not in ("synced", "in_sync") or not r.get("reference") or is_cross(r["reference"], lang):
         return False
     return reason.startswith(("passes against the release track", "original passes against the release track",
                               "in sync as it is"))

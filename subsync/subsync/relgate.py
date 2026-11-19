@@ -18,10 +18,13 @@ On Kingdom of Heaven's director's cut (1,099 sure starts of its PGS track): ever
 Russian, leaves at most 11 lines (159 s) uncovered; theatrical ones 36 to 111 lines (378 s and more); a theatrical
 subtitle aligned perfectly (the director's-cut subtitle without the lines a theatrical one lacks) 68 lines over 477 s.
 An opening or closing song the candidate leaves out (about 90 s) stays under MISSING_S.
+Beyond the candidate's first or last line the release's lines fail the gate when they are LONG_END_LINES over
+LONG_END_S, far longer than any opening or credits song the release's track transcribes (a subtitle that stops half an
+hour early, or covers only part of the film).
 Against another language's track an untranslated stretch (a song, background talk, on-screen text) looks the same, while
 a subtitle for another cut can't keep its lines paired under one shift (those after the extra scene are off by its
 length): there a candidate as it is or moved by one shift that pairs ONE_SHIFT_PAIRED of its lines is not refused for a
-missing scene (relgate.aligned).
+missing scene inside its span (relgate.aligned); beyond its ends it is.
 """
 import bisect
 import statistics
@@ -39,6 +42,10 @@ LOOSE_MS = 500
 END_MS = 300       # recorded: the share of line ends within this of the release's
 MISSING_LINES = 20
 MISSING_S = 150.0
+# beyond the candidate's ends an uncovered stretch this long is no credits song (on the replay of the captured files,
+# whole subtitles leave up to 112 lines, or 664 s, uncovered there)
+LONG_END_LINES = 120
+LONG_END_S = 900.0
 ONE_SHIFT_PAIRED = 0.90   # across languages, under one shift: a missing scene doesn't refuse a candidate pairing this share
 # the defaults of the second way to pass (clearly_better) and of the cross-language rule (aligned); Settings reads them
 BETTER = {"paired": 0.85, "median_ms": 200.0, "ratio": 0.5, "cross_median_ms": 300.0, "cross_paired": 0.75}
@@ -89,19 +96,28 @@ def _pair(ref, cand):
 
 
 def missing_scene(ref, cand, window=WINDOW):
-    """The longest stretch of consecutive reference starts inside the candidate's span that no candidate start is within
-    `window` of: (lines, seconds). Both sorted."""
-    if not cand:
-        return 0, 0.0
-    best, run = (0, 0.0), []
+    """The part of the release a subtitle lacks: a stretch of consecutive reference starts that no candidate start is
+    within `window` of. Inside the candidate's span, the stretch with the most lines, when it has at least MISSING_LINES
+    lines over at least MISSING_S seconds (a scene a subtitle for another cut lacks); beyond its first or last line, the
+    release's lines there when they are at least LONG_END_LINES over at least LONG_END_S, far longer than any credits
+    song. Both sorted. Returns (lines, seconds, found, at_end): the numbers of the stretch found (the one with the most
+    lines), else of the stretch inside the span with the most lines; at_end when one beyond the candidate's ends is
+    found."""
+    inside, run = (0, 0.0), []
     for r in ref[bisect.bisect_left(ref, cand[0]):bisect.bisect_right(ref, cand[-1])]:
         if lands(cand, r, window):
             run = []
             continue
         run.append(r)
-        if len(run) > best[0]:
-            best = (len(run), run[-1] - run[0])
-    return best
+        if len(run) > inside[0]:
+            inside = (len(run), run[-1] - run[0])
+    ends = ref[:bisect.bisect_left(ref, cand[0] - window)], ref[bisect.bisect_right(ref, cand[-1] + window):]
+    found = [(len(e), e[-1] - e[0]) for e in ends if len(e) >= LONG_END_LINES and e[-1] - e[0] >= LONG_END_S]
+    at_end = bool(found)
+    if inside[0] >= MISSING_LINES and inside[1] >= MISSING_S:
+        found.append(inside)
+    lines, secs = max(found) if found else inside
+    return lines, secs, bool(found), at_end
 
 
 def span_share(ref, cand):
@@ -183,8 +199,7 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
         if sum(i in err_ms for i in idx) / len(idx) < TENTH_MIN_SHARE * recall:
             unpaired.append(b)
     span = span_share(ref, cand)
-    missing_lines, missing_s = missing_scene(ref, cand)
-    cut = missing_lines >= MISSING_LINES and missing_s >= MISSING_S
+    missing_lines, missing_s, cut, at_end = missing_scene(ref, cand)
     ok = paired >= MIN_PAIRED * recall and within(med, MEDIAN_MS) and share >= within_share and not weak and not cut
     if min_span is not None and span < min_span:
         ok = False
@@ -192,6 +207,8 @@ def relgate(ref_starts, cand_starts, ref_durations=None, within_share=WITHIN_SHA
            "signed_median_ms": round(statistics.median(err.values()) * 1000, 1), "weak_tenths": weak,
            "weak_tenths_500": loose, "unpaired_tenths": unpaired, "missing_lines": missing_lines, "missing_s": round(missing_s, 1),
            "missing_scene": cut, "span": round(span, 3), "pass": ok}
+    if at_end:
+        out["missing_at_end"] = True
     if dur is not None:
         out["splits"] = len(split)
         if cend is not None:
@@ -221,10 +238,10 @@ def clearly_better(original, copy, rule=None, min_span=None, ref_recall=1.0):
         return False, "median error too large"
     if copy.get("weak_tenths_500"):
         return False, "a part of the runtime does not fit"
+    if min_span is not None and copy.get("span", 0.0) < min_span:     # the coarse guard first: half a film (a CD1)
+        return False, "covers too little of the runtime"
     if copy.get("missing_scene"):
         return False, "a scene of the release is missing (another cut)"
-    if min_span is not None and copy.get("span", 0.0) < min_span:
-        return False, "covers too little of the runtime"
     before = (original or {}).get("median_ms")
     if before is not None and copy["median_ms"] > rule["ratio"] * before:
         return False, "not clearly better than the original"
@@ -240,8 +257,9 @@ def aligned(g, rule=None, min_span=None, ref_recall=1.0, one_shift=False):
     translation can have a tenth under half within 500 ms: Breaking Bad's Russian), no missing scene, and the span.
     one_shift: `g` measures the subtitle as it is or moved by one steady offset (not alass's or a sectioned fit); then a
     missing scene doesn't refuse it when at least ONE_SHIFT_PAIRED of its lines pair (scaled by the recall like the other
-    pairing minimums): an untranslated stretch, not another cut (MobLand S02E08's Russian against the
-    en-GB track, one shift of 60 ms, 97 % of its 624 lines paired).
+    pairing minimums), unless what is missing is beyond its first or last line (`missing_at_end`: the subtitle stops
+    long before the film does): an untranslated stretch, not another cut (MobLand S02E08's Russian
+    against the en-GB track, one shift of 60 ms, 97 % of its 624 lines paired).
     Returns (ok, why)."""
     rule = dict(BETTER, **(rule or {}))
     recall = max(0.0, min(1.0, ref_recall))
@@ -253,8 +271,9 @@ def aligned(g, rule=None, min_span=None, ref_recall=1.0, one_shift=False):
         return False, "median error too large"
     if g.get("unpaired_tenths"):
         return False, "a part of the runtime does not fit"
-    if g.get("missing_scene") and not (one_shift and g["paired"] >= ONE_SHIFT_PAIRED * recall):
-        return False, "a scene of the release is missing (another cut)"
     if min_span is not None and g.get("span", 0.0) < min_span:
         return False, "covers too little of the runtime"
+    excused = one_shift and g["paired"] >= ONE_SHIFT_PAIRED * recall and not g.get("missing_at_end")
+    if g.get("missing_scene") and not excused:
+        return False, "a scene of the release is missing (another cut)"
     return True, "aligned to another language's track"

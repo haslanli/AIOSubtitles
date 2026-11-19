@@ -576,7 +576,27 @@ class PipelineWordsTest(unittest.TestCase):
         self.assertEqual(r["outcome"], "synced")
         self.assertTrue(r["reason"].startswith("passes"))
         self.assertEqual(index.asked, [])
-        self.assertTrue(pipeline.settles(r))
+        self.assertTrue(pipeline.settles(r, "eng"))
+
+    def test_only_a_pass_against_its_own_languages_track_settles_it(self):
+        # A 1,200-line Spanish subtitle can't be checked against the file's 400-line Spanish track (it needs 600),
+        # so it is checked against the English one; its pass there, by one shift or as it is, settled Spanish, and a
+        # later Spanish subtitle checked against the Spanish track was then never confirmed by its words
+        lines = dialogue(1200, 7)
+        cues = [(s, d) for s, d, _ in lines]
+        index = FakeIndex([track(cues, "en", 3), track(cues[::3], "es", 4)])
+        moved = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=6.0)])
+        as_is = srt([(c["s"], c["e"], c["text"]) for c in timed(lines)])
+        for r in (pipeline.shift_sync(index, moved, "spa"), pipeline.sync_subtitle(index, as_is, "spa", audio=False)):
+            self.assertEqual(r["reference"]["language"], "en")
+            self.assertIn(r["outcome"], ("synced", "in_sync"), r.get("reason"))
+            self.assertTrue(r["reason"].startswith(("passes against", "original passes against")), r["reason"])
+            self.assertFalse(pipeline.settles(r, "spa"))
+            self.assertTrue(pipeline.settles(r, "eng"))           # the same pass, its own language's track
+        own = srt([(c["s"], c["e"], c["text"]) for c in timed(lines[::3], shift_s=6.0)])
+        r = pipeline.shift_sync(index, own, "spa")                 # 400 lines: checked against the Spanish track
+        self.assertEqual((r["reference"]["language"], r["outcome"]), ("es", "synced"))
+        self.assertTrue(pipeline.settles(r, "spa"))
 
     def test_a_clearly_better_pass_reads_the_words_once_and_is_confirmed(self):
         lines = dialogue(500, 22)
@@ -945,6 +965,38 @@ class SectionsTest(unittest.TestCase):
         release = rhythm(600, 41)
         _, sect, _ = judge_sections(release, [(st - 20.0, d) for st, d in release])
         self.assertIsNone(sect)
+
+    def test_words_that_say_one_section_leave_no_sectioned_fit(self):
+        # When the cut with the lines' words was a single section, the cut by timing alone was used anyway
+        release, sub = cut_film(900, 7, {450: 8.0})
+        lines = pipeline.parse(srt([(st - 55.0, st - 55.0 + d, "x") for st, d in sub]))
+        self.assertEqual(len(sections.fit(lines, release)["groups"]), 2)        # timing alone: +55 s, then +63 s
+        self.assertIsNone(sections.fit(lines, release, {i: 55.0 for i in range(len(sub))}))   # every line's words: +55 s
+
+    def test_a_scene_the_file_lacks_is_left_out_wherever_the_break_falls(self):
+        # The subtitle carries a 40 s scene the file lacks (+12 s before it, -28 s after); the break between the
+        # two sections falls before, inside or after the scene by chance, and the scene's lines were kept over the file's
+        # real dialogue whenever it fell after them, as many real lines after them left out (seeds 1, 4, 8)
+        for seed in range(1, 9):
+            with self.subTest(seed=seed):
+                base = rhythm(900, seed, start=60.0)
+                r = random.Random(seed + 100)
+                sub, scene = [], []
+                for i, (st, d) in enumerate(base):
+                    if i == 450:                        # the scene, 3 s after the line before it
+                        t = base[i - 1][0] + base[i - 1][1] - 12.0 + 3.0
+                        end = t + 36.0
+                        while t < end:
+                            dd = r.uniform(1.0, 2.0)
+                            scene.append(len(sub))
+                            sub.append((t, dd))
+                            t += dd + r.uniform(0.3, 0.8)
+                    sub.append((st - 12.0 if i < 450 else st + 40.0 - 12.0, d))
+                res, sect, _ = judge_sections(base, sub, jitter=0.05, seed=seed)
+                self.assertEqual(res["outcome"], "synced", res.get("reason"))    # (refused would do too: none is)
+                self.assertIn("(sections)", res["reason"])
+                left_out = {i for i, line in enumerate(sect["lines"]) if line.get("drop")}
+                self.assertEqual(left_out, set(scene))                          # no scene line kept, no real line lost
 
 
 def dense(n, seed):

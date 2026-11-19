@@ -1868,7 +1868,7 @@ class Worker(threading.Thread):
                                e["cand"]["id"], offer=not best_fit, original=text)
                 outcome = "synced"
             ok = outcome in ("synced", "in_sync")
-            if ok and pipeline.settles(dict(got, cross=(got.get("detail") or {}).get("cross"))):
+            if ok and pipeline.settles(dict(got, reference=(got.get("detail") or {}).get("reference")), lang):
                 settled.append(result_key(file_key, e["sha"]))
             if ok and best_fit and outcome == "synced":
                 offer(result_key(file_key, e["sha"]))
@@ -1895,7 +1895,7 @@ class Worker(threading.Thread):
                                  e["ext"], r.get("body"), e["cand"]["id"], offer=not best_fit,
                                  original=e.get("text") or decode(e["raw"], lang))
             log.info("sync %s %s rank %d: %s (%s)", job.label, lang, e["rank"], r["outcome"], r.get("reason"))
-            if pipeline.settles(r):
+            if pipeline.settles(r, lang):
                 settled.append(key)
             if best_fit and r["outcome"] == "synced":
                 offer(key)

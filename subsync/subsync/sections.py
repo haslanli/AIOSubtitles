@@ -7,8 +7,10 @@ Each line "lands" under a shift when its start falls within NEAR_S of a release 
 END_WEIGHT more; a line paired by its words counts as landing under its own shift). The cut into sections is the one
 that lands the most lines, less BREAK_PENALTY for each new section, found by dynamic programming over the lines in
 order; a section starts only after a gap of at least GAP_S between lines. Lines that a later section's shift puts
-before the end of the previous line (a scene the release cut) are left out, by the rule the audio route shares
-(moved_back): lines stacked within one section, and the lines under one mistyped end, are kept.
+before the end of the previous line (a scene the release cut) are left out: at such a break, the run of lines around
+it that lands the fewest release lines under their own section's shift (the cut scene's, whichever side of the break
+they fell on), then by the rule the audio route shares (moved_back): lines stacked within one section, and the lines
+under one mistyped end, are kept.
 
 Limits, so a bad section can't pass (D4 1-3; the copy is then judged as any other, section by section and as a whole):
 at most MAX_SECTIONS sections, each at least MIN_SECTION_S long with MIN_SECTION_LINES lines, and each section's shift
@@ -16,6 +18,7 @@ landing at least SUPPORT of its lines or resting on at least MIN_ANCHORS lines p
 no sectioned fit (the one-shift path covers it).
 """
 import bisect
+import itertools
 
 from . import shift
 from .relgate import lands
@@ -69,23 +72,48 @@ def offsets(starts, ref, max_offset=MAX_OFFSET_S):
     return [shift._refine(starts, ref, p - n) for p in peaks]
 
 
+def _landing(s, e, o, ref, ref_e, anchor=None):
+    """How a line (start s, end e) lands under the shift o: 1 for its start within NEAR_S of a release start, END_WEIGHT
+    more for its end on a release end; 1 + END_WEIGHT when its words pair it under this shift (anchor)."""
+    if anchor is not None and abs(anchor - o) <= NEAR_S:
+        return 1.0 + END_WEIGHT
+    x = 1.0 if lands(ref, s + o, NEAR_S) else 0.0
+    if ref_e and lands(ref_e, e + o, NEAR_S):
+        x += END_WEIGHT
+    return x
+
+
+def _cut_scene(a, b, now, landing):
+    """At a break where the later section moves back over the end of the earlier one (a scene the release cut): the
+    earlier section's last lines to leave out. The later section's lines still moved back over what it keeps are left
+    out after them (moved_back), so each choice leaves out a run of lines around the break; the one chosen lands the
+    fewest of the release's lines under their own section's shift (landing), then is the shortest, then leaves out the
+    later lines. The cut scene lands only by chance, so its lines go wherever the break fell: before, inside or after
+    it. a, b: the two sections' lines (dialogue indexes in time order); now: each line's re-timed (start, end)."""
+    head = now[b[0]][0]
+    ends = [min(e1, s1 + LONGEST_S) for s1, e1 in (now[i] for i in a)]
+    most = 0                     # a's last lines still on screen when b starts; a keeps at least its first
+    while most < len(a) - 1 and ends[len(a) - 1 - most] > head + OVERLAP_S:
+        most += 1
+    kept_end = list(itertools.accumulate(ends, max))
+    b_starts = [now[i][0] for i in b]
+    b_landing = list(itertools.accumulate((landing[i] for i in b), initial=0.0))
+    best, gone = None, 0.0
+    for p in range(most + 1):
+        if p:
+            gone += landing[a[len(a) - p]]
+        q = bisect.bisect_left(b_starts, kept_end[len(a) - 1 - p] - OVERLAP_S)
+        cost = (gone + b_landing[q], p + q, p)
+        if best is None or cost < best[0]:
+            best = (cost, p)
+    return a[len(a) - best[1]:] if best[1] else []
+
+
 def _assign(s, e, ref, ref_e, offs, anchors):
     """The dynamic programme: each line's shift (index into offs) and the sections as runs of line indexes, or
     (None, None) when the best cut has a single section."""
     n, m = len(s), len(offs)
-    v = []
-    for i in range(n):
-        a = anchors.get(i)
-        row = []
-        for o in offs:
-            if a is not None and abs(a - o) <= NEAR_S:
-                row.append(1.0 + END_WEIGHT)
-                continue
-            x = 1.0 if lands(ref, s[i] + o, NEAR_S) else 0.0
-            if ref_e and lands(ref_e, e[i] + o, NEAR_S):
-                x += END_WEIGHT
-            row.append(x)
-        v.append(row)
+    v = [[_landing(s[i], e[i], o, ref, ref_e, anchors.get(i)) for o in offs] for i in range(n)]
     S = MAX_SECTIONS
     neg = float("-inf")
     best = [[neg] * m for _ in range(S + 1)]
@@ -151,9 +179,9 @@ def fit(lines, ref_cues, anchors=None):
         anchors = anchors()
     anchors = anchors or {}
     if anchors:
-        a2, g2 = _assign(s, e, ref, ref_e, offs, anchors)
-        if g2 is not None:
-            assign, groups = a2, g2
+        assign, groups = _assign(s, e, ref, ref_e, offs, anchors)
+        if groups is None:      # the words say one section: no sectioned fit
+            return None
     # groups: from 2 to MAX_SECTIONS sections, one per change of shift (_assign)
     summary = []
     shifts = []
@@ -181,7 +209,15 @@ def fit(lines, ref_cues, anchors=None):
         else:                    # signs and songs: the shift of the section they fall in
             o = shifts[max(0, bisect.bisect_right(firsts, l["s"]) - 1)]
         new[i]["s"], new[i]["e"] = l["s"] + o, l["e"] + o
-    dropped = moved_back([(lines[i]["s"], lines[i]["e"]) for i in dial], [(new[i]["s"], new[i]["e"]) for i in dial])
+    was = [(lines[i]["s"], lines[i]["e"]) for i in dial]
+    now = [(new[i]["s"], new[i]["e"]) for i in dial]
+    landing = {i: _landing(s[i], e[i], o, ref, ref_e, anchors.get(i)) for g, o in zip(groups, shifts) for i in g}
+    dropped = set()
+    for a, b, oa, ob in zip(groups, groups[1:], shifts, shifts[1:]):
+        if ob < oa:
+            dropped.update(_cut_scene(a, b, now, landing))
+    keep = [k for k in range(n) if k not in dropped]
+    dropped.update(keep[x] for x in moved_back([was[k] for k in keep], [now[k] for k in keep]))
     for k in dropped:
         new[dial[k]]["drop"] = True
     return {"lines": new, "groups": [[dial[i] for i in g] for g in groups],

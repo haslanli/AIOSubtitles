@@ -24,6 +24,8 @@ ALGO_VERSION = "v3"   # part of every stored result's key: a new version recompu
 #; 9: the same-language track that agrees with the others, a missing scene across languages under one shift,
 # the word check's part rule under 40 anchors, the edition order; 10: the original-language track
 #; 11: the audio fit's held-out parts, shift changes at a scene added or missing, windows without speech and
-# budget, the lines left out only across a shift change (audio and sectioned fits), dialogue tracks only, and the 24
-# against 23.976 and 25 against 24 fps pairs on the one-shift path
+# budget, the lines left out only across a shift change (audio and sectioned fits), dialogue tracks only, the 24
+# against 23.976 and 25 against 24 fps pairs on the one-shift path, the lines left out at a sectioned fit's break by how
+# they land, no sectioned fit where the words say one section, the release's lines far beyond the subtitle's ends, and
+# a language settled only by a pass against its own language's track
 RULE_REVISION = 11
