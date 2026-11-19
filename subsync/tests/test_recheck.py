@@ -339,6 +339,24 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
         self.assertIsNone(self.checker().check(token))
         self.assertNotIn("state_detail", self.record(token))
 
+    def test_a_refused_config_is_one_warning_line_for_the_operator(self):
+        # When the state becomes config_refused, one WARNING with AIOStreams' reason alone, nothing
+        # about the person, their link or a key; still refused at the next check, no second line
+        uuid, token = self.sign_up(keep=True)
+        record = self.record(token)
+        self.fake.configs[uuid]["config"]["presets"].insert(0, dict(COMET))
+        self.fake.refusal = lambda config: "Invalid preset options"
+        with self.assertLogs("subsync.recheck", "WARNING") as logged:
+            self.assertEqual(self.checker().check(token), "config_refused")
+        self.assertEqual(logged.output, ['WARNING:subsync.recheck:AIOStreams refused the config AIOSubtitles made at a '
+                                         'daily check: "Invalid preset options"'])
+        for private in (token, uuid, record["sync_uuid"], record["sync_link"], record["sync_password"], PASSWORD,
+                        INSTANCE, "tb-key"):
+            self.assertNotIn(private, logged.output[0])
+        self.clock.t += 24 * HOUR
+        with self.assertNoLogs("subsync.recheck", "WARNING"):
+            self.assertEqual(self.checker().check(token), "config_refused")
+
     def test_an_error_answer_is_a_note_after_three_checks_in_a_row_never_action_needed(self):
         # A passing error (busy, a fault, an answer it can't read) is counted as "couldn't reach" is
         from subsync import explain

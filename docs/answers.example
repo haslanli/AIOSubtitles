@@ -44,6 +44,7 @@ LANGUAGES=English
 # after you choose the file's "<Language> (Subsync)" entry, so only files you watch are read. As soon as a file is
 # opened: when your app asks for the file's subtitles, so files you only browse or that it prepares next are read
 # too (at most 5 a day). No: those files keep their original subtitles and subsync reads about 1 MB of each.
+# In an answers file: no, pick or open.
 AUDIO=no
 
 # Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a second
@@ -95,7 +96,8 @@ WYZIE_KEY=
 # nearly every title, so more subtitles are timed to the file's track in that language. Without it, only Wikidata is
 # asked, which knows about three films in four and half of all series; the rest are synced as if the language were
 # unknown. Cost: one request per film or series every 6 months at most; it sends only the title's IMDb id. TMDB's
-# answers are kept up to 6 months, as its terms allow. Its logo and notice are shown. Never shown or logged.
+# answers are kept up to 6 months, as its terms allow. TMDB's logo and notice are shown; the key itself is never
+# shown or logged.
 TMDB_KEY=
 
 # Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds
@@ -199,9 +201,10 @@ SUBSYNC_USER_FILES_PER_DAY=200
 # Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes about
 # 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's index may take (32
 # MB) with room to spare, so those reads never stop someone before the file limit. A file the audio route syncs from
-# its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; such a sync starts only when what is left
-# of the day likely covers it, so it rarely stops half-way; if it does, the file waits for another pick. Past the
-# limit, that person gets only copies already in the store until the next day.
+# its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day at that size, and about 10 of high-bitrate
+# files that read the whole audio limit (1 GB by default); such a sync starts only when what is left of the day
+# likely covers it, so it rarely stops half-way; if it does, the file waits for another pick. Past the limit, that
+# person gets only copies already in the store until the next day.
 SUBSYNC_USER_DAILY_MB=10000
 
 # How many languages each person may choose, from 1 to 4. Each language is a separate sync for every file they play:

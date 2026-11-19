@@ -30,7 +30,8 @@ RULES = [
      "AIOSubtitles never makes a single call to Real-Debrid: no search, no cache check (asking whether a file is ready), "
      f"no download, no file read, because {REASON}. With Real-Debrid beside another service, such as TorBox, subsync uses only the other one, so a file you play from "
      "Real-Debrid gets a synced copy only when that service has the same file ready. With Real-Debrid as your only "
-     "debrid service, ./setup stops. subsync also checks its config before every request through it, skips files "
+     "debrid service, ./setup goes on only when you turn Usenet on; subsync then reads only files you play from "
+     "Usenet. subsync also checks its config before every request through it, skips files "
      "listed as Real-Debrid's, and refuses and logs any request to real-debrid.com. Your apps play Real-Debrid files "
      "as before."),
     ("Addons added by link must show their debrid service",
@@ -64,9 +65,10 @@ RULES = [
      "A file that can't be reached on its first read is tried once more 10 seconds later; if it still fails, it waits "
      "10 minutes, then 1, 6 and 24 hours, and then isn't read again."),
     ("A copy is offered only after it passes the check",
-     "Each synced copy is checked against the file itself before it is offered: at least 90 % of its lines must start "
-     "within 200 ms (a fifth of a second) of the file's own subtitle track, spread over the whole film (95 % when its "
-     "lines were snapped onto the track), or it must be clearly better than the original (SUBSYNC_BETTER). Where the "
+     "Each synced copy is checked against the file itself before it is offered: at least 60 % of its lines must pair "
+     "with lines of the file's own subtitle track (start within a second of one), at least 90 % of those must start "
+     "within 200 ms (a fifth of a second) of theirs (95 % when snapped), with a typical error of 100 ms or less, "
+     "spread over the whole film, or it must be clearly better than the original (SUBSYNC_BETTER). Where the "
      "track is in the subtitle's language and timing alone leaves doubt, the lines' words must agree too, except in "
      "Chinese and Japanese (SUBSYNC_TEXT_PAIRING); a copy fitted in sections for another cut must pass in every "
      "section (SUBSYNC_SECTIONS). Line ends are measured and recorded, but don't decide. Files without a subtitle "
@@ -116,8 +118,8 @@ RULES = [
      "password) and whether its own config there still opens. It repairs a changed link by itself and tells you what "
      "only you can fix, on your settings page and with one \"AIOSubtitles: action needed\" entry in your subtitle "
      "lists. Without a kept password it can't see services or addons you add or remove, so press Refresh after such a "
-     "change; with one, it rebuilds its own config from yours by itself, leaving Real-Debrid out, and Usenet unless "
-     "you turn it on, and never changes your config."),
+     "change; with one, it rebuilds its configs from yours by itself, Real-Debrid always left out and Usenet kept to "
+     "its Usenet config, and never changes your config."),
     ("Public mode: Real-Debrid is left out",
      f"If your AIOStreams uses Real-Debrid, AIOSubtitles leaves it out of its own config and never reads a Real-Debrid "
      f"file, because {REASON}. It syncs only files from your other services: a file you play from Real-Debrid gets a "
@@ -150,7 +152,7 @@ RULES = [
      "the original at once, and the synced copy is there next time, for everyone who plays the file. It "
      "starts only when your day's data and audio syncs, and the service's data, likely have room; otherwise, or if it "
      "stops half-way, the file waits for another pick. The service runs a set number of these at once "
-     "(SUBSYNC_AUDIO_AT_ONCE), so other files aren't held up."),
+     "(SUBSYNC_AUDIO_AT_ONCE)."),
     ("Public mode: what is kept, and for how long",
      "AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: the "
      "address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password (with "
@@ -160,7 +162,7 @@ RULES = [
      "record, until you untick it. For each synced subtitle only its new timing (never its text), with the names and "
      "sizes of the files it fits, is shared and kept 180 days after last use, without who played them; logs name the "
      "titles synced, never who asked. Your record is deleted when you delete it on your settings page, or 180 days "
-     "after your last request."),
+     "after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may hold it longer."),
     ("Public mode: the timing is shared, not the subtitles",
      "When someone already synced a subtitle for the file you play, AIOSubtitles reuses that work: it keeps only how "
      "the subtitle was re-timed, never its text. Your copy is made from the original subtitle, downloaded again for you "
@@ -297,8 +299,8 @@ QUESTIONS = {
         "TMDB knows for nearly every title, so more subtitles are timed to the file's track in that language. Without "
         "it, only Wikidata is asked, which knows about three films in four and half of all series; the rest are synced "
         "as if the language were unknown. Cost: one request per film or series every 6 months at most; it sends only "
-        "the title's IMDb id. TMDB's answers are kept up to 6 months, as its terms allow. Its logo and notice are "
-        "shown. Never shown or logged."),
+        "the title's IMDb id. TMDB's answers are kept up to 6 months, as its terms allow. TMDB's logo and notice are "
+        "shown; the key itself is never shown or logged."),
     "ADD_OPENSUBTITLES": (
         "yes",
         "Asked only when your config has no subtitle source, so AIOStreams gives subsync nothing to sync. Yes adds "
@@ -897,7 +899,8 @@ GROUPS = [
             "Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track "
             "takes about 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's "
             "index may take (32 MB) with room to spare, so those reads never stop someone before the file limit. A "
-            "file the audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; "
+            "file the audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day at "
+            "that size, and about 10 of high-bitrate files that read the whole audio limit (1 GB by default); "
             "such a sync starts only when what is left of the day likely covers it, so it rarely stops half-way; if it "
             "does, the file waits for another pick. Past the limit, that person gets only copies already in the store "
             "until the next day."),
@@ -1095,8 +1098,9 @@ PUBLIC_FIELDS = {
     "keep_password": (
         "Off by default. Ticked: AIOSubtitles keeps your AIOStreams password, encrypted so that it opens only with your "
         "personal link, and {every} while you use it rebuilds its own config from yours, so services and addons you "
-        "add or remove are followed without Refresh; Real-Debrid stays out, and Usenet unless you turn it "
-        "on, and your own config is never changed. The cost: that password can change your whole AIOStreams config, all your keys included, "
+        "add or remove are followed without Refresh; Real-Debrid stays out, Usenet goes only into AIOSubtitles' "
+        "Usenet config, and your own config is never changed. The cost: that password can change your whole "
+        "AIOStreams config, all your keys included, "
         "so if AIOSubtitles' server were broken into while you use it, it could be read. Unticked: it is used once and "
         "forgotten. Untick and refresh, or press \"Stop keeping my password\", to delete it at once; {backups}."),
     "forget_password": (

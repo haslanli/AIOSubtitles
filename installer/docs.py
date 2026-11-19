@@ -33,6 +33,9 @@ PARTS = ('Install it for yourself (ROUTE=yourself)',
          'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD and CONFIRM above are asked here too; '
          'on a public instance only CONFIRM.')
 EXAMPLE_ON_GITHUB = 'https://github.com/haslanli/AIOSubtitles/blob/main/docs/answers.example'   # the image has no docs/
+# A comment line under a key's explanation in docs/answers.example, for what only an answers file needs; the question's
+# own text stays as setup shows it
+ANSWERS_NOTES = {'AUDIO': 'In an answers file: no, pick or open.'}
 
 
 def yourself():
@@ -86,14 +89,16 @@ def readme_section():
 
 
 def example(key):
-    """A key's example line, under its explanation: a question's own example, else (a setting's name) the setting's
-    default, or the answer setup takes when the line is left out where that differs (the trusted proxy)."""
+    """A key's example line, under its explanation (and its note for answers files, ANSWERS_NOTES): a question's own
+    example, else (a setting's name) the setting's default, or the answer setup takes when the line is left out where
+    that differs (the trusted proxy)."""
     if key in explain.QUESTIONS:
         value, text = explain.QUESTIONS[key]
     else:
         default, text = explain.SETTINGS[key]
         value = hosting.TRUSTED_PROXY if key == 'SUBSYNC_TRUSTED_PROXY' else default or ''
-    return [''] + comment(text) + [f'{key}={value}']
+    note = ['# ' + ANSWERS_NOTES[key]] if key in ANSWERS_NOTES else []
+    return [''] + comment(text) + note + [f'{key}={value}']
 
 
 def answers_example():

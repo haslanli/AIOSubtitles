@@ -22,9 +22,25 @@ def settings_read_by_the_code():
     return names
 
 
-# approved as written though longer than 125 words: the Usenet box's explanation, and the audio limit's and the word
-# check's with the sentences added to them
-APPROVED_LONG = ("USENET", "SUBSYNC_AUDIO_BUDGET_GB", "SUBSYNC_TEXT_PAIRING")
+# approved as written though longer than 125 words (a setting or question) or 160 (a fixed rule), each with its approved
+# word count, which is its own cap: the Usenet box's explanation, the audio limit's and the word check's with the
+# sentences added to them, the daily data limit's and the rule on what is kept with
+# its deletion sentence
+APPROVED_LONG = {
+    "USENET": 140,
+    "SUBSYNC_AUDIO_BUDGET_GB": 133,
+    "SUBSYNC_TEXT_PAIRING": 143,
+    "SUBSYNC_USER_DAILY_MB": 144,
+    "Public mode: what is kept, and for how long": 171,
+}
+
+
+def word_cap(name):
+    """The most words a text may have: its approved count when it was approved as long, else 160 for a fixed rule and
+    125 for a setting or question."""
+    if name in APPROVED_LONG:
+        return APPROVED_LONG[name]
+    return 160 if name in dict(explain.RULES) else 125
 
 
 class ExplainTest(unittest.TestCase):
@@ -70,9 +86,28 @@ class ExplainTest(unittest.TestCase):
                 self.assertNotIn("\n", text)
                 self.assertEqual(text, text.strip())
                 self.assertTrue(text.endswith((".", ")")), text[-30:])
-                self.assertLessEqual(len(text.split()), 160 if name in dict(explain.RULES) or name in APPROVED_LONG
-                                     else 125)
+                self.assertLessEqual(len(text.split()), word_cap(name))
                 self.assertIsNone(REGISTER_NOTE.search(text))
+
+    def test_a_text_approved_as_long_may_not_exceed_its_own_count(self):
+        # A text approved as long was held to 160 words, so the Usenet box's (140) could still grow by 20; now
+        # its approved count is its cap, and every other text keeps 125 (a setting or question) or 160 (a fixed rule)
+        texts = {}
+        for name, text in self.texts():
+            texts.setdefault(name, []).append(text)
+        self.assertEqual(word_cap("USENET"), 140)
+        self.assertEqual(word_cap("Public mode: what is kept, and for how long"), 171)
+        self.assertEqual(word_cap("SUBSYNC_AUDIO_AT_ONCE"), 125)
+        self.assertEqual(word_cap("AUDIO"), 125)
+        self.assertEqual(word_cap("Real-Debrid is never used"), 160)
+        for name, cap in APPROVED_LONG.items():
+            with self.subTest(name=name):
+                self.assertEqual(len(texts.get(name, [])), 1)              # one text of that name, which is there
+                self.assertGreater(cap, 160 if name in dict(explain.RULES) else 125)   # only texts past the usual limit
+                self.assertEqual(word_cap(name), cap)
+                count = len(texts[name][0].split())
+                self.assertLessEqual(count, cap)
+                self.assertEqual(count, cap)          # the approved text itself: one word more fails the check above
 
     def test_the_read_failure_rule(self):
         # The owner's approved words
@@ -215,11 +250,13 @@ APPROVED = {
         "is affected. 200 is more than anyone watches in a day, with room for the files apps open without playing "
         "them; it keeps one person, or a leaked link, from using up the service's daily reads.",
     "SUBSYNC_USER_DAILY_MB":
-        # with the audio route's sentence; 10,000 and 32 MB
+        # with the audio route's sentence; 10,000 and 32 MB; the high-bitrate files that
+        # read the whole audio limit
         "Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes "
         "about 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's index "
         "may take (32 MB) with room to spare, so those reads never stop someone before the file limit. A file the "
-        "audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; such a sync "
+        "audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day at that size, "
+        "and about 10 of high-bitrate files that read the whole audio limit (1 GB by default); such a sync "
         "starts only when what is left of the day likely covers it, so it rarely stops half-way; if it does, the file "
         "waits for another pick. Past the limit, that person gets only copies already in the store until the next day.",
     "SUBSYNC_MAX_LANGUAGES":
@@ -607,6 +644,80 @@ class Group3Test(unittest.TestCase):
                 self.assertNotIn("Cinemeta", explain.PRIVACY_LOOKUP[kind])
         self.assertIn(" Without it, your titles are looked up on Wikidata only (for anime, AniList and Kitsu). ",
                       explain.PUBLIC_FIELDS["tmdb_key"])
+
+
+class Round4Test(unittest.TestCase):
+    """The texts of cycle 1's round 4, word for word."""
+
+    def test_a_real_debrid_only_install_goes_on_with_usenet(self):
+        # =: the rule said "./setup stops", though with Usenet on it goes on (README's What you need)
+        rule = dict(explain.RULES)["Real-Debrid is never used"]
+        self.assertIn(" Real-Debrid gets a synced copy only when that service has the same file ready. With Real-Debrid "
+                      "as your only debrid service, ./setup goes on only when you turn Usenet on; subsync then reads "
+                      "only files you play from Usenet. subsync also checks its config ", rule)
+        self.assertNotIn("./setup stops", rule)
+
+    def test_the_check_rule_counts_the_lines_that_pair(self):
+        # It said 90 % of all its lines; the check counts the lines that pair, and needs a typical error too
+        from subsync import relgate
+        rule = dict(explain.RULES)["A copy is offered only after it passes the check"]
+        self.assertTrue(rule.startswith(
+            "Each synced copy is checked against the file itself before it is offered: at least 60 % of its lines must "
+            "pair with lines of the file's own subtitle track (start within a second of one), at least 90 % of those "
+            "must start within 200 ms (a fifth of a second) of theirs (95 % when snapped), with a typical error of 100 "
+            "ms or less, spread over the whole film, or it must be clearly better than the original (SUBSYNC_BETTER). "
+            "Where the track"), rule[:200])
+        self.assertEqual((relgate.MIN_PAIRED, relgate.WINDOW, relgate.WITHIN_SHARE, relgate.WITHIN_MS,
+                          relgate.MEDIAN_MS, explain.SETTINGS["SUBSYNC_SNAP_WITHIN"][0]),
+                         (0.6, 1.0, 0.9, 200, 100, "0.95"))                  # the numbers it gives are the check's
+
+    def test_a_public_record_is_deleted_as_its_setting_says_and_backups_may_keep_it(self):
+        # with: it said 180 days whatever SUBSYNC_USER_KEEP_DAYS said, and left out the host's backups
+        rule = dict(explain.RULES)["Public mode: what is kept, and for how long"]
+        self.assertTrue(rule.endswith(
+            "; logs name the titles synced, never who asked. Your record is deleted when you delete it on your settings "
+            "page, or 180 days after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may "
+            "hold it longer."), rule[-200:])
+        self.assertEqual(explain.SETTINGS["SUBSYNC_USER_KEEP_DAYS"][0], "180")
+        self.assertEqual(Settings({}).user_keep_days, 180)
+
+    def test_the_audio_rule_promises_no_place_of_its_own(self):
+        # "so other files aren't held up" is untrue with one file at a time (SUBSYNC_AUDIO_AT_ONCE says when)
+        rule = dict(explain.RULES)["Public mode: files without a subtitle track"]
+        self.assertTrue(rule.endswith(
+            " otherwise, or if it stops half-way, the file waits for another pick. The service runs a set number of "
+            "these at once (SUBSYNC_AUDIO_AT_ONCE)."), rule[-200:])
+        self.assertNotIn("held up", rule)
+
+    def test_the_tmdb_key_text_says_it_is_the_key_that_is_never_shown(self):
+        # "Its logo and notice are shown. Never shown or logged." left it unclear what is never shown
+        for text in (explain.QUESTIONS["TMDB_KEY"][1], explain.SETTINGS["SUBSYNC_TMDB_KEY"][1]):
+            self.assertTrue(text.endswith(
+                " TMDB's answers are kept up to 6 months, as its terms allow. TMDB's logo and notice are shown; the key "
+                "itself is never shown or logged."), text[-200:])
+            self.assertNotIn("Never shown or logged", text)
+
+    def test_the_daily_data_limit_counts_the_files_that_read_the_whole_audio_limit(self):
+        # "at least 28 a day" holds only for files of 350 MB; at the audio limit it is about 10
+        from subsync.settings import MB
+        s = Settings({})
+        self.assertIn(" so 10,000 MB covers at least 28 a day at that size, and about 10 of high-bitrate files that read "
+                      "the whole audio limit (1 GB by default); ", explain.SETTINGS["SUBSYNC_USER_DAILY_MB"][1])
+        self.assertEqual((s.user_daily_bytes // (350 * MB), round(s.user_daily_bytes / s.audio_budget),
+                          explain.SETTINGS["SUBSYNC_AUDIO_BUDGET_GB"][0]), (28, 10, "1"))
+
+    def test_the_check_and_the_kept_password_keep_usenet_to_its_own_config(self):
+        # "and Usenet unless you turn it on" said Usenet goes into AIOSubtitles' config once on; the daily check
+        # rebuilds the Usenet config too
+        rule = dict(explain.RULES)["Public mode: your AIOStreams is checked while you use it"]
+        self.assertTrue(rule.endswith(
+            " press Refresh after such a change; with one, it rebuilds its configs from yours by itself, Real-Debrid "
+            "always left out and Usenet kept to its Usenet config, and never changes your config."), rule[-200:])
+        keep = explain.PUBLIC_FIELDS["keep_password"]
+        self.assertIn(" are followed without Refresh; Real-Debrid stays out, Usenet goes only into AIOSubtitles' Usenet "
+                      "config, and your own config is never changed. The cost: ", keep)
+        for text in (rule, keep):
+            self.assertNotIn("unless you turn it on", text)
 
 
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}

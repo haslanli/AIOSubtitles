@@ -238,6 +238,10 @@ class Checker:
             record["state"], record["state_detail"] = "cannot_rebuild", detail if detail.endswith(".") else detail + "."
             return
         if kind == "refused":    # AIOStreams refused AIOSubtitles' config, a fault of AIOSubtitles
+            # one line for the operator when the state becomes so: AIOStreams' reason alone, nothing about the person,
+            # their link or a key
+            if record.get("state") != "config_refused":
+                log.warning('AIOStreams refused the config AIOSubtitles made at a daily check: "%s"', detail)
             record["state"], record["state_detail"] = "config_refused", detail
             return
         if found.get("to_store_only"):   # stored copies only from now on; check() removes the old configs

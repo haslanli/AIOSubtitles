@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from installer import docs, hosting, limits, screens, ui, web
+from installer import docs, hosting, limits, plan, screens, ui, web
 from subsync import explain
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -183,7 +183,10 @@ class Documents(unittest.TestCase):
             for key, text, value in lines:
                 with self.subTest(key=key):
                     question = explain.QUESTIONS.get(key)
-                    self.assertEqual(text, question[1] if question else explain.SETTINGS[key][1])
+                    explanation = question[1] if question else explain.SETTINGS[key][1]
+                    if key == 'AUDIO':                      # with its line for answers files
+                        explanation += ' In an answers file: no, pick or open.'
+                    self.assertEqual(text, explanation)
                     if question:
                         self.assertEqual(value, question[0])
                     elif key == 'SUBSYNC_TRUSTED_PROXY':          # setup's own answer when none is given
@@ -191,6 +194,18 @@ class Documents(unittest.TestCase):
                     else:
                         self.assertEqual(value, explain.SETTINGS[key][0] or '')
         self.assertEqual(hosting.TRUSTED_PROXY, 'gateway')
+
+    def test_the_audio_answers_are_named_under_its_explanation_in_the_example(self):
+        # The answers an answers file takes for AUDIO, as one comment line under its explanation; the
+        # question keeps its text on setup's screen and in the README
+        note = 'In an answers file: no, pick or open.'
+        example = docs.answers_example()
+        self.assertIn('\n\n' + '\n'.join(docs.comment(explain.QUESTIONS['AUDIO'][1])) + '\n# ' + note + '\nAUDIO=no\n',
+                      example)
+        self.assertEqual(example.count(note), 1)
+        self.assertNotIn(note, explain.QUESTIONS['AUDIO'][1])
+        self.assertNotIn(note, docs.readme_section())
+        self.assertEqual([value for value, _ in plan.AUDIO_ANSWERS], ['no', 'pick', 'open'])   # the answers it names
 
     def test_the_answers_example_has_every_key_setup_reads_from_an_answers_file(self):
         asked = set()

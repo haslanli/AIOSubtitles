@@ -545,14 +545,16 @@ T_A2 = ("The setting SUBSYNC_AUDIO_WHEN replaced, still read while that one isn'
 # the two public-instance additions kept short, so each explanation stays within 125 words
 T_A3 = "lets each person choose their audio syncs,"
 T_A4 = "On a public instance it counts in each person's daily data (SUBSYNC_USER_DAILY_MB)."
+# with the files that read the whole audio limit
 T_A5 = ("Megabytes read per person per day (UTC) through their own sync config. Reading a file's subtitle track takes "
         "about 1 MB, a few MB when the track's lines are pictures; 10,000 is 200 files at the most one file's index "
         "may take (32 MB) with room to spare, so those reads never stop someone before the file limit. A file the "
-        "audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day; such a sync "
+        "audio route syncs from its sound takes about 60–350 MB, so 10,000 MB covers at least 28 a day at that size, "
+        "and about 10 of high-bitrate files that read the whole audio limit (1 GB by default); such a sync "
         "starts only when what is left of the day likely covers it, so it rarely stops half-way; if it does, the file "
         "waits for another pick. Past the limit, that person gets only copies already in the store until the next day.")
 # Each person chooses (off, on their pick, as soon as a file is opened), Usenet files too, the instance's number
-# of audio syncs at once
+# of audio syncs at once, with no promise that other files aren't held up
 T_A6 = ("With the audio route on, a file with no usable subtitle track can be synced from its sound, as you choose on "
         "your settings page: off; after you pick its \"<Language> (AIOSubtitles)\" entry (the default); or, where the "
         "instance offers it, as soon as your app asks for its subtitles, if no synced copy exists and a subtitle exists "
@@ -561,7 +563,7 @@ T_A6 = ("With the audio route on, a file with no usable subtitle track can be sy
         "the original at once, and the synced copy is there next time, for everyone who plays the file. It "
         "starts only when your day's data and audio syncs, and the service's data, likely have room; otherwise, or if it "
         "stops half-way, the file waits for another pick. The service runs a set number of these at once "
-        "(SUBSYNC_AUDIO_AT_ONCE), so other files aren't held up.")
+        "(SUBSYNC_AUDIO_AT_ONCE).")
 T_A9 = ("A file with no subtitle track of its own can be synced from its sound, when you choose: by default only after "
         "you pick its \"(AIOSubtitles)\" entry. That reads about 60–350 MB of it through your debrid service or Usenet, "
         "and the copy is there the next time you open the file.")

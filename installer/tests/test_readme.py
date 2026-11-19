@@ -91,6 +91,15 @@ class WhatSubsyncReads(unittest.TestCase):
                       'route is on; it stops for a while if a service refuses, and has a daily limit (100 GB by '
                       'default).', section('What subsync reads'))
 
+    def test_tmdbs_answers_are_kept_up_to_six_months(self):
+        # it said the original language is looked up once and kept with no time limit, TMDB's answers too (
+        #); they expire within TMDB's 6 months and are looked up again
+        self.assertIn("- **The original language of each film or series it syncs,** looked up by the title's id (at "
+                      'TMDB with your key, and at Wikidata; AniList and Kitsu for anime) and kept with no time limit, '
+                      "TMDB's answers up to 6 months; nothing about you or the file is sent.",
+                      section('What subsync reads'))
+        self.assertNotIn('looked up once', section('What subsync reads'))
+
 
 class HowTheSyncWorks(unittest.TestCase):
     def test_the_check_counts_the_lines_that_pair(self):
@@ -104,13 +113,14 @@ class HowTheSyncWorks(unittest.TestCase):
                       f'lines snapped need {pct(snapped)}.', section('How the sync works'))
 
     def test_the_audio_route_gives_both_ways_to_pass(self):
-        # it gave only the "clearly closer" way's numbers
+        # it gave only the "clearly closer" way's numbers; the rule for each part holds for both ways
         c = constants(REPO / 'subsync' / 'subsync' / 'audiofit.py')
         better = c['BETTER']
         self.assertIn(f"A copy is kept when, on those parts, its typical error is {c['GATE_MEDIAN_MS']} ms or less, at "
                       f"least {pct(c['GATE_WITHIN'])} of its lines that match speech start within {c['WITHIN_MS']} ms "
-                      f"of it (and at least {pct(c['GATE_STRICT'])} of all its lines do), and at most "
-                      f"{pct(c['GATE_MISS'])} match no speech. A copy that misses that is still kept when it is "
+                      f"of it (and at least {pct(c['GATE_STRICT'])} of all its lines do), at most "
+                      f"{pct(c['GATE_MISS'])} match no speech, and none of those parts is clearly off. A copy that "
+                      'misses that is still kept when it is '
                       'clearly closer to the speech than the original (SUBSYNC_AUDIO_BETTER): its typical error is '
                       f"{better['median_ms']:.0f} ms or less, at least {pct(better['within'])} of its lines are within "
                       f"{c['WITHIN_MS']} ms of the speech, few lines are unmatched, none of those parts is clearly "
