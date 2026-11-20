@@ -5,7 +5,9 @@ are served from memory."""
 import struct
 import sys
 import time
+import tracemalloc
 import unittest
+from array import array
 from unittest import mock
 
 from helpers import fixture, have, Memory, Opener  # noqa: E402
@@ -14,6 +16,7 @@ from subsync.mp4 import NotMp4, open_index  # noqa: E402
 from subsync.reader import IndexTooLarge, RangeReader  # noqa: E402
 
 CONTAINERS = (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts")
+ECHO = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]   # a decoder stand-in
 
 
 def tracks(data):
@@ -128,6 +131,90 @@ class TableTest(unittest.TestCase):
         self.assertEqual((len(text["stts"]), len(text["sizes"]), text["count"]), (55, 61, 61))
 
 
+def with_table(data, codec, kind, n):
+    """tiny.mp4 (its movie box at the end) with the `codec` track's stsz or stco replaced by a table of n distinct
+    entries."""
+    values = array("I", range(1, n + 1))
+    if sys.byteorder == "little":
+        values.byteswap()
+    table = (bytes(8) if kind == b"stsz" else bytes(4)) + struct.pack(">I", n) + values.tobytes()
+
+    def edit(k, payload, parent):
+        found = {kk: (q, f) for kk, q, f in mp4.boxes(payload, 0, len(payload))}
+        if k != b"stbl" or payload[found[b"stsd"][0] + 12:found[b"stsd"][0] + 16] != codec:
+            return payload
+        return b"".join(box(kk, table if kk == kind else payload[q:f])
+                        for kk, q, f in mp4.boxes(payload, 0, len(payload)))
+    return rebuilt(data, edit)
+
+
+class TableMemoryTest(unittest.TestCase):
+    """The sample tables of every track became lists of Python tuples and ints, about 30 times the movie box
+    (a 64 MB one about 2 GB), video tracks' too, which nothing reads, and before the sample counts were checked. Only
+    the tracks walked a sample at a time (text, the audio windows are cut from) have their tables read, compact, once
+    their counts pass."""
+
+    def opened(self, data):
+        """(the index, or the NotMp4 opening it raised; the most memory taken while opening it)"""
+        tracemalloc.start()
+        try:
+            try:
+                got = open_index(Memory(data))
+            except NotMp4 as e:
+                got = e
+            return got, tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    def test_large_tables_take_about_their_own_size(self):
+        n = 1_000_000                                                    # 4 MB of table in a movie box of about 4 MB
+        for codec, kind, entries, refused in ((b"avc1", b"stsz", n, False), (b"avc1", b"stco", n, False),
+                                              (b"tx3g", b"stsz", 900_000, False), (b"tx3g", b"stsz", 1_500_000, True)):
+            with self.subTest(codec=codec, kind=kind, entries=entries):
+                got, peak = self.opened(with_table(fixture("tiny.mp4"), codec, kind, entries))
+                if refused:                                              # past MAX_TEXT_SAMPLES: before any table
+                    self.assertIsInstance(got, NotMp4)
+                else:
+                    self.assertIsInstance(got, mp4.Mp4Index)
+                self.assertLess(peak, 5 * 4 * entries)                   # the box read, its copies, a compact table
+
+    def test_the_tables_walked_are_read_as_before(self):
+        index = open_index(Memory(with_table(fixture("tiny.mp4"), b"tx3g", b"stsz", 900_000)))
+        text = next(t for t in index.tracks if t["codec"] == b"tx3g")
+        self.assertEqual((len(text["sizes"]), text["sizes"][0], text["sizes"][-1], text["count"]), (900_000, 1, 900_000,
+                                                                                                   900_000))
+        self.assertEqual(list(text["stts"]), list(open_index(Memory(fixture("tiny.mp4"))).tracks[2]["stts"]))
+
+
+class SampleToChunkTest(unittest.TestCase):
+    """The sample-to-chunk runs (stsc) were trusted: one naming a chunk the chunk table hasn't raised
+    IndexError once the text's words or an audio window were read (a failed job, tried again at every request), and a
+    first chunk of 0 read the last chunk's bytes. A track walked a sample at a time whose runs don't start at chunk 1
+    and rise within its chunks makes the file unreadable (NotMp4), when it is opened."""
+
+    def with_runs(self, codec, firsts):
+        """tiny-fast.mp4 with the first chunks of the `codec` track's runs set, from its last run back."""
+        data = bytearray(fixture("tiny-fast.mp4"))
+        q, _ = track(bytes(data), codec)[b"stsc"]
+        count = struct.unpack_from(">I", data, q + 4)[0]
+        for k, first in enumerate(firsts, count - len(firsts)):
+            struct.pack_into(">I", data, q + 8 + 12 * k, first)
+        return bytes(data)
+
+    def test_runs_naming_chunks_the_track_hasnt_are_not_read(self):
+        # the text track's runs start at chunks 1 and 59 of its 59; the audio track's last at 232 of 232
+        for codec, firsts in ((b"tx3g", (1, 70)), (b"tx3g", (0, 59)), (b"tx3g", (2, 59)), (b"tx3g", (1, 1)),
+                              (b"mp4a", (233,))):
+            with self.subTest(codec=codec, firsts=firsts), self.assertRaises(NotMp4):
+                open_index(Memory(self.with_runs(codec, firsts)))
+
+    def test_runs_within_the_chunks_are_read_as_before(self):
+        index = open_index(Memory(self.with_runs(b"tx3g", (1, 59))))   # as the file has them
+        lines = index.text_tracks()[0]["cues"]
+        self.assertEqual(index.line_words(3, [s for s, _ in lines[:6]]),
+                         {s: f"Line {k}" for k, (s, _) in enumerate(lines[:6], 1)})
+
+
 class SampleCountTest(unittest.TestCase):
     """A constant sample size lets a few bytes of the movie box claim billions of samples, each a Python object
     or more once its track is walked: past MAX_TEXT_SAMPLES (all text tracks) or MAX_AUDIO_SAMPLES (the audio track
@@ -229,6 +316,14 @@ class SampleTextTest(unittest.TestCase):
         self.assertIsNone(mp4.sample_text(b"wvtt", box(b"vtte", b"")))
         self.assertIsNone(mp4.sample_text(b"wvtt", b""))
 
+    def test_tx3g_in_utf16_after_its_byte_order_mark(self):
+        # 3GPP TS 26.245 lets a sample's text be UTF-16 when it starts with a byte-order mark; it was read as
+        # UTF-8, so its words were replacement characters and NULs
+        text = "Привет, как дела? Hello there"
+        for raw in (b"\xfe\xff" + text.encode("utf-16-be"), b"\xff\xfe" + text.encode("utf-16-le")):
+            with self.subTest(mark=raw[:2]):
+                self.assertEqual(mp4.sample_text(b"tx3g", struct.pack(">H", len(raw)) + raw + b"styl..."), text)
+
     def test_tx3g_reads_its_length_and_nothing_past_it(self):
         self.assertEqual(mp4.sample_text(b"tx3g", struct.pack(">H", 2) + b"Hi" + b"styl..."), "Hi")
         self.assertIsNone(mp4.sample_text(b"tx3g", b"\x00"))
@@ -294,6 +389,60 @@ class WindowTest(unittest.TestCase):
         index.tracks = []
         with self.assertRaises(NotMp4):                                 # no audio to decode, as window_pcm says
             index.window_bytes(0.0, 4.0)
+
+    def index_of(self, data, codec, places, scale, asc=b""):
+        """A hand-made index over `data` with one audio track of `codec`: its samples one tick of `scale` each, at
+        `places` [(offset, size)], one a chunk."""
+        index = mp4.Mp4Index(self.reader(data))
+        index.size, index.duration_s = len(data), len(places) / scale
+        index.tracks = [{"id": 1, "handler": b"soun", "codec": codec, "enabled": True, "asc": asc, "scale": scale,
+                         "stts": [(len(places), 1)], "const": 0, "sizes": [size for _, size in places],
+                         "count": len(places), "stsc": [(1, 1, 1)], "chunks": [at for at, _ in places], "empty": 0,
+                         "media_time": 0}]
+        return index
+
+    def test_a_window_of_far_more_samples_than_audio_has_is_not_read(self):
+        # A window took every sample covering it, however many: 5,000,000 one-byte samples (a 4.8 MiB read)
+        # took 1.2 GB of Python objects, and four windows are read at once
+        index = self.index_of(bytes(2000), b"ac-3", [(i, 1) for i in range(2000)], scale=1000)   # 1,000 a second
+        before = index.r.bytes
+        with self.assertRaises(NotMp4):
+            index.window_bytes(0.0, 1.0)
+        with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO), self.assertRaises(NotMp4):
+            index.window_pcm(0.0, 1.0)
+        self.assertEqual(index.r.bytes, before)                         # nothing read
+        index = self.index_of(bytes(range(200)), b"ac-3", [(i, 1) for i in range(200)], scale=100)   # AAC at 96 kHz
+        with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO):
+            self.assertEqual(index.window_pcm(0.0, 2.0), bytes(range(200)))
+
+    def test_audio_samples_larger_than_their_codecs_frames_are_not_read(self):
+        # Nothing bounded a sample's size: an AAC frame over 8,184 bytes got an ADTS header whose
+        # 13-bit length was wrong (from 512 KB, ValueError), and an AC-3 sample could be megabytes
+        for codec, size in ((b"ac-3", 64 * 1024 + 1), (b"mp4a", 8185), (b"mp4a", 600_000)):
+            with self.subTest(codec=codec, size=size):
+                index = self.index_of(bytes(size), codec, [(0, size)], scale=1, asc=b"\x02\x03\x02")
+                before = index.r.bytes
+                with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO), self.assertRaises(NotMp4):
+                    index.window_pcm(0.0, 1.0)
+                self.assertEqual(index.r.bytes, before)
+        index = self.index_of(b"\x01" * 8184, b"mp4a", [(0, 8184)], scale=1, asc=b"\x02\x03\x02")   # the largest
+        with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO):
+            out = index.window_pcm(0.0, 1.0)
+        self.assertEqual(out[7:], b"\x01" * 8184)
+        self.assertEqual(((out[3] & 3) << 11) | (out[4] << 3) | (out[5] >> 5), 8191)   # ADTS frame_length, header in
+
+    def test_samples_stored_far_from_their_order_are_not_all_held(self):
+        # Samples stored in reverse were all held until the first came (5,000,000 one-byte ones: 1.2 GB); the
+        # read stops once MAX_WAITING_BYTES of them wait for an earlier one
+        n, size = 200, 60_000
+        data = bytes(n * size)
+        index = self.index_of(data, b"ac-3", [((n - 1 - i) * size, size) for i in range(n)], scale=100)
+        with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO), self.assertRaises(NotMp4):
+            index.window_pcm(0.0, 2.0)
+        self.assertLess(index.audio_bytes, len(data) * 3 // 4)        # stopped early
+        forward = self.index_of(data, b"ac-3", [(i * size, size) for i in range(n)], scale=100)   # in their order
+        with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO):
+            self.assertEqual(len(forward.window_pcm(0.0, 2.0)), len(data))
 
     def test_a_window_whose_samples_spread_far_past_it_is_not_read(self):
         data = bytearray(fixture("tiny.mp4"))

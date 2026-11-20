@@ -229,7 +229,7 @@ def vobsub_image(spu, lums):
                     p += 4
                 else:
                     break
-            if nxt <= at:   # the last sequence names itself; one that names an earlier one is damaged (ffmpeg stops too)
+            if nxt <= at:   # the last sequence names itself; one naming an earlier one is damaged (ffmpeg stops too)
                 break
             at = nxt
         if not (colors and alpha and area and fields):
