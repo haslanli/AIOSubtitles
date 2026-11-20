@@ -1,6 +1,5 @@
 """Setup's Docker work from inside its container: the helper on the machine's network, joining AIOStreams'
 network, the ownership check, the new version's start check, and putting a database copy back."""
-import ast
 import base64
 import contextlib
 import errno
@@ -14,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, plan
+from subsync import hostcmd
 
 IMAGE = 'ghcr.io/haslanli/aiosubtitles:1.4.0@sha256:' + 'a' * 64
 
@@ -184,11 +184,7 @@ class OneDefinition(unittest.TestCase):
                 self.assertIs(getattr(dockerenv, name), getattr(plan, name))
 
     def test_the_databases_are_subsyncs_own_list(self):
-        source = Path(__file__).resolve().parents[2] / 'subsync' / 'subsync' / 'hostcmd.py'
-        tree = ast.parse(source.read_text())       # read, not imported: subsync's settings need numpy
-        value = next(node.value for node in tree.body if isinstance(node, ast.Assign)
-                     and any(getattr(t, 'id', None) == 'DATABASES' for t in node.targets))
-        self.assertEqual(ast.literal_eval(value), dockerenv.DATABASES)
+        self.assertEqual(hostcmd.DATABASES, dockerenv.DATABASES)
 
 
 class Probe(unittest.TestCase):

@@ -1324,6 +1324,7 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertEqual(headers['Location'], f'/{app.key}/hostinstall')
         _, _, text = b.settle('hostinstall')
         self.assertIn('AIOSubtitles is running (it restarts by itself after a reboot)', text)
+        self.assertNotIn('Your web server needs one rule', text)            # the address answers
         _, _, text = b.follow('hostinstall', {'go': 'next'})
         _, _, text = b.settle('hostcheck')
         self.assertIn(f'People can reach AIOSubtitles at {ADDRESS}', text)

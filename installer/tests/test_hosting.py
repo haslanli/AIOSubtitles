@@ -3,12 +3,14 @@ import ast
 import base64
 import contextlib
 import gc
+import html
 import http.server
 import io
 import json
 import os
 import socket
 import stat
+import string
 import tempfile
 import threading
 import unittest
@@ -17,11 +19,14 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, docs, engine, hosting, limits, plan, screens, wizard
-from installer.tests.test_flow import AnswersRun
+from installer.tests.test_flow import POLL, AnswersRun
 from subsync import explain, realdebrid
+from subsync.settings import Settings
 
 ADDRESS = 'https://subs.example.com'
 SECRET_WORDS = 'kept it in state/subsync.env'
+# a suggested invite code: three groups of four of the letters and digits easy to read out and type (no 0/o, 1/l/i)
+INVITE_CODE = r'^[a-hjkmnp-z2-9]{4}-[a-hjkmnp-z2-9]{4}-[a-hjkmnp-z2-9]{4}$'
 
 
 class Pieces(unittest.TestCase):
@@ -31,13 +36,16 @@ class Pieces(unittest.TestCase):
         self.assertNotEqual(secret, hosting.new_secret())
 
     def test_a_suggested_invite_code_is_easy_to_type(self):
-        code = hosting.suggested_invite()
-        self.assertRegex(code, r'^[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$')
+        # The pattern took i, l and o too, the letters the code leaves out, and one random code could miss them
+        self.assertEqual(set(hosting._INVITE_LETTERS), set(string.ascii_lowercase + string.digits) - set('01ilo'))
+        self.assertRegex(hosting.suggested_invite(), INVITE_CODE)
 
     def test_the_address_must_be_https_and_a_whole_host(self):
         self.assertEqual(hosting.check_address('https://Subs.Example.com/'), (True, '', 'https://subs.example.com'))
+        # An address with a user name or password would be written into every person's addon link
         for bad in ('http://subs.example.com', 'subs.example.com', 'https://subs.example.com/subsync', 'ftp://x',
-                    'https://', 'https://subs.example.com?x=1'):
+                    'https://', 'https://subs.example.com?x=1', 'https://user:pw@subs.example.com',
+                    'https://user@subs.example.com', 'https://:pw@subs.example.com'):
             with self.subTest(bad=bad):
                 good, message, _ = hosting.check_address(bad)
                 self.assertFalse(good)
@@ -69,10 +77,6 @@ class Pieces(unittest.TestCase):
         self.assertNotIn('SUBSYNC_WYZIE_KEY', env)                     # public mode refuses it
         self.assertEqual(env['SUBSYNC_AUDIO_ROUTE'], 'off')             # off unless the host chooses it
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', env)
-        try:     # subsync's settings need numpy, which a server's own Python may not have (the installer doesn't)
-            from subsync.settings import Settings
-        except ImportError as e:
-            self.skipTest(f'subsync.settings needs {e.name}')
         with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
             s = Settings(env)
             self.assertEqual(s.missing(), [])
@@ -91,10 +95,6 @@ class Pieces(unittest.TestCase):
         env = hosting.public_env(base, hosting.new_secret(), {})
         self.assertEqual(env['SUBSYNC_TMDB_PERSONAL'], 'off')
         self.assertTrue({'SUBSYNC_TMDB_KEY', 'SUBSYNC_TMDB_PERSONAL'} <= set(hosting.OWNED))
-        try:
-            from subsync.settings import Settings
-        except ImportError as e:
-            self.skipTest(f'subsync.settings needs {e.name}')
         with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
             for answers in (dict(base, TMDB_KEY='tk'), base):
                 self.assertEqual(Settings(hosting.public_env(answers, hosting.new_secret(), {}, tmdb_personal=True))
@@ -112,10 +112,6 @@ class Pieces(unittest.TestCase):
         self.assertEqual(off['SUBSYNC_AUDIO_ROUTE'], 'off')
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', off)                # no limit asked or written with it off
         self.assertTrue({'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_AUDIO_BUDGET_GB'} <= set(hosting.OWNED))
-        try:
-            from subsync.settings import Settings
-        except ImportError as e:
-            self.skipTest(f'subsync.settings needs {e.name}')
         with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
             s = Settings(env)
         self.assertEqual(s.conflicts(), [])
@@ -123,9 +119,6 @@ class Pieces(unittest.TestCase):
 
     def test_the_hosting_screens_ask_the_audio_route_and_its_limits(self):
         # Allow it (each person then chooses) or remove it completely, off by default; with it on, its limits
-        import html
-        from installer import screens
-        from subsync import explain
         page = screens.host_choices(audio=True)
         self.assertEqual(hosting.AUDIO_QUESTION, 'Offer syncing files that have no subtitles of their own, from their '
                                                  'audio?')
@@ -157,10 +150,6 @@ class Pieces(unittest.TestCase):
         off = hosting.public_env(answers, hosting.new_secret(), changed, audio=False)
         self.assertFalse(set(changed) & set(off))
         self.assertLessEqual(set(changed), set(hosting.OWNED))       # a line set by hand gives way to the answer
-        try:
-            from subsync.settings import Settings
-        except ImportError as e:
-            self.skipTest(f'subsync.settings needs {e.name}')
         with mock.patch('subsync.settings.default_gateway', lambda path=None: '172.17.0.1'):
             s = Settings(env)
         self.assertEqual(s.conflicts(), [])
@@ -269,8 +258,25 @@ class Rows:
         return lambda text: self.rows.append((kind, text))
 
 
+class NotHttp(http.server.BaseHTTPRequestHandler):
+    """Something else than a web server answering: an SSH server's first line."""
+
+    def handle(self):
+        self.request.recv(1024)
+        self.request.sendall(b'SSH-2.0-OpenSSH_9.6\r\n')
+
+
 class Fetch(unittest.TestCase):
     """One GET from this machine (127.0.0.1 here), as hosting.check makes them."""
+
+    def serve(self, handler):
+        """A stand-in server on 127.0.0.1 for this test, closed after it; its address. It looks for shutdown() every
+        POLL seconds, so closing it takes no longer than that (serve_forever's default is half a second)."""
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        threading.Thread(target=server.serve_forever, kwargs={'poll_interval': POLL}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f'http://127.0.0.1:{server.server_address[1]}'
 
     def setUp(self):
         self.agents = []
@@ -287,11 +293,7 @@ class Fetch(unittest.TestCase):
 
             def log_message(self, *args):
                 pass
-        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Answer)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        self.base = f'http://127.0.0.1:{self.server.server_address[1]}'
+        self.base = self.serve(Answer)
 
     def test_an_error_answer_is_closed_at_once(self):
         with warnings.catch_warnings(record=True) as caught:
@@ -311,29 +313,12 @@ class Fetch(unittest.TestCase):
         port = closed.server_address[1]
         closed.server_close()
         self.assertFalse(hosting.health_ok(f'http://127.0.0.1:{port}'))              # nothing answers
-
-        class NotHttp(http.server.BaseHTTPRequestHandler):
-            def handle(self):
-                self.request.recv(1024)
-                self.request.sendall(b'SSH-2.0-OpenSSH_9.6\r\n')
-        other = http.server.ThreadingHTTPServer(('127.0.0.1', 0), NotHttp)
-        threading.Thread(target=other.serve_forever, daemon=True).start()
-        self.addCleanup(other.server_close)
-        self.addCleanup(other.shutdown)
-        self.assertFalse(hosting.health_ok(f'http://127.0.0.1:{other.server_address[1]}'))   # something else answers
+        self.assertFalse(hosting.health_ok(self.serve(NotHttp)))                       # something else answers
 
     def test_an_answer_that_isnt_http_or_a_name_that_cant_be_looked_up_is_a_reason_not_a_stop(self):
         # The sign-up page's check caught OSError only, so a non-HTTP answer (BadStatusLine) or a name IDNA
         # refuses (UnicodeError) stopped setup with a traceback, at the install and at every update's check
-        class NotHttp(http.server.BaseHTTPRequestHandler):
-            def handle(self):
-                self.request.recv(1024)
-                self.request.sendall(b'SSH-2.0-OpenSSH_9.6\r\n')
-        other = http.server.ThreadingHTTPServer(('127.0.0.1', 0), NotHttp)
-        threading.Thread(target=other.serve_forever, daemon=True).start()
-        self.addCleanup(other.server_close)
-        self.addCleanup(other.shutdown)
-        base = f'http://127.0.0.1:{other.server_address[1]}'
+        base = self.serve(NotHttp)
         with self.assertRaises(OSError) as caught:
             hosting.fetch(base + '/')
         self.assertEqual(str(caught.exception), 'SSH-2.0-OpenSSH_9.6')         # one line, the answer's own words
@@ -379,14 +364,11 @@ class Fetch(unittest.TestCase):
 
             def log_message(self, *args):
                 pass
-        away = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Away)
-        threading.Thread(target=away.serve_forever, daemon=True).start()
-        self.addCleanup(away.server_close)
-        self.addCleanup(away.shutdown)
+        away = self.serve(Away)
         with mock.patch.object(socket, 'create_connection', connect), \
                 mock.patch('urllib.request.urlopen', lambda *a, **k: opened.append(a) or self.fail('urllib opened it')):
             for url in ('https://real-debrid.com/health', 'https://API.Real-Debrid.com./',
-                        f'http://127.0.0.1:{away.server_address[1]}/health'):
+                        f'{away}/health'):
                 with self.subTest(url=url), self.assertLogs('subsync.realdebrid', 'WARNING') as logged, \
                         self.assertRaises(realdebrid.Blocked):
                     hosting.fetch(url)
@@ -402,10 +384,12 @@ class Fetch(unittest.TestCase):
 
 
 class RouteFixture(AnswersRun, unittest.TestCase):
-    """Docker and the address faked (no tests here: test_web.py drives the page on it too)."""
+    """Docker and the address faked (no tests here: test_web.py drives the page on it too). Everything it sets up is
+    undone by cleanups, last first, so a setUp that fails halfway leaves nothing behind for later tests."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.state = Path(self.tmp.name) / 'state'
         self.up = False
         self.pages = {}
@@ -441,7 +425,30 @@ class RouteFixture(AnswersRun, unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.stand_in_tmdb()
-        self.addCleanup(self.tmp.cleanup)
+
+
+class Fixture(unittest.TestCase):
+    def test_a_set_up_that_fails_halfway_still_undoes_everything(self):
+        # The folder's cleanup was registered last, after ten patches and stand_in_tmdb, so a setUp stopped
+        # by either left the folder to the garbage collector (and its ResourceWarning)
+        made = []
+
+        class Broken(RouteFixture):
+            def stand_in_tmdb(self):
+                made.append(Path(self.tmp.name))
+                raise RuntimeError('a later step of setUp failed')
+
+            def test_nothing(self):
+                pass
+
+        def patched():
+            return engine.STATE, engine.REPO, dockerenv.compose, dockerenv.exec_in, hosting.fetch
+        before = patched()
+        result = unittest.TestResult()
+        Broken('test_nothing').run(result)
+        self.assertEqual(len(result.errors), 1)
+        self.assertEqual(patched(), before)
+        self.assertFalse(made[0].exists())
 
 
 class Route(RouteFixture):
@@ -454,7 +461,7 @@ class Route(RouteFixture):
         self.assertEqual(env['SUBSYNC_PUBLIC'], 'on')
         self.assertEqual(env['SUBSYNC_TRUSTED_PROXY'], 'gateway')
         self.assertEqual(env['SUBSYNC_MAX_USERS'], '150')
-        self.assertRegex(env['SUBSYNC_PUBLIC_INVITE'], r'^[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$')   # suggested
+        self.assertRegex(env['SUBSYNC_PUBLIC_INVITE'], INVITE_CODE)                         # suggested
         secret = env['SUBSYNC_SECRET_KEY']
         self.assertNotIn(secret, out)                                                           # never shown
         self.assertNotIn(secret, (self.state / 'settings.json').read_text())
@@ -463,6 +470,9 @@ class Route(RouteFixture):
         self.assertIn('ports: ["127.0.0.1:8790:8790"]', (self.state / 'compose.yaml').read_text())
         self.assertIn(f'People can reach AIOSubtitles at {ADDRESS}', out)
         self.assertIn(f'The sign-up page loads at {ADDRESS}, with its security headers', out)
+        # The address answers once the container runs, so the web server's rule is in place: not shown again
+        self.assertNotIn('Your web server needs one rule', out)
+        self.assertNotIn('reverse_proxy', out)
         self.assertIn('Starting AIOSubtitles', out)
         self.assertEqual(json.loads((self.state / 'settings.json').read_text())['route'], 'host')
 
@@ -474,6 +484,7 @@ class Route(RouteFixture):
         self.assertEqual((again['SUBSYNC_SECRET_KEY'], again['SUBSYNC_PUBLIC_INVITE']), (secret, invite))
         self.assertNotIn(SECRET_WORDS, out)
         code, out = self.run_setup({'SUBSYNC_PUBLIC_INVITE': ''})
+        self.assertEqual(code, 0, out)                          # the whole run, not only its env lines
         self.assertNotIn('SUBSYNC_PUBLIC_INVITE', engine.read_kv(self.state / 'subsync.env'))
 
     def test_a_public_instance_with_the_audio_route(self):
@@ -487,6 +498,7 @@ class Route(RouteFixture):
         again = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual((again['SUBSYNC_AUDIO_ROUTE'], again['SUBSYNC_AUDIO_BUDGET_GB']), ('on', '0.5'))
         code, out = self.run_setup({'SUBSYNC_AUDIO_ROUTE': 'no'})        # turned off: its limit goes too
+        self.assertEqual(code, 0, out)
         off = engine.read_kv(self.state / 'subsync.env')
         self.assertEqual(off['SUBSYNC_AUDIO_ROUTE'], 'off')
         self.assertNotIn('SUBSYNC_AUDIO_BUDGET_GB', off)
