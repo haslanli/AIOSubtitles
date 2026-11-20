@@ -281,6 +281,13 @@ def saved_aios(s):
     return Aios(s.get('aios_url') or plan.AIOS_DEFAULT_URL)
 
 
+def aios_settings(status):
+    """The settings in AIOStreams' status answer, read as the public sign-up reads them: none when an AIOStreams (an
+    older or a forked one) sends none."""
+    settings = status.get('settings')
+    return settings if isinstance(settings, dict) else {}
+
+
 def made_before_labels(s):
     """Whether the setup saved in `s` (state/settings.json) is an install setup 1.3.0 or before made: installed, with
     no install id. Setup labels what it makes since 1.4.0, so that install's container, volume and network carry no
@@ -554,7 +561,7 @@ class Engine:
     def find_aios(self):
         self.show_step('aios')
         container, url = self.reach_aios()
-        settings = self.status['settings']
+        settings = aios_settings(self.status)
         public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
         self.s.update(aios_url=url, aios_public=public, version=setup_version(), aios_version=self.status.get('version'))
         if container and container['host_network']:
@@ -641,14 +648,16 @@ class Engine:
 
     def _aios_at(self, value):
         value = re.sub(r'/(stremio|configure|jellyfin)(/.*)?$', '', value)
-        local = plan.is_local_host(plan.host_of(value))
-        if bridge() and local:    # 127.0.0.1 is setup's own container here: the machine is its gateway
-            parts = urllib.parse.urlsplit(value)
+        parts = urllib.parse.urlsplit(value)
+        # 127.0.0.1 is setup's own container on the bridge network: the machine is its gateway. An address whose port
+        # can't be one goes to the client as typed, which refuses it as it does on every route.
+        gateway = bridge() and plan.is_local_host(plan.host_of(value)) and plan.has_usable_port(parts)
+        if gateway:
             value = urllib.parse.urlunsplit(parts._replace(netloc=f'{PLACE.gateway}:{parts.port or 80}'))
         try:
             self.status = Aios(value, timeout=15).status()
         except AiosError as e:
-            if bridge() and local:
+            if gateway:
                 return False, CANT_REACH, value
             return False, e.message + (f' {e.fix}' if e.fix else ''), value
         return True, f"AIOStreams {self.status.get('version', '?')} answers there", value
@@ -895,7 +904,8 @@ class Engine:
     def plan_changes(self):
         """What saving would change in the two configs, as (heading, [(sign, line)], note) sections. Changes nothing."""
         self.addon_urls()
-        metadata = {p['ID']: p for p in self.status['settings'].get('presets') or []}
+        metadata = {p['ID']: p for p in aios_settings(self.status).get('presets') or []
+                    if isinstance(p, dict) and 'ID' in p}
         self.new_viewer, self.changes = plan.viewer_change(self.viewer, self.manifest_url, metadata, self.add_os)
         self.sync = plan.sync_config(self.new_viewer, self.manifest_url)
         self.sync_exists = bool(self.keys.get('SYNC_UUID') and self.keys.get('SYNC_PASSWORD'))

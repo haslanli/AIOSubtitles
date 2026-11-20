@@ -357,6 +357,19 @@ class StateFlows(Offline):
         for char in ('\x1b', '\x07', '\r'):
             self.assertNotIn(char, out)
 
+    def test_an_aiostreams_whose_status_has_no_settings_is_set_up_as_one_without_them(self):
+        # The client takes a status answer with a version alone; setup read its settings as always there (a
+        # KeyError: a traceback in a terminal, the unexpected-error stop on the page), the public sign-up as optional
+        real = engine.Aios.status
+
+        def bare(aios):
+            return {'version': real(aios)['version']}
+        with mock.patch.object(engine.Aios, 'status', bare):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.load_settings()['aios_public'], PUBLIC)          # the container's own address
+        self.assertEqual(len(self.ours()), 1)
+
     def test_the_terminals_step_headings_are_the_pages_steps(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
@@ -681,6 +694,19 @@ class OnBridge(Offline):
         self.assertIn(('warn', 'The container "aiostreams" looks like AIOStreams, but I can\'t reach it from here.'), rows)
         self.assertIn(('ok', 'AIOStreams 2.37.0 answers there'), rows)
         self.assertEqual(e.s['aios_url'], gateway)
+
+    def test_a_local_address_whose_port_cant_be_one_is_refused_as_on_every_route(self):
+        # Its port was read to put the gateway in its place: letters or a number out of range raised
+        # ValueError (the page's unexpected-error stop, a traceback in a terminal), and port 0 was tried as port 80
+        for address in ('localhost:abc', 'http://127.0.0.1:99999', 'localhost:0'):
+            with self.subTest(address=address):
+                good, message, value = engine.Engine({})._check_aios(address)
+                with mock.patch.object(engine, 'PLACE', None):
+                    elsewhere = engine.Engine({})._check_aios(address)
+                self.assertEqual((good, message, value), elsewhere)          # the client's own refusal
+                self.assertFalse(good)
+                self.assertTrue(message.startswith("Can't reach AIOStreams at http://"), message)
+                self.assertNotIn(self.place.gateway, message + value)
 
     def lan_lookups(self):
         return [checks for _, checks in self.probed if not checks]
@@ -1225,6 +1251,15 @@ class PlainHttp(Offline):
         for address in ('192.168.1.5:3000', 'localhost:3000', 'aiostreams:3000', 'nas.local:3000'):
             with self.subTest(address=address):
                 self.assertEqual(self.found(address), (f'http://{address}', [f'http://{address}'], []))
+
+    def test_a_pasted_page_or_install_link_is_cut_back_to_aiostreams_own_address(self):
+        # The address bar of AIOStreams' configure page, an install link or its Jellyfin address is asked and
+        # saved as AIOStreams' own address, which every API call is made under
+        for address, url in (('https://aio.example.com/configure', 'https://aio.example.com'),
+                             (f'aio.example.com/stremio/{UUID}/ENC/manifest.json', 'https://aio.example.com'),
+                             ('http://192.168.1.5:3000/jellyfin/', 'http://192.168.1.5:3000')):
+            with self.subTest(address=address):
+                self.assertEqual(self.found(address), (url, [url], []))
 
 
 class CacheRecord(Offline):
