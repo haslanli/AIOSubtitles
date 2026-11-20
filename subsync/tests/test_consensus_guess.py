@@ -118,5 +118,32 @@ class WorkerConsensusGuessTest(unittest.TestCase):
                 self.assertTrue(w.waits_for_pick(job.alias))
 
 
+    def test_the_picked_audio_job_serves_the_consensus_its_first_pass_chose(self):
+        # The audio job chose the originals again by name (the 9.3 s guess), in memory and in the store, so
+        # from the pick on the English entries served the guess the consensus had replaced, while Russian stayed lined
+        # up with the consensus; it chooses them only when none are known (a restart with no stored row)
+        w = self.worker()
+        job = Job("movie", "tt1", self.hints)
+        with self.downloads.patch():
+            w.process(job)
+        self.assertTrue(w.pick(job.alias))
+        audio = w.jobs.pop(job.alias)
+        w.queue.clear()
+        seen = []
+        w._sync_all = lambda job, per_lang, sync: seen.append(dict(w.originals[job.alias]))   # the audio fit
+        with self.downloads.patch():
+            w.process(audio)
+        self.assertEqual([o["eng"]["id"] for o in seen], ["e0"])           # during the audio sync too
+        self.assertEqual(w.known_originals(job.alias)["eng"]["id"], "e0")
+        self.assertEqual(w.store.originals_get(job.alias)["eng"]["id"], "e0")
+        w.originals.clear()
+        w.store.db.execute("DELETE FROM originals")                       # none known: chosen by name
+        again = audio.again()
+        again.audio = True
+        with self.downloads.patch():
+            w.process(again)
+        self.assertEqual(w.known_originals(job.alias)["eng"]["id"], "far")
+
+
 if __name__ == "__main__":
     unittest.main()

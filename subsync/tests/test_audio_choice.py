@@ -724,6 +724,25 @@ class AudioEndingTest(Base):
                 self.assertEqual(w._file_blocked(self.alias), isinstance(error, Refused))
                 self.assertFalse(self.store.file_blocked(self.alias))   # never for anyone else
 
+    def test_an_audio_job_whose_subtitle_list_changed_leaves_the_file_waiting(self):
+        # A pick more than LIST_TTL_S after the first pass asks for the list again; when it comes back empty
+        # (a subtitle addon too slow for AIOStreams' answer) or with nothing in the person's languages, the job
+        # ends before its sync: the file waits for another pick (it didn't: the pick was used up, and later picks
+        # started nothing until a new first pass); nothing is read or counted
+        for listed in ([], self.subs("fre")):
+            with self.subTest(listed=[c["lang"] for c in listed]):
+                self.store.db.execute("DELETE FROM pickable")
+                limits = Limits()
+                w = self.picked(self.worker(limits))
+                w.lists.clear()                                   # the first pass's list is older than LIST_TTL_S
+                w.aios.subs = listed
+                w.queue.clear()
+                log = len(self.srv.log)
+                w.process(w.jobs.pop(self.alias))
+                self.assertTrue(w.waits_for_pick(self.alias))
+                self.assertTrue(self.worker(Limits()).waits_for_pick(self.alias))   # its row too
+                self.assertEqual((len(self.srv.log), limits.syncs), (log, 0))
+
     def test_a_pick_queued_when_the_worker_stops_waits_again(self):
         w = self.picked(self.worker(Limits()))
         w.stop()                                            # Pool.stop: a settings change, an idle worker

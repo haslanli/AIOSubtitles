@@ -266,8 +266,46 @@ class SharedStoreTest(unittest.TestCase):
         job = Job("movie", "tt1", {"filename": "other-name.mkv", "videoSize": 1000})
         app.worker.process(job)
         self.assertEqual(self.store.resolve(job.alias), FILE)
-        self.assertEqual(aios.subtitle_requests, 0)
+        # its subtitle list only, for the originals its entries serve
+        self.assertEqual(aios.subtitle_requests, 1)
+        self.assertEqual(app.worker.known_originals(job.alias),
+                         {"eng": {"url": "http://127.0.0.1:9/sub.srt", "id": "os-1"}})
         self.assertEqual(self.store.day_count("read"), 0)
+
+    def test_a_known_torrent_file_gets_the_originals_its_entries_serve(self):
+        # The known-file path sets the file's originals from the list, as the capped path does, on a
+        # self-hosted install and in public mode: a pick entry listed while its job was queued serves the original,
+        # and never asks for the list again (each try a new job and stream listing, answered 503); the subtitle made for
+        # the stored file's own hash comes first
+        from subsync.store import Store
+        from subsync.worker import Job, Safety, Worker
+        stored = "0123456789abcdef-1000"                                   # a stored file's key: its hash and size
+        subs = [{"id": "os-1", "url": "http://127.0.0.1:9/1.srt", "lang": "eng", "release": "", "hash": "",
+                 "hash_match": False, "ai": False},
+                {"id": "os-2", "url": "http://127.0.0.1:9/2.srt", "lang": "eng", "release": "", "hash": stored[:16],
+                 "hash_match": False, "ai": False}]
+        for keep_texts in (True, False):
+            with self.subTest(keep_texts=keep_texts):
+                folder = os.path.join(self.dir, f"keep-{keep_texts}")
+                os.makedirs(folder)
+                store = closed_after(self, Store(folder, keep_texts=keep_texts))
+                s = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_PUBLIC_BASE": "http://x.test",
+                              "SUBSYNC_LANGUAGES": "eng"})
+                aios = ListingAios({"url": "http://127.0.0.1:9/never",
+                                    "streamData": {"torrent": {"infoHash": HASH, "fileIdx": 0}}}, subs)
+                w = Worker(s, store, aios, Safety())
+                store.alias(f"bt:{HASH}:0", stored)
+                store.file_read(stored, 1000, stored[:16], True, {"rule": s.rule_id})
+                store.judged_put(stored, ["eng"], s.rule_id)
+                job = Job("movie", "tt1", {"filename": "other-name.mkv", "videoSize": 1000})
+                w.remember(job)
+                w.process(job)
+                self.assertEqual(store.resolve(job.alias), stored)
+                self.assertEqual(w.known_originals(job.alias),
+                                 {"eng": {"url": "http://127.0.0.1:9/2.srt", "id": "os-2"}})
+                self.assertEqual((aios.subtitle_requests, store.day_count("read")), (1, 0))
+                self.assertEqual(w.wait_for_originals(job.alias, 0), w.known_originals(job.alias))
+                self.assertFalse(w.busy_with(job.alias))       # nothing queued again for it
 
     def test_a_known_torrent_file_of_another_hash_than_the_players_is_not_used(self):
         # A player that sends its file's hash gets a stored file only of that hash; the torrent file
@@ -290,7 +328,7 @@ class SharedStoreTest(unittest.TestCase):
         self.assertIsNone(self.store.resolve(other.alias))
         same = Job("movie", "tt1", {"videoHash": stored[:16].upper(), "videoSize": 1000})
         app.worker.process(same)                                             # the stored file is its own
-        self.assertEqual(aios.subtitle_requests, 1)
+        self.assertEqual(aios.subtitle_requests, 2)                         # its list, nothing read
         self.assertEqual(self.store.resolve(same.alias), stored)
 
     def test_a_file_known_by_its_name_of_another_hash_than_the_players_is_not_listed(self):

@@ -1379,6 +1379,15 @@ class Worker(threading.Thread):
         job.bt = bt
         # the title's original language: looked up in the background, never waited for (origlang.py)
         self.start_lookup(job.video_id)
+        # the originals the file's entries serve, chosen from its subtitle list (_set_originals); an audio job keeps
+        # those its first pass chose,'s consensus guess among them, and chooses them only when none are known
+        # (after a restart with no stored row)
+        chosen = job.audio and self.known_originals(job.alias) is not None
+
+        def choose_originals(candidates, file_hash):
+            if candidates and not chosen:
+                self._set_originals(job.alias, candidates, hints.get("filename"), file_hash)
+
         # a file known by its torrent file, or a Usenet file by its name
         key = bt or (job.alias if job.usenet else None)
         known = self.file_of((key,), hints.get("videoHash")) if key else None
@@ -1390,8 +1399,10 @@ class Worker(threading.Thread):
             # its audio job (a pick, or "open"), or another person's first pass of their own, still reads it
             self.store.alias(job.alias, known)
             log.info("known file %s: nothing to read", job.label)
-            if not self.store.keep_texts:   # this person's copies are made from their own list's originals
-                self._candidates(job, hints)
+            # its subtitle list and originals are still set, as for a capped file, so its entries serve the originals
+            # (a pick entry listed while this job was queued would else ask for the list again on every try); in
+            # public mode this person's copies are made from their own list's originals too
+            choose_originals(self._candidates(job, hints), hints.get("videoHash") or known.split("-")[0])
             return
         if self.capped(job, bt):
             # Nothing of the file is read and no file is counted; its subtitle list and originals are still set,
@@ -1400,9 +1411,7 @@ class Worker(threading.Thread):
             if not self.capped(job):
                 self.store.cap_reached(job.alias, self.store.over_cap(bt))
             self.store.marks_asked(job.alias, bt)    # asked for: the mark stays
-            candidates = self._candidates(job, hints)
-            if candidates:
-                self._set_originals(job.alias, candidates, hints.get("filename"), hints.get("videoHash"))
+            choose_originals(self._candidates(job, hints), hints.get("videoHash"))
             log.info("index larger than the cap %s (%s): originals kept", job.label,
                      self._cap_words(job, self._cap(job)))
             return
@@ -1418,12 +1427,17 @@ class Worker(threading.Thread):
         candidates = self._candidates(job, hints)
         if not candidates:
             # An empty list is most likely a subtitle addon too slow for AIOStreams' answer, not "no subtitles":
-            # nothing is remembered, so the next request or pick asks for the list again
+            # nothing is remembered, so the next request or pick asks for the list again (an audio job's file waits
+            # for that pick: its list changed since its first pass)
             log.info("empty subtitle list %s: asked again on the next request", job.label)
+            if job.audio:
+                self._wait_again(job)
             return
-        self._set_originals(job.alias, candidates, hints.get("filename"), hints.get("videoHash"))
+        choose_originals(candidates, hints.get("videoHash"))
         if not any(c["lang"] in self.s.languages for c in candidates):
             log.info("no subtitles to sync %s", job.label)   # nothing is read
+            if job.audio:   # as for an empty list
+                self._wait_again(job)
             return
         guard = JobGuard(self.safety, self.store, self.s.daily_budget, self._cap(job), limits=self.limits)
         reader = RangeReader(rewrite(url, self.s.url_rewrite), job.label, guard, timeout=self.s.read_timeout,
@@ -1488,7 +1502,7 @@ class Worker(threading.Thread):
                 self.usenet_finder.missed(job.alias)
             return
         if not hints.get("videoHash"):   # the file's own hash is known now: a subtitle made for it is the better guess
-            self._set_originals(job.alias, candidates, hints.get("filename"), oshash)
+            choose_originals(candidates, oshash)
         file_key = f"{oshash}-{index.size}"
         for a in {*job.aliases, f"hash:{oshash}|{index.size}", bt} - {None}:
             self.store.alias(a, file_key)
