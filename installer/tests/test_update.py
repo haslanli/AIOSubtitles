@@ -585,6 +585,24 @@ class Backups(unittest.TestCase):
                              ['databases-20261102-000000', 'databases-20261103-000000', 'databases-20261104-000000',
                               'viewer-1a2b3c4d-20261101-000000.json'])
 
+    def test_only_the_copies_themselves_are_counted_and_removed(self):
+        # A link named like a copy made shutil.rmtree raise after a good copy (the update stopped), and a file
+        # named databases-… counted as the newest copy, so a real one was removed in its place
+        with tempfile.TemporaryDirectory() as tmp:
+            backups, elsewhere = Path(tmp) / 'backups', Path(tmp) / 'elsewhere'
+            backups.mkdir()
+            elsewhere.mkdir()
+            (elsewhere / 'users.sqlite3').write_text('kept')
+            (backups / 'databases-20200101-000000').symlink_to(elsewhere)
+            for stamp in ('20261101-000000', '20261102-000000', '20261103-000000', '20261104-000000'):
+                (backups / f'databases-{stamp}').mkdir()
+            (backups / 'databases-notes.txt').write_text('mine')
+            update.keep_newest(backups, 'databases-', 3, keep={'databases-20261104-000000'})
+            self.assertEqual(sorted(p.name for p in backups.iterdir()),
+                             ['databases-20200101-000000', 'databases-20261102-000000', 'databases-20261103-000000',
+                              'databases-20261104-000000', 'databases-notes.txt'])
+            self.assertEqual((elsewhere / 'users.sqlite3').read_text(), 'kept')     # nothing followed through the link
+
 
 if __name__ == '__main__':
     unittest.main()

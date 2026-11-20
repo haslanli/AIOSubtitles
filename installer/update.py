@@ -7,8 +7,10 @@ the source route ./setup --update fetches the folder's newer commit with git and
 and the update (installer/engine.py) copies the databases, checks the new version while the old one keeps running,
 switches, checks again, and puts the old version back when the new one doesn't answer.
 """
+import os
 import re
 import shutil
+import stat
 from collections import namedtuple
 from pathlib import Path
 
@@ -85,15 +87,36 @@ def running(repo):
     return path.read_text().strip() if path.exists() else '1.0.0'
 
 
+# A copy of the databases is made inside the service's container, so a link in it is never followed: setup runs as root
+# with Docker's socket, and a link could point it at anything it can reach.
+def real_folder(path):
+    """Whether `path` is a folder itself, not a link to one."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def remove_entry(path):
+    """Removes a file, a link (never what it points to) or a folder with all in it; nothing when there is none."""
+    try:
+        folder = stat.S_ISDIR(os.lstat(path).st_mode)
+    except FileNotFoundError:
+        return
+    shutil.rmtree(path) if folder else os.unlink(path)
+
+
 def keep_newest(folder, prefix, n, keep=()):
-    """Leaves `n` entries whose names start with `prefix` (their names end with the time they were made): those named
-    in `keep` (a rollback needs them), then the newest."""
+    """Leaves `n` of the copies in `folder`, the folders named `prefix` and the time they were made (YYYYmmdd-HHMMSS):
+    those named in `keep` (a rollback needs them), then the newest. Nothing else there is counted or removed (a file or
+    a link with such a name, say), and no link is followed."""
     folder = Path(folder)
     if not folder.exists():
         return
-    found = sorted(p for p in folder.iterdir() if p.name.startswith(prefix))
+    copy = re.compile(re.escape(prefix) + r'\d{8}-\d{6}')
+    found = sorted(p for p in folder.iterdir() if copy.fullmatch(p.name) and real_folder(p))
     kept = [p for p in found if p.name in keep]
     rest = [p for p in found if p.name not in keep]
     room = max(n - len(kept), 0)
     for path in rest[:-room] if room else rest:
-        shutil.rmtree(path) if path.is_dir() else path.unlink()
+        remove_entry(path)

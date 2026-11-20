@@ -20,7 +20,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import stat
 import textwrap
 import time
@@ -31,6 +30,7 @@ from installer import docs, dockerenv, hosting, limits, plan, screens, ui, updat
 from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the client through here)
 from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
+from installer.update import real_folder, remove_entry
 from subsync import digits, explain, origlang, realdebrid
 from subsync.aiosconfig import install_link
 from subsync.settings import GB, Settings
@@ -212,31 +212,12 @@ def backup(config, uuid, label='viewer'):
     return path
 
 
-# A copy of the databases is made inside the service's container, so a link in it is never followed: setup runs as root
-# with Docker's socket, and a link could point it at anything it can reach.
-def real_folder(path):
-    """Whether `path` is a folder itself, not a link to one."""
-    try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
-    except OSError:
-        return False
-
-
 def plain_databases(folder):
     """The names of the databases in a copy's folder that are plain files; none when the folder isn't a real one."""
     if not real_folder(folder):
         return set()
     return {p.name for p in Path(folder).iterdir()
             if p.name in dockerenv.DATABASES and stat.S_ISREG(p.lstat().st_mode)}
-
-
-def remove_entry(path):
-    """Removes a file, a link (never what it points to) or a folder with all in it; nothing when there is none."""
-    try:
-        folder = stat.S_ISDIR(os.lstat(path).st_mode)
-    except FileNotFoundError:
-        return
-    shutil.rmtree(path) if folder else os.unlink(path)
 
 
 def setup_version():
