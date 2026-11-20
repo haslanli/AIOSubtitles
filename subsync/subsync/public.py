@@ -20,7 +20,7 @@ import time
 import urllib.parse
 
 from . import pages, ui
-from .addon import App, Handler, Server, head_answer, is_entry, manifest
+from .addon import MANIFEST_CACHE, App, Handler, Server, head_answer, is_entry, manifest
 from .aiosconfig import MAX_LANGUAGES, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
@@ -487,6 +487,10 @@ class PublicHandler(Handler):
             return self._send(404, b"")
         return self._send(200, ui.font_bytes(found), "font/ttf", FONT_HEADERS)
 
+    def _not_allowed(self, allow):
+        """405 for a method the address doesn't take, naming those it does (`allow`), as RFC 9110 asks."""
+        return self._send(405, b"", headers={"Allow": allow})
+
     def _browser(self):
         """Whether a browser asked (it accepts a page): an error then gets a short page, where an app gets nothing."""
         return "text/html" in (self.headers.get("Accept") or "")
@@ -554,7 +558,7 @@ class PublicHandler(Handler):
                 return self._font(font.group(1))
             if path == "/health" or path.startswith("/file/"):
                 if method != "GET":
-                    return self._send(405, b"")
+                    return self._not_allowed("GET, HEAD")
                 if path != "/health" and not svc.store.keep_texts:
                     # a store of recipes (public mode's): a copy is rebuilt from a person's own list, under
                     # their link (/u/<token>/file/), never here
@@ -563,7 +567,7 @@ class PublicHandler(Handler):
             m = ENTRY_PATH.match(path)
             if m:
                 if method != "GET":
-                    return self._send(405, b"")
+                    return self._not_allowed("GET, HEAD")
                 token = svc.users.token_of(m.group(1))
                 if token is None or not is_entry(m.group(2)):   # never the personal link's routes
                     return self._not_found()
@@ -575,11 +579,11 @@ class PublicHandler(Handler):
             if rest == "/configure":
                 return self._configure(token, method)
             if method != "GET":
-                return self._send(405, b"")
+                return self._not_allowed("GET, HEAD")
             if rest == "/manifest.json":
                 if svc.users.open(token) is None:
                     return self._not_found()
-                return self._json(manifest(svc.s, PUBLIC_MANIFEST), cache="max-age=3600")
+                return self._json(manifest(svc.s, PUBLIC_MANIFEST), cache=MANIFEST_CACHE)
             # the personal link lists subtitles; its entries are under the read key, and the service's own
             # numbers (/status) are not for the people using it
             if not rest.startswith("/subtitles/"):
@@ -645,7 +649,7 @@ class PublicHandler(Handler):
             message, notice = pages.done_message((query.get("done") or [None])[0], record)
             return page(message=message, notice=notice)
         if method != "POST":
-            return self._send(405, b"")
+            return self._not_allowed("GET, HEAD, POST")
         try:
             form = self._form()
         except FormError as e:

@@ -26,8 +26,9 @@ class PublicManifestTest(ServerHarness, unittest.TestCase):
         from subsync.version import VERSION
         self.start()
         _, _, _, _, token = self.sign_up()
-        code, body, _ = http(f"{self.base}/u/{token}/manifest.json")
+        code, body, headers = http(f"{self.base}/u/{token}/manifest.json")
         self.assertEqual((code, json.loads(body)["version"]), (200, VERSION))
+        self.assertEqual(headers["Cache-Control"], "max-age=3600")       # as the self-hosted one's
         self.assertNotEqual(VERSION, "1.0.0")
 
     def test_a_head_of_a_list_or_an_entry_starts_nothing(self):
@@ -353,6 +354,18 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
                         + body + hidden)
         self.assertEqual(answers(data), [400])
         self.assertIn(b"\r\nConnection: close\r\n", data)
+
+    def test_a_405_names_the_methods_the_address_takes(self):
+        # RFC 9110 asks a 405 to name them (Allow); none was named
+        _, _, _, _, token = self.sign_up()
+        port = self.server.server_address[1]
+        for path in ("/health", "/file/x", f"/r/{self.users.read_key(token)}/notice.srt", f"/u/{token}/manifest.json"):
+            with self.subTest(path=path):
+                data = exchange(port, f"POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n"
+                                      "\r\n".encode())
+                head = data.partition(b"\r\n\r\n")[0]
+                self.assertTrue(head.startswith(b"HTTP/1.1 405 "), head)
+                self.assertIn(b"\r\nAllow: GET, HEAD\r\n", head + b"\r\n")
 
     def test_a_request_that_trickles_in_is_cut_off(self):
         # The timeout bounds each wait, not the request: a byte at a time held a connection, and one of

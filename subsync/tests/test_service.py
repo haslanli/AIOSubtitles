@@ -707,10 +707,11 @@ class AddonFixture(AddonCase):
 
 class AddonTest(AddonFixture):
     def test_manifest(self):
-        code, body, _ = http(self.base + "/manifest.json")
+        code, body, headers = http(self.base + "/manifest.json")
         m = json.loads(body)
         self.assertEqual(code, 200)
         self.assertEqual(m["resources"], ["subtitles"])
+        self.assertEqual(headers["Cache-Control"], "max-age=3600")       # as public mode's (one name)
 
     def test_a_head_is_answered_with_the_headers_only(self):
         # HEAD goes to the GET route, and the answer leaves out the body it announces

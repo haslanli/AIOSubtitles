@@ -102,6 +102,11 @@ MAX_VIDEO_ID = 256
 # isn't downloaded yet, so that download has time (a subtitle file is tens of KB; a slow site's first answer takes a
 # second or two); past the deadline, the redirect to the original's own address as before
 ORIGINAL_DOWNLOAD_S = 3.0
+# How long a player or AIOStreams may keep an addon answer (Cache-Control), in both modes: the manifest; a
+# subtitle list, which decides how soon a copy made since is listed; a synced copy
+MANIFEST_CACHE = "max-age=3600"
+LIST_CACHE = "max-age=60"
+FILE_CACHE = "max-age=3600"
 
 
 def file_id(key):
@@ -555,7 +560,7 @@ class Handler(BaseHTTPRequestHandler):
             if head:
                 return self._headers_only(*head)
             if path == "/manifest.json":
-                return self._json(manifest(app.s), cache="max-age=3600")
+                return self._json(manifest(app.s), cache=MANIFEST_CACHE)
             if path == "/status":
                 return self._json({"store": app.store.stats(), "queue": len(app.worker.jobs),
                                    "subtitle_requests": app.subtitle_requests,
@@ -572,7 +577,7 @@ class Handler(BaseHTTPRequestHandler):
                 app.subtitle_requests += 1
                 app.last_subtitle_request = int(time.time())
                 # the extras as they are in the path: parse_extras splits them before it decodes each value
-                return self._json({"subtitles": app.subtitles(m.group(1), vid, m.group(3) or "")}, cache="max-age=60")
+                return self._json({"subtitles": app.subtitles(m.group(1), vid, m.group(3) or "")}, cache=LIST_CACHE)
             m = FILE_ROUTE.match(path)
             if m:
                 key = key_of(m.group(1))
@@ -583,7 +588,7 @@ class Handler(BaseHTTPRequestHandler):
                 if m.group(2) == "srt":   # the .srt link sends SRT whatever the copy's own format
                     body = as_srt(body)
                 ctype = "text/x-ssa; charset=utf-8" if m.group(2) == "ass" else "application/x-subrip; charset=utf-8"
-                return self._send(200, body, ctype, {"Cache-Control": "max-age=3600"})
+                return self._send(200, body, ctype, {"Cache-Control": FILE_CACHE})
             m = PENDING_ROUTE.match(path)
             if m:
                 try:
