@@ -58,6 +58,32 @@ def drip(code, body, every):
     return route
 
 
+def slow_head(code, body=b"", seconds=6, **headers):
+    """An answer whose status line and headers come a byte at a time over `seconds` (each read's own wait is met),
+    then its body at once."""
+    def route(h):
+        fields = {"Content-Type": "application/json", **headers, "Content-Length": str(len(body))}
+        head = ("\r\n".join([f"HTTP/1.1 {code} X"] + [f"{k}: {v}" for k, v in fields.items()]) + "\r\n\r\n").encode()
+        for i in range(len(head)):
+            h.wfile.write(head[i:i + 1])
+            h.wfile.flush()
+            time.sleep(seconds / len(head))
+        h.wfile.write(body)
+    return route
+
+
+def cut_status(code, seconds=3):
+    """An answer whose status line never ends: its code, then a byte of its reason every 0.1 s for `seconds` (each
+    read's own wait is met). The bound shuts it mid-line, and what came reads as a whole status line with no headers."""
+    def route(h):
+        h.wfile.write(f"HTTP/1.1 {code} ".encode())
+        for _ in range(int(seconds * 10)):
+            h.wfile.write(b"X")
+            h.wfile.flush()
+            time.sleep(0.1)
+    return route
+
+
 def big(code, size):
     """A JSON answer of `size` bytes, sent in pieces."""
     def route(h):
@@ -235,6 +261,62 @@ class AnswerLimitsTest(ClientCase):
         with self.assertRaises(AiosError) as e:
             self.api(timeout=1).alias_config_id("fam")
         self.assertEqual(e.exception.code, "ALIAS_UNKNOWN")
+
+
+class WholeCallBoundTest(ClientCase):
+    """A call's wait bounds the whole request, its status line, headers and redirects as well as its body; the
+    body only was bounded, from its first read, so a server that sent the rest a byte now and then, each within a
+    read's own wait, held a call (a sign-up's request, a job's place) as long as it liked."""
+
+    VERSION = json.dumps({"success": True, "data": {"version": "2.37.0"}}).encode()
+
+    def assert_timed_out(self, call, within=2.5):
+        t0 = time.monotonic()
+        with self.assertRaises(AiosError) as e:
+            call()
+        self.assertLess(time.monotonic() - t0, within)
+        self.assertEqual(e.exception.code, aiosconfig.UNREACHABLE)
+        self.assertIn("timed out", e.exception.message)
+
+    def test_a_trickled_status_line_and_headers_end_at_the_timeout(self):
+        self.stand.routes[("GET", "/api/v1/status")] = slow_head(200, self.VERSION)
+        self.stand.routes[("GET", "/api/v1/user")] = slow_head(401, b'{"error": {"code": "USER_INVALID_PASSWORD"}}')
+        self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = slow_head(404)
+        for name, call in (("status", lambda api: api.status()), ("get_config", lambda api: api.get_config(UUID, "pw")),
+                           ("alias", lambda api: api.alias_config_id("fam"))):
+            with self.subTest(call=name):
+                self.assert_timed_out(lambda: call(self.api(timeout=1)))
+
+    def test_a_status_line_cut_at_the_bound_is_no_answer(self):
+        # the bound shut the connection right after the status code: the 404 never came whole, so it is no "unknown
+        # alias", and no 400 or 500 either; the call timed out
+        for code in (404, 400, 500):
+            self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = cut_status(code)
+            with self.subTest(code=code):
+                self.assert_timed_out(lambda: self.api(timeout=1).alias_config_id("fam"))
+        self.stand.routes[("GET", "/api/v1/status")] = cut_status(404)
+        self.assert_timed_out(lambda: self.api(timeout=1).status())
+
+    def test_redirect_hops_share_the_calls_bound(self):
+        # each hop comes within the call's second, the two together don't
+        other = Stand()
+        self.addCleanup(other.close)
+        self.stand.routes[("GET", "/api/v1/status")] = slow_head(302, seconds=0.7,
+                                                                 Location=f"{other.url}/api/v1/status")
+        other.routes[("GET", "/api/v1/status")] = slow_head(200, self.VERSION, seconds=0.7)
+        self.assertEqual(self.api(timeout=5).status(), {"version": "2.37.0"})
+        self.assert_timed_out(lambda: self.api(timeout=1).status())
+
+    def test_a_body_cut_at_the_bound_without_a_length_is_not_taken_for_the_answer(self):
+        def endless(h):   # no Content-Length: the body ends when the connection does
+            h.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\": {\"version\": \"x")
+            h.wfile.flush()
+            for _ in range(30):
+                time.sleep(0.1)
+                h.wfile.write(b"x")
+                h.wfile.flush()
+        self.stand.routes[("GET", "/api/v1/status")] = endless
+        self.assert_timed_out(lambda: self.api(timeout=1).status())
 
 
 class RedirectTest(ClientCase):

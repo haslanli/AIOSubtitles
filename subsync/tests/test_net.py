@@ -3,6 +3,7 @@ on the name's lookup and again on the address the connection really reached, red
 name up or connects anywhere but this machine."""
 import os
 import socket
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -258,6 +259,49 @@ class GateTest(unittest.TestCase):
 class _Closable:
     def close(self):
         pass
+
+
+class DeadlineTest(unittest.TestCase):
+    """A request's whole bound, held around it, covers every connection the gate opens on its thread."""
+
+    def setUp(self):
+        net.configure(public_only=False)
+
+    def test_each_connect_waits_the_time_left_at_most(self):
+        waits = []
+
+        def refuses(address, timeout, *a, **k):
+            waits.append(timeout)
+            raise ConnectionRefusedError("refused")
+        with unittest.mock.patch("socket.create_connection", refuses):
+            with net.Deadline(5), self.assertRaises(ConnectionRefusedError):
+                net._guarded_create_connection(("127.0.0.1", 9), 30)
+            with net.Deadline(5), self.assertRaises(ConnectionRefusedError):
+                net._guarded_create_connection(("127.0.0.1", 9), 2)
+            with self.assertRaises(ConnectionRefusedError):         # no bound held: the wait as given
+                net._guarded_create_connection(("127.0.0.1", 9), 30)
+            with net.Deadline(0), self.assertRaises(TimeoutError):  # none left: no connect at all
+                net._guarded_create_connection(("127.0.0.1", 9), 30)
+        self.assertEqual(len(waits), 3)
+        self.assertTrue(4 < waits[0] <= 5, waits)
+        self.assertEqual(waits[1:], [2, 30])
+
+    def test_its_connections_are_shut_down_at_its_end(self):
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            port = listener.getsockname()[1]
+            t0 = time.monotonic()
+            with net.Deadline(0.3) as bound:
+                with net._guarded_create_connection(("127.0.0.1", port), 5) as sock:
+                    sock.settimeout(5)                               # a read's own wait, past the bound
+                    self.assertEqual(sock.recv(1), b"")              # nothing ever comes: ended at the bound
+                self.assertTrue(bound.passed)
+            self.assertLess(time.monotonic() - t0, 2)
+            with net.Deadline(5) as bound:
+                with net._guarded_create_connection(("127.0.0.1", port), 5) as sock:
+                    sock.settimeout(0.2)
+                    with self.assertRaises(TimeoutError):            # still open within its bound
+                        sock.recv(1)
+                self.assertFalse(bound.passed)
 
 
 class RetryAfterTest(unittest.TestCase):

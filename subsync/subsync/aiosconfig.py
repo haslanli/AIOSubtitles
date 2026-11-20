@@ -579,15 +579,12 @@ def _error_code(body):
     return err.get('code') if isinstance(err, dict) else None
 
 
-def _read(answer, wait_at_most, limit):
-    """An answer's body (a response, or an HTTPError carrying one), read a piece at a time: whole within `wait_at_most`
-    seconds of its first read (TimeoutError after, checked between reads), and only until more than `limit` bytes are in
-    (the caller refuses or cuts a longer one). A body that ends before its Content-Length raises IncompleteRead."""
-    deadline = time.monotonic() + wait_at_most
+def _read(answer, limit):
+    """An answer's body (a response, or an HTTPError carrying one), read a piece at a time and only until more than
+    `limit` bytes are in (the caller refuses or cuts a longer one); the call's bound (net.Deadline) ends one that keeps
+    coming. A body that ends before its Content-Length raises IncompleteRead."""
     parts, size = [], 0
     while size <= limit:
-        if time.monotonic() > deadline:
-            raise TimeoutError('timed out')
         part = answer.read1(READ_SIZE)
         if not part:
             missing = getattr(answer, 'length', None)
@@ -608,8 +605,8 @@ class AiosApi:
                  retry_wait_cap=RETRY_WAIT_CAP, tries=TRIES):
         self.base = base.rstrip('/')
         self.timeout = timeout
-        # the longest any call waits (the public sign-up's own bound): to connect, for each read, and (checked between
-        # reads) for its whole answer
+        # the longest any call waits (the public sign-up's own bound), from its start to its whole answer: its
+        # connections, any redirect, its status line, headers and body (net.Deadline)
         self.max_timeout = max_timeout
         self.retry_wait_cap = retry_wait_cap    # a "too many requests" asking for a longer wait is reported, not waited
         self.tries = tries                      # tries at a call AIOStreams asks to slow down
@@ -638,7 +635,8 @@ class AiosApi:
         return min(wait, self.max_timeout) if self.max_timeout else wait
 
     def _call(self, method, path, body, auth, timeout, raw):
-        """(status, answer, the wait a "too many requests" asks for or None)."""
+        """(status, answer, the wait a "too many requests" asks for or None). The call's wait bounds the whole request
+        (net.Deadline): a server that sends its answer a byte now and then fails it as timed out."""
         headers = {'User-Agent': self.user_agent, 'Accept': 'application/json'}
         data = None
         if body is not None:
@@ -648,19 +646,23 @@ class AiosApi:
             headers['Authorization'] = 'Basic ' + base64.b64encode(f'{auth[0]}:{auth[1]}'.encode()).decode()
         url = path if path.startswith('http') else self.base + path
         wait_at_most = self._wait_at_most(timeout)
+        bound = net.Deadline(wait_at_most)
         try:
             # made inside the try: urllib refuses an address without a scheme here, with a ValueError
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
-            try:
-                answer = realdebrid.urlopen(req, wait_at_most, opener=self.keyed_opener if auth else self.opener)
-            except urllib.error.HTTPError as e:
-                answer = e          # a refusal is an answer too: read, and closed, the same way
-            try:
-                if auth and 300 <= answer.status < 400:
-                    raise self._bad_answer(answer.status)
-                payload = _read(answer, wait_at_most, MAX_ANSWER)
-            finally:
-                answer.close()
+            with bound:
+                try:
+                    answer = realdebrid.urlopen(req, wait_at_most, opener=self.keyed_opener if auth else self.opener)
+                except urllib.error.HTTPError as e:
+                    answer = e          # a refusal is an answer too: read, and closed, the same way
+                try:
+                    if auth and 300 <= answer.status < 400:
+                        raise self._bad_answer(answer.status)
+                    payload = _read(answer, MAX_ANSWER)
+                finally:
+                    answer.close()
+            if bound.passed:            # its connection was shut at the bound: what came may be cut short
+                raise TimeoutError('timed out')
             if len(payload) > MAX_ANSWER:
                 raise self._bad_answer(answer.status)
             if not isinstance(answer, urllib.error.HTTPError):
@@ -674,7 +676,7 @@ class AiosApi:
         except realdebrid.Blocked:
             raise self._blocked() from None
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
-            raise self._unreachable(e) from None
+            raise self._unreachable(TimeoutError('timed out') if bound.passed else e) from None
 
     def _asked_wait(self, headers):
         """The seconds a "too many requests" asks to wait (Retry-After, else RateLimit-Reset); SLOW_DOWN_WAIT, never
@@ -792,24 +794,35 @@ class AiosApi:
         url = f'{self.base}/stremio/u/{urllib.parse.quote(alias, safe="")}/manifest.json'
         wait_at_most = min(self._wait_at_most(), QUICK_TIMEOUT)
         location, body = None, b''
+        bound = net.Deadline(wait_at_most)
         try:
             req = urllib.request.Request(url, method='GET', headers={'User-Agent': self.user_agent,
                                                                      'Accept': 'application/json'})
-            with realdebrid.urlopen(req, wait_at_most, opener=net.build_opener(net.NoRedirects())) as r:
-                status, headers = r.status, r.headers
-        except urllib.error.HTTPError as e:
-            status, headers = e.code, e.headers
-            location = headers.get('Location') if headers else None
-            try:   # only a refusal's body is read: a redirect's would hold the encrypted password, and may never come
-                body = _read(e, wait_at_most, MAX_REFUSAL)[:MAX_REFUSAL] if status == 400 else b''
-            except (OSError, ValueError, http.client.HTTPException):
+            with bound:
+                try:
+                    with realdebrid.urlopen(req, wait_at_most, opener=net.build_opener(net.NoRedirects())) as r:
+                        status, headers = r.status, r.headers
+                        if bound.passed:    # shut at the bound mid-head: what came reads as a whole status line
+                            raise TimeoutError('timed out')
+                except urllib.error.HTTPError as e:
+                    if bound.passed:        # the same for a refusal: its code never came whole
+                        e.close()
+                        raise TimeoutError('timed out') from None
+                    status, headers = e.code, e.headers
+                    location = headers.get('Location') if headers else None
+                    # only a refusal's body is read: a redirect's would hold the encrypted password, and may never come
+                    try:
+                        body = _read(e, MAX_REFUSAL)[:MAX_REFUSAL] if status == 400 else b''
+                    except (OSError, ValueError, http.client.HTTPException):
+                        body = b''
+                    finally:
+                        e.close()
+            if bound.passed:            # a refusal cut short at the bound: its reason never came whole
                 body = b''
-            finally:
-                e.close()
         except realdebrid.Blocked:
             raise self._blocked() from None
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
-            raise self._unreachable(e) from None
+            raise self._unreachable(TimeoutError('timed out') if bound.passed else e) from None
         return status, location, body, headers
 
     def _config_id_in(self, location):

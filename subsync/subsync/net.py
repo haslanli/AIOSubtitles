@@ -10,18 +10,23 @@ addresses checked, and the address it really reached is checked again. An IPv6 a
 (IPv4-mapped, or a translator's prefix such as NAT64's) is judged as that IPv4 address. Redirects are opened through the
 same connections. Only http and https are opened, and proxies from the environment are not used.
 
+Both modes: a request held within a Deadline has one bound for the whole of it, its connections and every read.
+
 Standard library only, so ./setup can import it.
 """
 import http.client
 import ipaddress
 import math
 import socket
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 _public_only = False
 _resolver = socket.getaddrinfo
+_local = threading.local()   # .deadline: this thread's request bound (Deadline), while one is held
 # IPv6 prefixes whose last 32 bits are the IPv4 address a connection reaches: IPv4-mapped, IPv4-translated (SIIT), the
 # NAT64 well-known prefix (RFC 6052) and the old IPv4-compatible form; Python counts the last three as global whatever
 # IPv4 address they carry
@@ -135,17 +140,94 @@ def retry_after(value):
     return None if math.isnan(seconds) else seconds
 
 
-def _guarded_create_connection(address, *args, **kwargs):
+class Deadline:
+    """A request's whole bound, held around it: every connection the gate opens on this thread meanwhile (a
+    redirect's too) connects within the time left and is shut down once `seconds` have passed since the start, so a
+    server that sends its status line, its headers or its body a byte now and then, each within a read's own wait,
+    holds the request no longer. The read in progress then ends, with an error or cut short; `passed` says the bound
+    ended it. A duplicate of each connection's socket is held until the end: while it is, the connection's number
+    can't go to another one."""
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.passed = False
+        self._lock = threading.Lock()
+        self._held = []
+        self._end_at = self._timer = self._outer = None
+
+    def __enter__(self):
+        self._end_at = time.monotonic() + self.seconds
+        self._outer, _local.deadline = getattr(_local, "deadline", None), self
+        self._timer = threading.Timer(self.seconds, self._end)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._timer.cancel()
+        _local.deadline = self._outer
+        with self._lock:
+            for sock in self._held:
+                sock.close()
+            self._held = []
+
+    def wait(self, timeout):
+        """A connect's wait: `timeout` (seconds, or None for none), never past the end; TimeoutError once it has
+        come."""
+        left = self._end_at - time.monotonic()
+        if self.passed or left <= 0:
+            raise TimeoutError("timed out")
+        return left if timeout is None else min(timeout, left)
+
+    def hold(self, sock):
+        """A new connection's socket, shut down at the end (at once if it has come)."""
+        held = sock.dup()
+        with self._lock:
+            self._held.append(held)
+            if self.passed:
+                _shut(held)
+
+    def _end(self):
+        with self._lock:
+            self.passed = True
+            for sock in self._held:
+                _shut(sock)
+
+
+def _shut(sock):
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass   # its other end has closed it already
+
+
+def _connect(address, timeout, *args, **kwargs):
+    """socket.create_connection, within this thread's request bound (Deadline) when one is held."""
+    bound = getattr(_local, "deadline", None)
+    if bound is None:
+        return socket.create_connection(address, timeout, *args, **kwargs)
+    if timeout is socket._GLOBAL_DEFAULT_TIMEOUT:
+        timeout = socket.getdefaulttimeout()
+    sock = socket.create_connection(address, bound.wait(timeout), *args, **kwargs)
+    try:
+        bound.hold(sock)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _guarded_create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *args, **kwargs):
     """socket.create_connection through the check: in public mode the name is looked up once, and the connection goes
     to the addresses checked, in the lookup's order, as create_connection's own would (the last error when none
-    answers); the address it really reached is checked again."""
+    answers); the address it really reached is checked again. Within a request's bound (Deadline) when one is held."""
     if not _public_only:
-        return socket.create_connection(address, *args, **kwargs)
+        return _connect(address, timeout, *args, **kwargs)
     host, port = address[0], address[1]
     error = OSError("getaddrinfo returns an empty list")
     for ip in _public_addresses(host, port):
         try:
-            sock = socket.create_connection((ip, port), *args, **kwargs)
+            sock = _connect((ip, port), timeout, *args, **kwargs)
         except OSError as e:
             error = e
             continue
