@@ -918,6 +918,20 @@ class SelfCheck(Offline):
                       'report.', flat(out))
         self.assertEqual([c for c in self.exec_calls if 'subsync.selftest' in c[0]], [])     # nothing to read
 
+    def test_each_check_asks_at_its_own_configs_addon_address(self):
+        # each one is its config's install link without /manifest.json, as subsync's own client makes it
+        real, asked = engine.Aios.addon_get, set()
+
+        def addon_get(aios, base, path, **kw):
+            asked.add((path.split('/')[1], base))
+            return real(aios, base, path, **kw)
+        with mock.patch.object(engine.Aios, 'addon_get', addon_get):
+            code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        keys = self.keys()
+        self.assertEqual(asked, {(kind, f'{self.aios.url}/stremio/{uuid}/ENC-{uuid[:4]}') for kind, uuid in (
+            ('subtitles', UUID), ('manifest.json', keys['USENET_UUID']), ('stream', keys['SYNC_UUID']))})
+
     def test_the_usenet_config_not_answering_is_a_warning(self):
         real = engine.Aios.addon_get
 

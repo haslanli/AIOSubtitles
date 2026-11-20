@@ -32,7 +32,9 @@ from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the clien
 from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
 from subsync import digits, explain, origlang, realdebrid
+from subsync.aiosconfig import install_link
 from subsync.settings import Settings
+from subsync.sources import manifest_base
 
 REPO = Path(__file__).resolve().parent.parent      # the code (/opt/aiosubtitles in the image)
 STATE = Path(os.environ.get('AIOSUBTITLES_STATE') or REPO / 'state')
@@ -1100,8 +1102,8 @@ class Engine:
         def link(kind):
             if not self.keys.get(f'{kind}_UUID'):
                 return ''
-            return (f"{self.s['aios_internal']}/stremio/{self.keys[f'{kind}_UUID']}/"
-                    f"{getattr(self, f'{kind.lower()}_encrypted')}/manifest.json")
+            return install_link(self.s['aios_internal'], self.keys[f'{kind}_UUID'],
+                                getattr(self, f'{kind.lower()}_encrypted'))
         env = plan.subsync_env({
             'sync_manifest': link('SYNC'), 'sync_password': self.keys.get('SYNC_PASSWORD', ''),
             'usenet': self.usenet, 'usenet_manifest': link('USENET') if self.usenet else '',
@@ -1237,7 +1239,7 @@ class Engine:
                 self.out.note(line)
         # b) AIOStreams asks subsync for subtitles
         before = self.subsync_status().get('subtitle_requests', 0)
-        viewer_base = f"{self.s['aios_url']}/stremio/{self.uuid}/{self.viewer_encrypted}"
+        viewer_base = self.addon_base(self.uuid, self.viewer_encrypted)
         reached = False
         for type_, imdb, _ in TEST_TITLES:
             try:
@@ -1252,10 +1254,10 @@ class Engine:
         else:
             self.good = False
             self.out.bad('AIOStreams did not reach subsync.')
-            self.out.note(f"It calls {plan.manifest_base(self.manifest_url).rsplit('/', 1)[0]}/…; check that address works from AIOStreams.")
+            self.out.note(f"It calls {manifest_base(self.manifest_url).rsplit('/', 1)[0]}/…; check that address works from AIOStreams.")
         # d) subsync's Usenet config answers: its manifest only, no search, so no indexer call is spent
         if getattr(self, 'usenet', False) and self.keys.get('USENET_UUID'):
-            usenet_base = f"{self.s['aios_url']}/stremio/{self.keys['USENET_UUID']}/{self.usenet_encrypted}"
+            usenet_base = self.addon_base(self.keys['USENET_UUID'], self.usenet_encrypted)
             try:
                 self.aios.addon_get(usenet_base, '/manifest.json', timeout=40)
                 self.out.ok("subsync's Usenet config answers (no search made, to spare your indexer's daily calls)")
@@ -1267,7 +1269,7 @@ class Engine:
         if not self.keys.get('SYNC_UUID'):
             self.ready_rows = []
             return []
-        sync_base = f"{self.s['aios_url']}/stremio/{self.keys['SYNC_UUID']}/{self.sync_encrypted}"
+        sync_base = self.addon_base(self.keys['SYNC_UUID'], self.sync_encrypted)
         rows, title = [], None
         for type_, imdb, name in TEST_TITLES[:2]:
             try:
@@ -1287,6 +1289,10 @@ class Engine:
             self.out.note('If your apps do show ready files for them, run ./setup --status and send its output with a bug report.')
         self.ready_rows = rows
         return rows
+
+    def addon_base(self, uuid, encrypted):
+        """A config's addon address at AIOStreams as setup reaches it: its install link without /manifest.json."""
+        return manifest_base(install_link(self.s['aios_url'], uuid, encrypted))
 
     def offer_test_read(self, rows):
         """d) one small read, only if the user says yes (the default is no)."""

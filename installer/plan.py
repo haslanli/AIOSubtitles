@@ -95,10 +95,6 @@ def rewrite_rule(aios_public, aios_internal):
     return f'{a}={b}' if a and b and a != b else ''
 
 
-def manifest_base(manifest_url):
-    return manifest_url[: -len('/manifest.json')] if manifest_url.endswith('/manifest.json') else manifest_url.rstrip('/')
-
-
 def subtitle_cache_value(current, host):
     """AIOStreams' per-addon subtitle cache setting with subsync's host set to -1 (no cache), the rest kept."""
     value = {}
