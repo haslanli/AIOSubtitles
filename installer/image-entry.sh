@@ -1,7 +1,8 @@
 #!/bin/sh
 # The AIOSubtitles image's start. "setup ..." runs setup as root: Docker's socket needs it, and only the short-lived
 # setup container is ever given the socket. Anything else (the service: python -u -m subsync) never runs as root:
-# started as root, it switches to its own user (10001) first, and stops if it can't.
+# started as root, it switches to its own user (10001) first, with no way to gain privileges again (no set-user-ID
+# program raises it), and stops if it can't.
 set -e
 if [ "$1" = setup ]; then
   shift
@@ -12,11 +13,11 @@ if [ "$1" = setup ]; then
   exec python -I -u /opt/aiosubtitles/installer/wizard.py "$@"   # -u: lines show at once, terminal or not
 fi
 if [ "$(id -u)" = 0 ]; then
-  if ! setpriv --reuid=10001 --regid=10001 --clear-groups -- true 2>/dev/null; then
+  if ! setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs -- true 2>/dev/null; then
     echo "AIOSubtitles doesn't run as root, and this container can't switch to its own user (10001):" >&2
     echo "start it with --user 10001:10001 (in a compose file: user: \"10001:10001\")." >&2
     exit 1
   fi
-  exec setpriv --reuid=10001 --regid=10001 --clear-groups -- "$@"
+  exec setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs -- "$@"
 fi
 exec "$@"

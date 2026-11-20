@@ -206,7 +206,7 @@ class Entry(unittest.TestCase):
         code, log, _ = self.run_entry('python', '-u', '-m', 'subsync')
         self.assertEqual(code, 0)
         self.assertIn('ran python -u -m subsync as 10001', log)
-        self.assertIn('setpriv --reuid=10001 --regid=10001 --clear-groups -- python -u -m subsync', log)
+        self.assertIn('setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs -- python -u -m subsync', log)
         self.assertNotIn('python -u -m subsync state=', log)           # never run directly as root
 
     def test_the_service_never_runs_as_root_when_it_cant_drop(self):

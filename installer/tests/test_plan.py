@@ -420,6 +420,21 @@ class Files(unittest.TestCase):
             self.assertIn('    user: "10001:10001"\n', self.compose(**s))
         self.assertEqual(dockerenv.SERVICE_USER, '10001:10001')
 
+    def test_compose_gives_the_service_no_capability_and_no_way_to_gain_one(self):
+        # It kept Docker's default capabilities, and a set-user-ID program could have raised code run through
+        # a flaw in a parser to root in its container; a public instance's compose is this one too
+        from installer import hosting
+        texts = [self.compose(**s) for s in ({'bind': '127.0.0.1'}, {'host_network': True},
+                                             {'networks': ['aio_default'], 'bind': '0.0.0.0'})]
+        texts.append(hosting.compose_yaml(self.IMAGE, 'id-1234', 8790))
+        for text in texts:
+            service = text.split('  subsync:\n', 1)[1].split('\nnetworks:', 1)[0].split('\nvolumes:', 1)[0]
+            self.assertIn('\n    cap_drop: [ALL]\n', service)
+            self.assertIn('\n    security_opt: ["no-new-privileges:true"]\n', service)
+            self.assertNotIn('cap_add', text)
+            self.assertNotIn('privileged', text)
+            self.assertIn('    user: "10001:10001"\n', service)     # under cap_drop the image can't switch user itself
+
     def test_compose_never_gives_the_service_dockers_socket(self):
         for s in ({'bind': '127.0.0.1'}, {'host_network': True}, {'networks': ['aio_default'], 'bind': '0.0.0.0'},
                   {'image': 'aiosubtitles:local-1.4.0', 'local': True}):

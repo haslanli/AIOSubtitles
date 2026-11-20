@@ -248,10 +248,11 @@ DATA = '/data'                  # where it is in the service's container (subsyn
 def compose_yaml(s):
     """state/compose.yaml: subsync only, on AIOStreams' Docker network(s) when it runs on this machine. It runs the
     image setup itself runs from (`s['image']`, pinned by digest; `local`: built on this machine, never pulled), as its
-    own user, never with Docker's socket, and labels the container, its volume and its own network with the install's
-    id (`s['install_id']`). The volume an install setup 1.3.0 or before made keeps (`s['external_volume']`, its name;
-    Docker can't label a volume it has) is declared external instead, so Compose never creates, checks or recreates
-    it."""
+    own user with no capability and no way to gain one (it reads files from the internet: code run through a flaw in
+    a parser stays that user), never with Docker's socket, and labels the container, its volume and its own network
+    with the install's id (`s['install_id']`). The volume an install setup 1.3.0 or before made keeps
+    (`s['external_volume']`, its name; Docker can't label a volume it has) is declared external instead, so Compose
+    never creates, checks or recreates it."""
     label = f'{{{INSTALL_LABEL}: "{s["install_id"]}"}}'
     lines = [
         '# Written by ./setup (AIOSubtitles). Run ./setup again to change it; edits here are replaced.',
@@ -262,6 +263,8 @@ def compose_yaml(s):
         f"    pull_policy: {'never' if s.get('local') else 'missing'}",
         f'    container_name: {container_name()}',
         f'    user: "{SERVICE_USER}"',
+        '    cap_drop: [ALL]',
+        '    security_opt: ["no-new-privileges:true"]',
         f'    labels: {label}',
         '    restart: unless-stopped',
         '    env_file: [subsync.env]',
