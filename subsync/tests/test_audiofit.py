@@ -669,6 +669,44 @@ class ShiftChangeTest(unittest.TestCase):
                 self.assertLessEqual(moved, shifts)                     # each sign line moved with its part
 
 
+class FitStepTest(unittest.TestCase):
+    """The steps of one judgement, each on its own (they were one 170-line function, reached only through a
+    whole fit on a synthetic film)."""
+
+    def fit(self, lines):
+        return AudioFit(SpeechIndex([], 600.0), lines, vad=LoudVad())
+
+    def test_the_cut_goes_where_every_line_lands(self):
+        lines = [{"s": 100.0 + 2 * i, "e": 101.0 + 2 * i, "text": "x", "kind": "dialogue"} for i in range(50)]
+        onsets = [s["s"] + (10.0 if s["s"] < 150.0 else 20.0) for s in lines]     # 10 s late, then 20 s from 150 s
+        windows = [{"start": 105.0, "len": 120.0, "onsets": np.array(onsets)}]
+        fit = self.fit(lines)
+        timeline = fit._timeline(1.0)
+        self.assertEqual(fit._cut((150.0, 170.0, 10.0, 20.0), timeline, windows, None), 25)   # the line at 150 s
+        self.assertIsNone(fit._cut((250.0, 100.0, 10.0, 20.0), timeline, windows, None))     # a bracket inside out
+
+    def test_each_line_takes_the_shift_of_its_part(self):
+        self.assertEqual(AudioFit._segments([2, 0, 1, 3], [(2, 5.0, 7.0)], 5.0), [5.0, 7.0, 5.0, 7.0])
+        self.assertEqual(AudioFit._segments([0, 1, 2], [], 3.0), [3.0, 3.0, 3.0])
+        self.assertEqual(AudioFit._segments([0, 1, 2, 3], [(1, 1.0, 2.0), (3, 2.0, 4.0)], 1.0), [1.0, 2.0, 2.0, 4.0])
+
+    def test_the_decision(self):
+        fit = AudioFit(SpeechIndex([], 600.0), [], vad=LoudVad(), better=AUDIO_BETTER)
+        passes = {"pass": True, "matched": 100, "miss": 0.0, "median_ms": 40.0, "within200": 0.95, "parts_off": []}
+        fails = {"pass": False, "matched": 10, "median_ms": None}
+        better = {"pass": False, "matched": 100, "miss": 0.1, "median_ms": 120.0, "within200": 0.6, "parts_off": []}
+        cases = [((fails, passes, False, False, 9.0), ("in_sync", None)),             # the original passes as it is
+                 ((passes, fails, True, True, 0.05), ("in_sync", None)),              # a shift never published
+                 ((fails, better, True, False, 0.05), ("in_sync", "fits the speech as it is")),
+                 ((passes, fails, True, False, 0.05), ("keep_original", None)),
+                 ((passes, fails, False, True, 9.0), ("synced", None)),
+                 ((better, fails, False, True, 9.0), ("synced", "clearly better than the original")),
+                 ((better, fails, False, True, 0.5), ("keep_original", None)),         # moved under min_shift_s
+                 ((fails, fails, False, True, 9.0), ("keep_original", None))]
+        for args, want in cases:
+            self.assertEqual(fit._decision(*args), want, args)
+
+
 class HeldOutTest(unittest.TestCase):
     """The held-out windows are never used for the fit: no window read for it (a confirmation, a step narrowing
     down a shift change) overlaps one, the extra held-out windows keep off every window read, and each counts once."""

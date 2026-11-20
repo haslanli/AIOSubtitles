@@ -43,10 +43,12 @@ the windows read) are read, 4 at a time, as many as the audio budget leaves, and
 them; that verdict is the result.
 """
 import bisect
+import functools
 import math
 import statistics
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import NamedTuple
 
 import numpy as np
 
@@ -241,6 +243,24 @@ def most_tracks(index, original=None):
 
 class AudioBudget(Exception):
     """The next audio window would pass the file's audio budget."""
+
+
+class Scale(NamedTuple):
+    """The fit's frame-rate scale and overall offset (AudioFit._scale), with the subtitle's signal at that scale and
+    the fit windows' score curves on it (fast_corr)."""
+    scale: float
+    offset: float
+    signal: np.ndarray
+    curves: list
+
+
+class Timeline(NamedTuple):
+    """The subtitle's lines in time order at the fit's scale (AudioFit._timeline): their indexes, scaled starts and
+    ends, and the ranks (places in that order) of the dialogue lines."""
+    order: list
+    starts: list
+    ends: list
+    talk: list
 
 
 class AudioFit:
@@ -744,29 +764,80 @@ class AudioFit:
             plans[key] = {"fit": fit, "check": check, "window_s": self.W}
         return plans[key]
 
+    # -- one judgement, step by step (_run) --------------------------------------------------------------------
     def _run(self, fit_starts=None, check_starts=None):
-        K, W, V = self.K, self.W, self.V
-        allines, lines = self.allines, self.lines
-        D, margin, span, vspan = self.geometry()
+        """One judgement of the copy on the planned windows (or, for a close call, on `fit_starts` and `check_starts`):
+        the scale and overall offset (_scale), each fit window's offset (_labels), each change of offset narrowed down
+        (_changes) and placed in the subtitle's order (_cut), the lines of a scene the file lacks left out (_dropped),
+        each part's fine shift (_fine), the held-out windows (_held_out), both gates (_gates) and the decision
+        (_decision). Returns run()'s result."""
+        W = self.W
         plan = self.plan()
         if fit_starts is not None:      # a close call judged again with more windows
             plan = {"fit": list(fit_starts), "check": list(check_starts), "window_s": W}
-            K = len(plan["fit"])
         checks = plan["check"]
         self.prefetch(plan["fit"] + checks, W)   # every first fit reads both: at once, not one by one
         windows = [self.read_window(start, W) for start in plan["fit"]]
-
-        def add(w):     # a window read for the fit, counted once (a step can land on a window already read)
-            if all(x is not w for x in windows):
-                windows.append(w)
-            return w
+        K = len(windows)
         # the subtitle's signal as far as a window can reach: none starts past D, and one reads at most OMAX + W past
         # its start (one line ending at 99:59:59 made it millions of frames, per scale)
-        n = int(min(max(l["e"] for l in allines) * 1.1 + 60, D + OMAX + 2 * W) / DT)
+        n = int(min(max(l["e"] for l in self.allines) * 1.1 + 60, self.index.duration() + OMAX + 2 * W) / DT)
+        scale = self._scale(windows, n)
+        c = scale.scale
+        labels, read = self._labels(windows, scale, checks)
+        self._add(windows, read)
+        seq = [(w["start"], lab) for w, lab in zip(windows[:K], labels) if lab is not None]
+        bounds, read, undecided = self._changes(seq, scale, checks)
+        self._add(windows, read)
+        timeline = self._timeline(c)
+        placing = [w for w in windows if all(w is not x for x in undecided)]   # none that decided nothing
+        lag = self.end_lag(c, scale.offset, windows) if bounds else None
+        cuts = []
+        for bracket in bounds:
+            k = self._cut(bracket, timeline, placing, lag)
+            if k is not None:       # None only for no k at all: a bracket inside out (narrow never gives one)
+                cuts.append((k, bracket[2], bracket[3]))
+        seg_of = self._segments(timeline.order, cuts, seq[0][1] if seq else scale.offset)
+        dropped = self._dropped(c, seg_of, timeline)
+        fine = self._fine(c, seg_of, windows)
+        new = [dict(l, s=l["s"] * c + seg_of[k] + fine[seg_of[k]], e=l["e"] * c + seg_of[k] + fine[seg_of[k]],
+                    drop=k in dropped) for k, l in enumerate(self.allines)]
+        dial_new = [l["s"] for l in new if l["kind"] == "dialogue" and not l["drop"]]
+        verify = self._held_out(checks, windows, dial_new)
+        g_new, g_old = self._gates(dial_new, windows, verify)
+        applied = seg_of[0] if len(set(seg_of)) == 1 else None   # one segment: the offset every line was moved by
+        shift = None if applied is None else applied + fine[applied]
+        agree = all(l is None or abs(l - scale.offset) <= SAME_OFFSET_S for l in labels) \
+            and sum(l is not None for l in labels) >= 0.6 * K
+        small = c == 1.0 and shift is not None and abs(shift) <= SMALL_SHIFT_S   # never published
+        moved = statistics.median(abs(n["s"] - l["s"]) for n, l in zip(new, self.allines)
+                                  if l["kind"] == "dialogue" and not n["drop"]) if dial_new else 0.0
+        decision, why = self._decision(g_new, g_old, small, agree, moved)
+        return {"decision": decision, "why": why, "lines": new if decision == "synced" else None, "moved_s": round(moved, 2),
+                "seq": seq, "segment_offsets": sorted(set(seg_of)), "end_lag_ms": None if lag is None else round(lag * 1000),
+                "model": {"scale": round(c, 5), "offset": round(scale.offset if applied is None else applied, 2),
+                          "lead_ms": round(self.lead * 1000),
+                          "segments": [{"after_rank": k, "from": a, "to": b} for k, a, b in cuts],
+                          "fine_ms": {str(k): round(v * 1000) for k, v in fine.items()}, "dropped": len(dropped)},
+                "gate_new": g_new, "gate_old": g_old, "windows": self.windows_read, "plan": plan,
+                "audio_s": self.audio_s}
+
+    @staticmethod
+    def _add(windows, more):
+        """The windows `more`, read for the fit, added to `windows`, each once (a step can land on a window read)."""
+        for w in more:
+            if all(x is not w for x in windows):
+                windows.append(w)
+
+    def _scale(self, windows, n):
+        """The frame-rate scale (SCALES, 1.0 first) and the overall offset where the fit windows that hear speech score
+        best together; a scale other than 1.0 must score SCALE_GAIN more per such window. With the subtitle's signal at
+        that scale (`n` frames) and each fit window's score curve on it, which label it: a window is correlated once
+        per scale."""
         scored = [i for i, w in enumerate(windows) if self.heard(w)] or list(range(len(windows)))  # speech heard
         fits, best = {}, 1.0    # scale: (offset, score, signal, curves), kept for 1.0 and the best scale so far
         for c in SCALES:        # 1.0 first
-            ssig = self.sub_signal(lines, c, n)
+            ssig = self.sub_signal(self.lines, c, n)
             cs = [self.fast_corr(w, ssig) for w in windows]
             total = np.sum([cs[i][1] / self.frames(windows[i]) for i in scored], axis=0)
             j = peak(total, 0.0)
@@ -775,92 +846,132 @@ class AudioFit:
                     del fits[best]
                 fits[c], best = (float(LAGS[j]), float(total[j]), ssig, cs), c
         c = best if fits[best][1] - fits[1.0][1] >= SCALE_GAIN * len(scored) else 1.0
-        o_glob, _, ssig, curves = fits[c]
+        offset, _, ssig, curves = fits[c]
+        return Scale(c, offset, ssig, curves)
 
-        def curve(w):
-            return self.fast_corr(w, ssig)
+    def curve(self, scale, w):
+        """A window's score at every offset in LAGS against the subtitle's signal at the fit's scale."""
+        return self.fast_corr(w, scale.signal)
 
-        def label(w, cv=None):
-            offs, vals = curve(w) if cv is None else cv
-            j = peak(vals, o_glob)
-            o_top, z_top = float(offs[j]), float(vals[j]) / self.frames(w)
-            z_g = self.zat(w, (offs, vals), o_glob)
-            if abs(o_top - o_glob) <= SAME_OFFSET_S:
-                return o_glob if z_g >= FITS_Z else None
-            if z_top - z_g >= OWN_GAIN_Z and z_top >= OWN_PEAK_Z:
-                return o_top
-            return None
+    def label(self, scale, w, cv=None):
+        """A window's offset (its curve `cv`, else computed): the overall one where the window fits it (FITS_Z); else
+        its own best one, where that scores at least OWN_PEAK_Z and OWN_GAIN_Z above the overall one; None when
+        neither."""
+        offs, vals = self.curve(scale, w) if cv is None else cv
+        j = peak(vals, scale.offset)
+        o_top, z_top = float(offs[j]), float(vals[j]) / self.frames(w)
+        z_g = self.zat(w, (offs, vals), scale.offset)
+        if abs(o_top - scale.offset) <= SAME_OFFSET_S:
+            return scale.offset if z_g >= FITS_Z else None
+        if z_top - z_g >= OWN_GAIN_Z and z_top >= OWN_PEAK_Z:
+            return o_top
+        return None
 
-        labels = [label(w, cv) for w, cv in zip(windows, curves)]   # the chosen scale's curves, not computed again
-        for i, (w, lab) in enumerate(zip(list(windows), list(labels))):
-            if lab is None or abs(lab - o_glob) <= SAME_OFFSET_S:
+    def _labels(self, windows, scale, checks):
+        """The fit windows' labels (their curves from _scale, not computed again). A window whose own offset no other
+        fit window shares keeps it only when the window after it, kept off the held-out windows starting in `checks`
+, gives it too. Returns (the labels, the windows read to confirm them)."""
+        W = self.W
+        labels = [self.label(scale, w, cv) for w, cv in zip(windows, scale.curves)]
+        read = []
+        for i, (w, lab) in enumerate(zip(windows, list(labels))):
+            if lab is None or abs(lab - scale.offset) <= SAME_OFFSET_S:
                 continue
             same = [k for k in range(len(labels))
                     if labels[k] is not None and abs(labels[k] - lab) <= SAME_OFFSET_S and k != i]
-            if not same:    # confirmed by the window after it, kept off the held-out windows
-                wc = add(self.read_window(self.aside(w["start"] + W, checks + [w["start"]], lo=0.0), W))
-                lc = label(wc)
+            if not same:
+                wc = self.read_window(self.aside(w["start"] + W, checks + [w["start"]], lo=0.0), W)
+                read.append(wc)
+                lc = self.label(scale, wc)
                 if lc is None or abs(lc - lab) > SAME_OFFSET_S:
                     labels[i] = None
-        seq = [(w["start"], lab) for w, lab in zip(windows[:K], labels) if lab is not None]
-        bounds, undecided = [], []
+        return labels, read
+
+    def _changes(self, seq, scale, checks):
+        """Each change of offset between neighbouring labelled fit windows (`seq`: (start, offset) in time order),
+        narrowed down by narrow() off the held-out windows. Returns (the brackets (lo, hi, oa, ob), the windows read,
+        those of them that decided nothing)."""
+        bounds, read, undecided = [], [], []
         for (sa, oa), (sb, ob) in zip(seq, seq[1:]):
             if abs(oa - ob) <= SAME_OFFSET_S:
                 continue
-            lo, hi, read, left_out = self.narrow(sa + W, sb, oa, ob, checks, curve)
-            for w in read:
-                add(w)
+            lo, hi, got, left_out = self.narrow(sa + self.W, sb, oa, ob, checks, functools.partial(self.curve, scale))
+            read += got
             undecided += left_out
             bounds.append((lo, hi, oa, ob))
-        order = sorted(range(len(allines)), key=lambda k: allines[k]["s"])
-        st = [allines[k]["s"] * c for k in order]       # the lines' scaled starts and ends in time order, once
-        en = [allines[k]["e"] * c for k in order]
-        talk = [i for i, k in enumerate(order) if allines[k]["kind"] == "dialogue"]   # the dialogue lines' ranks
-        placing = [w for w in windows if all(w is not x for x in undecided)]   # none that decided nothing
-        lag = self.end_lag(c, o_glob, windows) if bounds else None
-        cuts = []
-        for lo, hi, oa, ob in bounds:
-            best_k, best_score = None, -1
-            # k, the first line of the second shift, only where the lines land in reach of the bracket under one shift
-            # or the other; the lines after it that land before the last line under the first shift are a scene the file
-            # lacks, left out by the drop step, so they count for no k. Every line is moved by the cut, but only the
-            # dialogue lines are scored against the speech, as everywhere else in the fit (signs and songs aren't spoken)
-            first, last = bisect.bisect_left(st, lo - W - max(oa, ob)), bisect.bisect_right(st, hi + W - min(oa, ob))
-            for k in range(first, last + 1):
-                rest = max(k, bisect.bisect_left(st, st[k - 1] + oa - ob)) if k else 0
-                before, after = talk[:bisect.bisect_left(talk, k)], talk[bisect.bisect_left(talk, rest):]
-                errs = self.onset_errors([st[i] + oa for i in before] + [st[i] + ob for i in after], placing)
-                score = sum(1 for e in errs if e is not None and abs(e) < CUT_ERR_S)
-                if lag is not None:     # the line ends too, against the subtitle's own lag (D3)
-                    ends = [en[i] + oa for i in before] + [en[i] + ob for i in after]
-                    score += END_WEIGHT * sum(1 for e in self.onset_errors(ends, placing, "ends")
-                                              if e is not None and abs(e - lag) < CUT_ERR_S)
-                if score > best_score:
-                    best_k, best_score = k, score
-            if best_k is not None:      # None only for no k at all: a bracket inside out (narrow never gives one)
-                cuts.append((best_k, oa, ob))
-        seg_of = [None] * len(allines)
-        cur = seq[0][1] if seq else o_glob
-        ci = 0
+        return bounds, read, undecided
+
+    def _timeline(self, c):
+        """The subtitle's lines in time order at scale c (Timeline), once for every cut."""
+        order = sorted(range(len(self.allines)), key=lambda k: self.allines[k]["s"])
+        return Timeline(order, [self.allines[k]["s"] * c for k in order], [self.allines[k]["e"] * c for k in order],
+                        [i for i, k in enumerate(order) if self.allines[k]["kind"] == "dialogue"])
+
+    def _cut(self, bracket, timeline, placing, lag):
+        """Where a change of offset goes: k, the rank in time order of the first line of the second shift, where the
+        most lines land on the speech in the windows `placing` (a start within CUT_ERR_S of an onset; with the
+        subtitle's own end lag `lag`, an end within CUT_ERR_S of it counts END_WEIGHT); of equal scores the first.
+        Only the k where the lines land in reach of the bracket (lo, hi, oa, ob) under one shift or the other; the
+        lines after k that land before the last line under the first shift are a scene the file lacks, left out by the
+        drop step, so they count for no k. Every line is moved by the cut, but only the dialogue lines are scored
+        against the speech, as everywhere else in the fit (signs and songs aren't spoken). None when no k is tried."""
+        lo, hi, oa, ob = bracket
+        st, en, talk = timeline.starts, timeline.ends, timeline.talk
+        best_k, best_score = None, -1
+        first = bisect.bisect_left(st, lo - self.W - max(oa, ob))
+        last = bisect.bisect_right(st, hi + self.W - min(oa, ob))
+        for k in range(first, last + 1):
+            rest = max(k, bisect.bisect_left(st, st[k - 1] + oa - ob)) if k else 0
+            before, after = talk[:bisect.bisect_left(talk, k)], talk[bisect.bisect_left(talk, rest):]
+            errs = self.onset_errors([st[i] + oa for i in before] + [st[i] + ob for i in after], placing)
+            score = sum(1 for e in errs if e is not None and abs(e) < CUT_ERR_S)
+            if lag is not None:     # the line ends too, against the subtitle's own lag (D3)
+                ends = [en[i] + oa for i in before] + [en[i] + ob for i in after]
+                score += END_WEIGHT * sum(1 for e in self.onset_errors(ends, placing, "ends")
+                                          if e is not None and abs(e - lag) < CUT_ERR_S)
+            if score > best_score:
+                best_k, best_score = k, score
+        return best_k
+
+    @staticmethod
+    def _segments(order, cuts, start):
+        """Each line's shift, by line index (`order`: the indexes in time order): `start` up to the first cut's rank,
+        then each cut's second shift from its rank on (`cuts`: (rank, oa, ob) in time order)."""
+        seg_of = [None] * len(order)
+        cur, ci = start, 0
         for rank, k in enumerate(order):
             while ci < len(cuts) and rank >= cuts[ci][0]:
                 cur = cuts[ci][2]
                 ci += 1
             seg_of[k] = cur
-        spoken = [order[i] for i in talk]
-        was = [(allines[k]["s"] * c, allines[k]["e"] * c) for k in spoken]     # the scale moves every line alike
-        dropped = {spoken[i] for i in moved_back(was, [(s + seg_of[k], e + seg_of[k])
-                                                       for k, (s, e) in zip(spoken, was)])}
+        return seg_of
+
+    def _dropped(self, c, seg_of, timeline):
+        """The dialogue lines (by index) of a scene the file lacks: those the shifts move back behind an earlier line
+        (sections.moved_back)."""
+        spoken = [timeline.order[i] for i in timeline.talk]
+        was = [(self.allines[k]["s"] * c, self.allines[k]["e"] * c) for k in spoken]  # the scale moves every line alike
+        return {spoken[i] for i in moved_back(was, [(s + seg_of[k], e + seg_of[k]) for k, (s, e) in zip(spoken, was)])}
+
+    def _fine(self, c, seg_of, windows):
+        """Each shift's refinement to the speech: the median onset error (under 0.5 s) of its dialogue lines in the
+        windows read for the fit, on at least 5 of them; else 0."""
         fine = {}
         for o in sorted(set(seg_of)):
-            idx = [k for k in range(len(allines)) if seg_of[k] == o and allines[k]["kind"] == "dialogue"]
-            errs = [e for e in self.onset_errors([allines[k]["s"] * c + o for k in idx], windows)
+            idx = [k for k in range(len(self.allines)) if seg_of[k] == o and self.allines[k]["kind"] == "dialogue"]
+            errs = [e for e in self.onset_errors([self.allines[k]["s"] * c + o for k in idx], windows)
                     if e is not None and abs(e) < 0.5]
             fine[o] = float(np.median(errs)) if len(errs) >= 5 else 0.0
-        new = [dict(l, s=l["s"] * c + seg_of[k] + fine[seg_of[k]], e=l["e"] * c + seg_of[k] + fine[seg_of[k]],
-                    drop=k in dropped) for k, l in enumerate(allines)]
+        return fine
+
+    def _held_out(self, checks, windows, dial_new):
+        """The held-out windows the copy (its dialogue starts `dial_new`) is judged on: those starting in `checks`, and
+        while it matches fewer than GATE_LINES lines there, one more in the stretch where it matched the fewest, off
+        every window read (none where there is no such place); none past the audio budget: the copy is judged on those
+        read."""
+        W, V = self.W, self.V
+        _, margin, span, vspan = self.geometry()
         verify = [self.read_window(start, W) for start in checks]
-        dial_new = [l["s"] for l in new if l["kind"] == "dialogue" and not l["drop"]]
 
         def stretch(w):     # which of the V stretches of the runtime a held-out window is in
             return min(V - 1, max(0, int((w["start"] + W / 2 - margin) // vspan)))
@@ -869,8 +980,6 @@ class AudioFit:
             return sum(e is not None for e in self.onset_errors(dial_new, ws))
         left = set(range(V))
         while matched(verify) < GATE_LINES and left:
-            # one more held-out window in the stretch where the copy matched the fewest lines, off every window read
-            # (none where there is no such place); none past the audio budget: the copy is judged on those read
             i = min(left, key=lambda j: (matched([w for w in verify if stretch(w) == j]), j))
             left.discard(i)
             taken = [w["start"] for w in windows + verify]
@@ -882,41 +991,37 @@ class AudioFit:
             if w is None:
                 break
             verify.append(w)
-        original = [l["s"] for l in lines]
+        return verify
+
+    def _gates(self, dial_new, windows, verify):
+        """(the copy's gate on the held-out windows `verify`, with each held-out part it is clearly off in: then it
+        fails; the original's own gate on every window read, each once, by the stricter bar)."""
+        original = [l["s"] for l in self.lines]
         g_new = self.gate(self.onset_errors(dial_new, verify))
         g_new["parts_off"] = [[round(ws[0]["start"], 2), round(ws[-1]["start"], 2)] for ws in self.parts(verify)
                               if self.part_off(dial_new, original, ws)]     # (first, last window start) of each
         g_new["pass"] = g_new["pass"] and not g_new["parts_off"]
         every = list({id(w): w for w in windows + verify}.values())     # each window once
         g_old = self.gate(self.onset_errors(original, every), strict_mode=True)
-        applied = seg_of[0] if len(set(seg_of)) == 1 else None   # one segment: the offset every line was moved by
-        shift = None if applied is None else applied + fine[applied]
-        agree = all(l is None or abs(l - o_glob) <= SAME_OFFSET_S for l in labels) \
-            and sum(l is not None for l in labels) >= 0.6 * K
-        small = c == 1.0 and shift is not None and abs(shift) <= SMALL_SHIFT_S   # never published
-        moved = statistics.median(abs(n["s"] - l["s"]) for n, l in zip(new, allines)
-                                  if l["kind"] == "dialogue" and not n["drop"]) if dial_new else 0.0
-        why = None
+        return g_new, g_old
+
+    def _decision(self, g_new, g_old, small, agree, moved):
+        """(decision, why) from the gates: the original in sync when it passes as it is, or when the fit would move it
+        by a `small` shift, never published, and the copy passes with every fit window `agree`ing; or when, moved that
+        little, it meets the second way's numbers (made for this release, it fits the speech as it is); kept on
+        any other small shift. Else the copy synced when it passes, or when it is clearly better having `moved` its
+        lines at least the second way's min_shift_s; else the original kept."""
         if g_old["pass"] or (small and agree and g_new["pass"]):
-            decision = "in_sync"
-        elif small and self.meets_better(g_old):   # made for this release, it fits the speech as it is
-            decision, why = "in_sync", "fits the speech as it is"
-        elif small:
-            decision = "keep_original"
-        elif g_new["pass"]:
-            decision = "synced"
-        elif self.clearly_better(g_new, moved):
-            decision, why = "synced", "clearly better than the original"
-        else:
-            decision = "keep_original"
-        return {"decision": decision, "why": why, "lines": new if decision == "synced" else None, "moved_s": round(moved, 2),
-                "seq": seq, "segment_offsets": sorted(set(seg_of)), "end_lag_ms": None if lag is None else round(lag * 1000),
-                "model": {"scale": round(c, 5), "offset": round(o_glob if applied is None else applied, 2),
-                          "lead_ms": round(self.lead * 1000),
-                          "segments": [{"after_rank": k, "from": a, "to": b} for k, a, b in cuts],
-                          "fine_ms": {str(k): round(v * 1000) for k, v in fine.items()}, "dropped": len(dropped)},
-                "gate_new": g_new, "gate_old": g_old, "windows": self.windows_read, "plan": plan,
-                "audio_s": self.audio_s}
+            return "in_sync", None
+        if small and self.meets_better(g_old):
+            return "in_sync", "fits the speech as it is"
+        if small:
+            return "keep_original", None
+        if g_new["pass"]:
+            return "synced", None
+        if self.clearly_better(g_new, moved):
+            return "synced", "clearly better than the original"
+        return "keep_original", None
 
 
 def fit_tracks(index, lines, fit_class=None, original=None, **kw):
