@@ -491,6 +491,7 @@ class Job:
         self.usenet = False       # found through the Usenet config (its audio job too)
         self.kept = None          # an audio job's (row, address) of its file's first pass on Usenet, for its life
         self.bt = None            # the listed row's torrent file ("bt:<hash>:<index>"), once found (cap mark)
+        self.index_read = False   # its file's index was read (open_index, read_hash): a fault after it is the file's
         # Languages whose entry was downloaded while this job was queued or running -> when (Worker.prioritize),
         # for alass sooner; they no longer hold the other languages' downloads back
         self.picked = {}
@@ -1179,9 +1180,7 @@ class Worker(threading.Thread):
             unfinished = True
             wait = self._refused(job)
             if not (job.audio and job.usenet):
-                with self.cv:       # nothing more of a person's once their data is deleted (stop(forget=True))
-                    if not self.forgotten:
-                        self.store.file_failed(self._refusal_key(job.alias), REFUSED_BACKOFF_S)
+                self._viewer_backs_off(job.alias)
             log.warning("refused %s (%s): no reads for %d s", job.label, e, wait)
         except ReadFailed as e:
             if job.audio:
@@ -1194,6 +1193,11 @@ class Worker(threading.Thread):
         except Exception as e:  # never let one file stop the worker
             log.warning("failed %s: %s", job.label, type(e).__name__)
             unfinished = True
+            if job.index_read and not job.audio:
+                # a first pass that failed once its file's index was read (damage the parsers let through, met when the
+                # index's fields are used): the file backs off as one that couldn't be read, so it isn't listed, asked
+                # and read again on every request (READ_FAILED_BACKOFF_S; its next good read clears it, file_ok)
+                self.store.file_failed(job.alias, READ_FAILED_BACKOFF_S)
         finally:
             with self.cv:   # one step: never neither busy nor waiting
                 if lane == "audio":
@@ -1264,14 +1268,22 @@ class Worker(threading.Thread):
         return job.refused_wait
 
     def _refusal_key(self, alias):
-        """The store's mark of a file whose read was refused (1 h / 6 h / 24 h): in public mode the person's own
-        (_person_key: a refusal is most likely their account's limit, so it never backs the file off for anyone else),
-        else the file's (a self-hosted install, or a public worker without a person's key)."""
+        """The store's mark of a file this viewer backs off from (_viewer_backs_off: a refusal of their reads, or a failed
+        first read of their own Usenet file; 1 h / 6 h / 24 h): in public mode the person's own (_person_key: most likely
+        their account's limit or their Usenet service's fault, so it never backs the file off for anyone else), else the
+        file's (a self-hosted install, or a public worker without a person's key)."""
         return self._person_key(alias) or alias
 
+    def _viewer_backs_off(self, alias):
+        """The file backs off for this viewer alone (_refusal_key; REFUSED_BACKOFF_S: 1 h / 6 h / 24 h, then never): a
+        refusal of their reads, or a failed first read of their own Usenet file. Returns store.file_failed's retry time
+        (None: never), or False when nothing is written: their data is deleted (stop(forget=True))."""
+        with self.cv:
+            return False if self.forgotten else self.store.file_failed(self._refusal_key(alias), REFUSED_BACKOFF_S)
+
     def _file_blocked(self, alias):
-        """The file backs off: after its read failures (anyone's: they are about the file) or a refusal of this
-        viewer's reads."""
+        """The file backs off: after its read failures (anyone's: they are about the file), or for this viewer after a
+        refusal of their reads or a failed first read of their own Usenet file (_viewer_backs_off)."""
         return any(self.store.file_blocked(key) for key in dict.fromkeys((alias, self._refusal_key(alias))))
 
     def _backing_off(self, job):
@@ -1376,7 +1388,7 @@ class Worker(threading.Thread):
 
     def _process_row(self, job, hints, row, bt):
         """The file's work once its listed row is known (`bt`: the row's torrent file, or None)."""
-        job.bt = bt
+        job.bt, job.index_read = bt, False
         # the title's original language: looked up in the background, never waited for (origlang.py)
         self.start_lookup(job.video_id)
         # the originals the file's entries serve, chosen from its subtitle list (_set_originals); an audio job keeps
@@ -1444,11 +1456,11 @@ class Worker(threading.Thread):
                              size=None if job.usenet else expected_size(hints, row), size_slack=self.s.size_slack,
                              max_re_resolve=USENET_MAX_RE_RESOLVE if job.usenet else MAX_RE_RESOLVE,
                              first_timeout=USENET_FIRST_READ_S if job.usenet else None,
-                             size_ok=usenet_size_ok(expected_size(hints, row)) if job.usenet else None)
-        if job.usenet and job.kept is not None and job.kept[1]:
-            # The audio job reads at the address its first pass resolved, so the Usenet service doesn't fetch
-            # the NZB again; when it stops answering, the link is asked again as any reader does (at most twice)
-            reader.resolved, reader.redirects = job.kept[1], True
+                             size_ok=usenet_size_ok(expected_size(hints, row)) if job.usenet else None,
+                             # The audio job reads at the address its first pass resolved, so the Usenet
+                             # service doesn't fetch the NZB again; when it stops answering, the link is asked again
+                             # as any reader does (at most twice)
+                             resolved=job.kept[1] if job.usenet and job.kept is not None else None)
         if counts:
             job.file_counted = True
             self.limits.file_started()
@@ -1469,8 +1481,9 @@ class Worker(threading.Thread):
                 raise
             except ReadFailed as e:
                 if job.usenet and job.audio:
-                    # Not the file's first read (its first pass read it): Usenet goes on, nothing backs off,
-                    # and the file waits for another pick
+                    # A read during the audio sync (its first pass read the file, through debrid when this job
+                    # listed it on Usenet itself) doesn't stop Usenet: nothing backs off, and the file waits for another
+                    # pick
                     log.info("read failed %s (%s): it waits for another pick", job.label, e)
                     self._wait_again(job)
                     return
@@ -1482,14 +1495,21 @@ class Worker(threading.Thread):
                     with self._given_back(job):
                         time.sleep(READ_RETRY_S)
                     continue
-                if job.usenet:      # an NZB fetch that failed can't be told apart from other faults here
+                if job.usenet:
+                    # an NZB fetch that failed can't be told apart from other faults here: most likely this person's own
+                    # Usenet service, indexer or provider, so their Usenet stops for the day and the file backs off for
+                    # them alone, as after a refusal; never for anyone who reads it through debrid
                     self.usenet_finder.stop("the first read of a Usenet file failed")
-                retry = self.store.file_failed(job.alias, REFUSED_BACKOFF_S if job.usenet else READ_FAILED_BACKOFF_S)
-                log.info("read failed %s (%s), retry %s", job.label, e, "never" if retry is None else time.strftime("%H:%M", time.gmtime(retry)))
+                    retry = self._viewer_backs_off(job.alias)
+                else:
+                    retry = self.store.file_failed(job.alias, READ_FAILED_BACKOFF_S)
+                log.info("read failed %s (%s), retry %s", job.label, e, "never" if retry is None
+                         else time.strftime("%H:%M", time.gmtime(retry)) if retry else "-")
                 if job.audio:   # a debrid file's audio job: it backs off as any read, and waits for another pick
                     self._wait_again(job)
                 return
         # the file could be read: a back-off is for failures in a row, so the earlier ones no longer count
+        job.index_read = True
         self.store.file_ok(job.alias, self._refusal_key(job.alias))
         if job.usenet:
             self.usenet_finder.keep_address(job.alias, row, reader.resolved)

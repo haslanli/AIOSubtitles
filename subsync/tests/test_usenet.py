@@ -402,6 +402,28 @@ class ReaderTest(unittest.TestCase):
                 r.get(100 * k, 50)
         self.assertLessEqual(self.d.link_hits, 2)
 
+    def test_a_reader_given_the_address_an_earlier_one_resolved_reads_there_first(self):
+        # The audio job's reader starts at the address its first pass's reader resolved, so the link
+        # isn't asked (the Usenet service doesn't fetch the NZB again); when that address stops answering, the link is
+        # asked again as after a redirect, at most twice in all
+        first = RangeReader(self.d.link, "test", max_re_resolve=1)
+        first.get(0, 100)
+        self.assertEqual(self.d.link_hits, 1)
+        later = RangeReader(self.d.link, "test", max_re_resolve=1, resolved=first.resolved)
+        self.assertEqual((later.resolved, later.redirects), (first.resolved, True))
+        self.assertEqual(later.get(0, 100), self.d.data[:100])
+        self.assertEqual((self.d.link_hits, later.lookups), (1, 0))
+        self.d.expire()
+        self.assertEqual(later.get(100, 100), self.d.data[100:200])   # the link asked again: a new address
+        self.assertEqual(self.d.link_hits, 2)
+        self.d.file_dead = True
+        for k in range(10):
+            with self.assertRaises(ReadFailed):
+                later.get(200 + 100 * k, 50)
+        self.assertEqual(self.d.link_hits, 3)          # the first pass's look-up, then the audio job's two at most
+        none = RangeReader(self.d.link, "test", resolved=None)    # nothing resolved before: as a new reader
+        self.assertEqual((none.resolved, none.redirects), (None, False))
+
     def test_a_served_size_is_checked_by_a_rule_when_the_listed_one_is_not_the_files(self):
         # seen in a test: AIOStreams lists a Usenet release by its whole NZB (video, par2, nfo), so the file it
         # serves is a few per cent smaller; a reader with a size rule checks the served size by it instead of by an

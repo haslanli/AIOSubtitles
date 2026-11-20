@@ -1507,6 +1507,85 @@ class BreaksOff:
         return r
 
 
+class UnreadableFileTest(unittest.TestCase):
+    """A file subsync can't use: one neither Matroska nor MP4 (an AVI, a TS, a damaged head) keeps its originals and
+    backs off an hour, 6 and 24 hours (the worker's handling was untested); a first pass that fails once the
+    index is read (damage the parsers let through, met when its fields are used) backs off as a read that failed
+    (it was read again on every request). Neither is read again meanwhile, and the log holds no link."""
+
+    def setUp(self):
+        watch_the_log(self)
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        shutil.copy(TINY, self.dir)
+        with open(os.path.join(self.dir, "clip.avi"), "wb") as f:
+            f.write(b"RIFF" + (8184).to_bytes(4, "little") + b"AVI LIST" + bytes(8176))
+        self.srv = RangeServer(self.dir)
+        self.addCleanup(self.srv.close)
+        sized = mock.patch.object(sources, "MIN_VIDEO_BYTES", 1)    # the listing's size is the file's
+        sized.start()
+        self.addCleanup(sized.stop)
+        srv = self.srv
+
+        class Aios:
+            name, lists = "tiny.mkv", 0
+
+            def find_row(self, *a):
+                return {"url": srv.url(self.name)}
+
+            def subtitles(self, *a):
+                self.lists += 1
+                return [{"id": "e1", "url": srv.url("tiny.srt"), "lang": "eng", "release": ""}]
+        self.aios = Aios()
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
+
+    def worker(self):
+        s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_EXTRA_SOURCES": ""})
+        return Worker(s, self.store, self.aios, Safety(), limits=CountedLimits())
+
+    def job(self, name):
+        self.aios.name = name
+        return Job("movie", "tt1", {"filename": name, "videoSize": os.path.getsize(os.path.join(self.dir, name))})
+
+    def test_a_file_neither_matroska_nor_mp4_keeps_its_originals_and_backs_off(self):
+        w = self.worker()
+        job = self.job("clip.avi")
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            run_once(w, job)
+        self.assertIn("file not readable as Matroska or MP4 movie/tt1", "\n".join(logs.output))
+        refused = self.store.db.execute("SELECT fails, retry_at FROM files WHERE file_key=?",
+                                        (job.alias + "|refused",)).fetchone()
+        self.assertEqual(refused[0], 1)                          # under the refusal back-off: an hour first
+        self.assertAlmostEqual(refused[1], time.time() + REFUSED_BACKOFF_S[0], delta=60)
+        self.assertTrue(w._file_blocked(job.alias))
+        self.assertIsNone(self.store.resolve(job.alias))         # nothing of it stored as read
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
+        self.assertEqual(w.done[job.alias], {"eng": None})       # nothing published
+        self.assertEqual(w.known_originals(job.alias)["eng"]["id"], "e1")   # its original is served
+        read, lists = len(self.srv.log), self.aios.lists
+        run_once(w, self.job("clip.avi"))                        # asked again within the hour
+        self.assertEqual((len(self.srv.log), self.aios.lists), (read, lists))   # nothing read, no list
+
+    def test_a_first_pass_that_fails_once_the_index_is_read_backs_off(self):
+        from subsync.store import READ_FAILED_BACKOFF_S
+        w = self.worker()
+        job = self.job("tiny.mkv")
+        # a 2,000-byte TrackNumber opens, then fails here (json.dumps of the tracks: Python's limit of 4,300 digits)
+        with mock.patch.object(self.store, "file_read", side_effect=ValueError("Exceeds the limit (4300 digits)")):
+            run_once(w, job)
+        retry = self.store.file_retry(job.alias)
+        self.assertIsNotNone(retry, "nothing marked: read again on every request")
+        self.assertAlmostEqual(retry, time.time() + READ_FAILED_BACKOFF_S[0], delta=60)
+        read, lists = len(self.srv.log), self.aios.lists
+        run_once(w, self.job("tiny.mkv"))                        # asked again within the back-off
+        self.assertEqual((len(self.srv.log), self.aios.lists), (read, lists))
+        # a failure before the index is read (here the subtitle list's) marks nothing: nothing is known of the file
+        self.store.db.execute("DELETE FROM files")
+        with mock.patch.object(w, "_candidates", side_effect=RuntimeError("a bug")):
+            run_once(w, self.job("tiny.mkv"))
+        self.assertIsNone(self.store.file_retry(job.alias))
+
+
 class ConnectionFaultTest(unittest.TestCase):
     """A read that fails for want of a connection says so (ReadFailed.connection); an answer it can't use doesn't."""
 

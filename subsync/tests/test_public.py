@@ -624,6 +624,49 @@ class WorkerHooksTest(unittest.TestCase):
         b.process(Job("movie", "tt1", dict(job.hints)))
         self.assertEqual(b.aios.subtitle_requests, 1)        # not backing off: the other person's job goes on
 
+    def test_one_persons_failed_usenet_first_read_backs_the_file_off_for_them_only(self):
+        """A Usenet file's failed first read is most likely the person's own Usenet service, indexer or
+        provider (an NZB fetch that failed can't be told apart): their Usenet stops for the day and the file backs off
+        for them, never for another person who reads it through debrid (it did, up to "never"); nothing is written once
+        their data is deleted."""
+        from unittest import mock
+        from subsync.worker import Job, Safety, UsenetFinder, Worker
+        subs = [{"id": "os-1", "url": "http://127.0.0.1:9/s.srt", "lang": "eng", "release": "", "hash": "",
+                 "hash_match": False, "ai": False}]
+        dead = {"url": "http://127.0.0.1:9/never"}
+
+        def person(who, row=None):
+            limits = StubLimits()
+            limits.who = limits.rows_key = who
+            w = Worker(self.settings(SUBSYNC_PUBLIC="on"), self.store, ListingAios(row, subs), Safety(), limits=limits)
+            self.workers.append(w)
+            return w
+        a, b = person("a" * 16), person("b" * 16, dead)
+        stops = []
+        a.usenet_finder = UsenetFinder(None, mock.Mock(stop=stops.append))
+        hints = {"filename": "Movie.2020.1080p.mkv", "videoSize": 4_000_000_000}
+        job = Job("movie", "tt1", hints)
+        job.usenet = True
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            a._process_row(job, dict(hints), dead, None)
+        self.assertEqual(stops, ["the first read of a Usenet file failed"])
+        self.assertIn("read failed movie/tt1 (", logs.output[-1])
+        self.assertTrue(a._file_blocked(job.alias))          # 1 h, then 6 h, 24 h, for this person
+        self.assertFalse(self.store.file_blocked(job.alias))
+        self.assertFalse(b._file_blocked(job.alias))
+        from subsync import worker
+        with mock.patch.object(worker, "READ_RETRY_S", 0):
+            b.process(Job("movie", "tt1", dict(hints)))
+        self.assertEqual(b.aios.subtitle_requests, 1)        # not backing off: the other person's job goes on
+        gone = person("c" * 16)                              # their data deleted while the read ran
+        gone.usenet_finder = UsenetFinder(None, mock.Mock())
+        gone.stop(forget=True)
+        rows = self.store.db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        again = Job("movie", "tt1", hints)
+        again.usenet = True
+        gone._process_row(again, dict(hints), dead, None)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM files").fetchone()[0], rows)
+
     def test_a_full_queue_queues_nothing(self):
         from subsync.worker import Job, Safety, Worker
         w = Worker(self.settings(), self.store, ListingAios(), Safety(), limits=StubLimits(queue=1))

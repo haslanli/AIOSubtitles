@@ -143,7 +143,7 @@ class _TimeLimit:
 class RangeReader:
     def __init__(self, url, label, guard=None, timeout=60.0, size=None, size_tolerance=SIZE_TOLERANCE, opener=None,
                  size_slack=0,
-                 max_re_resolve=MAX_RE_RESOLVE, first_timeout=None, size_ok=None):
+                 max_re_resolve=MAX_RE_RESOLVE, first_timeout=None, size_ok=None, resolved=None):
         self.url, self.label, self.guard, self.timeout = url, label, guard, timeout
         # a Usenet file: its link asked at most twice (a fresh look-up could fetch its NZB again), and
         # its first look-up waits longer (the Usenet service fetches and opens the NZB first; NzbDAV's add takes up to
@@ -163,9 +163,12 @@ class RangeReader:
         self.finished = 0             # reads that got all they asked for and passed the reply's checks
         self._lock = threading.Lock()   # audio windows are read up to 4 at once (audiofit.AudioFit.prefetch)
         self.open = opener or realdebrid.urlopen   # refuses Real-Debrid addresses, redirects included
-        self.resolved = None          # the address the link pointed to: never logged, never stored
+        # the address the link pointed to: never logged, never stored. `resolved`: one an earlier reader of the
+        # same link found (a Usenet file's audio job reads where its first pass read), read first as if this
+        # reader had been redirected there: the link is asked only when it stops answering, within max_re_resolve
+        self.resolved = resolved or None
         self.lookups = 0              # requests to the link itself (the first one and any after)
-        self.redirects = False        # the link has redirected once: its look-ups are then counted
+        self.redirects = bool(resolved)   # the link has redirected once: its look-ups are then counted
         self._resolving = threading.Lock()   # parallel first reads wait for one look-up of the link
 
     def _request(self, url, start, length):
