@@ -14,6 +14,7 @@ from collections import namedtuple
 
 from installer import plan
 from subsync import digits, explain
+from subsync.aiosconfig import MAX_LANGUAGES
 from subsync.settings import GB
 
 Limit = namedtuple('Limit', 'setting label unit kind options')
@@ -34,7 +35,8 @@ HOSTING = [
     ('Each person', [
         Limit('SUBSYNC_USER_FILES_PER_DAY', 'New files per person a day', 'files', 'number'),
         Limit('SUBSYNC_USER_DAILY_MB', 'Data per person a day', 'MB', 'number'),
-        Limit('SUBSYNC_MAX_LANGUAGES', 'Languages per person', None, 'segmented', ('1', '2', '3', '4')),
+        Limit('SUBSYNC_MAX_LANGUAGES', 'Languages per person', None, 'segmented',
+              tuple(str(n) for n in range(1, MAX_LANGUAGES + 1))),
         USENET_HOSTED,
     ]),
     ('The whole service', [
@@ -58,7 +60,7 @@ ABOVE_ZERO = 'A number above 0, like {default}.'
 # a comma in a GB value: a decimal comma once multiplied it ("1,5" became 15 GB); the page never writes one there
 NO_COMMA = 'A number above 0, with a dot for decimals and no commas, like 1.5.'
 NOT_AN_AUDIO_LIMIT = f'Type {plan.AUDIO_BUDGET_WORDS} (GB per file).'
-NOT_A_LANGUAGE_LIMIT = 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'
+NOT_A_LANGUAGE_LIMIT = f'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to {MAX_LANGUAGES}.'
 # what subsync can hold: a longer answer, or a GB value whose bytes (subsync counts settings.GB, 10^9, to a GB) are no
 # finite number, crashed it at start
 LONGEST = 15

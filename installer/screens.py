@@ -10,7 +10,7 @@ from installer import hosting
 from installer import limits as limit_list
 from installer import plan, update
 from subsync import explain, ui
-from subsync.aiosconfig import LANGUAGES
+from subsync.aiosconfig import LANGUAGE_OPTIONS, MAX_LANGUAGES
 from subsync.ui import e
 
 TITLE = 'Set up AIOSubtitles'
@@ -142,12 +142,12 @@ INSTALLER_WORDS = (
 
 # ------------------------------------------------------------------------------------------- the frame
 
-def _page(content, refresh=None, kind='letter', heading=None):
+def _page(content, refresh=None, heading=None):
     """A page in setup's frame, titled by its `heading` (its step's name, or its own heading) before setup's name, so
     tabs, history and a screen reader's announcement tell the pages apart."""
     title = f'{heading} · {TITLE}' if heading and heading != TITLE else TITLE
     return ui.page(title, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}{content}</div>',
-                   kind, refresh=refresh)
+                   'letter', refresh=refresh)
 
 
 def _explanation(key, settings=None):
@@ -160,21 +160,32 @@ def _error(problem, key):
     return problem[1] if problem and problem[0] == key and problem[1] else None
 
 
+def _field_id(key):
+    """A question's field id on the setup page: its answers-file key in small letters (_input, _choice, the audio
+    answers; ui.language_slots draws "languages", the same). A limit's is its setting (_limit_ids). A refused answer's
+    summary links to it (_summary)."""
+    return key.lower()
+
+
+def _ids(*keys):
+    """The fields a step drew for these questions, as `step` takes them: each one's id by its key."""
+    return {key: _field_id(key) for key in keys}
+
+
 def _input(key, label, value='', problem=None, kind='text', mono=False, reveal=False, help_text=None, attrs=''):
     a = (f'value="{e(value)}" ' if value else '') + 'autocomplete="off" spellcheck="false"' + (f' {attrs}' if attrs else '')
-    return ui.field(key.lower(), label, _explanation(key) if help_text is None else help_text, name=key, kind=kind,
+    return ui.field(_field_id(key), label, _explanation(key) if help_text is None else help_text, name=key, kind=kind,
                     mono=mono, error=_error(problem, key), attrs=a, reveal=reveal)
 
 
-def _choice(key, title, checked, needs=None, settings=None):
-    return ui.choice(key.lower(), title, _explanation(key, settings), name=key, checked=checked, value='yes',
-                     needs=needs)
+def _choice(key, title, checked, settings=None):
+    return ui.choice(_field_id(key), title, _explanation(key, settings), name=key, checked=checked, value='yes')
 
 
-def _continue(enabled=True, label='Continue', arrow=True):
+def _continue(enabled=True):
     if enabled:
-        return ui.button(label, 'primary', type='submit', attrs='name="go" value="next"', arrow=arrow)
-    return ui.button(label, 'primary', type='button', attrs='disabled', arrow=arrow)
+        return ui.button('Continue', 'primary', type='submit', attrs='name="go" value="next"', arrow=True)
+    return ui.button('Continue', 'primary', type='button', attrs='disabled', arrow=True)
 
 
 def _back(href):
@@ -223,33 +234,31 @@ def _steps(route):
     return (HOSTING, HOSTING_IDS) if route == 'host' else (PERSONAL, PERSONAL_IDS)
 
 
-def _summary(problem, body):
+def _summary(problem, fields):
     """A refused answer's summary for the top of its step, as the site's pages show one: its message word for word,
-    a link to its field when `body` has it (a limit's id is its setting, every other field's its key in small
-    letters)."""
+    and a link to its field when the step drew it (`fields`: the id of each field drawn, by its key)."""
     if not problem or not problem[1]:
         return ''
-    key = problem[0]
-    field = next((name for name in (key, key.lower()) if f' id="{e(name)}"' in body), None)
-    return ui.problem_summary(problem[1], REFUSED, field)
+    return ui.problem_summary(problem[1], REFUSED, fields.get(problem[0]))
 
 
-def step(route, step_id, body, actions, back=True, refresh=None, done=False, form=True, problem=None):
+def step(route, step_id, body, actions, back=True, refresh=None, problem=None, fields=None):
     """One step in the installer's frame: its heading, its body and its actions, in one form posting to itself.
-    `problem`: a refused answer (field, message), summed up at the top of the body (the script focuses it)."""
+    `problem`: a refused answer (key, message), summed up at the top of the body (the script focuses it), linking to
+    its field among `fields` (the id of each field the body drew, by its key: _ids)."""
     names, ids = _steps(route)
     i = ids.index(step_id)
     back_href = (ids[i - 1] if i else './') if back else False
-    inner = (f'<h1>{e(names[i])}</h1><div class="body">{_summary(problem, body)}{body}</div>'
-             f'<div class="actions">{actions}</div>')
-    content = f'<form method="post" novalidate>{inner}</form>' if form else inner
-    return _page(ui.step_frame(names, i, content, RAIL, done=done, back=back_href), refresh=refresh, heading=names[i])
+    content = (f'<form method="post" novalidate><h1>{e(names[i])}</h1>'
+               f'<div class="body">{_summary(problem, fields or {})}{body}</div>'
+               f'<div class="actions">{actions}</div></form>')
+    return _page(ui.step_frame(names, i, content, RAIL, back=back_href), refresh=refresh, heading=names[i])
 
 
-def _back_and_continue(route, step_id, enabled=True, label='Continue'):
+def _back_and_continue(route, step_id, enabled=True):
     _, ids = _steps(route)
     i = ids.index(step_id)
-    return _back(ids[i - 1] if i else './') + _continue(enabled, label, arrow=label == 'Continue')
+    return _back(ids[i - 1] if i else './') + _continue(enabled)
 
 
 # ------------------------------------------------------------------------------------------- the start
@@ -274,17 +283,19 @@ def machine(route, rows, stop=None):
 
 # ------------------------------------------------------------------------------------------- install it for yourself
 
-def aios(rows, ask=None, value='', problem=None, containers=(), done=False, stop=None):
+def aios(rows, ask=None, value='', problem=None, containers=(), stop=None):
     """Your AIOStreams: what was found; the address question when it wasn't found; the choice when several run
     (`containers`: their names, each with its image under it)."""
-    body = _rows(rows) + _stop(stop)
+    body, fields = _rows(rows) + _stop(stop), {}
     if ask == 'AIOS_CONTAINER':
         body += ui.radio_group(LABELS['AIOS_CONTAINER'],
                                [ui.radio_row('AIOS_CONTAINER', name, name, image, checked=name == value)
                                 for name, image in containers])
     elif ask == 'AIOS_URL':
         body += _input('AIOS_URL', LABELS['AIOS_URL'], value, problem, kind='url', mono=True)
-    return step('yourself', 'aios', body, _back_and_continue('yourself', 'aios', enabled=not stop), problem=problem)
+        fields = _ids('AIOS_URL')
+    return step('yourself', 'aios', body, _back_and_continue('yourself', 'aios', enabled=not stop), problem=problem,
+                fields=fields)
 
 
 def config(rows, config_id='', problem=None, stop=None):
@@ -293,28 +304,30 @@ def config(rows, config_id='', problem=None, stop=None):
     body = (_input('AIOS_CONFIG_ID', LABELS['AIOS_CONFIG_ID'], config_id, problem, mono=True)
             + _input('AIOS_CONFIG_PASSWORD', LABELS['AIOS_CONFIG_PASSWORD'], '', problem, kind='password', reveal=True)
             + _rows(rows) + _stop(stop))
-    return step('yourself', 'config', body, _back_and_continue('yourself', 'config'), problem=problem)
+    return step('yourself', 'config', body, _back_and_continue('yourself', 'config'), problem=problem,
+                fields=_ids('AIOS_CONFIG_ID', 'AIOS_CONFIG_PASSWORD'))
 
 
 def choices(languages, audio, public_address, problem=None, offer_opensubtitles=False, add_opensubtitles=True,
-            limit=4, usenet=None, stop=None, saved=(), rows=(), settings=None):
+            usenet=None, stop=None, saved=(), rows=(), settings=None):
     """Your choices: what the step reported (`rows`: why Usenet stays off, a saved key removed), the languages (the
     site's slots), the audio route (`audio`: the answer picked, no, pick or open), Usenet when the config has a
     Usenet service subsync reads through (`usenet` not None), the optional keys (`saved`: those with a saved
     key), OpenSubtitles when the config has no subtitle source, and subsync's address for your apps. `stop`: a config
     without a debrid service answered no to Usenet. `settings`: subsync's on this install, whose values the audio and
-    Usenet explanations state."""
+    Usenet explanations state. As many language slots as the service takes (MAX_LANGUAGES)."""
     error = _error(problem, 'LANGUAGES')
     langs = (f'<div class="field"><span class="label" id="languages-l">{e(LABELS["LANGUAGES"])}</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
-             + ui.language_slots([(name, code) for name, _, code in LANGUAGES], languages, limit, 'languages-l',
+             + ui.language_slots(LANGUAGE_OPTIONS, languages, MAX_LANGUAGES, 'languages-l',
                                  'languages-help', 'languages-error' if error else None, name='LANGUAGES')
              + f'<p class="help" id="languages-help">{e(_explanation("LANGUAGES"))}</p></div>')
     usenet_box = (_choice('USENET', LABELS['USENET'], usenet, settings=settings),) if usenet is not None else ()
     audio_rows = [ui.radio_row('AUDIO', value, answer, '', checked=value == audio)
                   for value, answer in plan.AUDIO_ANSWERS]
     body = (_rows(rows) + _stop(stop) + langs + ui.radio_group(LABELS['AUDIO'], audio_rows,
-                                                                help_text=_explanation('AUDIO', settings), id='audio')
+                                                                help_text=_explanation('AUDIO', settings),
+                                                                id=_field_id('AUDIO'))
             + (ui.choices(*usenet_box) if usenet_box else '')
             + _key('SUBDL_KEY', LABELS['SUBDL_KEY'], problem, saved)
             + _key('WYZIE_KEY', LABELS['WYZIE_KEY'], problem, saved)
@@ -322,7 +335,9 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
     if offer_opensubtitles:
         body += ui.choices(_choice('ADD_OPENSUBTITLES', LABELS['ADD_OPENSUBTITLES'], add_opensubtitles))
     body += _input('PUBLIC_ADDRESS', LABELS['PUBLIC_ADDRESS'], public_address, problem, kind='url', mono=True)
-    return step('yourself', 'choices', body, _back_and_continue('yourself', 'choices'), problem=problem)
+    fields = _ids('LANGUAGES', 'AUDIO', *(('USENET',) if usenet_box else ()), 'SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY',
+                  *(('ADD_OPENSUBTITLES',) if offer_opensubtitles else ()), 'PUBLIC_ADDRESS')
+    return step('yourself', 'choices', body, _back_and_continue('yourself', 'choices'), problem=problem, fields=fields)
 
 
 # the keyboard phones show for a limit's box, by its kind: one with a decimal point for a decimal, the normal
@@ -339,6 +354,11 @@ def _limit(lim, value, problem):
                            keypad=KEYPADS.get(lim.kind, 'numeric'), error=error)
 
 
+def _limit_ids(asked):
+    """The limits' fields, as `step` takes them: each one's id is its setting (ui.number_field's, ui.segmented's)."""
+    return {lim.setting: lim.setting for lim in asked}
+
+
 def _choose(problem, asked):
     """A refused limit as the page says it: a row of buttons' problem says what to choose (the engine's words, which
     the terminal shows, say what to type)."""
@@ -351,17 +371,19 @@ def limits(route, values, problem=None, audio=False, usenet=False, stop=None):
     every limit in its three groups (each
     install only the limits that do something for it)."""
     if route == 'host':
-        problem = _choose(problem, limit_list.hosting(usenet, audio))
+        asked = limit_list.hosting(usenet, audio)
+        problem = _choose(problem, asked)
         groups = ''.join(f'<section class="limits" aria-labelledby="g{i}"><h2 id="g{i}">{e(heading)}</h2>'
                          + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem) for lim in group)
                          + '</section>' for i, (heading, group) in enumerate(limit_list.hosting_groups(usenet, audio)))
         return step('host', 'hostlimits', _stop(stop) + groups, _back_and_continue('host', 'hostlimits'),
-                    problem=problem)
+                    problem=problem, fields=_limit_ids(asked))
     asked = limit_list.personal(audio, usenet)
     problem = _choose(problem, asked)
     body = '<div class="limits">' + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem)
                                             for lim in asked) + '</div>'
-    return step('yourself', 'limits', _stop(stop) + body, _back_and_continue('yourself', 'limits'), problem=problem)
+    return step('yourself', 'limits', _stop(stop) + body, _back_and_continue('yourself', 'limits'), problem=problem,
+                fields=_limit_ids(asked))
 
 
 def review(sections, cache=False, sign_in=False, problem=None, username='', rows=(), stop=None):
@@ -370,13 +392,15 @@ def review(sections, cache=False, sign_in=False, problem=None, username='', rows
     changes."""
     body = (_rows(rows) + _stop(stop) + ui.config_changes(sections)
             + ui.choices(_choice('CACHE', LABELS['CACHE'], cache)))
+    fields = _ids('CACHE')
     if sign_in or cache:
         body += (_input('AIOS_USERNAME', SIGN_IN_ADMIN if cache else SIGN_IN_TO_SAVE, username, problem)
                  + _input('AIOS_PASSWORD', LABELS['AIOS_PASSWORD'], '', problem, kind='password', reveal=True))
+        fields.update(_ids('AIOS_USERNAME', 'AIOS_PASSWORD'))
     body += f'<p class="help">{e(_explanation("CONFIRM"))}</p>'
     actions = _back('limits') + ui.button('Save these changes', 'primary', type='submit',
                                           attrs='name="CONFIRM" value="yes"')
-    return step('yourself', 'review', body, actions, problem=problem)
+    return step('yourself', 'review', body, actions, problem=problem, fields=fields)
 
 
 def installing(route, rows, running, stop=None, rule=None, rule_intro=None, rule_note=None, warnings=()):
@@ -431,7 +455,8 @@ def done(route, title, lines, after, warnings=()):
 def host_address(address='', proxy=hosting.TRUSTED_PROXY, problem=None, stop=None):
     body = (_input('HOST_ADDRESS', LABELS['HOST_ADDRESS'], address, problem, kind='url', mono=True)
             + _input('SUBSYNC_TRUSTED_PROXY', LABELS['SUBSYNC_TRUSTED_PROXY'], proxy, problem, mono=True) + _stop(stop))
-    return step('host', 'address', body, _back_and_continue('host', 'address'), problem=problem)
+    return step('host', 'address', body, _back_and_continue('host', 'address'), problem=problem,
+                fields=_ids('HOST_ADDRESS', 'SUBSYNC_TRUSTED_PROXY'))
 
 
 def host_signups(invite, problem=None, stop=None):
@@ -439,7 +464,8 @@ def host_signups(invite, problem=None, stop=None):
     body = (_stop(stop) + _input('SUBSYNC_PUBLIC_INVITE', 'Invite code', invite, problem, mono=True)
             + ui.field('secret', 'Secret key', _explanation('SUBSYNC_SECRET_KEY'), name='secret', kind='text', mono=True,
                        attrs=f'value="{SECRET_DOTS}" readonly tabindex="-1" aria-readonly="true"'))
-    return step('host', 'signups', body, _back_and_continue('host', 'signups'), problem=problem)
+    return step('host', 'signups', body, _back_and_continue('host', 'signups'), problem=problem,
+                fields=_ids('SUBSYNC_PUBLIC_INVITE'))
 
 
 def _key(key, label, problem, saved):
@@ -463,7 +489,9 @@ def host_choices(problem=None, usenet=False, audio=False, tmdb_personal=False, s
             + ui.choices(_choice('SUBSYNC_TMDB_PERSONAL', LABELS['SUBSYNC_TMDB_PERSONAL'], tmdb_personal),
                          _choice('SUBSYNC_USENET', LABELS['SUBSYNC_USENET'], usenet),
                          _choice('SUBSYNC_AUDIO_ROUTE', LABELS['SUBSYNC_AUDIO_ROUTE'], audio)))
-    return step('host', 'hostchoices', body, _back_and_continue('host', 'hostchoices'), problem=problem)
+    return step('host', 'hostchoices', body, _back_and_continue('host', 'hostchoices'), problem=problem,
+                fields=_ids('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY', 'SUBSYNC_TMDB_PERSONAL', 'SUBSYNC_USENET',
+                            'SUBSYNC_AUDIO_ROUTE'))
 
 
 # ------------------------------------------------------------------------------------------- after setup
@@ -535,10 +563,10 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
                    f'<div class="rows">{panel}{answers}{remove}</div></main></div>', 'settings')
 
 
-def working(heading, rows, running, stop=None, back='./'):
+def working(heading, rows, running, stop=None):
     """A piece of work after setup (an update, removing): its progress, then the way back to the page after setup."""
     body = _progress(rows) + _stop(stop)
-    actions = '' if running else ui.link_button('Continue', back, 'primary', arrow=True)
+    actions = '' if running else ui.link_button('Continue', './', 'primary', arrow=True)
     content = (f'<h1>{e(heading)}</h1><div class="body">{body}</div>'
                + (f'<div class="actions">{actions}</div>' if actions else ''))
     return _page(f'<main class="letter">{content}</main>', refresh=REFRESH_S if running else None, heading=heading)

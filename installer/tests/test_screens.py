@@ -1,9 +1,15 @@
 """The setup page's screens: approved words only, the parts' structure, every value
 escaped, no inline style, no way forward while installing or on a stop (but one about the config, whose Continue reads
 it again), and the secret never on a page."""
+import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from html.parser import HTMLParser
+from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, engine, limits, plan, screens, update
@@ -11,9 +17,10 @@ from installer.aios import Aios
 from installer.tests import samples
 import html as htmllib
 
-from subsync import explain, pages, realdebrid, ui
+from subsync import aiosconfig, explain, pages, realdebrid, ui
 from subsync.aiosconfig import LANGUAGES
 
+REPO = Path(__file__).resolve().parent.parent.parent
 HOSTILE = '"><script>alert(1)</script><b>x</b>'
 
 
@@ -706,6 +713,37 @@ class LimitProblems(unittest.TestCase):
         self.assertNotIn('field-error', html)
 
 
+class LanguageCeiling(unittest.TestCase):
+    """The setup page's language slots and the host's language limit follow the service's one ceiling,
+    aiosconfig.MAX_LANGUAGES (they had 4 written out)."""
+
+    def test_the_slots_and_the_language_limit_follow_the_services_ceiling(self):
+        # in a fresh interpreter, the ceiling lowered before setup's modules are imported (they read it then)
+        script = ('import json\nimport installer\nfrom subsync import aiosconfig\naiosconfig.MAX_LANGUAGES = 3\n'
+                  'from installer import limits, screens\n'
+                  'lim = next(lim for lim in limits.hosting() if lim.setting == "SUBSYNC_MAX_LANGUAGES")\n'
+                  'page = screens.choices(["eng"], "no", "http://x")\n'
+                  'print(json.dumps([lim.options, limits.check(lim, "4"), limits.check(lim, "3"), '
+                  'page.count("data-slot>"), "data-max-languages=\\"3\\"" in page]))\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), PYTHONDONTWRITEBYTECODE='1',
+                       AIOSUBTITLES_STATE=tmp)
+            done = subprocess.run([sys.executable, '-B', '-c', script], cwd=REPO, env=env, timeout=60,
+                                  capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(done.returncode, 0, done.stderr[-600:])
+        self.assertEqual(json.loads(done.stdout), [
+            ['1', '2', '3'], [None, 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 3.'], ['3', None], 3, True])
+
+    def test_today_both_offer_the_services_four(self):
+        lim = next(lim for lim in limits.hosting() if lim.setting == 'SUBSYNC_MAX_LANGUAGES')
+        self.assertEqual(lim.options, tuple(str(n) for n in range(1, aiosconfig.MAX_LANGUAGES + 1)))
+        self.assertEqual(limits.NOT_A_LANGUAGE_LIMIT, 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.')
+        page = screens.choices(['eng'], 'no', 'http://x')
+        self.assertIn(f'data-max-languages="{aiosconfig.MAX_LANGUAGES}"', page)
+        self.assertEqual(page.count('data-slot>'), aiosconfig.MAX_LANGUAGES)
+        self.assertEqual(aiosconfig.LANGUAGE_OPTIONS, [(name, code) for name, _, code in LANGUAGES])
+
+
 class RefusedAnswerSummary(unittest.TestCase):
     """A step that comes back with a refused answer starts with the public pages' summary, focused by the
     script, its message linking to the field; the headings have no unused focus mark."""
@@ -735,6 +773,46 @@ class RefusedAnswerSummary(unittest.TestCase):
                 self.assertIn(f'>{htmllib.escape(words)}</p>', html.split('id="problem-message"', 1)[1])  # and under it
         self.assertEqual(screens.REFUSED, "That didn't go through")
         self.assertIn(screens.REFUSED, pages.UI_WORDS)                             # the settings page's title
+
+    def test_each_question_on_a_step_is_linked_to_its_own_field(self):
+        steps = {
+            'aios': (lambda p: screens.aios([], ask='AIOS_URL', problem=p), ['AIOS_URL']),
+            'config': (lambda p: screens.config([], problem=p), ['AIOS_CONFIG_ID', 'AIOS_CONFIG_PASSWORD']),
+            'choices': (lambda p: screens.choices(['eng'], 'no', 'http://x', problem=p, usenet=False,
+                                                  offer_opensubtitles=True),
+                        ['LANGUAGES', 'AUDIO', 'USENET', 'SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY', 'ADD_OPENSUBTITLES',
+                         'PUBLIC_ADDRESS']),
+            'limits': (lambda p: screens.limits('yourself', {}, problem=p, audio=True, usenet=True),
+                       limits.names(limits.personal(True, True))),
+            'host-limits': (lambda p: screens.limits('host', {}, problem=p, audio=True, usenet=True),
+                            limits.names(limits.hosting(True, True))),
+            'review': (lambda p: screens.review([], cache=True, problem=p), ['CACHE', 'AIOS_USERNAME', 'AIOS_PASSWORD']),
+            'host-address': (lambda p: screens.host_address(problem=p), ['HOST_ADDRESS', 'SUBSYNC_TRUSTED_PROXY']),
+            'host-signups': (lambda p: screens.host_signups('', problem=p), ['SUBSYNC_PUBLIC_INVITE']),
+            'host-choices': (lambda p: screens.host_choices(problem=p),
+                             ['SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY', 'SUBSYNC_TMDB_PERSONAL',
+                              'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE'])}
+        for name, (draw, keys) in steps.items():
+            for key in keys:
+                with self.subTest(step=name, key=key):
+                    html = draw((key, 'Refused.'))
+                    # (a row of buttons' message is the page's own: limits.choose)
+                    field = re.search(r'<p id="problem-message"><a href="#([^"]+)">[^<]+</a></p>', html).group(1)
+                    self.assertEqual(field, key if name.endswith('limits') else key.lower())
+                    self.assertEqual(html.count(f' id="{field}"'), 1)
+
+    def test_only_a_field_the_step_drew_for_the_question_is_linked(self):
+        # The link was found by searching the page for ' id="KEY"' or ' id="key"', so whatever had that id
+        # was linked: a group's heading on the limits step (g0), the secret key's fixed row (secret), a lower-case key
+        for html, key in ((screens.limits('host', {}, problem=('g0', 'Refused.')), 'g0'),
+                          (screens.host_signups('', problem=('SECRET', 'Refused.')), 'secret'),
+                          (screens.choices(['eng'], 'no', 'http://x', problem=('languages', 'Refused.')), 'languages')):
+            with self.subTest(key=key):
+                self.assertIn(f' id="{key}"', html)
+                self.assertIn('<p id="problem-message">Refused.</p>', html)
+        # a question the step didn't draw: no link either
+        self.assertIn('<p id="problem-message">Refused.</p>', screens.aios([], ask='AIOS_CONTAINER',
+                                                                           problem=('AIOS_URL', 'Refused.')))
 
     def test_no_summary_without_a_refused_answer(self):
         for name in ('config', 'choices', 'limits', 'host-limits', 'host-address', 'after-sign-in'):

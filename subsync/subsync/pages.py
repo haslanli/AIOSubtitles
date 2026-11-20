@@ -9,14 +9,13 @@ every value from a person or a config is escaped. The texts come from explain.py
 and UI_WORDS below; nothing else is shown.
 """
 from . import explain, ui
-from .aiosconfig import LANGUAGES, usenet_names
+from .aiosconfig import LANGUAGE_OPTIONS, LANGUAGES, usenet_names
 from .extra import asked_sources, cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .settings import MB
 from .ui import e
 
 _NAMES = {three: name for name, _, three in LANGUAGES}
-_CHOICES = [(name, three) for name, _, three in LANGUAGES]
 
 # The fixed words of the pages, each approved by the owner. A test checks that the pages show nothing else.
 UI_WORDS = (
@@ -85,9 +84,9 @@ def _audio_group(settings, chosen, labelled=True, error_id=None):
     return ui.radio_group(None, rows, id="audio", labelled_by="audio-h", described_by="audio-help", error_id=error_id)
 
 
-def _top(settings, start="/"):
+def _top(settings):
     """The page's header, its Questions link the instance's own (SUBSYNC_CONTACT; none without one)."""
-    return ui.top(settings.contact if settings is not None else "", start)
+    return ui.top(settings.contact if settings is not None else "")
 
 
 def _keep_password(settings, kept=False):
@@ -174,7 +173,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None, ticked
     screens.append(_screen("languages", steps, 100,
                            "<h2 class=\"q\" id=\"languages-q\">Languages</h2>"
                            + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>"
-                           + ui.language_slots(_CHOICES, order, limit, "languages-q", "languages-help",
+                           + ui.language_slots(LANGUAGE_OPTIONS, order, limit, "languages-q", "languages-help",
                                                err("languages"))))
     usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day),
                         checked=ticked["usenet"]),) if usenet_allowed(settings) else ()
@@ -458,7 +457,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
     languages = _row("languages-h", "Languages",
                      (f"<p class=\"field-error\" id=\"languages-error\">{e(lang_error)}</p>" if lang_error else "")
                      + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>",
-                     _form("languages", ui.language_slots(_CHOICES, record["languages"], limit, "languages-h",
+                     _form("languages", ui.language_slots(LANGUAGE_OPTIONS, record["languages"], limit, "languages-h",
                                                           "languages-help", "languages-error" if lang_error else None)
                            + f"<div class=\"actions\">{ui.button('Save languages', 'primary', type='submit')}</div>"))
     kept = bool(record.get("auto_password"))
@@ -505,10 +504,10 @@ def _foot(settings):
     return ui.footer(explain.TMDB_NOTICE) if settings is not None and explain.tmdb_used(settings) else ""
 
 
-def _letter(title, heading, content, personal=False, start="/", settings=None, credit=False):
+def _letter(title, heading, content, personal=False, settings=None, credit=False):
     """A page of text: the header with the instance's Questions link, and TMDB's credit under it only where `credit`
     (the privacy page, which names TMDB)."""
-    body = (f"<div class=\"wrap\">{_top(settings, start)}<main class=\"letter\"><h1>{e(heading)}</h1>{content}</main>"
+    body = (f"<div class=\"wrap\">{_top(settings)}<main class=\"letter\"><h1>{e(heading)}</h1>{content}</main>"
             f"{_foot(settings) if credit else ''}</div>")
     return ui.page(title, body, "letter", personal=personal)
 

@@ -27,6 +27,7 @@ from installer import engine, hosting, limits, plan, screens, update
 from installer.aios import AiosError
 from installer.ui import Stop
 from subsync import ui
+from subsync.langs import DEFAULT_LANGUAGE
 from subsync.ui import FONT_HEADERS, SCRIPT_HEADERS                  # the public site's own (subsync/subsync/public.py)
 from subsync.ui import PAGE_HEADERS as SITE_HEADERS
 
@@ -330,8 +331,8 @@ class App:
             if s.run('choices', e.choices):
                 return self.go('limits')
         filled = e.prefill()
-        text = e.answers.get('LANGUAGES') or filled.get('LANGUAGES') or 'English'
-        languages = [three for _, _, three in (plan.parse_languages(text)[0] or [])] or ['eng']
+        text = e.answers.get('LANGUAGES') or filled.get('LANGUAGES')
+        languages = [three for _, _, three in plan.parse_languages(text)[0]] or [DEFAULT_LANGUAGE]
         audio = plan.audio_answer(e.answers.get('AUDIO') or filled.get('AUDIO')) or 'no'
         usenet = str(e.answers.get('USENET') or filled.get('USENET')) == 'yes' \
             if getattr(e, 'usenet_services', None) else None

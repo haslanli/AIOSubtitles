@@ -74,6 +74,8 @@ OFFERED = ('eng', 'spa', 'fre', 'ger', 'ita', 'por', 'rus', 'ukr', 'pol', 'dut',
            'hun', 'rum', 'bul', 'hrv', 'srp', 'gre', 'tur', 'ara', 'heb', 'per', 'hin', 'ind', 'tha', 'vie', 'jpn',
            'kor', 'chi')
 LANGUAGES = [(langs.NAMES[three], langs.lang2(three), three) for three in OFFERED]   # (name, ISO 639-1, ISO 639-2/B)
+# (name, code) pairs: what the language slots offer (ui.language_slots), on the site's pages and the setup page
+LANGUAGE_OPTIONS = [(name, three) for name, _, three in LANGUAGES]
 # what parse_languages understands: each language's name (any case) and codes, ISO 639-2's terminologic codes (deu,
 # fra, …) and "farsi"
 _BY = {key: lang for lang in LANGUAGES for key in (lang[0].lower(), lang[1], lang[2])}
