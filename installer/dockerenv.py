@@ -36,8 +36,7 @@ def docker_problem():
             return ('Docker is installed, but this user may not use it.',
                     'Run ./setup with sudo, or add yourself to the docker group (sudo usermod -aG docker $USER, then log in again).')
         return 'Docker is installed but not running.', 'Start it (sudo systemctl start docker, or open Docker Desktop), then run ./setup again.'
-    code, out, _ = run(['docker', 'compose', 'version', '--short'])
-    if code != 0:
+    if run(['docker', 'compose', 'version', '--short'])[0] != 0:
         return 'Docker Compose v2 is missing.', 'Install the docker-compose-plugin package, then run ./setup again.'
     return None
 
@@ -238,12 +237,27 @@ def foreign(project, container, install_id, unlabelled=()):
     return found
 
 
+def _remove_checks(project, tag):
+    """Removes the start checks' containers (first) and volumes that carry this install's label (`tag`): what a setup
+    stopped during a check leaves behind, still running (the page runs an update in a thread that Ctrl-C doesn't
+    wait for)."""
+    prefix = f'{project}-check-'
+    for listing, remove in ((['docker', 'ps', '-a', '--format', '{{.Names}}'], ['docker', 'rm', '-f']),
+                            (['docker', 'volume', 'ls', '--format', '{{.Name}}'], ['docker', 'volume', 'rm'])):
+        code, out, _ = run(listing + ['--filter', f'label={tag}', '--filter', f'name={prefix}'])
+        names = [n for n in out.split() if n.startswith(prefix)] if code == 0 else []   # the filter matches parts too
+        if names:
+            run(remove + names)
+
+
 def check_image(image, project, install_id, seconds=90):
     """The new version started once while the old one keeps running: a throwaway container from `image`, with no
     published port, an empty volume of its own, public mode and a throwaway secret, as the service's user. (True, '')
-    when /health answers ok within `seconds`, else (False, reason). It and its volume are removed either way."""
+    when /health answers ok within `seconds`, else (False, reason). It and its volume are removed either way, and an
+    earlier check's left behind are removed first."""
     name = f'{project}-check-{secrets.token_hex(4)}'
     tag = f'{INSTALL_LABEL}={install_id}'
+    _remove_checks(project, tag)
     try:
         run(['docker', 'volume', 'create', '--label', tag, name])
         code, out, err = run(['docker', 'run', '-d', '--name', name, '--label', tag, '--user', SERVICE_USER,

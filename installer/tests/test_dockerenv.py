@@ -349,6 +349,28 @@ class CheckImage(unittest.TestCase):
         secret = next(a for a in start if a.startswith('SUBSYNC_SECRET_KEY='))
         self.assertGreaterEqual(len(secret.split('=', 1)[1]), 43)
 
+    def test_an_earlier_checks_leftovers_are_removed_first(self):
+        # A check is removed in a `finally` that doesn't run when setup stops during it (Ctrl-C while the
+        # page's update thread runs it); its container kept running and nothing removed it later (each has a new name)
+        def listing(names):     # Docker's answer: only with this install's label and the checks' names asked for
+            return lambda cmd: (0, names if 'label=org.aiosubtitles.install=id-1' in cmd
+                                and 'name=aiosubtitles-check-' in cmd else '', '')
+        docker = FakeDocker([(['docker', 'ps', '-a'],
+                              listing('aiosubtitles-check-0badc0de\nold-aiosubtitles-check-1\n')),
+                             (['docker', 'volume', 'ls'], listing('aiosubtitles-check-0badc0de\n')),
+                             (['docker', 'exec'], (0, 'ok', ''))])
+        with mock.patch.object(dockerenv, 'run', docker), mock.patch.object(dockerenv.time, 'sleep', lambda s: None):
+            good, reason = dockerenv.check_image(IMAGE, 'aiosubtitles', 'id-1')
+        self.assertTrue(good, reason)
+        cmds = [c for c, _ in docker.calls]
+        start = next(i for i, c in enumerate(cmds) if c[:3] == ['docker', 'run', '-d'])
+        self.assertEqual([c for c in cmds[:start] if c[1] in ('rm', 'volume') and 'rm' in c],
+                         [['docker', 'rm', '-f', 'aiosubtitles-check-0badc0de'],
+                          ['docker', 'volume', 'rm', 'aiosubtitles-check-0badc0de']])   # the container, then its volume
+        self.assertFalse(any('old-aiosubtitles-check-1' in c for c in cmds[1:]))     # Docker's filter matched a part
+        name = cmds[start][cmds[start].index('--name') + 1]
+        self.assertEqual(cmds[-2:], [['docker', 'rm', '-f', name], ['docker', 'volume', 'rm', name]])
+
     def test_any_spelling_of_a_published_port_is_seen(self):
         # the check above once looked for a "-p" argument only
         for args in (['-p', '8790:8790'], ['-p8790:8790'], ['-P'], ['-dp', '8790:8790'], ['-dP'],
