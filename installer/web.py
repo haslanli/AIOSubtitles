@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from installer import engine, hosting, limits, plan, screens, update
 from installer.aios import AiosError
-from installer.ui import Stop
+from installer.ui import Stop, needs_answer
 from subsync import ui
 from subsync.langs import DEFAULT_LANGUAGE
 from subsync.ui import FONT_HEADERS, SCRIPT_HEADERS                  # the public site's own (subsync/subsync/public.py)
@@ -81,6 +81,7 @@ class Session:
         self.e.route = route
         self.done, self.rows, self.problems, self.stops, self.asks = set(), {}, {}, {}, {}
         self.saved = self.test_read = False
+        self.read_good = True               # the test read's result (none done: nothing against the install)
         self.jobs = {}
         self.lock = threading.Lock()
         self.busy = threading.Lock()        # one request at a time works on the engine (a double click on Save waits)
@@ -127,13 +128,16 @@ class Session:
 
     def redo(self, steps):
         """`steps` are to be done again: their finished background work goes, so it runs again (the check's test read
-        with the check), and a save among them is made again: the next "Save these changes" saves and installs the
-        answers given since. Work still running stays (the steps before it lead to its page meanwhile, App.route)."""
+        with the check, its rows, stop and result too: it is offered again), and a save among them is made again: the
+        next "Save these changes" saves and installs the answers given since. Work still running stays (the steps
+        before it lead to its page meanwhile, App.route)."""
         for step in steps:
             self.again(step)
         if 'check' in steps:
             self.again('check-read')
-            self.test_read = False
+            for kept in (self.rows, self.problems, self.stops, self.asks):
+                kept.pop('check-read', None)
+            self.test_read, self.read_good = False, True
         if 'review' in steps:
             self.saved = False
 
@@ -293,21 +297,27 @@ class App:
 
     def step_config(self, s, method, form, one):
         e = s.e
+        config_id = None                # the ID box, when it shows what was sent
         if method == 'POST':
+            given = one.get('AIOS_CONFIG_ID', '')
             password = one.get('AIOS_CONFIG_PASSWORD', '')
             if password:
-                e.answers['AIOS_CONFIG_ID'] = one.get('AIOS_CONFIG_ID', '')
+                e.answers['AIOS_CONFIG_ID'] = given
                 e.answers['AIOS_CONFIG_PASSWORD'] = password
                 s.run('config', e.read_viewer)
-            elif 'config' in s.stops and one.get('AIOS_CONFIG_ID') == e.answers.get('AIOS_CONFIG_ID'):
+            elif 'config' in s.stops and given == e.answers.get('AIOS_CONFIG_ID'):
                 s.run('config', e.read_viewer)      # after a stop: read again, with the ID and password given
-            elif one.get('go') == 'next' and 'config' in s.done:
+            elif one.get('go') == 'next' and 'config' in s.done and plan.config_id_from(given) == e.uuid:
+                s.problems.pop('config', None)      # the config read before, its ID unchanged
                 return self.go('choices')
             else:
-                s.problems['config'] = ('AIOS_CONFIG_PASSWORD', '"Its password" needs an answer.')
-        config_id = e.answers.get('AIOS_CONFIG_ID') or e.prefill().get('AIOS_CONFIG_ID', '')
-        if 'config' in s.done:
-            config_id = getattr(e, 'uuid', config_id)
+                # another config's ID (or none read yet) needs its password; the box keeps the ID sent (a link's
+                # config ID: never its encrypted password)
+                s.problems['config'] = ('AIOS_CONFIG_PASSWORD', needs_answer(screens.LABELS['AIOS_CONFIG_PASSWORD']))
+                config_id = plan.config_id_from(given) or given
+        if config_id is None:
+            config_id = e.uuid if 'config' in s.done else \
+                e.answers.get('AIOS_CONFIG_ID') or e.prefill().get('AIOS_CONFIG_ID', '')
         return self.page(screens.config(s.rows.get('config', []), config_id, s.problems.get('config'),
                                         s.stops.get('config')))
 
@@ -399,19 +409,18 @@ class App:
                 s.again(step)
                 s.start_job(step, work)
                 return self.go(step)
-        running = s.running(step)
-        rule = getattr(s.e, 'web_server_rule', None)
+        e = s.e         # the rule this run of the install showed, if any (each run forgets the last one's first)
         warnings = [row for row in s.rows.get('review', []) if row[0] in ('warn', 'bad')]
-        return self.page(screens.installing(s.route, s.live(step), running, s.stops.get(step), rule=rule,
-                                            rule_intro=getattr(s.e, 'rule_intro', None),
-                                            rule_note=getattr(s.e, 'rule_note', None), warnings=warnings))
+        return self.page(screens.installing(s.route, s.live(step), s.running(step), s.stops.get(step),
+                                            rule=e.web_server_rule, rule_intro=e.rule_intro, rule_note=e.rule_note,
+                                            warnings=warnings))
 
     def step_check(self, s, method, form, one):
         e = s.e
         if method == 'POST' and not s.running('check') and not s.running('check-read'):
             if one.get('TEST_READ') and not s.test_read and getattr(e, 'ready_rows', None):
                 s.test_read = True
-                s.start_job('check-read', lambda: setattr(e, 'read_good', e.test_read(e.ready_rows)))
+                s.start_job('check-read', lambda: setattr(s, 'read_good', e.test_read(e.ready_rows)))
                 return self.go('check')
             if 'check' in s.done or ('check' in s.jobs and not s.running('check')):   # done, or it couldn't run
                 s.done.add('check')
@@ -431,7 +440,7 @@ class App:
         if s.route == 'host':
             title, lines, after = e.host_summary_parts(good)
         else:
-            good = good and getattr(e, 'read_good', True)
+            good = good and s.read_good
             title, lines, after = e.summary_parts(good)
         warnings = [] if good else [row for step in checks for row in s.live(step) if row[0] in ('warn', 'bad')]
         self.finish_in(DONE_S)

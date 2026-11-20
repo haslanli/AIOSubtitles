@@ -386,6 +386,35 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertIn('<h1>Installed, with warnings</h1>', text)
         self.assertNotIn('<h1>Done</h1>', text)
 
+    def test_a_test_read_from_before_an_answer_changed_goes_with_its_check(self):
+        # Going back and saving again ran the check again but kept the earlier test read's rows and result:
+        # the new check's page still said the read was refused, and the done page said "Installed, with warnings"
+        refused = 'The test read was refused by the debrid service'
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        self.b.follow('install', {'go': 'next'})
+        self.b.settle('check')
+        good, self.selftest = self.selftest, {'ok': False, 'error': 'refused'}
+        self.b.post('check', {'TEST_READ': 'yes'})
+        _, _, text = self.b.settle('check')
+        self.assertIn(refused, text)
+        self.selftest = good
+        self.b.get('choices')                                                       # the browser's Back
+        self.b.follow('choices', {'LANGUAGES': ['eng', 'spa', ''], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
+                                  'ADD_OPENSUBTITLES': 'yes', 'go': 'next'})
+        self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        self.b.follow('install', {'go': 'next'})
+        _, _, text = self.b.settle('check')
+        self.assertIn('AIOStreams asks subsync for subtitles', text)
+        self.assertNotIn(refused, text)
+        self.assertIn('Do the test read now?', text)                                # offered again
+        _, _, text = self.b.follow('check', {'go': 'next'})
+        self.assertNotIn('Installed, with warnings', text)
+        self.assertNotIn(refused, text)
+
     def test_a_failed_update_can_be_tried_again(self):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8806)
@@ -458,6 +487,40 @@ class Personal(BackgroundWork, FlowFixture):
                 self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/config'))
         self.assertFalse(any(m == 'PUT' and who == other for m, who, _ in self.aios.log))
         self.assertEqual(self.aios.users[other]['config']['presets'][0]['instanceId'], 'B-ONLY')
+
+    def test_another_configs_id_without_its_password_is_asked_for_not_dropped(self):
+        # Once the config was read, Continue with another config's ID and no password went on with the config
+        # read before, saying nothing: the new ID was never kept or checked
+        other = '2b3c4d5e-1234-4abc-8def-0123456789ab'
+        self.aios.users[other] = {'password': PASSWORD, 'config': {'services': [TORBOX], 'presets': [ZILEAN, SUBS]}}
+        self.walk_to_config()
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.assertIn('Config found', text)
+        status, _, text = self.b.post('config', {'AIOS_CONFIG_ID': other, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
+        self.assertEqual(status, 200)
+        self.assertIn('"Its password" needs an answer.', text)
+        self.assertRegex(self.b.pages[-1], rf'<input[^>]*value="{other}"[^>]*name="AIOS_CONFIG_ID"'
+                                           rf'|<input[^>]*name="AIOS_CONFIG_ID"[^>]*value="{other}"')   # as sent
+        self.assertEqual(self.app.session.e.uuid, UUID)
+        # its install link sent with no password: its ID in the box, never the link's encrypted part
+        self.b.post('config', {'AIOS_CONFIG_ID': f'{PUBLIC}/stremio/{other}/OTHER-ENC/manifest.json', 'go': 'next'})
+        self.assertIn(f'value="{other}"', self.b.pages[-1])
+        self.assertNotIn('OTHER-ENC', self.b.pages[-1])
+        # the same config's ID, or its link: on without the password, the problem gone
+        status, headers, _ = self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': '',
+                                                    'go': 'next'})
+        self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/choices'))
+        self.assertNotIn('needs an answer', self.b.get('config')[2])
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': other, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.assertIn('Config found', text)
+        self.assertEqual(self.app.session.e.uuid, other)
+
+    def test_the_missing_password_message_names_the_fields_label(self):
+        # The message was typed out by hand beside the label it quotes
+        self.walk_to_config()
+        with mock.patch.dict(screens.LABELS, {'AIOS_CONFIG_PASSWORD': 'Its config password'}):
+            _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
+        self.assertIn('"Its config password" needs an answer.', text)
 
     def test_a_later_step_before_its_turn_goes_back_to_the_first_one_left(self):
         self.b.post('', {'ROUTE': 'yourself'})
@@ -770,6 +833,26 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertNotIn('Your web server needs one rule', text)
         self.assertNotIn('reverse_proxy', text)
         self.assertIsNone(self.app.session.e.rule_note)
+
+    def test_a_rule_an_earlier_install_showed_is_gone_for_an_address_with_a_port(self):
+        # An address with its own port needs no rule, and the install never asks
+        # for one; the earlier install's rule stayed on the page
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        _, _, text = self.b.settle('install')
+        self.assertIn('Your web server needs one rule', text)
+        self.b.follow('install', {'go': 'next'})
+        self.b.settle('check')
+        self.b.get('choices')                                                       # the browser's Back
+        self.b.follow('choices', {'LANGUAGES': ['eng', 'rus', ''], 'PUBLIC_ADDRESS': 'http://192.168.1.5:8795',
+                                  'ADD_OPENSUBTITLES': 'yes', 'go': 'next'})
+        self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        self.b.post('review', {'CONFIRM': 'yes'})
+        _, _, text = self.b.settle('install')
+        self.assertIn('subsync is running (it restarts by itself after a reboot)', text)
+        self.assertNotIn('Your web server needs one rule', text)
+        self.assertNotIn('reverse_proxy', text)
+        self.assertEqual(self.app.session.e.s['public_kind'], 'port')
 
     def test_while_the_install_runs_the_steps_before_it_lead_to_its_page(self):
         # an earlier step's answers once changed under the running install

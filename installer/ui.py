@@ -109,6 +109,11 @@ def masked(value):
 REMOVE = 'remove'      # typed at an optional question: no answer is kept (its current one is removed)
 
 
+def needs_answer(question):
+    """What a question left without an answer says, in a terminal and on the setup page."""
+    return f'"{question}" needs an answer.'
+
+
 def answers_advice(key, given):
     """The way out after an answer was refused or not given: `given`, the keys the answers file has (None: no file)."""
     if given is None:
@@ -188,7 +193,7 @@ class Asker:
                 if optional:
                     return ''
                 if self.yes:
-                    stop(f'"{question}" needs an answer.', answers_advice(key, self.file_keys))
+                    stop(needs_answer(question), answers_advice(key, self.file_keys))
                 warn('This one is needed.')
                 continue
             if check:

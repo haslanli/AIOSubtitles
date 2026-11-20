@@ -403,7 +403,7 @@ class PageAsk:
         if not value:
             if optional:
                 return ''
-            raise Problem(key, f'"{question}" needs an answer.', missing=given is None)
+            raise Problem(key, ui.needs_answer(question), missing=given is None)
         if check:
             good, message, value = check(value)
             if not good:
