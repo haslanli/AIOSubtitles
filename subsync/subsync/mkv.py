@@ -23,14 +23,21 @@ AUDIO_BYTES_LOCK = threading.Lock()
 # ffmpeg decodes bytes of files anyone can publish; on Linux each decoder gets its own limits
 FFMPEG_MEMORY_KB = 1024 * 1024    # address space of one decoder (1 GiB; a 30 s window needs a few MB)
 FFMPEG_CPU_S = 120                # processor seconds of one decoder (a window takes well under one)
+# the only decoders ffmpeg may open, by its names for them (DTS's is dca, MP3's mp3float): those of the audio
+# codecs Matroska and MP4 files carry. A window's header names every track of the file, and ffmpeg's probing would
+# otherwise open each one's decoder (the video's too) on the window's bytes.
+AUDIO_DECODERS = ("aac", "ac3", "eac3", "dca", "truehd", "mlp", "flac", "opus", "vorbis", "alac", "wavpack", "tta",
+                  "mp3float", "mp3", "mp2float", "mp2", "mp1float", "mp1", "pcm_s16le", "pcm_s16be", "pcm_s24le",
+                  "pcm_s24be", "pcm_s32le", "pcm_s32be", "pcm_f32le", "pcm_f64le", "pcm_u8")
 
 
 def decoder_cmd(ffmpeg, fmt, args, linux=None):
     """An ffmpeg command that decodes audio from standard input in the format `fmt`: it opens only the pipe (no file
-    or network address a file could name) and only that one demuxer; on Linux the shell sets its memory and processor
-    limits just before ffmpeg starts (no preexec_fn: the worker has threads), and ffmpeg dies past them."""
-    cmd = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "pipe", "-format_whitelist", fmt, "-f", fmt,
-           "-i", "pipe:0", *args]
+    or network address a file could name), only that one demuxer and only the decoders of AUDIO_DECODERS; on Linux the
+    shell sets its memory and processor limits just before ffmpeg starts (no preexec_fn: the worker has threads), and
+    ffmpeg dies past them."""
+    cmd = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "pipe", "-format_whitelist", fmt,
+           "-codec_whitelist", ",".join(AUDIO_DECODERS), "-f", fmt, "-i", "pipe:0", *args]
     on_linux = sys.platform.startswith("linux") if linux is None else linux
     if on_linux:
         # the limits where the shell can set them; ffmpeg runs either way, so a shell that can't never stops decoding
@@ -181,12 +188,12 @@ def ass_text(block_text):
 
 def uncompressed(payload, comp, limit):
     """A block payload with the track's ContentCompression undone (zlib, or header stripping); None when it can't be,
-    or when it would inflate past `limit` bytes. A zlib payload cut short (a text line's block past WORD_READ) gives
-    what its start inflates to."""
+    or when it would inflate past `limit` bytes (header stripping too, whose settings a file may make
+    megabytes long). A zlib payload cut short (a text line's block past WORD_READ) gives what its start inflates to."""
     if payload is None or not comp:
         return payload
     if comp["algo"] == 3:
-        return comp["settings"] + payload
+        return comp["settings"] + payload if len(comp["settings"]) + len(payload) <= limit else None
     if comp["algo"] == 0:
         d = zlib.decompressobj()
         try:

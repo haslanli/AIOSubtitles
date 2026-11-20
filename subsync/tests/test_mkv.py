@@ -40,8 +40,32 @@ class InflateLimitTest(unittest.TestCase):
         self.assertEqual(mkv.uncompressed(packed, self.ZLIB, mkv.TEXT_INFLATE), text)
         start = mkv.uncompressed(packed[:len(packed) // 2], self.ZLIB, mkv.TEXT_INFLATE)
         self.assertTrue(start and text.startswith(start))
-        self.assertEqual(mkv.uncompressed(b"\x00\x01", {"algo": 3, "settings": b"\x80"}, 1), b"\x80\x00\x01")
+        self.assertEqual(mkv.uncompressed(b"\x00\x01", {"algo": 3, "settings": b"\x80"}, 3), b"\x80\x00\x01")
         self.assertIsNone(mkv.uncompressed(b"not zlib", self.ZLIB, mkv.TEXT_INFLATE))
+
+    def test_header_stripping_past_its_limit_is_no_answer(self):
+        """Header stripping puts the track's settings before each payload; settings a file makes megabytes
+        long made every line that long (120 lines of 0.2 MiB grew the worker by 451 MiB)."""
+        stripped = {"algo": 3, "settings": b"s" * (mkv.TEXT_INFLATE - 2)}
+        self.assertEqual(mkv.uncompressed(b"ab", stripped, mkv.TEXT_INFLATE), stripped["settings"] + b"ab")
+        self.assertIsNone(mkv.uncompressed(b"abc", stripped, mkv.TEXT_INFLATE))
+        self.assertIsNone(mkv.uncompressed(b"\x00" * 10, {"algo": 3, "settings": bytes(mkv.IMAGE_INFLATE)},
+                                           mkv.IMAGE_INFLATE))
+
+    def stripped_line(self, settings):
+        """A text track whose blocks drop `settings` (header stripping), one line's block in a cluster, and the words
+        line_words reads there."""
+        encoding = el("6D80", el("6240", el("5034", el("4254", b"\x03") + el("4255", settings))))
+        data = matroska(tracks=el("1654AE6B", el("AE", el("D7", b"\x01") + el("83", b"\x11") + el("86", b"S_TEXT/UTF8")
+                                                          + encoding)))
+        block = el("A3", b"\x81\x00\x00\x80" + b"there")
+        index = MkvIndex(Memory(data + el("1F43B675", el("E7", b"\x00") + block))).read_head()
+        index.track_places[1] = (array("d", [1.0]), array("q", [len(data) + 12 + 10]))  # the block, past E7
+        return index.line_words(1, [1.0])
+
+    def test_text_lines_whose_stripped_header_is_past_the_limit_are_left_out(self):
+        self.assertEqual(self.stripped_line(b"Hello "), {1.0: "Hello there"})
+        self.assertEqual(self.stripped_line(b"word " * (mkv.TEXT_INFLATE // 5)), {})
 
     def test_image_lines_past_their_limit_are_left_out(self):
         r = Memory(fixture("tiny-pgs-zlib.mkv"))

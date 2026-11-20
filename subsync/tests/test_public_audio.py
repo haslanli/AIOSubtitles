@@ -670,6 +670,46 @@ class DecoderTest(unittest.TestCase):
         self.assertEqual(cmd[5:], decoder_cmd("/usr/bin/ffmpeg", "aac", [], linux=False)[1:])
         self.assertEqual((FFMPEG_MEMORY_KB, FFMPEG_CPU_S), (1024 * 1024, 120))
 
+    def test_the_decoder_opens_only_the_audio_decoders_listed(self):
+        """A window's header names every track of the file, and ffmpeg's probing opened each one's decoder (the
+        video's too); it may now open only those of AUDIO_DECODERS, named before the input as the other lists are."""
+        from subsync.mkv import AUDIO_DECODERS, decoder_cmd
+        cmd = decoder_cmd("ffmpeg", "matroska", [], linux=False)
+        self.assertEqual(cmd[cmd.index("-codec_whitelist") + 1], ",".join(AUDIO_DECODERS))
+        self.assertLess(cmd.index("-codec_whitelist"), cmd.index("-i"))
+
+    @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
+    def test_each_listed_codec_decodes_and_another_does_not(self):
+        """AUDIO_DECODERS holds ffmpeg's own names of the decoders it picks (DTS's dca, MP3's mp3float): a
+        second of each audio codec this ffmpeg can write, in Matroska, decodes whole through the command; a codec not
+        listed (WMA) gives nothing."""
+        import subprocess
+        import tempfile
+        from subsync.mkv import AUDIO_DECODERS, decoder_cmd, pipe_until
+        made = {"aac": ["aac"], "ac3": ["ac3"], "eac3": ["eac3"], "dca": ["dca", "-strict", "-2"],
+                "truehd": ["truehd", "-strict", "-2"], "mlp": ["mlp", "-strict", "-2"], "flac": ["flac"],
+                "opus": ["libopus"], "vorbis": ["vorbis", "-strict", "-2", "-ac", "2"], "alac": ["alac"],
+                "wavpack": ["wavpack"], "tta": ["tta"], "mp3float": ["libmp3lame"], "mp2float": ["mp2"],
+                **{p: [p] for p in AUDIO_DECODERS if p.startswith("pcm_")}}
+        cmd = decoder_cmd("ffmpeg", "matroska", ["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"])
+        with tempfile.TemporaryDirectory() as folder:
+            def decoded(name, encoder):
+                path = os.path.join(folder, name + ".mkv")
+                if subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=f=440:r=48000:d=1",
+                                   "-c:a", *encoder, path], stdin=subprocess.DEVNULL, capture_output=True,
+                                  timeout=60).returncode:
+                    return None                       # no such encoder in this ffmpeg
+                with open(path, "rb") as f:
+                    return len(pipe_until(cmd, f.read(), iter(()), 10 ** 9, timeout=60))
+            for name, encoder in made.items():
+                self.assertIn(name, AUDIO_DECODERS)
+                with self.subTest(name):
+                    n = decoded(name, encoder)
+                    if n is None:
+                        self.skipTest(f"this ffmpeg can't write {name}")
+                    self.assertAlmostEqual(n / 2 / 16000, 1.0, delta=0.05)
+            self.assertEqual(decoded("wmav2", ["wmav2"]), 0)
+
     @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
     def test_both_audio_readers_decode_through_it(self):
         from unittest import mock
