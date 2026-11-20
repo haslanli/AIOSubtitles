@@ -11,8 +11,9 @@ Fragmented files (an `mvex` box in the movie box, or `moof`) are not supported: 
 """
 import struct
 
-from .mkv import (DAMAGED, EBML, HASH_CHUNK, HEAD_BYTES, WORD_READ, LineReads, MkvIndex, NotMatroska, add_audio_bytes,
-                  decoder_cmd, index_hash, named_not_dialogue, pipe_until, read_lines, sane_duration, starts_at, vint)
+from .mkv import (DAMAGED, EBML, HASH_CHUNK, HEAD_BYTES, WINDOW_MARGIN_S, WORD_READ, LineReads, MkvIndex, NotMatroska,
+                  add_audio_bytes, decoder_cmd, index_hash, named_not_dialogue, pipe_until, read_lines, sane_duration,
+                  starts_at, vint)
 from .reader import IndexTooLarge
 
 MAX_MOOV = 64 * 1024 * 1024      # a larger movie box is never read (IndexTooLarge)
@@ -20,7 +21,6 @@ MAX_MOOV = 64 * 1024 * 1024      # a larger movie box is never read (IndexTooLar
 # of the movie box can claim billions: a file with more than these is not read (NotMp4)
 MAX_TEXT_SAMPLES = 1_000_000     # of all its text tracks together (a film's track: a few thousand lines and gaps)
 MAX_AUDIO_SAMPLES = 5_000_000    # of the audio track its windows are cut from (3 hours of 48 kHz AAC: about 0.5 M)
-WINDOW_MARGIN_S = 0.1            # audio read on each side of a window, so its first and last frames are whole
 # how many times its share of the file an audio window's bytes may span: a real file's busiest scene holds a few times
 # its share, a made-up chunk table can place a window's last sample gigabytes away (NotMp4)
 MAX_WINDOW_SPAN = 8

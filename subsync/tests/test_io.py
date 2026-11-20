@@ -172,9 +172,10 @@ class MkvTest(unittest.TestCase):
         a, b = idx.byte_range(30.0, 10.0)
         self.assertTrue(0 < a < b <= idx.size)
         self.assertLess(b - a, idx.size)
-        # From the cluster cued at or before the window's start (an earlier one would have the decoder start
-        # there), on past the first cluster cued after its end, and a fraction of the file, as an MP4 window's read
-        self.assertEqual(a, max(p for t, p in idx.cue_points if t <= 30.0))
+        # From the cluster cued at or before the window's start less its margin (the decoder primes
+        # there, -ss still starts the window on time; an earlier cluster would be read for nothing), on past the first
+        # cluster cued after its end, and a fraction of the file, as an MP4 window's read
+        self.assertEqual(a, max(p for t, p in idx.cue_points if t <= 30.0 - mkv.WINDOW_MARGIN_S))
         self.assertLess(min(p for t, p in idx.cue_points if t > 40.0), b)
         self.assertLess(b - a, idx.size // 3)
 

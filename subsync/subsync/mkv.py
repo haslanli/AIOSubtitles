@@ -67,6 +67,9 @@ MAX_CUE_POINTS = 1_000_000
 # hold half a gigabyte, or a worker for hours: a file with more is not read (NotMatroska)
 MAX_TRACKS = 256
 MAX_DURATION_S = 7 * 24 * 3600     # the longest runtime taken from a file; past it (or NaN, infinite, 0) it is unknown
+# audio read before a window (an MP4's after it too), so that the decoder has primed and its first frame is whole when
+# the window starts (a Matroska window read from a cluster that starts at its start began up to 96 ms late)
+WINDOW_MARGIN_S = 0.1
 
 # Matroska element ids (RFC 9559), by the specification's names: the top-level ones, then the children read
 EBML, SEGMENT, SEEKHEAD, INFO, TRACKS, CUES, CLUSTER = (0x1A45DFA3, 0x18538067, 0x114D9B74, 0x1549A966,
@@ -443,6 +446,7 @@ class MkvIndex:
         self.first_cluster = None
         self.ebml = self.info = self.tracks_raw = b""
         self.first64 = self.last64 = b""   # the file's first and last 64 KiB, when a read holds them (index_hash)
+        self.line_reads = {}               # subtitle track number -> its LineReads, one for the job (_line_reads)
 
     # -- reads -------------------------------------------------------------------------------------------------
     def read_head(self, head=None):
@@ -671,11 +675,11 @@ class MkvIndex:
         block's place in the Cues (one read of WORD_READ bytes; WORD_READS_AT_ONCE at once). Returns {start: text} for
         those it could read; a line whose cue has no place in its cluster, or whose block doesn't parse, is left out. A
         refused read (Refused) or a stopped job (Stopped) is raised; after MAX_FAILED_IN_A_ROW failed reads in a row no
-        further line is read (LineReads)."""
+        further line of the track is read, in this call or a later one (_line_reads)."""
         meta = next((t for t in self.tracks if t.get("number") == track), {})
         comp = meta.get("compression")
         want = self._places(track, starts)
-        reads = LineReads(self.r)
+        reads = self._line_reads(track)
 
         def one(item):
             s, at = item
@@ -695,6 +699,12 @@ class MkvIndex:
             return s, text
         return read_lines(want, one, reads)
 
+    def _line_reads(self, track):
+        """The track's LineReads, one for the index's life (the job), so that its reads stop for good however many calls
+        make them: pipeline.track_words reads an image track a batch of lines at a time, and a LineReads per
+        call started the count of failed reads again in every batch (15 failed reads for 60 lines, not 3)."""
+        return self.line_reads.setdefault(track, LineReads(self.r))
+
     def _places(self, track, starts):
         """[(start, the byte where its block's search begins)] for the starts whose cue has a place in its cluster."""
         times, places = self.track_places.get(track, ((), ()))
@@ -708,11 +718,12 @@ class MkvIndex:
         """The block payloads (uncompressed) of the lines of image track `track` that start at `starts`: a first
         read of WORD_READ bytes, then the rest of the block when it is longer, never a block over IMAGE_READ bytes;
         WORD_READS_AT_ONCE lines at once. Returns {start: payload}. A refused read (Refused) or a stopped job (Stopped)
-        is raised; after MAX_FAILED_IN_A_ROW failed reads in a row no further line is read (LineReads)."""
+        is raised; after MAX_FAILED_IN_A_ROW failed reads in a row no further line of the track is read, in this call or
+        a later one (_line_reads)."""
         meta = next((t for t in self.tracks if t.get("number") == track), {})
         comp = meta.get("compression")
         want = self._places(track, starts)
-        reads = LineReads(self.r)
+        reads = self._line_reads(track)
 
         def one(item):
             s, at = item
@@ -747,13 +758,16 @@ class MkvIndex:
         return sane_duration(self.duration_s) or sane_duration(max((t for t, _ in self.cue_points), default=None))
 
     def byte_range(self, start, length):
-        """The bytes that hold [start, start + length): from the last cue cluster at or before the start to the cue
-        cluster after the first one cued past the end (else to the Cues or the file's end). A cluster's time here is
-        its first cue's, which can be later than the cluster's own start (mkvmerge cues every subtitle block, video
-        only at keyframes), so that first one may still begin inside the window; the one after it can't, since the
-        first one holds a block past the end."""
+        """The bytes that hold [start, start + length) and the WINDOW_MARGIN_S before it: from the last cue cluster at
+        or before that margin's start (else the first cluster) to the cue cluster after the first one cued past the end
+        (else to the Cues or the file's end). A cluster's time here is its first cue's, which can be later than the
+        cluster's own start (mkvmerge cues every subtitle block, video only at keyframes), so that first one may still
+        begin inside the window; the one after it can't, since the first one holds a block past the end."""
         end_t = start + length
-        a = max((p for t, p in self.cue_points if t <= start), default=self.first_cluster)
+        a = max((p for t, p in self.cue_points if t <= start - WINDOW_MARGIN_S), default=None)
+        if a is None:   # nothing cued that early: the window starts with the file
+            a = self.first_cluster if self.first_cluster is not None else min((p for _, p in self.cue_points),
+                                                                              default=None)
         if a is None:
             raise NotMatroska("no cluster position")
         past = min((p for t, p in self.cue_points if t >= end_t + 0.001 and p > a), default=None)

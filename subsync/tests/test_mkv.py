@@ -5,6 +5,7 @@ most, nothing read past the file's end, the Cues read with the hash's last 64 Ki
 MAX_CUE_POINTS, a plausible runtime, and the clusters an audio window needs. No network: files are served from
 memory."""
 import math
+import os
 import struct
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import zlib
 from array import array
 from unittest import mock
 
-from helpers import el, fixture, have, matroska, Memory, Opener, text_track  # noqa: E402
+from helpers import el, fixture, FIXTURES, have, matroska, Memory, Opener, text_track  # noqa: E402
 from subsync import mkv  # noqa: E402
 from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash  # noqa: E402
 from subsync.mp4 import Mp4Index, open_index  # noqa: E402
@@ -160,6 +161,31 @@ class MidWindowFaultTest(unittest.TestCase):
         with self.assertRaises(ReadFailed) as caught:
             index.window_pcm(30.0, 10.0)
         self.assertTrue(caught.exception.connection)
+
+
+class WindowPrerollTest(unittest.TestCase):
+    """An audio window is read from WINDOW_MARGIN_S before its start, so the decoder has primed when the window
+    starts: one starting where a cue cluster starts (20, 30 and 40 s here) came out up to 96 ms late and short by as
+    much, every speech onset in it placed early by that, while the fit took it as whole."""
+
+    @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
+    def test_a_window_where_a_cluster_starts_is_whole_and_on_time(self):
+        import numpy as np
+        data = fixture("tiny.mkv")
+        index = open_index(RangeReader("http://127.0.0.1:9/tiny.mkv", "test", opener=Opener(data)))
+        for start in (20.0, 20.03, 30.0, 40.0, 45.0):
+            with self.subTest(start=start):
+                got = np.frombuffer(index.window_pcm(start, 6.0), np.int16).astype(np.int32)
+                # the same seconds of the whole file, decoded from its start and cut at `start` (-ss after the input)
+                whole = subprocess.run(
+                    ["ffmpeg", "-nostdin", "-v", "error", "-i", os.path.join(FIXTURES, "tiny.mkv"), "-ss",
+                     f"{start:.3f}", "-t", "6.000", "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=True).stdout
+                whole = np.frombuffer(whole, np.int16).astype(np.int32)
+                self.assertEqual(len(got), 6 * 16000)
+                self.assertEqual(len(whole), len(got))
+                self.assertGreater(np.abs(whole).mean(), 100)                         # sound, not silence
+                self.assertLess(np.abs(got[160:-160] - whole[160:-160]).mean(), 1.0)  # the same samples, not shifted
 
 
 class DecoderCleanupTest(unittest.TestCase):
@@ -723,6 +749,16 @@ class ClusterRangeTest(unittest.TestCase):
         self.assertEqual(index.byte_range(3.0, 3.0), (5698, 37494))     # the cluster from 4.5 s holds 4.5-6
         self.assertEqual(index.byte_range(28.0, 1.0), (83259, 110_000))  # no cue cluster after: up to the Cues
         self.assertEqual(index.byte_range(31.0, 1.0), (98768, 110_000))
+
+    def test_the_read_starts_a_margin_before_the_window(self):
+        """From the cluster cued at or before WINDOW_MARGIN_S before the start, where the decoder primes; one
+        cued at the start itself is not enough."""
+        index = self.index()
+        self.assertEqual(index.byte_range(20.0, 1.0), (37494, 98768))   # the cluster cued at 20 s starts the window
+        self.assertEqual(index.byte_range(20.5, 1.0), (68131, 98768))
+        self.assertEqual(index.byte_range(0.05, 1.0), (5698, 37494))     # nothing cued that early: the first cluster
+        index.first_cluster = None                                       # not in the head: the first cue cluster
+        self.assertEqual(index.byte_range(0.05, 1.0), (5698, 37494))
 
 
 if __name__ == "__main__":

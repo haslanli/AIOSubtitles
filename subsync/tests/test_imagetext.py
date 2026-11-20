@@ -260,6 +260,27 @@ class TrackImagesReadTest(unittest.TestCase):
             mkv.WORD_READS_AT_ONCE = old
         self.assertEqual(len(r.reads) - before, mkv.MAX_FAILED_IN_A_ROW)
 
+    def test_the_stop_holds_for_the_track_across_its_batches(self):
+        """pipeline.track_words reads an image track IMAGE_BATCH lines at a time; the track's reads
+        stop for the job after MAX_FAILED_IN_A_ROW failures, where each batch started the count again (15 failed reads
+        for the 60 lines here, up to 30 for the 120 a track's words take)."""
+        imagetext.set_recogniser(lambda lang: FakeRecogniser())
+        self.addCleanup(imagetext.set_recogniser, None)
+        r, index = self.index()
+        t = next(t for t in index.image_tracks())
+        ref = {"route": "image", "number": t["number"], "language": t["language"], "codec": t["codec"],
+               "cues": t["cues"]}
+        self.assertGreater(len(textpair.pick(t["cues"])), 2 * pipeline.IMAGE_BATCH)       # several batches
+        old = mkv.WORD_READS_AT_ONCE
+        try:
+            mkv.WORD_READS_AT_ONCE = 1                      # one at a time: the count is exact
+            before = len(r.reads)
+            r.fail = lambda n: n >= before
+            self.assertIsNone(pipeline.track_words(index, ref, True))
+        finally:
+            mkv.WORD_READS_AT_ONCE = old
+        self.assertEqual(len(r.reads) - before, mkv.MAX_FAILED_IN_A_ROW)
+
 
 class Index:
     """A file whose only reference is an English PGS track; its lines' images come from imagesubs."""
