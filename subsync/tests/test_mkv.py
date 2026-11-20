@@ -437,6 +437,100 @@ class DamagedFieldTest(unittest.TestCase):
         self.assertEqual(len(index.tracks), len(good.tracks) - sum(t["scale"] == text["scale"] for t in good.tracks))
 
 
+class OversizeChildTest(unittest.TestCase):
+    """A child element is read only within its parent: one whose size claims more than its parent holds is
+    not read, where each such child copied the rest of the buffer (a few hundred KB of made-up entries held GB)."""
+
+    def test_a_track_field_larger_than_its_entry_is_not_read(self):
+        entry = bytes.fromhex("AE8C D78101 838111 63A2 10FFFFFE")    # a CodecPrivate claiming 16 MB in a 12-byte entry
+        index = open_index(Memory(matroska(tracks=el("1654AE6B", text_track(2) + entry * 2000))))
+        self.assertEqual(len(index.tracks), 2001)
+        self.assertEqual(sum(len(t.get("private", b"")) for t in index.tracks), 0)
+        self.assertEqual([t["number"] for t in index.text_tracks()], [2])
+
+    def test_a_cue_field_larger_than_its_point_is_not_read(self):
+        point = el("BB", el("B3", b"\x01") + el("B7", el("F7", b"\x01") + el("F1", b"\x00")))
+        made_up = bytes.fromhex("BB89 B38101 B784 F12FFFFE")         # a CueClusterPosition claiming 1 MB in 4 bytes
+        data = matroska()
+        index = MkvIndex(Memory(data)).read_head()
+        body = el("1C53BB6B", point + made_up * 2000)
+        index.positions[mkv.CUES] = len(data)
+        index.r = Memory(data + body)
+        index.size = len(data) + len(body)
+        index.read_cues()
+        self.assertEqual(index.cue_points, [(0.001, index.seg_data)])
+        self.assertEqual(index.track_cues, {1: [(0.001, 0.0)]})
+
+    def test_a_child_cut_off_at_the_buffers_end_is_not_read_as_a_shorter_one(self):
+        whole = el("AE", el("D7", b"\x01") + el("83", b"\x11"))
+        cut = bytes.fromhex("AE8A D78101 838111 8682") + b"S"       # a CodecID of 2 bytes, 1 of them held
+        self.assertEqual([(i, d, s) for i, _, d, s in mkv.elements(whole, 0, len(whole))], [(0xAE, 9, 20)])
+        self.assertEqual([i for i, *_ in mkv.elements(cut, 2, 12)], [0xD7, 0x83])
+        self.assertEqual([i for i, *_ in mkv.elements(cut, 0, len(cut), spill=True)], [0xAE])
+
+
+class LongIntegerTest(unittest.TestCase):
+    """An EBML unsigned integer is at most 8 bytes; a longer one is damage (NotMatroska), where a
+    2,001-byte TrackNumber opened as fine and then failed every job that recorded it (no int of 4,300 digits or more
+    turns into text)."""
+
+    def test_eight_bytes_at_most(self):
+        self.assertEqual(mkv.uint(b"\xff" * 8), (1 << 64) - 1)
+        self.assertEqual(mkv.uint(b""), 0)
+        with self.assertRaises(NotMatroska):
+            mkv.uint(b"\x01" * 9)
+
+    def test_a_track_number_of_2001_bytes_is_damage(self):
+        track = el("AE", el("D7", b"\x01" * 2001) + el("83", b"\x11") + el("86", b"S_TEXT/UTF8"))
+        with self.assertRaises(NotMatroska):
+            open_index(Memory(matroska(tracks=el("1654AE6B", track))))
+
+
+class Ending(Memory):
+    """Memory with RangeReader's rule at the file's end: a read that starts at or past it fails (ReadFailed)."""
+
+    def get(self, start, length):
+        if length > 0 and start >= self.size:
+            raise ReadFailed("range past the end")
+        return super().get(start, length)
+
+
+class PastTheEndTest(unittest.TestCase):
+    """A position or size the file names that lies past its end (a file cut short, or made
+    up) is never read: Cues there are no Cues, a SeekHead target there is not followed, and an element cut off by the
+    end is damage (NotMatroska). Each was a failed read (ReadFailed), which stopped a Usenet viewer's listings for the
+    day and had a debrid file read again four times."""
+
+    def test_a_file_cut_before_its_cues_is_read_without_them(self):
+        data = fixture("tiny.mkv")
+        cut = data[:open_index(Memory(data)).cues_at]                # the SeekHead still lists the Cues
+        index = open_index(Ending(cut))
+        self.assertIsNone(index.cues_at)
+        self.assertEqual(index.text_tracks()[0]["cues"], [])
+        self.assertEqual(index.read_hash(), oshash(len(cut), cut[:HASH_CHUNK], cut[-HASH_CHUNK:]))
+
+    def test_tracks_that_run_past_the_files_end_are_damage(self):
+        tracks = bytes.fromhex("1654AE6B") + b"\x01" + (300_000).to_bytes(7, "big") + text_track()
+        for reader in (Ending, Memory):
+            with self.assertRaises(NotMatroska, msg=reader.__name__):
+                open_index(reader(matroska(tracks=tracks)))
+
+    def test_a_seekhead_target_past_the_end_is_not_followed(self):
+        data = matroska(pad_to=HEAD_BYTES - 6, seek_tracks=True)[:HEAD_BYTES - 6]   # cut where Tracks would start
+        r = Ending(data)
+        with self.assertRaises(NotMatroska) as caught:
+            open_index(r)
+        self.assertIn("no Tracks", str(caught.exception))
+        self.assertEqual(r.reads, [(0, HEAD_BYTES)])
+
+    def test_tracks_found_through_the_seekhead_and_cut_by_the_end_are_damage(self):
+        data = matroska(tracks=el("1654AE6B", text_track(1) + text_track(2)), pad_to=HEAD_BYTES - 6, seek_tracks=True)
+        first_end = HEAD_BYTES - 6 + 12 + len(text_track(1))         # Tracks' header, then its first entry whole
+        self.assertEqual(len(open_index(Ending(data)).tracks), 2)
+        with self.assertRaises(NotMatroska):
+            open_index(Ending(data[:first_end + 5]))
+
+
 class ClusterRangeTest(unittest.TestCase):
     """A cluster's time in the Cues is its first cue's, a subtitle's when it holds no keyframe, so a cluster
     cued past the window may begin inside it: the range runs to the cue cluster after that one."""

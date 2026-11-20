@@ -331,8 +331,13 @@ def vint(buf, pos, strip=True):
     return val, n
 
 
-def elements(buf, pos, end):
-    """(id, element start, data start, data size) for each child element in buf[pos:end]."""
+def elements(buf, pos, end, spill=False):
+    """(id, element start, data start, data size) for each child element in buf[pos:end]. A child that doesn't fit
+    there (nor in buf) ends the walk, as a field cut off at the buffer's end does: its size is damaged or made up, and
+    read as it is, each such child would copy the rest of the buffer. With `spill` (read_head's walk of the
+    Segment's top level) a child may run past `end`, the bytes held: read_head reads its rest, or stops there."""
+    if not spill:
+        end = min(end, len(buf))
     while pos < end:
         try:
             eid, n = vint(buf, pos, strip=False)
@@ -340,13 +345,19 @@ def elements(buf, pos, end):
         except IndexError:
             return
         data = pos + n + m
-        if size == (1 << (7 * m)) - 1:  # unknown size
+        if size == (1 << (7 * m)) - 1:  # unknown size: the rest of the parent
             size = end - data
+        if not spill and (size < 0 or data + size > end):
+            return
         yield eid, pos, data, size
         pos = data + size
 
 
 def uint(b):
+    """An EBML unsigned integer: at most 8 bytes; a longer one is damage (a TrackNumber of thousands of digits
+    opened as fine, then failed every job that recorded it)."""
+    if len(b) > 8:
+        raise NotMatroska("an integer longer than 8 bytes")
     return int.from_bytes(b, "big") if b else 0
 
 
@@ -397,13 +408,14 @@ class MkvIndex:
             raise NotMatroska("no Segment")
         _, m = vint(head, ebml_end + n)
         self.seg_data = ebml_end + n + m
-        for eid, raw, p, sz in elements(head, self.seg_data, len(head)):
+        for eid, raw, p, sz in elements(head, self.seg_data, len(head), spill=True):
             if eid == CLUSTER:
                 self.first_cluster = raw
                 break
             if p + sz > len(head):
                 if eid not in (SEEKHEAD, INFO, TRACKS) or p + sz - raw > MAX_ELEMENT:
                     break
+                self._within_file(p + sz)
                 head = head + self.r.get(len(head), p + sz - len(head))   # only the part not held yet
             self._element(head, eid, raw, p, sz)
         for eid in (INFO, TRACKS):  # not in the first read: follow the SeekHead
@@ -413,12 +425,22 @@ class MkvIndex:
             raise NotMatroska("no Tracks")
         return self
 
+    def _within_file(self, end):
+        """An element the index reads that ends past the file's end (a file cut short, or made up) is damage,
+        never read as a shorter one, nor read past the end (RangeReader refuses that as a failed read)."""
+        if end > self.size:
+            raise NotMatroska("an element runs past the file's end")
+
     def _fetch_element(self, at, want):
+        """Info or Tracks (`want`) where the SeekHead puts them; a place at or past the file's end is not followed."""
+        if at >= self.size:
+            return
         hdr = self.r.get(at, 16)
         eid, n = vint(hdr, 0, strip=False)
         sz, m = vint(hdr, n)
         if eid != want or sz > MAX_ELEMENT:
             return
+        self._within_file(at + n + m + sz)
         body = self.r.get(at, n + m + sz)
         self._element(body, eid, 0, n + m, sz)
 
@@ -438,7 +460,7 @@ class MkvIndex:
             for cid, _, cp, csz in elements(buf, p, p + sz):
                 if cid == 0x2AD7B1:
                     self.scale = uint(buf[cp:cp + csz])
-                elif cid == 0x4489 and csz in (0, 4, 8) and cp + csz <= len(buf):   # an EBML float; else damaged
+                elif cid == 0x4489 and csz in (0, 4, 8):   # an EBML float; else damaged
                     self.duration_s = struct.unpack(">f" if csz == 4 else ">d", buf[cp:cp + csz])[0] if csz else 0.0
             if self.duration_s is not None:
                 self.duration_s = self.duration_s * self.scale / 1e9
@@ -494,11 +516,11 @@ class MkvIndex:
         block places. Cues at the end of the file, where mkvmerge and ffmpeg write them, are read together with the
         file's last 64 KiB, which the hash needs too (kept as `last64`): one or two requests instead of three."""
         at = self.positions.get(CUES)
-        if not at:
+        if not at or at >= self.size:   # none listed, or listed past the end of a file cut short: no Cues
             return self
         n_hash = min(HASH_CHUNK, self.size)
         tail_at = self.size - n_hash
-        tail = tail_at <= at < self.size   # the Cues start in the file's last 64 KiB: one read for them and the hash
+        tail = tail_at <= at               # the Cues start in the file's last 64 KiB: one read for them and the hash
         if tail:
             self.last64 = self.r.get(tail_at, n_hash)
             hdr = self.last64[at - tail_at:at - tail_at + 16]
