@@ -42,8 +42,10 @@ class Personal(FlowFixture):
         self.assertEqual(env['SUBSYNC_USENET_PASSWORD'], keys['USENET_PASSWORD'])
         self.assertIn("subsync's Usenet config (new)", out)
         self.assertIn("subsync's Usenet config answers", out)
-        listed = [p for m, p, _ in self.aios.log if m == 'GET' and f"/stremio/{keys['USENET_UUID']}/stream" in str(p)]
-        self.assertEqual(listed, [])                                      # the self-test searches no indexer
+        # the self-test searches no indexer: the Usenet config is asked for its manifest only (the check
+        # looked for /stremio/<id>/stream, but the config's encrypted password always comes between the two)
+        asked = [p for m, p, _ in self.aios.log if m == 'GET' and p.startswith(f"/stremio/{keys['USENET_UUID']}/")]
+        self.assertEqual([p.rsplit('/', 1)[-1] for p in asked], ['manifest.json'])
         self.assertNotIn(keys['USENET_PASSWORD'], out)
         for secret in self.setup_secrets():                     # nor the Usenet config's link, nor the others'
             self.assertNotIn(secret, out)
@@ -57,6 +59,8 @@ class Personal(FlowFixture):
         self.assertEqual(env['SUBSYNC_USENET'], 'off')
         self.assertNotIn('SUBSYNC_USENET_MANIFEST', env)
         self.assertNotIn('SUBSYNC_USENET_LISTINGS_PER_DAY', env)
+        self.assertNotIn('SUBSYNC_USENET_PASSWORD', env)                 # the removed config's secret
+        self.assertNotIn(keys['USENET_PASSWORD'], (self.state / 'subsync.env').read_text())
 
     def test_the_question_only_with_a_readable_route(self):
         # a Newznab set to a NzbDAV that isn't served through AIOStreams' proxy: no route, no question
