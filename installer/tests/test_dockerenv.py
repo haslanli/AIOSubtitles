@@ -342,6 +342,15 @@ class CheckImage(unittest.TestCase):
         self.assertNotIn('docker.sock', ' '.join(start))
         self.assertIn('SUBSYNC_PUBLIC=on', start)
         self.assertEqual(start[-1], IMAGE)
+        # An empty volume of its own, never the service's (the old version keeps serving its databases), and
+        # the check of each person's AIOStreams turned off
+        self.assertLess(cmds.index(['docker', 'volume', 'create', '--label', 'org.aiosubtitles.install=id-1', name]),
+                        cmds.index(start))
+        self.assertEqual([start[i + 1] for i, a in enumerate(start) if a in ('-v', '--volume', '--mount')],
+                         [f'{name}:/data'])
+        self.assertNotIn('--volumes-from', start)
+        self.assertNotIn('aiosubtitles_subsync-data', ' '.join(start))
+        self.assertIn('SUBSYNC_RECHECK_HOURS=0', start)
         self.assertIn(['docker', 'rm', '-f', name], cmds)
         self.assertIn(['docker', 'volume', 'rm', name], cmds)
         # The one /health question setup asks, on the port subsync listens on (it had its own, port 8790 typed)
@@ -388,7 +397,7 @@ class CheckImage(unittest.TestCase):
         with mock.patch.object(dockerenv, 'run', docker), mock.patch.object(dockerenv.time, 'sleep', lambda s: None), \
                 mock.patch.object(dockerenv.time, 'monotonic', lambda: next(clock)):
             good, reason = dockerenv.check_image(IMAGE, 'aiosubtitles', 'id-1', seconds=60)
-        self.assertFalse(good)
+        self.assertEqual((good, reason), (False, 'no answer within 60 seconds'))
         cmds = [c[:3] for c, _ in docker.calls]
         self.assertIn(['docker', 'rm', '-f'], cmds)
         self.assertIn(['docker', 'volume', 'rm'], cmds)

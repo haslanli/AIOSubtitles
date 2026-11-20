@@ -2067,9 +2067,12 @@ class TakeOver(Offline):
         engine.write_compose(settings)
         self.docker = {('container', 'aiosubtitles-subsync'): 'id-1', ('volume', KEPT_VOLUME): '',
                        ('network', 'aiosubtitles_default'): 'id-1'}
-        with self.assertRaises(ui.Stop) as caught:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(ui.Stop) as caught:
             engine.Engine({'REMOVE': 'no'}).remove_host()
         self.assertEqual(caught.exception.message, 'Nothing was changed.')
+        self.assertIn(f'{screens.DELETE_RECORDS} [y/n]\n', out.getvalue())
+        self.assertIn('  > no   (from the answers file)\n', out.getvalue())
         self.assertIn(('volume', KEPT_VOLUME), self.docker)
         self.assertEqual(self.volume_calls, [])
         out = io.StringIO()
@@ -2091,15 +2094,23 @@ class TakeOver(Offline):
 class OldUpdater(unittest.TestCase):
     def test_its_second_half_runs_on_this_machines_python(self):
         # as 1.3.0's updater starts it: python3 -I installer/wizard.py --update-finish COMMIT, outside the image, with
-        # nothing on its import path
+        # nothing on its import path; and with -B (-I ignores PYTHONDONTWRITEBYTECODE), so it writes no bytecode into
+        # the folders it imports from (25 .pyc files in installer/ and subsync/subsync/ on every run)
         wizard_py = Path(wizard.__file__).resolve()
-        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'PYTHONDONTWRITEBYTECODE': '1'}
-        done = subprocess.run([sys.executable, '-I', str(wizard_py), '--update-finish', 'f4313df'], capture_output=True,
-                              text=True, timeout=60, env=env, stdin=subprocess.DEVNULL, cwd=wizard_py.parent.parent)
+        tree = wizard_py.parent.parent
+
+        def bytecode():
+            return {(p, p.stat().st_mtime_ns) for folder in ('installer', 'subsync/subsync')
+                    for p in (tree / folder).rglob('*.pyc')}
+        before = bytecode()
+        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin')}
+        done = subprocess.run([sys.executable, '-I', '-B', str(wizard_py), '--update-finish', 'f4313df'],
+                              capture_output=True, text=True, timeout=60, env=env, stdin=subprocess.DEVNULL, cwd=tree)
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertEqual(done.stdout, '\n  !  The files are updated. Run ./setup to finish the update: it keeps your '
                                       'answers.\n\n')
         self.assertEqual(done.stderr, '')
+        self.assertEqual(bytecode(), before)
 
 
 if __name__ == '__main__':
