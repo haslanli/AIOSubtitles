@@ -1,9 +1,10 @@
 """The file index on damaged or made-up files, and how it reads them: blocks that inflate (or lose a stripped header)
 only so far, line reads that stop without waiting for a read that hangs, the decoder's pipe on a failed read and what a
-failed decoder said, fields cut off at a buffer's end, children read only within their parent, integers of 8 bytes at
-most, nothing read past the file's end, the Cues read with the hash's last 64 KiB, cue points kept compactly and at most
-MAX_CUE_POINTS, a plausible runtime, and the clusters an audio window needs. No network: files are served from
-memory."""
+failed decoder said, fields cut off at a buffer's end, children read only within their parent and by their id (a CRC-32
+or a Void passed over), strings up to their NUL, integers of 8 bytes at most, at most MAX_TRACKS tracks, nothing read
+past the file's end, the Cues read with the hash's last 64 KiB and bytes a read holds not read again, cue points kept
+compactly and at most MAX_CUE_POINTS, a plausible runtime, and the clusters an audio window needs, from a margin before
+it. No network: files are served from memory."""
 import math
 import os
 import random

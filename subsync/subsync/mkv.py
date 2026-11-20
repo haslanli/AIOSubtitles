@@ -798,7 +798,7 @@ class MkvIndex:
         points, place = self._points, itemgetter(1)
         k = bisect.bisect_right(self._times, start - WINDOW_MARGIN_S)
         if k:
-            a = self._reach[k - 1]
+            a = self._reach[k - 1]   # the furthest cluster cued by then
         else:           # nothing cued that early: the window starts with the file
             a = self.first_cluster if self.first_cluster is not None else (points[0][1] if points else None)
         if a is None:
