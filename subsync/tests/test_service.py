@@ -1062,6 +1062,31 @@ class PickTest(AddonFixture):
         self.assertEqual(len(self.worker.jobs), 0)
         self.assertEqual(self.worker.judged[self.ALIAS], {"eng", "rus"})
 
+    def test_a_no_track_files_languages_are_downloaded_at_once(self):
+        # The first pass of a file with no track downloaded its languages one after the other, so the audio
+        # job a pick queued (it starts once this pass ends) waited for every language's rounds in turn; with
+        # SUBSYNC_PARALLEL_LANGUAGES (the default) they go at once, as LanguageSync's downloads do
+        self.worker._set_provisional = lambda job: None
+        for parallel, expected in ((True, ["eng", "rus"]), (False, [])):
+            with self.subTest(parallel=parallel):
+                self.s.parallel_languages = parallel
+                self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+                both, together = threading.Barrier(2, timeout=2 if parallel else 0.2), []
+
+                def fetch_all(job, lang, tries, both=both, together=together):
+                    try:
+                        both.wait()                              # the other language's downloads run meanwhile
+                        together.append(lang)
+                    except threading.BrokenBarrierError:
+                        pass
+                    return [(r, c, b"1\n00:00:01,000 --> 00:00:02,000\nx\n") for r, c in tries]
+                self.worker._fetch_all = fetch_all
+                job = Job(self.job.type, self.job.video_id, self.job.hints)
+                self.worker._await_pick(job, self.cands(), "b.mp4", None)
+                self.assertEqual(sorted(together), expected)
+                self.assertEqual({lang: [c["id"] for c, _ in got] for lang, got in job.fetched.items()},
+                                 {"eng": ["os-9", "os-8"], "rus": ["os-r"]})
+
     def test_a_file_waiting_for_its_pick_keeps_none_of_its_first_pass_downloads(self):
         # The file waited as its first pass's own job, whose downloaded texts (the guess and its consensus
         # tries, SUBSYNC_GATE_TRIES per other language) stayed in memory for as long as it waited; a pick needs the

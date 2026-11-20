@@ -413,6 +413,30 @@ class LanguageCheckWorkerTest(unittest.TestCase):
         self.assertEqual(job.to_audio, {"rus"})
         self.assertEqual([c["id"] for c, _ in job.fetched["rus"]], ["os-ru"])
 
+    def test_the_anchors_original_is_downloaded_further_in_name_order_until_its_text_is_checked(self):
+        # The main language's original refused, the next by name is
+        # downloaded and checked, a failed one is passed over, up to langcheck.MORE_DOWNLOADS more; the one that passes
+        # is served and kept for the anchored guesses, the refused one is left out
+        from subsync import langcheck
+        w = self.worker()
+        more = [f"os-es{k}" for k in range(2, 2 + langcheck.MORE_DOWNLOADS)]       # Spanish, listed as English
+        self.downloads.files.update({f"http://subs.test/{cid}.srt": dialogue_srt("spa", start=40.0 + k).encode()
+                                     for k, cid in enumerate(more)})
+
+        def check(cids):
+            job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
+            cands = [self.cand(cid) for cid in cids]
+            w._set_originals(job.alias, cands, "b.mp4", None)
+            job.fetched["eng"] = [(cands[0], self.texts["http://subs.test/os-es.srt"])]   # the guess, downloaded
+            self.downloads.asked.clear()
+            w._check_fetched(job, "eng", cands, {"os-es"}, "b.mp4", None, more=langcheck.MORE_DOWNLOADS)
+            asked = [url.rsplit("/", 1)[1][:-4] for url in self.downloads.asked]
+            return asked, w.known_originals(job.alias)["eng"]["id"], [c["id"] for c, _ in job.fetched["eng"]]
+        self.assertEqual(check(["os-es", "os-gone", "os-en"]), (["os-gone", "os-en"], "os-en", ["os-en"]))
+        # every one further refused: it stops after MORE_DOWNLOADS, the next by name served unchecked (checked when it
+        # is served, original_for), nothing kept for an anchor
+        self.assertEqual(check(["os-es", *more, "os-en"]), (more, "os-en", []))
+
     def test_a_failed_download_alone_keeps_the_original(self):
         # not a refusal: the language keeps its entry, and its original is downloaded again when served
         w = self.worker(SUBSYNC_LANGUAGES="eng,rus", SUBSYNC_AUDIO_ROUTE="on")

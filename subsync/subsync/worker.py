@@ -1656,9 +1656,16 @@ class Worker(threading.Thread):
                     + [(r, c) for r, c in order if c["id"] != guess][:CONSENSUS_TRIES]
             else:
                 want[lang] = order[: self.s.gate_tries]
+        # every language's downloads at once with SUBSYNC_PARALLEL_LANGUAGES, as LanguageSync's: the audio job a
+        # pick queued starts only once this pass ends
+        if self.s.parallel_languages and len(want) > 1:
+            with ThreadPoolExecutor(max_workers=len(want), thread_name_prefix="subsync-lang") as pool:
+                running = {lang: pool.submit(self._fetch_all, job, lang, tries) for lang, tries in want.items()}
+                got = {lang: future.result() for lang, future in running.items()}
+        else:
+            got = {lang: self._fetch_all(job, lang, tries) for lang, tries in want.items()}
         for lang, tries in want.items():
-            got = self._fetch_all(job, lang, tries)
-            job.fetched[lang] = [(cand, decode(raw, lang)) for _, cand, raw in got]
+            job.fetched[lang] = [(cand, decode(raw, lang)) for _, cand, raw in got[lang]]
             self._check_fetched(job, lang, per_lang[lang], {c["id"] for _, c in tries}, filename, oshash,
                                 more=langcheck.MORE_DOWNLOADS if lang == main else 0)
         self._consensus_guess(job, main)
@@ -2163,7 +2170,7 @@ class LanguageSync:
         # the release's own track in the subtitle's language, whose line count says a subtitle was made from this
         # release (choose.order); its timing is still judged against the title's original language
         ref = pipeline.choose_reference(self.index, 0, self.lang, False, s.prefer_plain, s.fallback_reference,
-                                        by_original=False) if hasattr(self.index, "text_tracks") else None
+                                        by_original=False)
         ref_cues = len(ref["cues"]) if ref else None
         first = w.viewer_first(self.candidates)
         tries = w._within_limits(w._try_order(self.candidates, self.filename, self.oshash, ref_cues, first),
