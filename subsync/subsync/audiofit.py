@@ -79,8 +79,6 @@ SPARSE_INDEX = 4    # an MKV whose planned windows would cost more than this man
                     # originals before any audio is read, as one without a seek index does
 PARALLEL_READS = 4  # planned windows read at once (AudioFit.prefetch)
 FULL_WINDOW = 0.95  # a window decoded to less of its length is a failed read, never judged
-RUN_GAP = 6         # speech runs (10 ms frames): gaps under 60 ms are closed,
-RUN_MIN = 10        # and runs under 100 ms dropped
 SAME_OFFSET_S = 0.5   # two windows' offsets this close are the same offset
 EDGE_S = 0.5        # a line is judged in a window only when it starts (and ends) at least this far inside it
 PAIR_S = 1.0        # a line's start pairs with a speech onset (its end with a speech-run end) at most this far away
@@ -346,8 +344,11 @@ class AudioFit:
 
     def _read_window(self, start, length):
         """A window's speech: its 10 ms frames' mask, the onsets (moved `lead` earlier) and ends of its speech runs, and
-        `len`, the seconds decoded. Past the end of the file's audio (NoAudioThere) a window without speech; a window
-        decoded short (a read or decoder that stopped early) raises ReadFailed and is never kept."""
+        `len`, the seconds decoded. The runs are the VAD's speech segments, which keep its own minimum speech and
+        silence (vad.speech). A run under way at the window's first frame has no onset there, and one still running at
+        its last frame no end there: those are the window's edges, not the speech's. Past the end of the file's audio
+        (NoAudioThere) a window without speech; a window decoded short (a read or decoder that stopped early) raises
+        ReadFailed and is never kept."""
         try:
             pcm = self.index.window_pcm(start, length, SR, self.ffmpeg, **self.track_arg)
         except NoAudioThere:
@@ -367,29 +368,11 @@ class AudioFit:
         mask = np.zeros(frames, dtype=bool)
         for a, b in speech:
             mask[a // fl: b // fl] = True
-        runs, i = [], 0
-        while i < len(mask):
-            if mask[i]:
-                j = i
-                while j < len(mask) and mask[j]:
-                    j += 1
-                runs.append([i, j])
-                i = j
-            else:
-                i += 1
-        merged = []
-        for a, b in runs:  # close gaps < 60 ms, drop runs < 100 ms
-            if merged and a - merged[-1][1] < RUN_GAP:
-                merged[-1][1] = b
-            else:
-                merged.append([a, b])
-        merged = [r for r in merged if r[1] - r[0] >= RUN_MIN]
-        mask[:] = False
-        for a, b in merged:
-            mask[a:b] = True
-        onsets = np.array([start + a / 100 - self.lead for a, _ in merged])
-        offsets = np.array([start + b / 100 for _, b in merged])
-        return {"start": start, "len": decoded, "mask": mask, "onsets": onsets, "offsets": offsets}
+        edges = np.diff(mask.astype(np.int8), prepend=0, append=0)
+        runs = list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))   # [first frame, end frame)
+        onsets = np.array([start + a / 100 - self.lead for a, _ in runs if a > 0])
+        ends = np.array([start + b / 100 for _, b in runs if b < frames])
+        return {"start": start, "len": decoded, "mask": mask, "onsets": onsets, "ends": ends}
 
     # -- correlation -------------------------------------------------------------------------------------------
     @staticmethod
@@ -433,7 +416,7 @@ class AudioFit:
     @staticmethod
     def onset_errors(starts, windows, key="onsets"):
         """Signed (onset - start) per mapped start inside a read window, matched one-to-one; None = no onset. With
-        key="offsets", speech-run ends against line ends."""
+        key="ends", speech-run ends against line ends."""
         errs = []
         for w in windows:
             inside = [s for s in starts if w["start"] + EDGE_S <= s <= w["start"] + w["len"] - EDGE_S]
@@ -506,15 +489,15 @@ class AudioFit:
         than 10."""
         errs = []
         for w in windows:
-            on, off = np.asarray(w.get("onsets", ())), np.asarray(w.get("offsets", ()))
-            if not len(on) or not len(off):
+            on, ends = np.asarray(w.get("onsets", ())), np.asarray(w.get("ends", ()))
+            if not len(on) or not len(ends):
                 continue
             for l in self.lines:
                 s, e = l["s"] * c + o, l["e"] * c + o
                 if s < w["start"] + EDGE_S or e > w["start"] + w["len"] - EDGE_S \
                         or np.min(np.abs(on - s)) > WITHIN_MS / 1000:
                     continue
-                d = off - e
+                d = ends - e
                 k = int(np.argmin(np.abs(d)))
                 if abs(d[k]) <= PAIR_S:
                     errs.append(float(d[k]))
@@ -824,7 +807,7 @@ class AudioFit:
                 score = sum(1 for e in errs if e is not None and abs(e) < CUT_ERR_S)
                 if lag is not None:     # the line ends too, against the subtitle's own lag (D3)
                     ends = [x + oa for x in en[:k]] + [en[i] + ob for i in rest]
-                    score += END_WEIGHT * sum(1 for e in self.onset_errors(ends, placing, "offsets")
+                    score += END_WEIGHT * sum(1 for e in self.onset_errors(ends, placing, "ends")
                                               if e is not None and abs(e - lag) < CUT_ERR_S)
                 if score > best_score:
                     best_k, best_score = k, score

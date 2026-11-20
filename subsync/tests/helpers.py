@@ -932,7 +932,7 @@ class FakeIndex:
 def timeline_fit(speech, rate=0, ends=False, base=None):
     """An AudioFit class (`base`, AudioFit by default) whose windows come straight from a timeline of speech: no audio,
     no Silero. `speech`: [(start, end)], or {audio track: [(start, end)]}. A window read costs `rate` bytes a second,
-    added to the index's audio_bytes; with `ends` it carries its speech-run ends ("offsets"), as every window does
+    added to the index's audio_bytes; with `ends` it carries its speech-run ends ("ends"), as every window does
 ."""
     import numpy as np
     from subsync.audiofit import AudioFit
@@ -944,7 +944,7 @@ def timeline_fit(speech, rate=0, ends=False, base=None):
             self.windows_read += 1
             self.audio_s += length
             n = int(round(length * 100))
-            mask, onsets, offsets = np.zeros(n, dtype=bool), [], []
+            mask, onsets, ends_at = np.zeros(n, dtype=bool), [], []
             for a, b in speech[self.track or 0] if isinstance(speech, dict) else speech:
                 if b <= start or a >= start + length:
                     continue
@@ -952,10 +952,10 @@ def timeline_fit(speech, rate=0, ends=False, base=None):
                 if a >= start:
                     onsets.append(a - self.lead)
                 if b <= start + length:
-                    offsets.append(b)
+                    ends_at.append(b)
             window = {"start": start, "len": length, "mask": mask, "onsets": np.array(onsets)}
             if ends:
-                window["offsets"] = np.array(offsets)
+                window["ends"] = np.array(ends_at)
             return window
     return TimelineFit
 

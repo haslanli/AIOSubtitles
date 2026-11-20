@@ -252,6 +252,31 @@ class ShortWindowTest(unittest.TestCase):
         self.assertFalse([k for k in fit.cache if k[0] > end / 2])        # none of them kept for the file
 
 
+class WindowEdgeTest(unittest.TestCase):
+    """A speech run the window's edge cuts (speech under way at its first frame, or still running at its last)
+    has no onset at the window's start nor end at its end: those were the window's edges, and a line starting 0.7 s into
+    a window that opens mid-sentence paired with the first at about -0.9 s instead of none."""
+
+    def test_a_run_cut_by_the_windows_edge_gives_no_onset_or_end_there(self):
+        idx = SpeechIndex([(95.0, 103.0), (110.0, 112.0), (127.0, 135.0)], 6000.0)
+        fit = AudioFit(idx, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=LoudVad(), lead=0.19)
+        w = fit.read_window(100.0, 30.0)
+        np.testing.assert_allclose(w["onsets"], [109.81, 126.81])        # none at 99.81 (100 s, less the lead)
+        np.testing.assert_allclose(w["ends"], [103.0, 112.0])            # none at 130 s
+        self.assertEqual(int(w["mask"].sum()), 300 + 200 + 300)          # the mask keeps the cut runs whole
+        self.assertTrue(w["mask"][0] and w["mask"][-1])
+        starts = AudioFit.onset_errors([100.7, 109.8], [w])             # the first line's speech began at 95 s
+        self.assertEqual((starts[0], round(starts[1], 6)), (None, 0.01))
+        ends = AudioFit.onset_errors([129.2, 112.1], [w], "ends")       # the first line's speech runs on to 135 s
+        self.assertEqual((ends[0], round(ends[1], 6)), (None, -0.1))
+
+    def test_a_window_inside_one_run_has_neither(self):
+        idx = SpeechIndex([(95.0, 140.0)], 6000.0)
+        w = AudioFit(idx, [], vad=LoudVad()).read_window(100.0, 30.0)
+        self.assertTrue(w["mask"].all())
+        self.assertEqual((len(w["onsets"]), len(w["ends"])), (0, 0))
+
+
 def whole_film_corr(w, ssig):
     """The correlation as it was computed before, one FFT of the whole subtitle signal per window (the reference)."""
     v = np.where(w["mask"][::5], 1.0, -1.0)
