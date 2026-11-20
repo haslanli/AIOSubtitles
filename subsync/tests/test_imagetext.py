@@ -4,7 +4,10 @@ import os
 import random
 import struct
 import sys
+import tempfile
+import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -123,17 +126,75 @@ class PgsLimitsTest(unittest.TestCase):
         self.assertEqual(rec.lines, imagetext.MAX_ROWS)
 
 
+def chained_spu(total):
+    """A subpicture of `total` bytes (its size field at most 65,535) whose control sequences, as many as 64 KiB holds,
+    are chained one after another, each one's header hidden in the arguments of an area command (0x05) as the commands
+    before it are read; it shows nothing."""
+    spu = bytearray(total)
+    n = (65536 - 4) // 7
+    for k in range(n):
+        spu[4 + 7 * k] = 0x05
+        at = 4 + 7 * k + 3
+        struct.pack_into(">H", spu, at + 2, at + 7 if k + 1 < n else at)
+    struct.pack_into(">HH", spu, 0, min(total, 65535), 7)
+    return bytes(spu)
+
+
 class VobSubDecodeTest(unittest.TestCase):
+    def setUp(self):
+        self.lums = imagetext.vobsub_palette(I.vobsub_private())
+
     def test_a_bar_comes_back_from_its_two_fields(self):
         bar = I.bar(150, height=20)
-        img = imagetext.vobsub_image(I.vobsub_spu(bar), I.vobsub_private())
+        img = imagetext.vobsub_image(I.vobsub_spu(bar), self.lums)
         self.assertEqual(img.shape, bar.shape)
         self.assertTrue(ink(img)[bar == 1].all())
         self.assertFalse(ink(img)[bar != 1].any())
 
     def test_the_palette_comes_from_the_tracks_private_data(self):
         self.assertEqual(len(imagetext.vobsub_palette(I.vobsub_private())), 16)
-        self.assertIsNone(imagetext.vobsub_image(b"\x00", I.vobsub_private()))
+        self.assertIsNone(imagetext.vobsub_image(b"\x00", self.lums))
+
+    def test_a_palette_colour_is_the_last_24_bits_of_its_value(self):
+        # A value longer than six hex digits (written with an alpha byte, or damaged) gave a luminance past
+        # 255 or one no float holds, and the OverflowError left texts() and failed the language's sync
+        bar = I.bar(150, height=20)
+        for extra in ("ff", "1" * 294):
+            with self.subTest(digits=len(extra) + 6):
+                private = ("size: 720x480\npalette: " + ", ".join(extra + c for c in I.VOBSUB_PALETTE) + "\n").encode()
+                self.assertEqual(imagetext.vobsub_palette(private), self.lums)
+                got = imagetext.texts("S_VOBSUB", {1.0: I.vobsub_spu(bar)}, FakeRecogniser(), private)
+                self.assertEqual(got, {1.0: text_of_width(150)})
+
+    def test_the_palette_is_read_once_for_the_lines(self):
+        # The track's CodecPrivate (up to 8 MiB) was decoded and split again for every line
+        spu = I.vobsub_spu(I.bar(150, height=20))
+        with mock.patch.object(imagetext, "vobsub_palette", wraps=imagetext.vobsub_palette) as palette:
+            got = imagetext.texts("S_VOBSUB", {1.0: spu, 2.0: spu, 3.0: spu}, FakeRecogniser(), I.vobsub_private())
+        self.assertEqual(len(got), 3)
+        self.assertEqual(palette.call_count, 1)
+
+    def test_chained_control_sequences_are_read_once(self):
+        # Each control sequence's commands were read to the end of the block, and the block was not cut to
+        # the subpicture's own size: 9,361 sequences hidden in each other's commands took 11 s for 64 KiB, and about
+        # half an hour for the 4 MiB a 27 KB zlib block inflates to
+        for total in (65536, 4 * 1024 * 1024):
+            with self.subTest(total=total):
+                t0 = time.process_time()
+                self.assertIsNone(imagetext.vobsub_image(chained_spu(total), self.lums))
+                self.assertLess(time.process_time() - t0, 1.0)
+
+    def test_a_second_control_sequence_reads_as_before(self):
+        bar = I.bar(150, height=20)
+        one = I.vobsub_spu(bar)
+        spu = bytearray(one)
+        ctrl = struct.unpack_from(">H", spu, 2)[0]
+        stop = len(spu)                                       # a second sequence after the first: stop the display
+        struct.pack_into(">H", spu, ctrl + 2, stop)
+        spu += struct.pack(">HH", 100, stop) + bytes([0x02, 0xFF])
+        struct.pack_into(">H", spu, 0, len(spu))
+        self.assertTrue(np.array_equal(imagetext.vobsub_image(bytes(spu), self.lums),
+                                       imagetext.vobsub_image(one, self.lums)))
 
 
 class RowsTest(unittest.TestCase):
@@ -168,6 +229,27 @@ class ModelChoiceTest(unittest.TestCase):
         self.assertEqual(imagetext.model_for("rus"), "eslav")
         self.assertEqual(imagetext.model_for("uk"), "eslav")
         self.assertIsNone(imagetext.model_for("jpn"))
+
+    def test_a_model_that_cant_be_loaded_is_logged_once(self):
+        # A model that failed to load (a damaged file, no runtime) was taken silently as no model for its
+        # languages, which then got no words from image tracks until a restart
+        old = imagetext.MODEL_DIR
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                for f in ("latin_rec.onnx", "latin_dict.txt"):
+                    open(os.path.join(folder, f), "wb").close()
+                imagetext.MODEL_DIR = folder
+                imagetext.forget()
+                with mock.patch.object(imagetext, "OnnxRecogniser", side_effect=RuntimeError("damaged")), \
+                        self.assertLogs("subsync.imagetext", "WARNING") as logs:
+                    self.assertIsNone(imagetext.recogniser("eng"))
+                    self.assertIsNone(imagetext.recogniser("fre"))       # the same model: not loaded again
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn("latin", logs.output[0])
+                self.assertIn("RuntimeError", logs.output[0])
+        finally:
+            imagetext.MODEL_DIR = old
+            imagetext.forget()
 
     def test_no_model_files_no_recogniser(self):
         old = imagetext.MODEL_DIR

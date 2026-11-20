@@ -16,6 +16,7 @@ decoded greedily (CTC: repeats and blanks dropped). The models are files in MODE
 {name}_dict.txt); without them there is no recogniser, and image tracks stay timing-only as before. Reading stops after
 BUDGET_S seconds per track. Nothing here reads a file: index.line_images does, within D1's limits.
 """
+import logging
 import os
 import struct
 import threading
@@ -35,11 +36,14 @@ MIN_ROW = 6
 MAX_ROWS = 4          # text rows read of one image: a subtitle has one to three
 PGS_OBJECTS = 2       # objects a PGS display set shows at most (its composition places no more)
 MAX_OBJECT_PIXELS = 4096 * 1024   # the largest object decoded (a 1920 x 1080 screen is half of it)
+MAX_VOBSUB_PIXELS = 2048 * 1024   # the largest VobSub area decoded (a DVD frame, 720 x 576, is a fifth of it)
 BUDGET_S = 20.0
 LATIN = {"eng", "fre", "ger", "spa", "ita", "por", "dut", "swe", "nor", "nob", "nno", "dan", "fin", "pol", "cze", "slo",
          "hun", "rum", "hrv", "slv", "bos", "est", "lav", "lit", "tur", "ind", "may", "cat", "glg", "baq", "ice", "gle",
          "alb", "afr", "swa", "tgl", "lat", "wel"}
 ESLAV = {"rus", "ukr", "bel", "bul"}
+
+log = logging.getLogger("subsync.imagetext")
 
 
 def model_for(lang):
@@ -144,12 +148,14 @@ def pgs_images(payload):
 
 # -- VobSub --------------------------------------------------------------------------------------------------------------
 def vobsub_palette(private):
-    """The 16 colours' luminance (0-255) from a VobSub track's CodecPrivate (the .idx header), or None."""
+    """The 16 colours' luminance (0-255) from a VobSub track's CodecPrivate (the .idx header), or None. A colour is the
+    last 24 bits (RGB) of its value (a longer one, such as one written with an alpha byte, gave a luminance
+    past 255, or one no float holds)."""
     for line in (private or b"").decode("latin-1").splitlines():
         if line.lower().startswith("palette:"):
             cols = [c.strip() for c in line.split(":", 1)[1].split(",")]
             try:
-                rgb = [int(c, 16) for c in cols[:16]]
+                rgb = [int(c, 16) & 0xFFFFFF for c in cols[:16]]
             except ValueError:
                 return None
             if len(rgb) < 16:
@@ -188,20 +194,19 @@ def _vob_field(data, start, w, rows):
     return out
 
 
-def vobsub_image(spu, private):
-    """The grey image (dark text on white) of one VobSub subpicture, or None."""
-    lums = vobsub_palette(private)
-    if lums is None:
-        return None
+def vobsub_image(spu, lums):
+    """The grey image (dark text on white) of one VobSub subpicture, `lums` its track's palette as luminances
+    (vobsub_palette), or None. The subpicture is read within its own size, its control sequences in their order and
+    each one's commands up to the next one, so each byte is read once (a chain of sequences hidden in each
+    other's commands, each read to the end of the block, cost minutes for one line)."""
     try:
+        spu = spu[:struct.unpack_from(">H", spu, 0)[0]]
         at = struct.unpack_from(">H", spu, 2)[0]
         colors = alpha = area = fields = None
-        seen = set()
-        while at not in seen and at + 4 <= len(spu):
-            seen.add(at)
+        while at + 4 <= len(spu):
             nxt = struct.unpack_from(">H", spu, at + 2)[0]
-            p = at + 4
-            while p < len(spu):
+            p, end = at + 4, nxt if nxt > at else len(spu)
+            while p < end:
                 cmd = spu[p]
                 p += 1
                 if cmd == 0xFF:
@@ -224,14 +229,14 @@ def vobsub_image(spu, private):
                     p += 4
                 else:
                     break
-            if nxt == at:
+            if nxt <= at:   # the last sequence names itself; one that names an earlier one is damaged (ffmpeg stops too)
                 break
             at = nxt
         if not (colors and alpha and area and fields):
             return None
         x1, x2, y1, y2 = area
         w, h = x2 - x1 + 1, y2 - y1 + 1
-        if w <= 0 or h <= 0 or w * h > 2048 * 1024:
+        if w <= 0 or h <= 0 or w * h > MAX_VOBSUB_PIXELS:
             return None
         img = np.zeros((h, w), dtype=np.uint8)
         img[0::2] = _vob_field(spu, fields[0], w, (h + 1) // 2)
@@ -340,7 +345,9 @@ def recogniser(lang):
             try:
                 _cache[name] = OnnxRecogniser(model, dictionary) if os.path.exists(model) and \
                     os.path.exists(dictionary) else None
-            except Exception:     # a broken model or no onnxruntime: no words, as without the files
+            except Exception as e:     # a broken model or no onnxruntime: no words, as without the files
+                log.warning("the %s text recogniser can't be loaded (%s): image tracks in its languages give no "
+                            "words", name, type(e).__name__)
                 _cache[name] = None
         return _cache[name]
 
@@ -348,11 +355,15 @@ def recogniser(lang):
 def texts(codec, payloads, rec, private=b"", budget=BUDGET_S, clock=time.monotonic):
     """{start: text} of image lines {start: block payload}, read by `rec`, within `budget` seconds."""
     out, t0 = {}, clock()
+    vobsub = codec.startswith("S_VOBSUB")
+    lums = vobsub_palette(private) if vobsub else None   # the track's palette, read once
+    if vobsub and lums is None:
+        return out
     for s in sorted(payloads):
         if clock() - t0 > budget:
             break
-        if codec.startswith("S_VOBSUB"):
-            img = vobsub_image(payloads[s], private)
+        if vobsub:
+            img = vobsub_image(payloads[s], lums)
             images = [img] if img is not None else []
         else:
             images = pgs_images(payloads[s])
