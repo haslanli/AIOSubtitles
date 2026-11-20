@@ -13,9 +13,9 @@ from unittest import mock
 
 import numpy as np
 
-from helpers import (AUDIO_BETTER, FIXTURES, matroska, Memory, RangeServer, rhythm, timeline_fit,  # noqa: E402
-                     truth_fit)
-from subsync import audiofit  # noqa: E402
+from helpers import (AUDIO_BETTER, FIXTURES, matroska, Memory, Opener, RangeServer, rhythm,  # noqa: E402
+                     timeline_fit, truth_fit)
+from subsync import audiofit, mp4  # noqa: E402
 from subsync.audiofit import DT, OMAX, AudioFit  # noqa: E402
 from subsync.mp4 import NoAudioThere, NotMp4, open_index  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
@@ -177,6 +177,25 @@ class SeekIndexTest(unittest.TestCase):
         with self.assertRaises(audiofit.AudioBudget):
             fit.read_window(300.0, 30.0)
         self.assertLessEqual(idx.audio_bytes, fit.budget)
+
+    def test_an_mp4_window_counts_its_samples_byte_range(self):
+        # An MP4 window was counted by its estimate, so one whose samples spread over more bytes than that
+        # (a busy scene of a VBR file, up to MAX_WINDOW_SPAN times its share) was read past the budget
+        reader = RangeReader("http://127.0.0.1:9/file.mp4", "test", opener=Opener(bytes(1000)))
+        index = mp4.Mp4Index(reader)
+        index.size, index.duration_s = 1000, 40.0                                   # 25 bytes a second
+        index.tracks = [{"id": 1, "handler": b"soun", "codec": b"ac-3", "enabled": True, "asc": b"", "scale": 1,
+                         "stts": [(40, 1)], "const": 3, "sizes": [], "count": 40, "stsc": [(1, 1, 1)],
+                         "chunks": [10 + 50 * i for i in range(5)] + [300 + 3 * i for i in range(35)], "empty": 0,
+                         "media_time": 0}]              # one 3-byte sample a second; the first five 50 bytes apart
+        fit = AudioFit(index, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=LoudVad(), budget=150)
+        self.assertIsNone(fit.unseekable())                       # an MP4 finds its windows by its sample tables
+        self.assertEqual(fit.estimate(4.0), 125)
+        self.assertEqual(fit.cost(0.0, 4.0), 213 - 10)            # its samples' byte range
+        before = reader.bytes
+        with self.assertRaises(audiofit.AudioBudget):
+            fit.read_window(0.0, 4.0)
+        self.assertEqual(reader.bytes, before)                    # nothing read
 
     def test_a_real_mkv_without_cues_has_no_seek_index(self):
         from subsync.mkv import MkvIndex

@@ -335,15 +335,18 @@ class Mp4Index:
             i += count
         return first, last, first_time
 
-    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024):
-        """16 kHz mono s16le PCM of [start, start+length) from the first usable audio track. The byte range of the
-        samples that cover it (WINDOW_MARGIN_S more on each side) is one bounded read, streamed as MkvIndex's is: each
-        sample is cut out as its bytes pass and fed to the decoder, and the read stops once the window is decoded, so an
-        interleaved file's video is never held. A range wider than MAX_WINDOW_SPAN times the window's share of the file
-        is not read (NotMp4). Bytes read are added to `audio_bytes`."""
+    def _audio_track(self):
+        """The audio track windows are cut from (_audio); NotMp4 when the file has none this module can decode."""
         t = self._audio()
         if t is None:
             raise NotMp4("no audio this module can decode")
+        return t
+
+    def _window_range(self, t, start, length):
+        """The samples of track t that cover [start, start + length) (WINDOW_MARGIN_S more on each side) and their byte
+        range: (first sample, its presented time, the samples in file order, first byte a, end byte b). NoAudioThere
+        where no sample covers it; NotMp4 when the range is wider than MAX_WINDOW_SPAN times the window's share of the
+        file."""
         first, last, first_time = self._samples_in(t, start - WINDOW_MARGIN_S, start + length + WINDOW_MARGIN_S)
         offs = self._sample_offsets(t)
         if first is None or last >= len(offs):
@@ -353,6 +356,27 @@ class Mp4Index:
         d = self.duration()
         if d and b - a > MAX_WINDOW_SPAN * (length + 2 * WINDOW_MARGIN_S) * self.size / d:
             raise NotMp4("audio samples spread far past their window")
+        return first, first_time, order, a, b
+
+    def window_bytes(self, start, length):
+        """What reading the audio window [start, start + length) costs at most: the byte range window_pcm reads (the
+        audio budget counts it before the read, as MkvIndex's:); 0 where no sample covers the window, which
+        is read as no audio. Raises NotMp4 as window_pcm does."""
+        try:
+            _, _, _, a, b = self._window_range(self._audio_track(), start, length)
+        except NoAudioThere:
+            return 0
+        return b - a
+
+    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024):
+        """16 kHz mono s16le PCM of [start, start+length) from the first usable audio track. The byte range of the
+        samples that cover it (WINDOW_MARGIN_S more on each side) is one bounded read, streamed as MkvIndex's is: each
+        sample is cut out as its bytes pass and fed to the decoder, and the read stops once the window is decoded, so an
+        interleaved file's video is never held. A range wider than MAX_WINDOW_SPAN times the window's share of the file
+        is not read (NotMp4). Bytes read are added to `audio_bytes`."""
+        t = self._audio_track()
+        first, first_time, order, a, b = self._window_range(t, start, length)
+        offs = self._sample_offsets(t)
         fmt = "aac" if t["codec"] == b"mp4a" else AUDIO_RAW[t["codec"]]
         skip = max(0.0, start - first_time)
         cmd = decoder_cmd(ffmpeg, fmt, ["-ss", f"{skip:.3f}", "-t", f"{length:.3f}", "-ac", "1", "-ar", str(sr),

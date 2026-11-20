@@ -24,8 +24,8 @@ average byte rate, the windows get shorter than W when the planned windows would
 shorter than MIN_W, the original is kept without reading any audio, and a window that would pass the budget is not read:
 narrowing down a shift change then stops and places the change from the windows read, and no more held-out windows are
 added (the copy is judged on those read); a planned window or a confirmation that would pass it keeps the original. A
-window counts what its read really costs, where the index plans it (an MKV's byte range, from its seek index); an MKV
-without a seek index, or whose planned windows would cost more than SPARSE_INDEX times their estimate, keeps the
+window counts what its read really costs, where the index plans it (an MKV's byte range, from its seek index; an MP4's,
+from its sample tables); an MKV without a seek index, or whose planned windows would cost more than SPARSE_INDEX times their estimate, keeps the
 original without reading any audio.
 
 On real releases subtitle lines start a steady ~190 ms before Silero's detected speech, so the bar is
@@ -50,7 +50,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from .langs import lang3, same_language
+from .langs import known, lang3, same_language
 from .mkv import COMMENTARY, NotMatroska, not_dialogue
 from .mp4 import NoAudioThere
 from .reader import ReadFailed, Refused, Stopped
@@ -166,29 +166,31 @@ def dialogue_track(track):
     return not not_dialogue(track, COMMENTARY)
 
 
+def _default(tracks):
+    """The default audio track of the file's audio tracks, else the first; None when there is none."""
+    return next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
+
+
+def _second(tracks):
+    default = _default(tracks)
+    return next((t for t in tracks if default is not None and t is not default and dialogue_track(t)
+                 and lang3(t.get("language")) != lang3(default.get("language"))), None)
+
+
 def second_track(index):
     """The audio track fit_tracks tries when the default one keeps the original: a dialogue track in another language,
     or None."""
-    tracks = _audio_tracks(index)
-    default = next((t for t in tracks if t.get("default")), tracks[0] if tracks else None)
-    return next((t for t in tracks if default is not None and t is not default and dialogue_track(t)
-                 and lang3(t.get("language")) != lang3(default.get("language"))), None)
+    return _second(_audio_tracks(index))
 
 
 def _untagged(track):
     return not track.get("tagged", True) or lang3(track.get("language")) == "und"
 
 
-def track_order(index, original=None):
-    """The audio tracks fit_tracks tries, in order, each once: with the title's original language known, first the
-    dialogue track in it (an untagged one, English by Matroska's rule, only for an English original and only when no
-    track is tagged with it), then the default track, then second_track's. Without an original language, or with no
-    track in it: the default, then second_track's, as before. [] when the file offers no list of audio tracks (MP4: its
-    one track)."""
-    tracks = _audio_tracks(index)
+def _order(tracks, original):
+    """track_order on the file's audio tracks, read once by the caller."""
     if not tracks:
         return []
-    default = next((t for t in tracks if t.get("default")), tracks[0])
     order = []
     if original:
         talk = [t for t in tracks if dialogue_track(t)]
@@ -197,20 +199,46 @@ def track_order(index, original=None):
             first = next((t for t in talk if _untagged(t)), None)
         if first is not None:
             order.append(first)
-    for t in (default, second_track(index)):
+    for t in (_default(tracks), _second(tracks)):
         if t is not None and all(o["index"] != t["index"] for o in order):
             order.append(t)
     return order
 
 
+def track_order(index, original=None):
+    """The audio tracks fit_tracks tries, in order, each once: with the title's original language known, first the
+    dialogue track in it (an untagged one, English by Matroska's rule, only for an English original and only when no
+    track is tagged with it), then the default track, then second_track's. Without an original language, or with no
+    track in it: the default, then second_track's, as before. [] when the file offers no list of audio tracks (MP4: its
+    one track)."""
+    return _order(_audio_tracks(index), original)
+
+
 def most_tracks(index, original=None):
     """How many audio tracks fit_tracks may try on a file (the room check's estimate): with the original language
     known, its order's length; unknown yet, the most any original language among the file's tracks would make (its
-    answer may come before the audio sync does)."""
+    answer may come before the audio sync does).
+
+    The tracks are read once, and a file's tracks can be many (a crafted Tracks element holds hundreds of thousands), so
+    only the languages that can put a track first are tried, each once: a tagged dialogue track's language that names
+    one (known), and English, where a track is in it, for an untagged dialogue track. An order is at most one track
+    longer than without an original language (the original's track before the default and second_track's), so the
+    first language that makes it so ends the search (every language's order, each reading every track twice,
+    took 4 s of CPU on 1,000 tracks and grew with the square of their number)."""
+    tracks = _audio_tracks(index)
     if original:
-        return max(1, len(track_order(index, original)))
-    candidates = {lang3(t.get("language")) for t in _audio_tracks(index)} | {None}
-    return max([1] + [len(track_order(index, c)) for c in candidates])
+        return max(1, len(_order(tracks, original)))
+    plain = len(_order(tracks, None))
+    candidates = dict.fromkeys(lang3(t.get("language")) for t in tracks
+                               if dialogue_track(t) and not _untagged(t) and known(t.get("language")))
+    if any(lang3(t.get("language")) == "eng" for t in tracks):
+        candidates["eng"] = None
+    most = max(1, plain)
+    for c in candidates:
+        if most > plain:
+            break
+        most = max(most, len(_order(tracks, c)))
+    return most
 
 
 class AudioBudget(Exception):
@@ -250,8 +278,8 @@ class AudioFit:
         return COST * length * self.rate()
 
     def cost(self, start, length):
-        """What reading the window at `start` really costs: its byte range where the index plans one (an MKV's, by its
-        seek index:), else the estimate."""
+        """What reading the window at `start` really costs: its byte range where the index plans one (an MKV's by its
+        seek index,; an MP4's by its sample tables), else the estimate."""
         window_bytes = getattr(self.index, "window_bytes", None)
         return window_bytes(start, length) if window_bytes else self.estimate(length)
 
@@ -260,7 +288,7 @@ class AudioFit:
         without one would read each window from its first cluster on; one whose planned windows would cost more than
         SPARSE_INDEX times their estimate is little better. None when they can be, and for an index that finds its
         windows otherwise (an MP4's sample tables)."""
-        if not hasattr(self.index, "window_bytes"):
+        if not hasattr(self.index, "cue_points"):
             return None
         if not self.index.cue_points:
             return "no seek index"

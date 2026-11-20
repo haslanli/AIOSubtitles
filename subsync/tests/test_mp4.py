@@ -273,6 +273,28 @@ class WindowTest(unittest.TestCase):
             self.assertEqual(index.window_pcm(0.0, 4.0, chunk=2), b"AAABBBCCCDDD")   # cut across 2-byte pieces
         self.assertEqual(index.audio_bytes, 25 - 4)                                    # from the first stored on
 
+    def test_a_windows_cost_is_the_byte_range_it_reads(self):
+        # The audio budget counted an MP4 window by the file's average byte rate, while its read is the byte
+        # range of its samples (up to MAX_WINDOW_SPAN times its share)
+        data = bytearray(30)
+        for at, frame in ((10, b"AAA"), (4, b"BBB"), (16, b"CCC"), (22, b"DDD")):
+            data[at:at + 3] = frame
+        index = mp4.Mp4Index(self.reader(bytes(data)))
+        index.size, index.duration_s = len(data), 4.0
+        index.tracks = [{"id": 1, "handler": b"soun", "codec": b"ac-3", "enabled": True, "asc": b"", "scale": 1,
+                         "stts": [(4, 1)], "const": 3, "sizes": [], "count": 4, "stsc": [(1, 1, 1)],
+                         "chunks": [10, 4, 16, 22], "empty": 0, "media_time": 0}]
+        self.assertEqual(index.window_bytes(0.0, 4.0), 25 - 4)          # from the first stored to the last's end
+        self.assertEqual(index.window_bytes(1.5, 1.0), 19 - 4)          # samples 1 to 2 (and the margin's)
+        self.assertEqual(index.window_bytes(10.0, 4.0), 0)              # no sample there: read as no audio
+        echo = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
+        with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: echo):
+            index.window_pcm(0.0, 4.0)
+        self.assertEqual(index.audio_bytes, index.window_bytes(0.0, 4.0))
+        index.tracks = []
+        with self.assertRaises(NotMp4):                                 # no audio to decode, as window_pcm says
+            index.window_bytes(0.0, 4.0)
+
     def test_a_window_whose_samples_spread_far_past_it_is_not_read(self):
         data = bytearray(fixture("tiny.mp4"))
         q, _ = track(bytes(data), b"mp4a")[b"stco"]

@@ -2,11 +2,14 @@
 commentary or an audio description never fitted, nor counted), then the default track, then the second track in another
 language as before; an untagged track counts only for an English original and only after a tagged one; without an
 original language the order is exactly as before."""
+import itertools
 import random
+import threading
 import unittest
 
 from helpers import AUDIO_BETTER, FIXTURES, rhythm
 from subsync import audiofit  # noqa: E402
+from subsync.langs import lang3  # noqa: E402
 from subsync.mp4 import open_index  # noqa: E402
 from subsync.worker import audio_facts  # noqa: E402
 
@@ -80,6 +83,43 @@ class OrderTest(unittest.TestCase):
             def duration(self):
                 return 600.0
         self.assertEqual(audiofit.track_order(Mp4Like(), "jpn"), [])
+
+    def test_the_estimate_is_the_most_any_language_among_the_tracks_would_make(self):
+        # most_tracks tries only the languages that can put a track first; the answer is that of every
+        # language of the file's tracks tried in turn (the reference)
+        def every_language(index):
+            languages = {lang3(t.get("language")) for t in index.audio_tracks()} | {None}
+            return max([1] + [len(audiofit.track_order(index, c)) for c in languages])
+        pool = ["eng", "en", "English", "jpn", "ja", "chi", "yue", "cmn", "zh-Hant", "und", "mul", "qaa", "x1", "",
+                "nor", "nob", "fre", "ger", "deu", "kor"]
+        r = random.Random(7)
+        for _ in range(1500):
+            tracks = [dict(track(i, r.choice(pool), r.random() < 0.3, r.choice(["", "", "Commentary", "Main"]),
+                                 r.random() < 0.8), commentary=r.random() < 0.1)
+                      for i in range(r.choice([0, 1, 2, 3, 4, 6, 9]))]
+            self.assertEqual(audiofit.most_tracks(Index(tracks)), every_language(Index(tracks)), tracks)
+
+    def test_a_file_with_thousands_of_tracks_is_counted_at_once(self):
+        # Every language's order, each reading every track twice: 4 s of CPU for 1,000 tracks, growing with the
+        # square of their number (a crafted Tracks element holds hundreds of thousands)
+        codes = ["".join(c) for c in itertools.product("abcdefghijklmnopqrstuvwxyz", repeat=3)][:17_000]
+        shapes = {"each in its own language": ([track(i, c, i == 0) for i, c in enumerate(codes)], 3),
+                  "all commentaries but the default": ([track(i, c, i == 0, "" if i == 0 else "Commentary")
+                                                        for i, c in enumerate(codes)], 1),
+                  "languages that name none": ([track(i, f"x{i}", i == 0) for i in range(17_000)], 2)}
+        for shape, (tracks, want) in shapes.items():
+            index, reads, done = Index(tracks), [], []
+            listed = index.audio_tracks
+
+            def counted():
+                reads.append(1)
+                return listed()
+            index.audio_tracks = counted
+            t = threading.Thread(target=lambda: done.append(audiofit.most_tracks(index)), daemon=True)
+            t.start()
+            t.join(10)
+            self.assertEqual(done, [want], f"{shape}: most_tracks still running after 10 s")
+            self.assertEqual(len(reads), 1, shape)                     # the tracks read once
 
     def test_the_read_estimate_counts_the_tracks_tried(self):
         tracks = [track(0, "rus", True), track(1, "ukr"), track(2, "eng")]
