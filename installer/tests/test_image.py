@@ -1,6 +1,7 @@
 """The image setup runs from: built from the repository's root, Docker's own programs pinned in it, the tests
 of both parts run in its build without leaving anything behind, and its entry script: setup as root, the service
 never as root."""
+import fnmatch
 import re
 import subprocess
 import tempfile
@@ -25,6 +26,26 @@ def instruction(text, start):
         if not line.rstrip().endswith('\\'):
             break
     return '\n'.join(out)
+
+
+def copied(path, source):
+    """Whether a COPY `source` (a file, a folder, or a pattern whose * stays within one folder, as Docker's do) takes the
+    file at `path`, both relative to the repository."""
+    source = source.rstrip('/')
+    if (REPO / source).is_dir():
+        return path.startswith(source + '/')
+    parts, pattern = path.split('/'), source.split('/')
+    return len(parts) == len(pattern) and all(fnmatch.fnmatchcase(p, q) for p, q in zip(parts, pattern))
+
+
+def matches(path, rule):
+    """Whether a .dockerignore `rule` leaves out the file at `path`: "**/" then a name for any folder or file of that
+    name, else the folders or files the rule names from the root."""
+    parts = path.split('/')
+    if rule.startswith('**/'):
+        return any(fnmatch.fnmatchcase(part, rule[3:]) for part in parts)
+    pattern = rule.split('/')
+    return len(parts) >= len(pattern) and all(fnmatch.fnmatchcase(p, q) for p, q in zip(parts, pattern))
 
 
 class Dockerfile(unittest.TestCase):
@@ -95,6 +116,27 @@ class Dockerfile(unittest.TestCase):
         ignore = (REPO / '.dockerignore').read_text().split()
         for name in ('.git', 'state', '**/__pycache__', '**/*.pyc', '**/.DS_Store'):
             self.assertIn(name, ignore)
+
+    def test_the_python_base_is_said_to_be_the_one_the_wheels_are_for(self):
+        # The base image is pinned by digest alone, and requirements.txt's wheels are for one CPython (cp313):
+        # the line above its FROM says which, and the two agree
+        said = re.search(r'^# CPython (\d+)\.(\d+)\b.*\nFROM python@' + SHA + '$', self.text, re.M)
+        self.assertIsNotNone(said)
+        wheels = set(re.findall(r'\bcp(\d)(\d+)\b', (REPO / 'subsync' / 'requirements.txt').read_text()))
+        self.assertEqual(wheels, {said.groups()})
+
+    def test_every_file_setup_needs_is_copied_into_the_image(self):
+        # The build's installer suite imports the build context's installer (-t /src), never the image's own
+        # copy, which holds only what the COPY lines name (installer/*.py: its top-level modules): a subfolder or a data
+        # file setup reads would pass the build's tests and be missing from the image
+        sources = [source for line in self.lines if line.startswith('COPY ') and '--from=' not in line
+                   for source in line.split()[1:-1] if not source.startswith('--')]
+        ignore = (REPO / '.dockerignore').read_text().split()
+        for path in sorted(p.relative_to(REPO).as_posix() for p in (REPO / 'installer').rglob('*') if p.is_file()):
+            if path.startswith('installer/tests/') or any(matches(path, rule) for rule in ignore):
+                continue
+            with self.subTest(path=path):
+                self.assertTrue(any(copied(path, source) for source in sources), sources)
 
 
 class Notice(unittest.TestCase):

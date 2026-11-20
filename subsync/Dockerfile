@@ -39,6 +39,7 @@ FROM scratch AS compose-amd64
 ADD --chmod=755 --checksum=sha256:af426722a8af5de812fcee30cc1c39f0639f5f723cbadefb25e5d4db054064cf https://github.com/docker/compose/releases/download/v5.7.1/docker-compose-linux-x86_64 /docker-compose
 FROM scratch AS compose-arm64
 ADD --chmod=755 --checksum=sha256:f2f49f903240895fa764c0dca3a14548b754ad9426f6b609ccaf55ec5a3aa2a5 https://github.com/docker/compose/releases/download/v5.7.1/docker-compose-linux-aarch64 /docker-compose
+# CPython 3.13, the Python requirements.txt's wheels (cp313) are for: a new digest must be a Python 3.13 image
 FROM python@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 COPY subsync/requirements.txt /tmp/requirements.txt
