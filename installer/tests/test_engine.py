@@ -132,6 +132,37 @@ class Terminal(TmpState):
             self.assertEqual(self.said(ui.paint('1;32', 'ok') + ' \x1b[2K\x1b[1Ax\x1b]0;t\x07'),
                              '\x1b[1;32mok\x1b[0m [2K[1Ax]0;t\n')
 
+    def test_with_colour_on_only_setups_own_colours_reach_the_terminal(self):
+        # Every ESC [ … m stayed while colour was on, so AIOStreams' words could conceal the rest of their line
+        # and setup's next lines (a stop's way out), and leave the terminal concealed after setup ended
+        with mock.patch.object(ui, 'COLOR', True):
+            self.assertEqual(self.said('AIOStreams says: 1.0\x1b[8m hidden', 'Fix: run ./setup again.'),
+                             'AIOStreams says: 1.0 hidden\nFix: run ./setup again.\n')
+            self.assertEqual(self.said('a\x1b[7mb\x1b[32;7mc\x1b[30;40md\x1b[5me\x1b[38;5;0mf\x1b[mg\x1b[;1mh'),
+                             'abcdefgh\n')
+            # one of setup's own colours the words leave on ends with its line
+            self.assertEqual(self.said(f"  {ui.paint('33', '!')}  v\x1b[1;32m1.0", 'next'),
+                             '  \x1b[33m!\x1b[0m  v\x1b[1;32m1.0\x1b[0m\nnext\n')
+            self.assertEqual(self.said('a\x1b[1mb\x1b[1;0mc'), 'a\x1b[1mb\x1b[1;0mc\n')
+            # setup's own lines are printed as they were
+            for line in (f"  {ui.paint('31', '✗')}  text", ui.paint('2', '     a note'), ui.paint('1', 'Step 1'),
+                         '  │ ' + ui.paint('1;33', 'Done') + ' │'):
+                self.assertEqual(self.said(line), line + '\n')
+
+    def test_every_colour_setup_paints_is_one_say_keeps(self):
+        # a colour outside ui.PAINTED would be taken out of setup's own lines
+        codes, installer = set(), Path(ui.__file__).resolve().parent
+        for path in installer.glob('*.py'):
+            source = path.read_text(encoding='utf-8')
+            codes |= set(re.findall(r'paint\(\s*[\'"]([^\'"]*)[\'"]', source))
+            codes |= {code for pair in re.findall(r"'([0-9;]+)' if good else '([0-9;]+)'", source) for code in pair}
+        codes.add(re.search(r"def box\(title, paragraphs, colour='([0-9;]+)'",
+                            (installer / 'ui.py').read_text(encoding='utf-8')).group(1))
+        self.assertGreaterEqual(codes, {'1', '2', '31', '32', '33', '1;32', '1;33'})
+        for code in codes:
+            with self.subTest(code=code):
+                self.assertLessEqual(set(code.split(';')), ui.PAINTED)
+
     def test_a_box_keeps_its_border_round_what_say_takes_out(self):
         for color in (False, True):
             with self.subTest(color=color), mock.patch.object(ui, 'COLOR', color):
@@ -1217,6 +1248,26 @@ class TerminalAsks(Offline):
         self.assertNotIn(PASSWORD, out)
         self.assertTrue(any(p['type'] == 'custom' for p in self.aios.users[UUID]['config']['presets']))
 
+    def test_ctrl_c_at_a_question_is_a_plain_stop_that_changes_nothing(self):
+        # Ctrl-C at the password question of ./setup --uninstall: the stop's own words and code 1, never a
+        # traceback, and nothing removed
+        self.install()
+        presets = json.dumps(self.aios.users[UUID]['config']['presets'])
+        interrupted = mock.Mock(side_effect=KeyboardInterrupt)
+        with mock.patch('builtins.input', interrupted), mock.patch.object(ui.getpass, 'getpass', interrupted), \
+                mock.patch.object(ui, 'COLOR', False):
+            try:
+                code, out = self.run_main('--uninstall')
+            except KeyboardInterrupt:
+                self.fail('Ctrl-C at a question went through as a traceback')
+        self.assertEqual(code, 1, out)
+        self.assertEqual(interrupted.call_count, 1)
+        self.assertIn('  ✗  Stopped by you.\n', out)
+        self.assertIn('Nothing after this point was changed. Run ./setup again any time.', out)
+        self.assertNotIn('Traceback', out)
+        self.assertTrue((self.state / 'settings.json').exists())
+        self.assertEqual(json.dumps(self.aios.users[UUID]['config']['presets']), presets)
+
 
 class OptionalKeys(Offline):
     """A saved optional key can be removed: remove typed in a terminal, its empty line in an answers file (no line keeps
@@ -1241,6 +1292,15 @@ class OptionalKeys(Offline):
         with typing(), contextlib.redirect_stdout(out):                  # a question that isn't optional: no remove
             ui.Asker({}, yes=True).text('AIOS_URL', 'Address', current='http://127.0.0.1:3000')
         self.assertNotIn('type remove', out.getvalue())
+
+    def test_remove_typed_with_no_saved_key_keeps_no_key(self):
+        # With nothing saved, the word went through as the answer and was saved as the key
+        for typed in ('remove', 'Remove'):
+            with self.subTest(typed=typed), typing(typed), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ui.Asker().text('SUBDL_KEY', screens.LABELS['SUBDL_KEY'], secret=True, optional=True),
+                                 '')
+        with typing('remove'), contextlib.redirect_stdout(io.StringIO()):     # a question that isn't optional: an answer
+            self.assertEqual(ui.Asker().text('AIOS_USERNAME', screens.SIGN_IN_TO_SAVE), 'remove')
 
     def test_an_answers_files_empty_line_removes_the_saved_key(self):
         self.install(SUBDL_KEY='subdl-key-1', TMDB_KEY='tmdb-key-1')

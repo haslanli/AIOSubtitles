@@ -15,15 +15,32 @@ def paint(code, text):
     return f'\033[{code}m{text}\033[0m' if COLOR else text
 
 
-# What a terminal acts on instead of showing: every C0 control but the line break, DEL and the C1 controls. Text from
-# AIOStreams (a version, an error message, a name in a config) is printed in setup's lines, so these are taken out of
-# every line: nothing printed can move the cursor, clear lines or set the window title or the clipboard. paint's colour
-# codes (ESC [ … m) stay while colour is on; with it off, setup prints none, so any there are taken out whole.
-UNSHOWN = re.compile(r'(\033\[[0-9;]*m)|[\x00-\x09\x0b-\x1f\x7f-\x9f]')
+# What a terminal acts on instead of showing: the codes that set how text looks (ESC [ … m), every C0 control but the
+# line break, DEL and the C1 controls. Text from AIOStreams (a version, an error message, a name in a config) is printed
+# in setup's lines, so these are taken out of every line: nothing printed can move the cursor, clear lines or set the
+# window title or the clipboard. While colour is on, a code made only of what setup paints with (PAINTED) stays, and
+# any other goes whole (conceal, reverse, blink, other colours:); a line that leaves one in force ends with a
+# reset, so none outlives its line. With colour off, setup paints nothing, so every one goes.
+UNSHOWN = re.compile(r'\033\[([0-9;]*)m|[\x00-\x09\x0b-\x1f\x7f-\x9f]')
+PAINTED = frozenset(('0', '1', '2', '31', '32', '33'))     # paint's and box's codes: reset, bold, dim, red, green, yellow
+RESET = '\033[0m'
+
+
+def _as_printed(text):
+    """`text` as say() prints it."""
+    kept = []
+
+    def keep(m):
+        if COLOR and m.group(1) is not None and set(m.group(1).split(';')) <= PAINTED:
+            kept.append(m.group(1))
+            return m.group(0)
+        return ''
+    line = UNSHOWN.sub(keep, str(text))
+    return line + RESET if kept and kept[-1].split(';')[-1] != '0' else line
 
 
 def say(text=''):
-    print(UNSHOWN.sub(lambda m: m.group(1) if COLOR and m.group(1) else '', str(text)), flush=True)
+    print(_as_printed(text), flush=True)
 
 
 def wrap(text, indent='  '):
@@ -89,7 +106,7 @@ def masked(value):
     return f'set ({len(value)} characters)' if value else 'not set'
 
 
-REMOVE = 'remove'      # typed at an optional question with a current answer: removes it
+REMOVE = 'remove'      # typed at an optional question: no answer is kept (its current one is removed)
 
 
 def answers_advice(key, given):
@@ -106,7 +123,7 @@ class Asker:
     answers-file key; a key without one is refused). Enter keeps the current answer (or takes the default); '?' shows
     the question and its explanation again. Answers can come from a KEY=value file (--answers) and, with --yes, nothing
     is asked. An optional question's current answer is removed by typing remove, or by its empty line in the file:
-    '' is returned."""
+    '' is returned (with no current answer too: the word is never kept as the answer)."""
 
     def __init__(self, answers=None, yes=False, settings=None):
         """`answers`: the answers file's lines; None when no file was given. `settings`: subsync's on this install, for
@@ -163,7 +180,7 @@ class Asker:
                 removing = value.lower() == REMOVE
             if value == '?':
                 continue
-            if removing and optional and current:
+            if removing and optional:
                 return ''
             if not value:
                 value = current or default or ''
