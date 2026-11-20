@@ -23,12 +23,12 @@ from unittest import mock
 from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only,  # noqa: E402
                      RangeServer, start_server, stop_server, TempDir, watch_the_log)
 from subsync import ALGO_VERSION  # noqa: E402
-from subsync.addon import REPROCESS_S, App, file_id, serve, token  # noqa: E402
+from subsync.addon import App, file_id, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
 from subsync import explain, sources  # noqa: E402
 from subsync.sources import (Aios, expected_size, extras, fetch_subtitle, parse_extras, same_hash,  # noqa: E402
                              unreadable)
-from subsync.store import REFUSED_BACKOFF_S, Store, result_key  # noqa: E402
+from subsync.store import JUDGED_FOR_S, REFUSED_BACKOFF_S, Store, result_key  # noqa: E402
 from subsync.reader import Stopped  # noqa: E402
 from subsync.worker import Job, JobGuard, Safety, Worker, rewrite  # noqa: E402
 
@@ -2329,7 +2329,7 @@ class ReadLatelyTest(AddonCase):
     def test_a_file_read_a_day_ago_on_the_stores_clock_is_read_again(self):
         self.store.alias("name:a.mkv|1000", FILE)
         self.store.file_read(FILE, 1000, FILE[:16], True, {})
-        self.clock.t += REPROCESS_S - 1
+        self.clock.t += JUDGED_FOR_S - 1
         self.app.subtitles("movie", "tt1", "filename=a.mkv&videoSize=1000")
         self.assertEqual(list(self.worker.jobs), [])                            # read lately: nothing queued
         self.clock.t += 2

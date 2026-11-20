@@ -505,6 +505,21 @@ SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there, Kenobi.\n\n2\n00:00:03,000
 SYNCED = "1\n00:00:01,500 --> 00:00:02,500\nHello there, Kenobi.\n\n2\n00:00:03,500 --> 00:00:04,500\nGeneral.\n"
 
 
+class AnswerLogTest(Base):
+    """The privacy page says the logs name the titles synced, never who asked, and that no log of requests is
+    kept, yet every subtitle list answered left a line naming the title asked for, synced or not."""
+
+    def test_a_public_instance_logs_no_line_per_subtitle_list(self):
+        from subsync.addon import App
+        w = self.worker(Limits(who="b" * 16))
+        with self.assertNoLogs("subsync.addon", "INFO"):
+            App(w.s, self.store, w, Safety()).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        own = self.worker(settings=self.settings(SUBSYNC_PUBLIC="off"))      # a self-hosted install's log keeps it
+        with self.assertLogs("subsync.addon", "INFO") as logs:
+            App(own.s, self.store, own, Safety()).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertIn("answer movie/tt9: ", logs.output[0])
+
+
 class CopyFromTheStoreTest(Base):
     """A person whose request is answered entirely from copies another person's sync made,
     and who never had a job for that file, can download them: the copy is rebuilt from their own list, fetched then."""

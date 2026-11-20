@@ -52,6 +52,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import digits, explain, origlang, srclimits
 from .langs import name as lang_name
 from .sources import parse_extras
+from .store import JUDGED_FOR_S
 from .subs import apply_recipe, format_of, parse, to_srt
 from .version import VERSION
 from .worker import Job, put_bounded
@@ -97,7 +98,6 @@ ENTRY_ROUTES = (FILE_ROUTE, PENDING_ROUTE, PICK_ROUTE, ORIGINAL_ROUTE)
 # character, names no title and is answered 404 (it would reach the log as it is); so is one with a "/" (sent as %2F: it
 # would be more of the path in AIOStreams' address)
 MAX_VIDEO_ID = 256
-REPROCESS_S = 24 * 3600
 # A pick or pending entry stops waiting for the job this long before its deadline while the original it would serve
 # isn't downloaded yet, so that download has time (a subtitle file is tens of KB; a slow site's first answer takes a
 # second or two); past the deadline, the redirect to the original's own address as before
@@ -299,8 +299,11 @@ class App:
         if self.action() is not None:     # public mode: one entry after the others while only the person can fix something
             out.append({"id": "aiosubtitles-notice", "url": f"{self.s.public_base}{NOTICE_PATH}",
                         "lang": self.s.languages[0], "label": explain.PUBLIC_NOTICE_LABEL})
-        log.info("answer %s/%s: %d entries (%d to pick) in %d ms", type_, video_id, len(out),
-                 sum(str(e.get("id", "")).startswith("subsync-pick-") for e in out), (time.time() - t0) * 1000)
+        # public mode: not in the log (DEBUG), which names only the titles synced, never every title asked for, as the
+        # privacy page says
+        log.log(logging.DEBUG if self.s.public else logging.INFO, "answer %s/%s: %d entries (%d to pick) in %d ms",
+                type_, video_id, len(out), sum(str(e.get("id", "")).startswith("subsync-pick-") for e in out),
+                (time.time() - t0) * 1000)
         return out
 
     def _with_pick_entries(self, job):
@@ -395,14 +398,16 @@ class App:
         if file_key:
             read_at, detail = self.store.file_state(file_key)
             now = self.store.clock()
-            recent = bool(read_at and now - read_at < REPROCESS_S)
+            # the window in which a file judged for every language asked is not read again: the worker's own
+            # (store.JUDGED_FOR_S), which the store's judged rows are kept for too
+            recent = bool(read_at and now - read_at < JUDGED_FOR_S)
             detail = detail or {}
             rule, now_rule = detail.get("rule"), origlang.current(self.worker.rule_for(job.video_id))
             if recent and rule is not None and not now_rule(rule):
                 # read under another pass rule, or before its title's original language was known: judge its
                 # subtitles again now
                 recent = False
-            judged = self.store.judged_all(file_key, self.s.languages, now_rule, now - REPROCESS_S) if recent else None
+            judged = self.store.judged_all(file_key, self.s.languages, now_rule, now - JUDGED_FOR_S) if recent else None
             no_track = detail.get("reference") is False
             # this person's languages only the audio route can judge here: all of them on a file with no track of its
             # own, else those whose subtitles a first pass found too long for its only track; it gives a
@@ -631,12 +636,12 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _wait_for(app, alias, lang, end, deadline, final=False):
-        """Worker.wait_for until `end` (a time), stopping ORIGINAL_DOWNLOAD_S before `deadline` while the original the
-        answer may serve still has to be downloaded, so it gets that time; once it is downloaded, until `end`."""
-        got = app.worker.wait_for(alias, lang, max(0.0, min(end, deadline - ORIGINAL_DOWNLOAD_S) - time.time()), final)
+        """Waits (Worker.wait_for) until `end` (a time), stopping ORIGINAL_DOWNLOAD_S before `deadline` while the
+        original the answer may serve still has to be downloaded, so it gets that time; once it is downloaded, until
+        `end`. It only waits: what is served is read afterwards (_entry_answer)."""
+        app.worker.wait_for(alias, lang, max(0.0, min(end, deadline - ORIGINAL_DOWNLOAD_S) - time.time()), final)
         if time.time() < end and not app.worker.original_needs_download(alias, lang):
-            got = app.worker.wait_for(alias, lang, max(0.0, end - time.time()), final)
-        return got
+            app.worker.wait_for(alias, lang, max(0.0, end - time.time()), final)
 
     def _entry_answer(self, app, alias, lang, end, deadline):
         """A pick or pending entry's answer once its wait for the file's job is over, the same for both in the same
