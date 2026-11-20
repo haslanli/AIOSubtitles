@@ -33,7 +33,7 @@ from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
 from subsync import digits, explain, origlang, realdebrid
 from subsync.aiosconfig import install_link
-from subsync.settings import Settings
+from subsync.settings import GB, Settings
 from subsync.sources import manifest_base
 
 REPO = Path(__file__).resolve().parent.parent      # the code (/opt/aiosubtitles in the image)
@@ -1624,7 +1624,7 @@ class Engine:
                 st = {}
             if st:
                 rows.append(('ok', f"people signed up: {st.get('people', 0)} of {st.get('max_people', 0)}",
-                             f"read today: {st.get('read_today', 0) / 1e9:.1f} GB of {st.get('daily_budget', 0) / 1e9:.0f} GB"))
+                             f"read today: {st.get('read_today', 0) / GB:.1f} GB of {st.get('daily_budget', 0) / GB:.0f} GB"))
             return rows, [('logs', f'docker logs {CONTAINER}')]
         st = subsync_status()
         if st:

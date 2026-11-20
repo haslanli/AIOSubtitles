@@ -14,6 +14,7 @@ from collections import namedtuple
 
 from installer import plan
 from subsync import digits, explain
+from subsync.settings import GB
 
 Limit = namedtuple('Limit', 'setting label unit kind options')
 Limit.__new__.__defaults__ = ((),)
@@ -58,10 +59,9 @@ ABOVE_ZERO = 'A number above 0, like {default}.'
 NO_COMMA = 'A number above 0, with a dot for decimals and no commas, like 1.5.'
 NOT_AN_AUDIO_LIMIT = f'Type {plan.AUDIO_BUDGET_WORDS} (GB per file).'
 NOT_A_LANGUAGE_LIMIT = 'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 4.'
-# what subsync can hold: a longer answer, or a GB value whose bytes (subsync counts 10^9 to a GB, settings.py) are no
+# what subsync can hold: a longer answer, or a GB value whose bytes (subsync counts settings.GB, 10^9, to a GB) are no
 # finite number, crashed it at start
 LONGEST = 15
-GB = 1e9
 
 
 def personal(audio, usenet=False):

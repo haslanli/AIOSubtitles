@@ -11,7 +11,8 @@ import subprocess
 import tarfile
 import time
 
-from installer.plan import DATA, INSTALL_LABEL, SERVICE_USER, VOLUME
+from installer.plan import AIOS_DEFAULT_PORT, DATA, INSTALL_LABEL, SERVICE_USER, VOLUME
+from subsync import digits
 
 # docker_problem's (problem, fix) when there is no docker command
 NO_DOCKER = ('Docker is not installed.', 'Install Docker (docs.docker.com/engine/install), then run ./setup again.')
@@ -62,11 +63,9 @@ def _inspect(ids):
 
 
 def _port(value):
-    """AIOStreams' PORT as its container has it: 3000 when it is unset, empty or not a number."""
-    try:
-        return int(value or 3000)
-    except ValueError:
-        return 3000
+    """AIOStreams' PORT as its container has it: its default when it is unset, empty or not a whole number written in
+    the digits 0 to 9 (digits.whole, the rule for every number setup reads from outside)."""
+    return digits.whole(str(value or '').strip()) or AIOS_DEFAULT_PORT
 
 
 def aios_containers():

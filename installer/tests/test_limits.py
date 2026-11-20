@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from installer import limits, plan
-from subsync import explain
+from installer import engine, limits, plan
+from subsync import explain, settings
 
 HOSTING_ORDER = [
     ('Each person', ['SUBSYNC_USER_FILES_PER_DAY', 'SUBSYNC_USER_DAILY_MB', 'SUBSYNC_MAX_LANGUAGES',
@@ -232,6 +232,15 @@ class InTheEnvFile(unittest.TestCase):
                                       current, owned=limits.names(asked))
         self.assertEqual(merged, {'SUBSYNC_LANGUAGES': 'spa', 'SUBSYNC_MAX_TRIES': '8'})
         self.assertEqual(kept, ['SUBSYNC_MAX_TRIES'])
+
+
+class Units(unittest.TestCase):
+    def test_setup_counts_a_gb_as_subsync_does(self):
+        # Limits kept its own GB (1e9), and the public instance's status line divided by its own 1e9: the unit
+        # of every *_GB setting is settings.GB, one place
+        self.assertIs(limits.GB, settings.GB)
+        self.assertIs(engine.GB, settings.GB)
+        self.assertEqual(settings.GB, 10 ** 9)
 
 
 if __name__ == '__main__':

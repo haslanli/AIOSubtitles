@@ -104,6 +104,16 @@ class Discovery(unittest.TestCase):
         with mock.patch.object(dockerenv, 'run', self.docker(env=['PORT=3005'])):
             self.assertEqual([c['port'] for c in dockerenv.aios_containers()], [3005, 3005])
 
+    def test_the_port_is_read_as_every_number_from_outside_is(self):
+        # It was read with int, which also takes another script's digits, a sign and underscores, and its
+        # default was typed twice beside plan's AIOStreams address
+        self.assertEqual(plan.AIOS_DEFAULT_URL, f'http://127.0.0.1:{plan.AIOS_DEFAULT_PORT}')
+        for value, port in (('3005', 3005), (' 3005\n', 3005), (None, 3000), ('', 3000), ('٣٠٠٥', 3000),
+                            ('３００５', 3000), ('+3005', 3000), ('3_005', 3000), ('0', 3000), ('${PORT}', 3000)):
+            with self.subTest(value=value):
+                self.assertEqual(dockerenv._port(value), port)
+                self.assertEqual(dockerenv._port(value) == plan.AIOS_DEFAULT_PORT, port == 3000)
+
     def test_a_container_gone_since_docker_ps_leaves_the_others(self):
         with mock.patch.object(dockerenv, 'run', self.docker(gone=('aaa111',))):
             self.assertEqual([c['name'] for c in dockerenv.aios_containers()], ['my-aiostreams'])
