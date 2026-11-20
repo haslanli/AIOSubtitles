@@ -25,8 +25,8 @@ shorter than MIN_W, the original is kept without reading any audio, and a window
 narrowing down a shift change then stops and places the change from the windows read, and no more held-out windows are
 added (the copy is judged on those read); a planned window or a confirmation that would pass it keeps the original. A
 window counts what its read really costs, where the index plans it (an MKV's byte range, from its seek index; an MP4's,
-from its sample tables); an MKV without a seek index, or whose planned windows would cost more than SPARSE_INDEX times their estimate, keeps the
-original without reading any audio.
+from its sample tables); an MKV without a seek index, or whose planned windows would cost more than SPARSE_INDEX times
+their estimate, keeps the original without reading any audio.
 
 On real releases subtitle lines start a steady ~190 ms before Silero's detected speech, so the bar is
 applied after removing that lead: onsets are moved `lead` seconds earlier before fitting and gating (the release's
