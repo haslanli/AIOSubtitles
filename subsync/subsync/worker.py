@@ -1801,9 +1801,12 @@ class Worker(threading.Thread):
             raise next((e for e in errors if isinstance(e, Refused)), errors[0])
 
     def _finish(self, job, lang, key, deferred):
-        """A language's judging ended: published as final, or kept in `deferred` while it waits for the audio route.
-        The audio route's own verdict replaces the language's anchored guess (served or kept as the original)."""
-        if lang in job.fetched and not job.audio:
+        """A language's judging ended: published as final, or kept in `deferred` while it waits for the audio route (a
+        first pass left it there, LanguageSync._to_audio, with the route on; with anchored guesses or without,
+): _sync_all publishes it once the anchored guesses are set, unless the audio job a pick queued
+        meanwhile is to judge it. The audio route's own verdict replaces the language's anchored guess (served or kept
+        as the original)."""
+        if not job.audio and lang in job.to_audio and self.s.audio_choice != "off":
             deferred[lang] = key
             return
         with self.cv:   # one step, so a pick in between finds the verdict or the anchored guess
@@ -2220,10 +2223,11 @@ class LanguageSync:
         else up to SUBSYNC_MAX_TRIES."""
         w, s = self.w, self.s
         # the release's own track in the subtitle's language, whose line count says a subtitle was made from this
-        # release (choose.order); its timing is still judged against the title's original language
+        # release (choose.order); its timing is still judged against the title's original language. None
+        # without one: another language's track (choose_reference's fallback) says nothing of this language's lines
         ref = pipeline.choose_reference(self.index, 0, self.lang, False, s.prefer_plain, s.fallback_reference,
                                         by_original=False)
-        ref_cues = len(ref["cues"]) if ref else None
+        ref_cues = len(ref["cues"]) if ref and not pipeline.is_cross(ref, self.lang) else None
         first = w.viewer_first(self.candidates)
         tries = w._within_limits(w._try_order(self.candidates, self.filename, self.oshash, ref_cues, first),
                                  self.filename, self.oshash, ref_cues, first)
@@ -2266,16 +2270,17 @@ class LanguageSync:
         return {"rule": self.job.rule or self.s.rule_id, "release": (e["cand"].get("release") or "")[:RELEASE_CHARS]}
 
     def _downloads(self):
-        """The downloads when they aren't judged as each ends (_stream), those in another language left out
-        (_wrong_language): with the fast path every try at once (Worker._fetch_all), so the originals can be checked
-        first; else one at a time, all of them for best fit, and otherwise (as in v3) only as they are judged, so the
-        downloads stop at the first that passes (a generator)."""
+        """The downloads when they aren't judged as each ends (_stream), those in another language (_wrong_language)
+        and the same subtitle from another source (_duplicate) left out, so each step sees each subtitle once: with the
+        fast path every try at once (Worker._fetch_all), so the originals can be checked first; else one at a time, all
+        of them for best fit, and otherwise (as in v3) only as they are judged, so the downloads stop at the first that
+        passes (a generator)."""
         job, lang = self.job, self.lang
         if self.s.fast_path:
             fetched = self.w._fetch_all(job, lang, self.tries)
         else:
             fetched = (f for f in (self.w._fetch_one(job, lang, rank, cand) for rank, cand in self.tries) if f)
-        entries = (e for e in (self._entry(*f) for f in fetched) if not self._wrong_language(e))
+        entries = (e for e in (self._entry(*f) for f in fetched) if not (self._wrong_language(e) or self._duplicate(e)))
         return list(entries) if self.s.fast_path or self.best_fit else entries
 
     def _wrong_language(self, e):
@@ -2360,8 +2365,6 @@ class LanguageSync:
         judges them all; a file with no text or image subtitle track stops at the first: only the audio route can judge
         it (_to_audio)."""
         for e in entries:
-            if not self.streamed and self._duplicate(e):
-                continue
             if e["got"]:
                 if not self.s.fast_path and self._listed_cached(e) and not self.best_fit:
                     return

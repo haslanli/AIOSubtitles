@@ -1013,7 +1013,7 @@ class PickTest(AddonFixture):
 
     def test_a_waiting_language_is_published_with_its_anchored_guess_when_another_raises(self):
         job = Job(self.job.type, self.job.video_id, self.job.hints)
-        job.fetched = {"eng": []}
+        job.to_audio, job.fetched = {"eng"}, {"eng": []}   # left to the audio route, as LanguageSync._to_audio does
         calls = []
         self.worker._set_provisional = lambda j: calls.append(j)
 

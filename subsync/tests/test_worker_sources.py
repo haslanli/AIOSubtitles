@@ -446,6 +446,28 @@ class LanguageCheckWorkerTest(unittest.TestCase):
         self.assertEqual(job.to_audio, {"rus"})
         self.assertEqual([c["id"] for c, _ in job.fetched["rus"]], ["os-ru"])
 
+    def test_a_language_left_to_a_picked_audio_job_waits_for_it_with_anchored_guesses_or_without(self):
+        # Without anchored guesses (nothing kept in job.fetched) the language was published as final although
+        # the audio job a pick queued during the first pass was to judge it: the pick's wait ended at once, with the
+        # original
+        self.judged()
+        no_track = {"outcome": "keep_original", "reason": "no text track", "route": None, "waits_audio": True}
+        patcher = mock.patch.object(pipeline, "sync_subtitle", lambda *a, **kw: dict(no_track))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for anchored in ("on", "off"):
+            with self.subTest(anchored=anchored):
+                w = self.worker(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_ANCHORED_GUESS=anchored)
+                job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
+                w.picked_early[job.alias] = time.time()              # the viewer picked while the first pass ran
+                w._audio_room = lambda alias: True
+                w._sync_all(job, {"eng": [self.cand("os-en")]},
+                            lambda lang, cands: w._sync_language(job, FakeIndex(), "f-1", lang, cands, "abcd", "b.mp4"))
+                self.assertEqual(job.to_audio, {"eng"})
+                self.assertTrue(w._audio_queued(job.alias))
+                self.assertNotIn("eng", w.judged.get(job.alias) or set())      # the pick waits for the audio job
+                self.assertNotIn("eng", w.done.get(job.alias) or {})
+
     def test_the_anchors_original_is_downloaded_further_in_name_order_until_its_text_is_checked(self):
         # The main language's original refused, the next by name is
         # downloaded and checked, a failed one is passed over, up to langcheck.MORE_DOWNLOADS more; the one that passes
@@ -549,6 +571,23 @@ class LanguageSyncStepsTest(unittest.TestCase):
         self.assertEqual(e["got"]["key"], kept)
         self.assertFalse(sync._listed_cached(e))
         self.assertEqual((self.store.get(kept)["outcome"], sync.passed), ("keep_original", [row["key"]]))
+
+    def test_the_fast_path_without_best_fit_judges_the_same_subtitle_from_another_source_once(self):
+        # Its originals were checked and shifted before the same subtitle from another source was left out
+        # (in _fit_all), so each copy was judged and its shift stored
+        self.downloads.files["http://subs.test/os-a2.srt"] = self.raw("os-a").replace(b"\n", b"\r\n")
+        sync = self.steps([self.cand("os-a"), self.cand("os-a2"), self.cand("os-b")], SUBSYNC_BEST_FIT="off",
+                          SUBSYNC_FAST_PATH="on", SUBSYNC_SHIFT_PATH="on", SUBSYNC_MAX_TRIES="3")
+        judged = []
+        with mock.patch.object(pipeline, "check_original", lambda index, text, lang, **k: judged.append("check") or {
+                    "in_sync": False, "route": "cues", "gate_original": {"within200": 0.3, "median_ms": 400}}), \
+                mock.patch.object(pipeline, "shift_sync", lambda *a, **k: judged.append("shift")), \
+                mock.patch.object(pipeline, "sync_subtitle", lambda *a, **k: judged.append("fit") or {
+                    "outcome": "keep_original", "reason": "below the bar", "route": "cues"}):
+            self.assertIsNone(sync.run())
+        self.assertEqual(sorted(judged), ["check", "check", "fit", "fit", "shift", "shift"])
+        self.assertEqual(sorted(cid for (cid,) in self.store.db.execute("SELECT candidate_id FROM results")),
+                         ["os-a", "os-b"])
 
     def test_a_stored_pass_ends_the_search_before_anything_else_is_downloaded(self):
         # neither best fit nor the fast path: one download at a time, stopping at the first that passes

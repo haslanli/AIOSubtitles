@@ -97,6 +97,20 @@ class LineCountSignalTest(unittest.TestCase):
         cand = {"id": "tsdb-1", "lang": "spa", "release": "Some.Other.Name", "cues": 760}
         self.assertEqual(choose.tier_of(3, cand, "Movie.2020.1080p.BluRay-GRP.mkv", None, 760), 1)
 
+    def test_a_language_with_no_track_of_its_own_counts_no_lines(self):
+        # The count came from another language's track (choose_reference's fallback), so a Russian subtitle
+        # about as long as the English track ranked as made from this release, above a release-group match
+        tmp = TempDir()
+        folder = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        s = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_LANGUAGES": "rus", "SUBSYNC_EXTRA_SOURCES": ""})
+        w = Worker(s, closed_after(self, Store(os.path.join(folder, "store"))), None, Safety())
+        index = Index([track(3, "eng", [(30.0 + 3 * i, 2.0) for i in range(820)])], "eng")
+        self.assertEqual(pipeline.choose_reference(index, 0, "rus", by_original=False)["number"], 3)   # the fallback
+        with mock.patch.object(choose, "order", wraps=choose.order) as order:
+            w._sync_language(Job("movie", "tt1"), index, "f-1", "rus", [], "abcd", "Movie.mkv")
+        self.assertIsNone(order.call_args.kwargs["ref_cues"])
+
 
 class OriginalImageAndCaptionTrackTest(unittest.TestCase):
     """."""
