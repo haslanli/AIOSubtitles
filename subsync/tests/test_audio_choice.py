@@ -8,9 +8,9 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, form, HAVE_CRYPTOGRAPHY, http, KEY,
-                     Limits, Listing, NEEDS, RangeServer, row, ServerHarness, start_server, stop_server, TempDir,
-                     wait_until)
+from helpers import (closed_after, Counts, dialogue_srt, FakeDebrid, FakeDownloads, FakeUsenet, FIXTURES, form,
+                     HAVE_CRYPTOGRAPHY, http, KEY, Limits, Listing, NEEDS, RangeServer, row, ServerHarness,
+                     start_server, stop_server, TempDir, wait_until)
 from subsync import sources
 from subsync import worker as worker_mod
 from subsync.reader import CapReached, ReadFailed, Refused, Stopped
@@ -529,6 +529,49 @@ class SelfHostedTest(Base):
         self.first_pass(w)
         self.assertEqual(len(w.jobs), 0)
         self.assertTrue(w.waits_for_pick(self.alias))
+
+
+class RouteOffNoTrackTest(Base):
+    """A file with no subtitle track of its own, for a job that may not use the audio route (the instance's
+    route off, or the person's choice): nothing can be judged, so the first pass downloads each language's original to
+    check it and keep it for the "(original)" entry, not every try (20 a language, judged for nothing). The languages
+    are left to the audio route, so turning it on later syncs the file."""
+
+    def run_first_pass(self, settings):
+        subs = [dict(SUB, id=f"os-{lang}-{k}", lang=lang, url=f"http://subs.test/{lang}/{k}.srt")
+                for lang in ("eng", "spa") for k in range(20)]
+        # each a subtitle of its own in its language (timed apart), so none is left out as another's same
+        downloads = FakeDownloads({c["url"]: dialogue_srt(c["lang"], start=30.0 + int(c["id"].rsplit("-", 1)[1]))
+                                   for c in subs})
+        w = self.worker(settings=settings, subs=subs)
+        with downloads.patch():
+            self.first_pass(w)
+        return w, downloads.asked
+
+    def test_only_the_originals_are_downloaded_and_kept(self):
+        for public, env in ((False, {"SUBSYNC_AUDIO_ROUTE": "off"}), (True, {})):
+            with self.subTest(public=public):
+                for table in ("results", "kept_original", "judged", "files", "aliases"):
+                    self.store.db.execute(f"DELETE FROM {table}")
+                settings = self.settings("off", SUBSYNC_LANGUAGES="eng,spa", **env)
+                settings.public = public
+                w, asked = self.run_first_pass(settings)
+                self.assertEqual(sorted(asked), ["http://subs.test/eng/0.srt", "http://subs.test/spa/0.srt"])
+                file_key = self.file_key()
+                self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
+                self.assertEqual({lang: self.store.kept_original(file_key, lang)["candidate_id"]
+                                  for lang in ("eng", "spa")}, {"eng": "os-eng-0", "spa": "os-spa-0"})
+                self.assertEqual(self.store.file_detail(file_key)["audio_only"], ["eng", "spa"])
+                self.assertEqual({lang: w.wait_for(self.alias, lang, 0, final=True)[0] for lang in ("eng", "spa")},
+                                 {"eng": None, "spa": None})
+                self.assertEqual(w.judged[self.alias], {"eng", "spa"})
+                # self-hosted with the route off marks the file judged a day; a person whose choice is off doesn't
+                self.assertEqual(bool(self.store.judged_all(file_key, ["eng", "spa"], w.s.rule_id, 0)), not public)
+                self.assertFalse(w.waits_for_pick(self.alias))
+                self.assertEqual(len(w.jobs), 0)
+        # the route turned on later: the languages left to it give the file a first pass of its own
+        on = self.worker(settings=self.settings("pick", SUBSYNC_LANGUAGES="eng,spa"))
+        self.assertTrue(on._audio_unjudged(Job("movie", "tt1", self.hints), self.file_key()))
 
 
 # ------------------------------------------------------------------------------------- the queue, picks and endings

@@ -1560,8 +1560,11 @@ class Worker(threading.Thread):
             self._await_pick(job, per_lang, hints.get("filename"), oshash)
             log.info("done %s file=%s bytes=%d requests=%d", job.label, file_key, reader.bytes, reader.requests)
             return
-        self._sync_all(job, per_lang, lambda lang, cands: self._sync_language(job, index, file_key, lang, cands, oshash,
-                                                                              hints.get("filename")))
+        if not reference and not self.audio_allowed(job):
+            self._originals_only(job, per_lang, file_key, hints.get("filename"), oshash)
+        else:
+            self._sync_all(job, per_lang, lambda lang, cands: self._sync_language(job, index, file_key, lang, cands,
+                                                                                  oshash, hints.get("filename")))
         if job.to_audio:
             self.store.file_detail_update(file_key, audio_only=sorted(audio_only | job.to_audio))
         if reference or job.audio or not self.s.audio_route:
@@ -1656,14 +1659,7 @@ class Worker(threading.Thread):
                     + [(r, c) for r, c in order if c["id"] != guess][:CONSENSUS_TRIES]
             else:
                 want[lang] = order[: self.s.gate_tries]
-        # every language's downloads at once with SUBSYNC_PARALLEL_LANGUAGES, as LanguageSync's: the audio job a
-        # pick queued starts only once this pass ends
-        if self.s.parallel_languages and len(want) > 1:
-            with ThreadPoolExecutor(max_workers=len(want), thread_name_prefix="subsync-lang") as pool:
-                running = {lang: pool.submit(self._fetch_all, job, lang, tries) for lang, tries in want.items()}
-                got = {lang: future.result() for lang, future in running.items()}
-        else:
-            got = {lang: self._fetch_all(job, lang, tries) for lang, tries in want.items()}
+        got = self._fetch_languages(job, want)   # the audio job a pick queued starts only once this pass ends
         for lang, tries in want.items():
             job.fetched[lang] = [(cand, decode(raw, lang)) for _, cand, raw in got[lang]]
             self._check_fetched(job, lang, per_lang[lang], {c["id"] for _, c in tries}, filename, oshash,
@@ -1702,9 +1698,12 @@ class Worker(threading.Thread):
                  job.label, lang, got["group"], got["offset_s"])
 
     def _check_fetched(self, job, lang, candidates, tried, filename, file_hash, more=0):
-        """A waiting file's downloads of a language: those whose text the language check refuses are left out (no
+        """The downloads of a language of a file nothing can judge yet (one that waits for a pick, or has no
+        track and no audio route, _originals_only): those whose text the language check refuses are left out (no
         anchored guess is made from them) and its original is replaced if it is one of them; with `more`, up to that many
-        further downloads in name order until the original's text is checked (the main language's, the anchor)."""
+        further downloads in name order until the original's text is checked (a waiting file's main language's, the
+        anchor; every language's with no audio route). Returns the texts that passed by candidate id, and the ids
+        refused."""
         texts, refused = {}, set()
         for cand, text in job.fetched.get(lang, []):
             if langcheck.refuses(text, lang):
@@ -1731,6 +1730,29 @@ class Worker(threading.Thread):
                 texts[cand["id"]] = text
                 job.fetched.setdefault(lang, []).append((cand, text))
         job.fetched[lang] = [(c, t) for c, t in job.fetched.get(lang, []) if c["id"] not in refused]
+        return texts, refused
+
+    def _originals_only(self, job, per_lang, file_key, filename, oshash):
+        """A file with no text or image subtitle track, for a job that may not use the audio route (the instance's route
+        is off, or this person's choice): nothing can be judged, so no subtitle is downloaded to be judged (every try
+        was, then the first fit said only the audio route could). Each language's original is checked as a waiting
+        file's (_check_fetched: the one served, then up to langcheck.MORE_DOWNLOADS more in name order until its text
+        passes the language check) and kept for its "(original)" entry (_keep_original); the languages with a subtitle
+        to fit are left to the audio route (job.to_audio), so turning it on later syncs the file."""
+        with self.cv:
+            originals = dict(self.originals.get(job.alias) or {})
+        want = {lang: [(r, c) for r, c in enumerate(cands) if c["id"] == (originals.get(lang) or {}).get("id")][:1]
+                for lang, cands in per_lang.items() if cands}
+        got = self._fetch_languages(job, want)
+        for lang, tries in want.items():
+            job.fetched[lang] = [(cand, decode(raw, lang)) for _, cand, raw in got[lang]]
+            texts, refused = self._check_fetched(job, lang, per_lang[lang], {c["id"] for _, c in tries}, filename,
+                                                 oshash, more=langcheck.MORE_DOWNLOADS)
+            self._keep_original(file_key, lang, per_lang[lang], texts, refused, filename, oshash, rule=job.rule)
+        job.to_audio.update(job.listed)
+        for lang in per_lang:
+            self._publish(job.alias, lang, None, final=True)
+        log.info("no text or image subtitle track %s, and the audio route is off: originals kept", job.label)
 
     def _sync_all(self, job, per_lang, sync):
         """Judge every language (sync(lang, candidates) -> result key) and publish each as final. A language that waits
@@ -1982,7 +2004,8 @@ class Worker(threading.Thread):
         unchanged "(synced)" copy, so the viewer can tell which one fits this file; the first one needs no copy.
         With SUBSYNC_FAST_PATH on, every try is downloaded at once and its original checked first (a gate, no
         alass), so an in-sync original is listed within seconds; re-timing runs only when none is in sync. With the audio
-        route off, a file with no text or image subtitle track stores nothing, so turning the route on later syncs it.
+        route off, a language only it can judge (the file's only track too small for its subtitles) stores nothing, so
+        turning the route on later syncs it (a file with no track: _originals_only).
         Each step is a method of LanguageSync."""
         return LanguageSync(self, job, index, file_key, lang, candidates, oshash, filename).run()
 
@@ -2103,6 +2126,15 @@ class Worker(threading.Thread):
                     yield got
         finally:   # closed early (judging raised): downloads not started are dropped, running ones end on their own
             pool.shutdown(wait=False, cancel_futures=True)
+
+    def _fetch_languages(self, job, want):
+        """_fetch_all of each language's tries in `want` ({lang: tries}): every language's at once with
+        SUBSYNC_PARALLEL_LANGUAGES, as LanguageSync's downloads, else one after the other. {lang: downloads}."""
+        if self.s.parallel_languages and len(want) > 1:
+            with ThreadPoolExecutor(max_workers=len(want), thread_name_prefix="subsync-lang") as pool:
+                running = {lang: pool.submit(self._fetch_all, job, lang, tries) for lang, tries in want.items()}
+                return {lang: future.result() for lang, future in running.items()}
+        return {lang: self._fetch_all(job, lang, tries) for lang, tries in want.items()}
 
     def _fetch_all(self, job, lang, tries):
         """The fast path's downloads: up to FETCH_AT_ONCE at once, results in try order; failed ones are left out."""
