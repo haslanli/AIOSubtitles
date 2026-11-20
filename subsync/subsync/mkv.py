@@ -58,9 +58,14 @@ HEAD_BYTES = 256 * 1024
 HASH_CHUNK = 64 * 1024
 MAX_ELEMENT = 8 * 1024 * 1024      # Info/Tracks larger than this are not read
 MAX_CUES = 32 * 1024 * 1024        # 7.27 MB on a file with 75 PGS tracks; larger ones are never read (IndexTooLarge)
-# cue track positions kept of one file (the 7.27 MB above hold a few hundred thousand); each is a few Python objects,
-# so a Cues of tiny made-up entries could otherwise hold a gigabyte: a file with more is not read (NotMatroska)
+# cue track positions kept of one file (the 7.27 MB above hold a few hundred thousand); each is a few Python objects
+# (a cue cluster and a subtitle cue at most), so a Cues of tiny made-up entries could otherwise hold a gigabyte: a file
+# with more is not read (NotMatroska)
 MAX_CUE_POINTS = 1_000_000
+# track entries read of one file (real files have about a hundred at most: the 75 PGS tracks above); each is a dict
+# kept for the job, and a first pass compares tracks pair by pair, so a Tracks of tiny made-up entries could otherwise
+# hold half a gigabyte, or a worker for hours: a file with more is not read (NotMatroska)
+MAX_TRACKS = 256
 MAX_DURATION_S = 7 * 24 * 3600     # the longest runtime taken from a file; past it (or NaN, infinite, 0) it is unknown
 
 # Matroska element ids (RFC 9559), by the specification's names: the top-level ones, then the children read
@@ -515,7 +520,9 @@ class MkvIndex:
                 self.duration_s = self.duration_s * self.scale / 1e9
         elif eid == TRACKS:
             self.tracks_raw = bytes(buf[raw:p + sz])
-            for tp, tsz in children(buf, p, p + sz, TRACK_ENTRY):
+            for k, (tp, tsz) in enumerate(children(buf, p, p + sz, TRACK_ENTRY), len(self.tracks) + 1):
+                if k > MAX_TRACKS:   # counted as they are walked: an entry without a number costs its walk too
+                    raise NotMatroska(f"more than {MAX_TRACKS} tracks")
                 t = {"forced": 0, "default": 1, "language": "eng", "name": "", "codec": ""}
                 for cid, _, cp, csz in elements(buf, tp, tp + tsz):
                     v = buf[cp:cp + csz]
@@ -610,7 +617,7 @@ class MkvIndex:
                         raise NotMatroska(f"more than {MAX_CUE_POINTS} cue points")
                     trk = dur = cpos = rel = None
                     for gid, _, gp, gsz in elements(body, cp, cp + csz):
-                        if gid == CUE_CLUSTER_POSITION:
+                        if gid == CUE_CLUSTER_POSITION and cpos is None:   # one each (repeats held 6x the cap)
                             cpos = self.seg_data + uint(body[gp:gp + gsz])
                             if cpos not in seen:
                                 seen.add(cpos)

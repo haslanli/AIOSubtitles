@@ -318,11 +318,12 @@ class CuePointsTest(unittest.TestCase):
         point = el("BB", el("B3", b"\x01") + el("B7", el("F7", bytes([track])) + el("F1", b"\x00")))
         return el("1C53BB6B", point * n)
 
-    def indexed(self, n, track):
+    def indexed(self, n, track, body=None):
+        """A file with a text track 1 and a video track 2, and as its Cues `body`, else self.cues(n, track)."""
         data = matroska(tracks=el("1654AE6B", text_track(1) + el("AE", el("D7", b"\x02") + el("83", b"\x01")
                                                                           + el("86", b"V_MPEG4/ISO/AVC"))))
         index = MkvIndex(Memory(data)).read_head()
-        body = self.cues(n, track)
+        body = self.cues(n, track) if body is None else body
         index.positions[mkv.CUES] = len(data)
         index.r = Memory(data + body)
         index.size = len(data) + len(body)
@@ -333,6 +334,16 @@ class CuePointsTest(unittest.TestCase):
             self.indexed(100, 1).read_cues()
             with self.assertRaises(NotMatroska):
                 self.indexed(101, 1).read_cues()
+
+    def test_a_cue_track_positions_keeps_one_cluster_position(self):
+        """The cap counts CueTrackPositions, and each keeps one CueClusterPosition (the specification allows
+        one), where every one inside it was kept: one CueTrackPositions of 6.2 million held 6.2 times the cap."""
+        many = b"".join(el("F1", k.to_bytes(4, "big")) for k in range(1, 102))
+        body = el("1C53BB6B", el("BB", el("B3", b"\x01") + el("B7", el("F7", b"\x01") + many)))
+        with mock.patch.object(mkv, "MAX_CUE_POINTS", 100):
+            index = self.indexed(0, 1, body).read_cues()
+        self.assertEqual(index.cue_points, [(0.001, index.seg_data + 1)])
+        self.assertEqual(index.track_cues, {1: [(0.001, 0.0)]})
 
     def test_a_video_tracks_cue_points_hold_no_memory_each(self):
         index = self.indexed(100_000, 2)
@@ -496,7 +507,8 @@ class OversizeChildTest(unittest.TestCase):
 
     def test_a_track_field_larger_than_its_entry_is_not_read(self):
         entry = bytes.fromhex("AE8C D78101 838111 63A2 10FFFFFE")    # a CodecPrivate claiming 16 MB in a 12-byte entry
-        index = open_index(Memory(matroska(tracks=el("1654AE6B", text_track(2) + entry * 2000))))
+        with mock.patch.object(mkv, "MAX_TRACKS", 2001):              #'s bound, lifted to read them all
+            index = open_index(Memory(matroska(tracks=el("1654AE6B", text_track(2) + entry * 2000))))
         self.assertEqual(len(index.tracks), 2001)
         self.assertEqual(sum(len(t.get("private", b"")) for t in index.tracks), 0)
         self.assertEqual([t["number"] for t in index.text_tracks()], [2])
@@ -615,6 +627,37 @@ class PaddedStringTest(unittest.TestCase):
         self.assertEqual([(a["language"], a["tagged"]) for a in index.audio_tracks()], [("de", True)])
         self.assertEqual(mkv.utf8("Ünïcödé".encode() + b"\0x"), "Ünïcödé")
         self.assertEqual(mkv.utf8(b"no padding"), "no padding")
+
+
+class TrackCountTest(unittest.TestCase):
+    """A file has at most MAX_TRACKS track entries; past them it is not read (NotMatroska), where a
+    Tracks of 8 MiB of tiny made-up entries was read as 1.7 million tracks (about 0.5 GB and 4 s), and a few thousand
+    made a first pass quadratic (about 17 s for 2,000 audio tracks)."""
+
+    @staticmethod
+    def tracks(n, extra=b""):
+        """Tracks of n text tracks numbered from 1, then `extra`."""
+        return el("1654AE6B", b"".join(el("AE", el("D7", k.to_bytes(2, "big")) + el("83", b"\x11")
+                                             + el("86", b"S_TEXT/UTF8")) for k in range(1, n + 1)) + extra)
+
+    def test_up_to_the_bound_every_track_is_read(self):
+        index = open_index(Memory(matroska(tracks=self.tracks(mkv.MAX_TRACKS))))
+        self.assertEqual([t["number"] for t in index.text_tracks()], list(range(1, mkv.MAX_TRACKS + 1)))
+
+    def test_past_the_bound_the_file_is_not_read(self):
+        with self.assertRaisesRegex(NotMatroska, "more than"):
+            open_index(Memory(matroska(tracks=self.tracks(mkv.MAX_TRACKS + 1))))
+        with self.assertRaisesRegex(NotMatroska, "more than"):     # entries without a number count too: each is walked
+            open_index(Memory(matroska(tracks=self.tracks(1, bytes.fromhex("AE80") * mkv.MAX_TRACKS))))
+
+    def test_eight_mib_of_tiny_entries_are_refused_at_once(self):
+        tracks = el("1654AE6B", bytes.fromhex("AE83D78101") * 1_677_700)
+        self.assertLessEqual(len(tracks), mkv.MAX_ELEMENT)                  # read whole
+        data = matroska(tracks=tracks)
+        t0 = time.process_time()
+        with self.assertRaisesRegex(NotMatroska, "more than"):
+            open_index(Memory(data))
+        self.assertLess(time.process_time() - t0, 0.5)
 
 
 class Ending(Memory):
