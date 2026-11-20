@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from installer import engine, limits, screens, tests, update, web
+from installer import engine, hosting, limits, screens, tests, update, web
 from installer.tests import samples
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
@@ -1421,18 +1421,28 @@ class Hosting(BackgroundWork, RouteFixture):
 
     def test_check_again_runs_the_check_once_and_leads_to_its_page(self):
         # Its POST was answered with the page itself, so reloading it sent "Check again" once more
+        # And what it is for, the check run again once the web server passes the address on: its warning
+        # gives way to the address's row (only the button's text was looked at)
         b = Browser(web.App(port=8818))
         self.walk_to_limits(b)
         checks, real = [], engine.Engine.host_check
+        no_answer = hosting.NO_ANSWER.format(address=ADDRESS)
+
+        def not_passed_on(url, timeout=10):             # the web server's rule not in place yet
+            raise OSError('connection refused')
         with mock.patch.object(engine.Engine, 'host_check', lambda e: checks.append(e) or real(e)):
             b.post('hostlimits', {'SUBSYNC_MAX_USERS': '150', 'go': 'next'})
             b.settle('hostinstall')
-            b.follow('hostinstall', {'go': 'next'})
-            b.settle('hostcheck')
+            with mock.patch.object(hosting, 'fetch', not_passed_on):
+                b.follow('hostinstall', {'go': 'next'})
+                _, _, text = b.settle('hostcheck')
+            self.assertIn(no_answer, text)
+            self.assertNotIn(f'People can reach AIOSubtitles at {ADDRESS}', text)
             status, headers, _ = b.post('hostcheck', {'go': 'again'})
             self.assertEqual((status, headers.get('Location')), (303, f'/{b.app.key}/hostcheck'))
             _, _, text = b.settle('hostcheck')
         self.assertIn(f'People can reach AIOSubtitles at {ADDRESS}', text)
+        self.assertNotIn(no_answer, text)
         self.assertEqual(len(checks), 2)
         status, headers, _ = b.post('hostcheck', {'go': 'next'})
         self.assertEqual((status, headers.get('Location')), (303, f'/{b.app.key}/done'))
@@ -1751,6 +1761,11 @@ class Lengths(unittest.TestCase):
 
     def test_a_connection_that_sends_nothing_gives_its_thread_back(self):
         self.assertTrue(web.Handler.timeout and web.Handler.timeout <= 60)
+        # And the server applies it: a connection that sends nothing is closed once it has passed (here a
+        # fraction of a second), not left holding its thread
+        with mock.patch.object(web.Handler, 'timeout', 0.3), \
+                socket.create_connection(('127.0.0.1', self.app.port), timeout=5) as c:
+            self.assertEqual(c.recv(1024), b'')
 
 
 class Rollback(BackgroundWork, FlowFixture):
