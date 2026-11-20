@@ -1909,7 +1909,10 @@ class Worker(threading.Thread):
                 listed = self.lists.get(alias)
         cands = [dict(c) for c in (listed[1] if listed else []) if c["lang"] == lang]
         if original and not any(c["id"] == original["id"] for c in cands):
-            cands.insert(0, {"id": original["id"], "url": original["url"], "lang": lang})
+            # not in the list known now (the store keeps only its address and id): its source told by its address, as
+            # _candidates tags a listed one, so its download carries the source's key and is counted
+            cands.insert(0, {"id": original["id"], "url": original["url"], "lang": lang,
+                             "source": srclimits.source_of_url(original["url"]) or "config"})
         if not cands:
             return None, "unknown", None
         ordered = self._name_order(cands, hints.get("filename"), hints.get("videoHash"),
@@ -2001,15 +2004,8 @@ class Worker(threading.Thread):
         return bool(url) and not (got and time.time() - got[0] < LIST_TTL_S)
 
     def _sync_language(self, job, index, file_key, lang, candidates, oshash=None, filename=None):
-        """The viewer's first subtitle, then subtitles made for this release, then the rest, until one
-        passes or `max_tries` were tried. Returns the last_good key to offer, if any. `rank` stays the viewer's order.
-        With SUBSYNC_LIST_IN_SYNC on, an original further down the list that is in sync as it is gets listed as an
-        unchanged "(synced)" copy, so the viewer can tell which one fits this file; the first one needs no copy.
-        With SUBSYNC_FAST_PATH on, every try is downloaded at once and its original checked first (a gate, no
-        alass), so an in-sync original is listed within seconds; re-timing runs only when none is in sync. With the audio
-        route off, a language only it can judge (the file's only track too small for its subtitles) stores nothing, so
-        turning the route on later syncs it (a file with no track: _originals_only).
-        Each step is a method of LanguageSync."""
+        """One language of the file judged (LanguageSync): the key to offer (with best fit the best of its passes, else
+        the last good result stored), or None."""
         return LanguageSync(self, job, index, file_key, lang, candidates, oshash, filename).run()
 
     @staticmethod
@@ -2045,11 +2041,16 @@ class Worker(threading.Thread):
             return None
         return text
 
+    @property
+    def _ledger(self):
+        """The extra sources' count of downloads per site (sourcestate.Ledger), or None without one."""
+        return getattr(self.extra, "ledger", None)
+
     def _within_limits(self, tries, filename, oshash, ref_cues, viewer_first=None):
         """A site with a tight limit (srclimits.PER_FILE_DOWNLOADS) gives a file and language only its first
         few subtitles in the try order; near its limit (sourcestate.Ledger.tight; in public mode for a person who had
         their share) only the likeliest (srclimits.TOP_TIER); at its limit none."""
-        ledger = getattr(self.extra, "ledger", None) if self.extra is not None else None
+        ledger = self._ledger
         if viewer_first is None:
             viewer_first = any(rank == 0 and cand.get("from_config", True) for rank, cand in tries)
         taken, out = {}, []
@@ -2087,12 +2088,10 @@ class Worker(threading.Thread):
             return None if raw is None else (rank, cand, raw)
         raw = None
         try:
-            source = cand.get("source")
-            ledger = getattr(self.extra, "ledger", None) if self.extra is not None else None
+            source, ledger = cand.get("source"), self._ledger
             if ledger is not None and source:
                 ledger.count(source, srclimits.DOWNLOAD_KIND.get(source, "download"), who=self.who)
-            headers = self.extra.headers_for(cand) if self.extra is not None else None
-            raw = fetch_subtitle(url, headers=headers) if headers else fetch_subtitle(url)
+            raw = fetch_subtitle(url, headers=self.extra.headers_for(cand) if self.extra is not None else None)
             with self.cv:
                 self._keep_download(url, now, raw)
             return rank, cand, raw
@@ -2150,9 +2149,21 @@ class Worker(threading.Thread):
 
 
 class LanguageSync:
-    """One language of a file judged (Worker._sync_language), each step a method. The state the steps share is the
-    language's: its tries, the downloads' texts and those the language check refused, the passes so far and the fits
-    made. Everything is read, stored, downloaded and published through the worker, as when these steps were its own."""
+    """One language of a file judged (Worker._sync_language), each step a method. Its subtitles are tried in try order
+    (the viewer's first, then those made for this release, then the rest: Worker._try_order); the rank recorded with
+    each result stays the viewer's. Without best fit the judging stops at the first that passes, within
+    SUBSYNC_MAX_TRIES, and the last good result stored is offered; with it every try is judged, alass on at most
+    SUBSYNC_MAX_TRIES of them (none once one fits as it is or by one shift, with the fast path), and the best fits are
+    offered (SUBSYNC_MAIN_ALTERNATIVES). With SUBSYNC_FAST_PATH on, the tries are downloaded at once and each original
+    is checked first (a gate, no alass), so an in-sync original is listed within seconds; re-timing runs only when none
+    is in sync. With SUBSYNC_LIST_IN_SYNC on, an original further down the list that is in sync as it is gets listed as
+    an unchanged "(synced)" copy, so the viewer can tell which one fits this file; the first one needs no copy. With the
+    audio route off, a language only it can judge (the file's only track too small for its subtitles) stores nothing,
+    so turning the route on later syncs it (a file with no track: Worker._originals_only).
+
+    The state the steps share is the language's: its tries, the downloads' texts and those the language check refused,
+    the passes so far and the fits made. Everything is read, stored, downloaded and published through the worker, as
+    when these steps were its own."""
 
     # a judged result's facts kept in its stored detail (_record)
     RECORDED = ("route", "reference", "gate_original", "gate_synced", "gate_snapped", "refined", "unchanged", "magnet",

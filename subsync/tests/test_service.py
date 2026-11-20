@@ -1293,7 +1293,7 @@ class PickTest(AddonFixture):
         self.assertEqual(len(calls), 2)
         import subsync.worker as w
         got, real = [], w.fetch_subtitle
-        w.fetch_subtitle = lambda url: (got.append(url), b"sub")[1]
+        w.fetch_subtitle = lambda url, headers=None: (got.append(url), b"sub")[1]
         try:
             cand = {"id": "os-9", "url": "http://opensubs/x.srt", "lang": "eng"}
             self.assertEqual(self.worker._fetch_one(self.job, "eng", 0, cand)[2], b"sub")

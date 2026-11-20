@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -203,6 +204,38 @@ class FetchTest(unittest.TestCase):
         w._fetch_one(Job("movie", "tt1"), "rus", 0, {"id": "d-1", "source": "subdl", "url": self.url + "/b"})
         self.assertIsNone(self.seen[-1].get("x-api-key"))
         self.assertEqual(ledger.used("subdl", "download", 86400), 1)
+
+
+class RestoredOriginalTest(unittest.TestCase):
+    """An original known only from the store (after a restart: the lists are memory only, the store keeps its
+    address and id) is downloaded as a listed one of its source is: with the source's key, and counted."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        guard = local_network_only()
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def test_a_stored_original_not_listed_now_is_downloaded_with_its_sources_key_and_counted(self):
+        ledger = Ledger(keyed={"subsource": True})
+        closed_after(self, ledger.db)
+        store = closed_after(self, Store(os.path.join(self.dir, "store")))
+        job = Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 5})
+        url = "https://api.subsource.net/api/v1/subtitles/123/download"
+        store.originals_put(job.alias, {"eng": {"url": url, "id": "ss-123"}})
+        w = Worker(Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_EXTRA_SOURCES": ""}),
+                   store, FakeAios(), None, extra=FakeExtra(ledger=ledger))         # a fresh worker: nothing listed
+        sent = []
+
+        def fetch(u, timeout=30, headers=None):
+            sent.append((u, headers))
+            return dialogue_srt("eng").encode()
+        with mock.patch("subsync.worker.fetch_subtitle", fetch):
+            text, why, _ = w.original_for(job.alias, "eng", time.time() + 5)
+        self.assertEqual((text, why), (dialogue_srt("eng"), None))
+        self.assertEqual(sent, [(url, {"X-API-Key": "k"})])
+        self.assertEqual(ledger.used("subsource", "request", 86400), 1)       # SubSource counts a download as a request
 
 
 class DuplicateTest(unittest.TestCase):
