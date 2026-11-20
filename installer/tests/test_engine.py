@@ -896,13 +896,13 @@ class SelfCheck(Offline):
         self.assertIn('Installed, with warnings (see above)', out)
 
     def test_the_address_apps_use_not_answering_is_a_warning(self):
-        real = engine.Aios.call
+        real = hosting.fetch
 
-        def call(aios, method, path, *a, **k):
-            if aios.base.startswith(PUBLIC) and path == '/health':        # the web server has no rule for it yet
-                return 502, b''
-            return real(aios, method, path, *a, **k)
-        with mock.patch.object(engine.Aios, 'call', call):
+        def fetch(url, timeout=10):
+            if url.startswith(PUBLIC) and url.endswith('/health'):            # the web server has no rule for it yet
+                return 502, {}, b''
+            return real(url, timeout)
+        with mock.patch.object(hosting, 'fetch', fetch):
             code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 3, out)
         self.assertIn(f"!  {PUBLIC}/subsync/health doesn't answer from this machine.", out)
@@ -979,7 +979,7 @@ class WaitHealthy(TmpState):
     """The wait for the service after a start: its /health asked inside its container, not Docker's health check, whose
     first probe runs only after 30 seconds on Docker Engine 23 and 24."""
 
-    def wait(self, answers, seconds=90):
+    def wait(self, answers, seconds=90, state='running starting'):
         clock, asked, slept = [0.0], [], []
 
         def exec_in(name, cmd, stdin=None, timeout=120):
@@ -992,7 +992,7 @@ class WaitHealthy(TmpState):
             if len(slept) > 100:          # a wait that would never end (90 seconds is 45 questions)
                 raise AssertionError('the wait never ends')
         with mock.patch.object(dockerenv, 'exec_in', exec_in), \
-                mock.patch.object(dockerenv, 'container_state', lambda name: 'running starting'), \
+                mock.patch.object(dockerenv, 'container_state', lambda name: state), \
                 mock.patch.object(engine.time, 'sleep', sleep), \
                 mock.patch.object(engine.time, 'monotonic', lambda: clock[0]):
             return engine.Engine({}, page=True).wait_healthy(seconds), asked, slept
@@ -1000,13 +1000,26 @@ class WaitHealthy(TmpState):
     def test_the_service_answering_ends_the_wait_at_once(self):
         healthy, asked, slept = self.wait(lambda n: (0, 'ok\n', '') if n == 3 else (1, '', 'Connection refused'))
         self.assertTrue(healthy)                          # while Docker's own check still says "starting"
-        self.assertEqual(asked, [(engine.CONTAINER, engine.HEALTH)] * 3)
+        self.assertEqual(asked, [(engine.CONTAINER, dockerenv.HEALTH)] * 3)
         self.assertEqual(slept, [2, 2])
 
     def test_a_service_that_never_answers_is_given_its_seconds(self):
         healthy, asked, slept = self.wait(lambda n: (1, '', 'Connection refused'))
         self.assertFalse(healthy)
         self.assertEqual(sum(slept), 90)
+        self.assertEqual(len(asked), 45)
+
+    def test_a_service_that_stops_ends_the_wait_at_once(self):
+        # One that exits at start (a setting it refuses, say) restarts in a loop; it was waited on for the
+        # whole 90 seconds, which the new version's start check never did
+        for state in ('restarting unhealthy', 'exited unhealthy', 'dead '):
+            with self.subTest(state=state):
+                healthy, asked, slept = self.wait(lambda n: (1, '', 'container is not running'), state=state)
+                self.assertFalse(healthy)
+                self.assertEqual((len(asked), slept), (1, []))
+        # one Docker doesn't list (yet) is still waited for, as the start check waits
+        healthy, asked, slept = self.wait(lambda n: (1, '', 'No such container'), state='')
+        self.assertFalse(healthy)
         self.assertEqual(len(asked), 45)
 
     def test_the_question_goes_to_the_port_subsync_listens_on(self):
@@ -1025,8 +1038,8 @@ class WaitHealthy(TmpState):
                 os.environ.pop('SUBSYNC_PORT', None)
                 if setting:
                     os.environ['SUBSYNC_PORT'] = setting
-                self.assertEqual(engine.HEALTH[:2], ['python', '-c'])
-                exec(compile(engine.HEALTH[2], 'health', 'exec'), {'__name__': '__main__'})
+                self.assertEqual(dockerenv.HEALTH[:2], ['python', '-c'])
+                exec(compile(dockerenv.HEALTH[2], 'health', 'exec'), {'__name__': '__main__'})
             self.assertEqual(opened[-1], f'http://127.0.0.1:{port}/health')
             self.assertEqual(out.getvalue(), 'ok\n')
 
@@ -1038,7 +1051,7 @@ class StartedButSilent(Offline):
         fixtures_exec_in = dockerenv.exec_in
 
         def exec_in(name, cmd, stdin=None, timeout=120):
-            if cmd == engine.HEALTH:
+            if cmd == dockerenv.HEALTH:
                 asked.append(name)
                 return 1, '', 'Connection refused'           # it restarts in a loop
             return fixtures_exec_in(name, cmd, stdin, timeout)
@@ -1393,6 +1406,31 @@ class ClosingWords(Offline):
         self.assertIn('When no copy is clearly closer than the original, no synced copy is added: the originals stay, '
                       'and the one that fits the file best is listed once as "<Language> (original)".', lines[1])
         self.assertNotIn('nothing is added', lines[1])
+
+    def test_the_containers_row_is_ok_while_dockers_first_check_hasnt_run_and_it_answers(self):
+        # For about 30 seconds after a start Docker says "starting"; the row said ✗ though /health answered
+        self.install()
+        row = f'container {engine.CONTAINER}: '
+
+        def first_row(state, health):
+            asked = []
+
+            def exec_in(name, cmd, stdin=None, timeout=120):
+                if cmd == dockerenv.HEALTH:
+                    asked.append(name)
+                    return health
+                return 0, '{}', ''
+            with mock.patch.object(dockerenv, 'container_state', lambda name: state), \
+                    mock.patch.object(dockerenv, 'exec_in', exec_in):
+                return engine.Engine({}).status_parts()[0][0], asked
+        self.assertEqual(first_row('running starting', (0, 'ok\n', '')),
+                         (('ok', row + 'running starting', None), [engine.CONTAINER]))
+        self.assertEqual(first_row('running starting', (1, '', 'Connection refused')),
+                         (('bad', row + 'running starting', None), [engine.CONTAINER]))
+        # Docker's own verdict, or no container, is taken as it is: nothing asked
+        self.assertEqual(first_row('running healthy', None), (('ok', row + 'running healthy', None), []))
+        self.assertEqual(first_row('running unhealthy', None), (('bad', row + 'running unhealthy', None), []))
+        self.assertEqual(first_row('', None), (('bad', row + 'not found', None), []))
 
     def test_the_status_line_says_the_outcomes_in_words(self):
         self.install()

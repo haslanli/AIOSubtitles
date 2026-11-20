@@ -6,6 +6,7 @@ that needs and checks the address before it says done. No Wyzie Subs key (public
 only when the host chooses it, and then each person chooses on their settings page when it starts, with
 its limits asked next.
 """
+import http.client
 import secrets
 import urllib.error
 import urllib.parse
@@ -114,15 +115,20 @@ def fetch(url, timeout=10):
             return e.code, dict(e.headers.items()), b''
 
 
+def health_ok(address):
+    """Whether subsync answers "ok" at `address`/health from this machine: the check of the address on both routes."""
+    try:
+        status, _, body = fetch(address + '/health')
+    except (OSError, ValueError, http.client.HTTPException):      # nothing answers, or not with HTTP
+        return False
+    return status == 200 and body.strip() == b'ok'
+
+
 def check(address, out):
     """The address answering from this machine, and the sign-up page there with its security headers. True when both
     hold."""
     good = True
-    try:
-        status, _, body = fetch(address + '/health')
-    except OSError:
-        status, body = 0, b''
-    if status == 200 and body.strip() == b'ok':
+    if health_ok(address):
         out.ok(f'People can reach AIOSubtitles at {address}')
     else:
         good = False

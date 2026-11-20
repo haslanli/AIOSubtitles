@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, plan, ui, where, wizard
+from installer import dockerenv, engine, hosting, plan, ui, where, wizard
 from subsync import aiosconfig, explain, origlang, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
@@ -326,7 +326,7 @@ class FlowFixture(AnswersRun, unittest.TestCase):
 
         def exec_in(name, cmd, stdin=None, timeout=120):
             self.exec_calls.append((cmd, stdin))
-            if cmd == engine.HEALTH:                        # subsync's /health, once it runs
+            if cmd == dockerenv.HEALTH:                     # subsync's /health, once it runs
                 return (0, 'ok\n', '') if self.aios.subsync_up else (1, '', 'Connection refused')
             if 'subsync.selftest' in cmd:
                 return (0 if self.selftest.get('ok') else 1), json.dumps(self.selftest) + '\n', ''
@@ -349,7 +349,7 @@ class FlowFixture(AnswersRun, unittest.TestCase):
             mock.patch.object(dockerenv, 'compose', self._compose),
             mock.patch.object(dockerenv, 'run', lambda cmd, *a, **k: as_subprocess_takes(cmd) and (0, '', '')),
             mock.patch.object(dockerenv, 'exec_in', exec_in),
-            mock.patch.object(engine.Aios, 'call', self._call_public_health(engine.Aios.call, self.aios)),
+            mock.patch.object(hosting, 'fetch', self._fetch_public_health(hosting.fetch, self.aios)),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -365,12 +365,12 @@ class FlowFixture(AnswersRun, unittest.TestCase):
         return 0, '', ''
 
     @staticmethod
-    def _call_public_health(real, aios):
-        def call(self, method, path, *a, **k):
-            if self.base.startswith(PUBLIC) and path == '/health':   # the user's web server, once subsync runs
-                return (200, b'ok') if aios.subsync_up else (502, b'')
-            return real(self, method, path, *a, **k)
-        return call
+    def _fetch_public_health(real, aios):
+        def fetch(url, timeout=10):
+            if url.startswith(PUBLIC) and url.endswith('/health'):     # the user's web server, once subsync runs
+                return (200, {}, b'ok') if aios.subsync_up else (502, {}, b'')
+            return real(url, timeout)
+        return fetch
 
     ANSWERS = {'AIOS_CONFIG_ID': f'{PUBLIC}/stremio/{UUID}/ENC/manifest.json', 'AIOS_CONFIG_PASSWORD': PASSWORD,
                'LANGUAGES': 'English, Russian', 'TEST_READ': 'yes'}
@@ -1188,7 +1188,7 @@ class Fixtures(unittest.TestCase):
     """The stand-in AIOStreams and FlowFixture themselves, which the flow tests here and in other modules rely on."""
 
     def patched_names(self):
-        return engine.STATE, engine.PLACE, dockerenv.compose, engine.Aios.call
+        return engine.STATE, engine.PLACE, dockerenv.compose, engine.Aios.call, hosting.fetch
 
     def test_the_stand_in_refuses_an_addon_naming_a_service_the_config_lacks(self):
         config = {'services': [{'id': 'torbox', 'enabled': True, 'credentials': {}}],

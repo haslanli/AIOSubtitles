@@ -51,9 +51,6 @@ TAKEN_OVER = 'Took over the install an earlier setup (1.3.0 or before) made here
 CANT_REACH = ("Setup runs in a container, so it can't reach an AIOStreams that only listens on this machine's "
               '127.0.0.1. Give its address on your network, or use the source route (README).')
 STARTING = 'Starting {name}'
-# subsync's /health, asked inside its container on the port it listens on there (SUBSYNC_PORT, else 8790)
-HEALTH = ['python', '-c', 'import os,urllib.request;print(urllib.request.urlopen("http://127.0.0.1:%s/health"%'
-                          'os.environ.get("SUBSYNC_PORT","8790"),timeout=5).read().decode())']
 TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'The Matrix'),
                ('movie', 'tt0110912', 'Pulp Fiction')]
 # The stops about the config, each with its way out on the page (where Continue reads the config again:
@@ -1228,22 +1225,21 @@ class Engine:
 
     def wait_healthy(self, seconds=90):
         """Whether the service answers within `seconds`: its /health asked inside its container every 2 seconds, as
-        the new version's start check asks. Docker's own health check is no use here: on Docker Engine 23 and 24 its
-        first probe runs only after 30 seconds."""
+        the new version's start check asks, no longer once it stops running (a service that exits at start restarts in a
+        loop). Docker's own health check is no use here: on Docker Engine 23 and 24 its first probe runs only after 30
+        seconds."""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            code, out, _ = dockerenv.exec_in(CONTAINER, HEALTH, timeout=20)
-            if code == 0 and out.strip() == 'ok':
+            if answers_health():
                 return True
+            if dockerenv.stopped(CONTAINER):
+                return False
             time.sleep(2)
         return False
 
     def public_health(self):
-        try:
-            status, body = Aios(self.s['public_base'], timeout=10).call('GET', '/health', raw=True)
-        except AiosError:
-            return False
-        return status == 200 and body.strip() == b'ok'
+        """Whether subsync answers at the address your apps use, from this machine."""
+        return hosting.health_ok(self.s['public_base'])
 
     def proxy_rule(self):
         if self.public_health():   # a re-run: the rule is in place already
@@ -1559,7 +1555,7 @@ class Engine:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         self._deploy('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
         self.web_server_rule = None
-        if not self.public_health_at(self.address):
+        if not hosting.health_ok(self.address):
             self.web_server_rule = hosting.web_server_rule(self.address, f"127.0.0.1:{self.s['port']}")
             self.rule_intro = (f'Your web server needs one rule so {self.address} reaches AIOSubtitles on this machine. '
                                'Add it with the https certificate your web server has for that name, and reload the '
@@ -1570,13 +1566,6 @@ class Engine:
                 self.out.say(f'    {self.out.paint("1", name)}')
                 for line in lines:
                     self.out.say(f'      {line}')
-
-    def public_health_at(self, address):
-        try:
-            status, _, body = hosting.fetch(address + '/health')
-        except OSError:
-            return False
-        return status == 200 and body.strip() == b'ok'
 
     def host_check(self):
         self.show_step('hostcheck', 'host')
@@ -1616,7 +1605,10 @@ class Engine:
         if not s:
             stop('subsync is not set up here yet.', 'Run ./setup')
         state = dockerenv.container_state(CONTAINER)
-        rows = [('ok' if 'healthy' in state.split() else 'bad', f'container {CONTAINER}: {state or "not found"}', None)]
+        # for about 30 seconds after a start Docker's own check hasn't run yet ("starting": wait_healthy): /health is
+        # asked then
+        healthy = 'healthy' in state.split() or ('starting' in state.split() and answers_health())
+        rows = [('ok' if healthy else 'bad', f'container {CONTAINER}: {state or "not found"}', None)]
         if s.get('route') == 'host':
             code, out, _ = dockerenv.exec_in(CONTAINER, ['python', '-m', 'subsync.hostcmd', 'status'])
             try:
@@ -1889,6 +1881,12 @@ class Engine:
         update.keep_newest(backups, 'databases-', 3, keep=set(keep) | {dest.name})
         self.out.ok(update.SAVED_DATABASES.format(path=shown(dest)))
         return dest
+
+
+def answers_health():
+    """Whether subsync answers its /health, asked inside its container."""
+    code, out, _ = dockerenv.exec_in(CONTAINER, dockerenv.HEALTH, timeout=20)
+    return code == 0 and out.strip() == 'ok'
 
 
 def subsync_status():

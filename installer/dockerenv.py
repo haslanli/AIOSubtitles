@@ -146,8 +146,19 @@ def container_state(name):
     return out.strip() if code == 0 else ''
 
 
+def stopped(name):
+    """Whether Docker has the container `name` and it isn't running: it exited, or restarts in a loop."""
+    return container_state(name).split()[:1] not in ([], ['running'])
+
+
 def exec_in(name, cmd, stdin=None, timeout=120):
     return run(['docker', 'exec', '-i', name, *cmd], stdin=stdin, timeout=timeout)
+
+
+# subsync's /health, asked inside its container on the port it listens on there (SUBSYNC_PORT, else 8790): by setup's
+# wait for the service and by the new version's start check
+HEALTH = ['python', '-c', 'import os,urllib.request;print(urllib.request.urlopen("http://127.0.0.1:%s/health"%'
+                          'os.environ.get("SUBSYNC_PORT","8790"),timeout=5).read().decode())']
 
 
 # ------------------------------------------------------------------------------------------- from inside setup's container
@@ -228,11 +239,6 @@ def foreign(project, container, install_id, unlabelled=()):
     return found
 
 
-def _health_command(port=8790):
-    return ['python', '-c', f"import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:{port}/health', "
-                            "timeout=5).read().decode())"]
-
-
 def check_image(image, project, install_id, seconds=90):
     """The new version started once while the old one keeps running: a throwaway container from `image`, with no
     published port, an empty volume of its own, public mode and a throwaway secret, as the service's user. (True, '')
@@ -251,10 +257,10 @@ def check_image(image, project, install_id, seconds=90):
             return False, ((err or out).strip().splitlines() or ['it did not start'])[-1]
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            code, out, _ = run(['docker', 'exec', name] + _health_command(), timeout=20)
+            code, out, _ = run(['docker', 'exec', name] + HEALTH, timeout=20)
             if code == 0 and out.strip() == 'ok':
                 return True, ''
-            if container_state(name).split()[:1] not in ([], ['running']):
+            if stopped(name):
                 return False, 'it stopped'
             time.sleep(2)
         return False, f'no answer within {seconds} seconds'

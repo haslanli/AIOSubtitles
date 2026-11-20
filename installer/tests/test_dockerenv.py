@@ -334,6 +334,8 @@ class CheckImage(unittest.TestCase):
         self.assertEqual(start[-1], IMAGE)
         self.assertIn(['docker', 'rm', '-f', name], cmds)
         self.assertIn(['docker', 'volume', 'rm', name], cmds)
+        # The one /health question setup asks, on the port subsync listens on (it had its own, port 8790 typed)
+        self.assertIn(['docker', 'exec', name] + dockerenv.HEALTH, cmds)
         secret = next(a for a in start if a.startswith('SUBSYNC_SECRET_KEY='))
         self.assertGreaterEqual(len(secret.split('=', 1)[1]), 43)
 

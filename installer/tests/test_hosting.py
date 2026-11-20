@@ -246,6 +246,25 @@ class Fetch(unittest.TestCase):
         self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
         self.assertEqual(hosting.fetch(self.base + '/health')[::2], (200, b'ok'))
 
+    def test_the_health_check_is_one_ok_from_this_machine(self):
+        # One check of an address on both routes (the personal route's asked through AIOStreams' client)
+        self.assertTrue(hosting.health_ok(self.base))
+        self.assertFalse(hosting.health_ok(self.base + '/elsewhere'))                 # 502
+        closed = http.server.ThreadingHTTPServer(('127.0.0.1', 0), http.server.BaseHTTPRequestHandler)
+        port = closed.server_address[1]
+        closed.server_close()
+        self.assertFalse(hosting.health_ok(f'http://127.0.0.1:{port}'))              # nothing answers
+
+        class NotHttp(http.server.BaseHTTPRequestHandler):
+            def handle(self):
+                self.request.recv(1024)
+                self.request.sendall(b'SSH-2.0-OpenSSH_9.6\r\n')
+        other = http.server.ThreadingHTTPServer(('127.0.0.1', 0), NotHttp)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.server_close)
+        self.addCleanup(other.shutdown)
+        self.assertFalse(hosting.health_ok(f'http://127.0.0.1:{other.server_address[1]}'))   # something else answers
+
     def test_it_says_which_release_of_setup_asks(self):
         # It said "AIOSubtitles-setup", no version; every User-Agent now carries the release's (VERSION)
         version = (Path(__file__).resolve().parents[2] / 'VERSION').read_text().strip()
@@ -277,7 +296,7 @@ class RouteFixture(AnswersRun, unittest.TestCase):
             return 200, {'Content-Security-Policy': "default-src 'none'; script-src 'self'"}, b'<!doctype html>'
 
         def exec_in(name, cmd, stdin=None, timeout=120):
-            if cmd == engine.HEALTH:                        # subsync's /health, once it runs
+            if cmd == dockerenv.HEALTH:                     # subsync's /health, once it runs
                 return (0, 'ok\n', '') if self.up else (1, '', 'Connection refused')
             return 0, json.dumps({'public': True, 'people': 0, 'max_people': 200, 'read_today': 0,
                                   'daily_budget': 50e9}), ''
