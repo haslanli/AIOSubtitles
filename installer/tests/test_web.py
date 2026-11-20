@@ -276,7 +276,18 @@ class Security(unittest.TestCase):
         self.assertTrue(app.finished.wait(5))
 
 
-class Personal(BackgroundWork, FlowFixture):
+class YourselfSteps:
+    """The first steps of installing it for yourself, on the test's page (self.b)."""
+
+    def walk_to_config(self):
+        """From the start page through the machine and AIOStreams steps to the config's."""
+        self.b.post('', {'ROUTE': 'yourself'})
+        self.b.get('machine')
+        self.b.follow('machine', {'go': 'next'})
+        self.b.follow('aios', {'go': 'next'})
+
+
+class Personal(YourselfSteps, BackgroundWork, FlowFixture):
     """Install it for yourself, through the page."""
 
     def setUp(self):
@@ -308,6 +319,14 @@ class Personal(BackgroundWork, FlowFixture):
         _, _, text = b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
         self.assertIn('Save these changes', text)
         return text
+
+    def walk_to_check(self):
+        """Through the steps and the install to the check's page, once the check is done; its text."""
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        self.b.follow('install', {'go': 'next'})
+        return self.b.settle('check')[2]
 
     def test_a_whole_personal_setup_through_the_page(self):
         self.walk_to_review()
@@ -403,11 +422,7 @@ class Personal(BackgroundWork, FlowFixture):
         # Going back and saving again ran the check again but kept the earlier test read's rows and result:
         # the new check's page still said the read was refused, and the done page said "Installed, with warnings"
         refused = 'The test read was refused by the debrid service'
-        self.walk_to_review()
-        self.b.post('review', {'CONFIRM': 'yes'})
-        self.b.settle('install')
-        self.b.follow('install', {'go': 'next'})
-        self.b.settle('check')
+        self.walk_to_check()
         good, self.selftest = self.selftest, {'ok': False, 'error': 'refused'}
         self.b.post('check', {'TEST_READ': 'yes'})
         _, _, text = self.b.settle('check')
@@ -427,6 +442,38 @@ class Personal(BackgroundWork, FlowFixture):
         _, _, text = self.b.follow('check', {'go': 'next'})
         self.assertNotIn('Installed, with warnings', text)
         self.assertNotIn(refused, text)
+
+    def test_the_test_read_runs_once_from_the_check_page(self):
+        # No page test pressed "Do the test read now?": the read, its row and its one self-test were tested in
+        # the terminal only
+        text = self.walk_to_check()
+        self.assertIn('Do the test read now?', text)
+        self.assertEqual([c for c in self.exec_calls if 'subsync.selftest' in c[0]], [])
+        status, headers, _ = self.b.post('check', {'TEST_READ': 'yes'})
+        self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/check'))
+        _, _, text = self.b.settle('check')
+        self.assertIn('Read 0.7 MB in 4 requests', text)                           # the self-test's bytes and requests
+        self.assertLess(text.index('AIOStreams asks subsync for subtitles'), text.index('Read 0.7 MB'))  # after the check
+        self.assertNotIn('Do the test read now?', text)                             # done: not offered again
+        self.assertEqual(len([c for c in self.exec_calls if 'subsync.selftest' in c[0]]), 1)
+        _, _, text = self.b.follow('check', {'go': 'next'})
+        self.assertIn('<h1>Done</h1>', text)
+
+    def test_a_test_read_that_didnt_work_ends_with_its_warning(self):
+        # A read that went wrong (no error setup doesn't know) is a warning on the done page, under its
+        # heading, as a check's is; nothing pressed the button, so dropping the read's result there failed no test
+        refused = 'The test read was refused by the debrid service'
+        self.walk_to_check()
+        self.selftest = {'ok': False, 'error': 'refused'}
+        self.b.post('check', {'TEST_READ': 'yes'})
+        _, _, text = self.b.settle('check')
+        self.assertIn(refused, text)
+        self.assertNotIn(screens.UNEXPECTED[0], text)
+        _, _, text = self.b.follow('check', {'go': 'next'})
+        self.assertIn('<h1>Installed, with warnings</h1>', text)
+        self.assertNotIn('<h1>Done</h1>', text)
+        self.assertLess(text.index('Installed, with warnings'), text.index(refused))
+        self.assertNotIn('AIOStreams asks subsync for subtitles', text)            # the warnings only
 
     def test_a_failed_update_can_be_tried_again(self):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
@@ -539,12 +586,6 @@ class Personal(BackgroundWork, FlowFixture):
         self.b.post('', {'ROUTE': 'yourself'})
         status, headers, _ = self.b.get('review')
         self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/machine'))
-
-    def walk_to_config(self):
-        self.b.post('', {'ROUTE': 'yourself'})
-        self.b.get('machine')
-        self.b.follow('machine', {'go': 'next'})
-        self.b.follow('aios', {'go': 'next'})
 
     def test_your_choices_state_this_installs_own_numbers(self):
         # The audio question's files opened a day and Usenet's searches a day, from state/subsync.env
@@ -713,11 +754,8 @@ class Personal(BackgroundWork, FlowFixture):
 
     def test_a_refused_answer_is_summed_up_first_linking_to_its_field(self):
         # The error was only under its box, further down; nothing was focused or announced
+        self.walk_to_config()
         b = self.b
-        b.post('', {'ROUTE': 'yourself'})
-        b.get('machine')
-        b.follow('machine', {'go': 'next'})
-        b.follow('aios', {'go': 'next'})
         _, _, text = b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': 'wrong', 'go': 'next'})
         raw = b.pages[-1]
         body = raw.split('<div class="body">', 1)[1]
@@ -755,11 +793,7 @@ class Personal(BackgroundWork, FlowFixture):
     def test_the_done_page_shows_the_checks_warnings_under_its_heading(self):
         # it said "Installed, with warnings (see above)" with nothing above: the warnings were on the page before
         self.aios.reaches_subsync = False
-        self.walk_to_review()
-        self.b.post('review', {'CONFIRM': 'yes'})
-        self.b.settle('install')
-        self.b.follow('install', {'go': 'next'})
-        self.b.settle('check')
+        self.walk_to_check()
         _, _, text = self.b.follow('check', {'go': 'next'})
         self.assertIn('<h1>Installed, with warnings</h1>', text)
         self.assertNotIn('see above', text)
@@ -805,11 +839,7 @@ class Personal(BackgroundWork, FlowFixture):
         # the next "Save these changes" led back to the review page every time, and the new answers were never applied
         checks, real = [], engine.Engine.self_test_checks
         with mock.patch.object(engine.Engine, 'self_test_checks', lambda e: checks.append(e) or real(e)):
-            self.walk_to_review()
-            self.b.post('review', {'CONFIRM': 'yes'})
-            self.b.settle('install')
-            self.b.follow('install', {'go': 'next'})
-            self.b.settle('check')
+            self.walk_to_check()
             _, _, text = self.b.get('choices')                                      # the browser's Back
             self.assertIn('Which subtitle languages should be synced?', text)
             self.b.follow('choices', {'LANGUAGES': ['eng', 'spa', ''], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
@@ -1058,11 +1088,8 @@ class Personal(BackgroundWork, FlowFixture):
     def test_an_address_with_a_space_is_asked_again_at_its_field(self):
         # it was taken, and the address's first check then ended in http.client's InvalidURL: the page's "unexpected
         # error" stop
+        self.walk_to_config()
         b = self.b
-        b.post('', {'ROUTE': 'yourself'})
-        b.get('machine')
-        b.follow('machine', {'go': 'next'})
-        b.follow('aios', {'go': 'next'})
         b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
         b.follow('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
         form = {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': 'http://192.168.1.5:8790/sub sync', 'go': 'next'}
@@ -1284,12 +1311,7 @@ class Hosting(BackgroundWork, RouteFixture):
         self.state.mkdir(parents=True)
         (self.state / 'subsync.env').write_text('SUBSYNC_MAX_LANGUAGES=6\n')
         b = Browser(web.App(port=8812))
-        b.post('', {'ROUTE': 'host'})
-        b.get('machine')
-        b.follow('machine', {'go': 'next'})
-        b.follow('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
-        b.follow('signups', {'SUBSYNC_PUBLIC_INVITE': 'my-own-code', 'go': 'next'})
-        b.follow('hostchoices', {'go': 'next'})
+        self.walk_to_limits(b)
         status, _, _ = b.post('hostlimits', {'go': 'next'})                # no button is picked: 6 isn't one
         page = b.pages[-1]
         self.assertEqual(status, 200)
@@ -1485,7 +1507,7 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertEqual([found for page in b.pages for found in terminal_only_shown(page)], [])
 
 
-class OnBridge(BackgroundWork, FlowFixture):
+class OnBridge(YourselfSteps, BackgroundWork, FlowFixture):
     """The page on Docker's bridge network (the image route), where setup's own container has an address of its own."""
 
     def setUp(self):
@@ -1511,11 +1533,8 @@ class OnBridge(BackgroundWork, FlowFixture):
     def test_your_choices_fills_in_this_machines_network_address(self):
         # it filled in setup's container's own address (http://172.17.0.3:8790), which phones can't reach, and the page
         # always sends the field, so that address was saved
+        self.walk_to_config()
         b = self.b
-        b.post('', {'ROUTE': 'yourself'})
-        b.get('machine')
-        b.follow('machine', {'go': 'next'})
-        b.follow('aios', {'go': 'next'})
         b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
         _, _, text = b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
         self.assertRegex(text, r'<input[^>]*name="PUBLIC_ADDRESS"[^>]*value="http://192\.168\.1\.7:8790"')
@@ -1534,11 +1553,8 @@ class OnBridge(BackgroundWork, FlowFixture):
             if not checks:
                 lookups.append(image)
             return {'lan': '192.168.1.7', 'taken': []}
+        self.walk_to_config()
         b = self.b
-        b.post('', {'ROUTE': 'yourself'})
-        b.get('machine')
-        b.follow('machine', {'go': 'next'})
-        b.follow('aios', {'go': 'next'})
         b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
         with mock.patch.object(engine.dockerenv, 'probe', probe):
             b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
