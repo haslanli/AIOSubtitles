@@ -56,6 +56,11 @@ from .subs import fingerprint, line_positions, timing_recipe
 
 log = logging.getLogger("subsync.store")
 
+# The databases in SUBSYNC_DATA, named once: the store's own and, in public mode, the people's records (users.Users,
+# which __main__ opens). ./setup copies both before an update (hostcmd.DATABASES, a test keeps it equal to these).
+DATABASE = "subsync.sqlite3"
+USERS_DATABASE = "users.sqlite3"
+
 DAY = 86400
 KEEP_SERVED_S = 180 * DAY
 RETRY_KEEP_ORIGINAL_S = 30 * DAY
@@ -123,7 +128,7 @@ class Store:
         self.root, self.cap, self.clock, self.keep_texts = root, cap_bytes, clock, keep_texts
         self.database_over_cap_said = False      # the database alone past the cap is logged once (enforce_cap)
         os.makedirs(os.path.join(root, "bodies"), exist_ok=True)
-        self.db = sqlite3.connect(os.path.join(root, "subsync.sqlite3"), check_same_thread=False,
+        self.db = sqlite3.connect(os.path.join(root, DATABASE), check_same_thread=False,
                                   isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
         # copies and counters: with WAL, NORMAL commits without syncing the disk and can lose only the last commits on
@@ -611,7 +616,7 @@ class Store:
         """The database's files, its write-ahead log included. Not counted against the cap: deleting copies
         never shrinks them; what nobody used for 180 days is deleted instead (expire)."""
         return sum(os.path.getsize(os.path.join(self.root, f)) for f in os.listdir(self.root)
-                   if f.startswith("subsync.sqlite3") and os.path.isfile(os.path.join(self.root, f)))
+                   if f.startswith(DATABASE) and os.path.isfile(os.path.join(self.root, f)))
 
     def _drop(self, key):
         with self._tx():

@@ -69,6 +69,14 @@ class HostCmdTest(unittest.TestCase):
         self.assertEqual(json.loads(out), {"public": True, "people": 3, "max_people": 150, "read_today": 2_500_000,
                                            "daily_budget": Settings({}).daily_budget})
 
+    def test_the_databases_copied_are_the_files_the_service_opens(self):
+        # The store and main_public named their files apart from this list; a rename would have left that
+        # database out of every copy before an update, with no error (a file that isn't there is skipped)
+        from subsync import store
+        self.assertEqual(hostcmd.DATABASES, (store.USERS_DATABASE, store.DATABASE))
+        Store(self.data).close()
+        self.assertTrue(os.path.isfile(os.path.join(self.data, store.DATABASE)))
+
     def test_status_of_a_new_install_is_zero(self):
         code, out, _ = self.run_cmd("status")
         self.assertEqual(json.loads(out)["people"], 0)

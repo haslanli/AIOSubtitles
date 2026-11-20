@@ -1155,6 +1155,22 @@ class ListenTest(unittest.TestCase):
                 entry.main_public(s)
         self.assertEqual(serve.call_args.args, (service.return_value, 8791, "127.0.0.1"))
 
+    def test_public_mode_opens_the_peoples_records_setup_copies(self):
+        # main_public named the people's database by a literal of its own, apart from what ./setup copies
+        from unittest import mock
+        from subsync import __main__ as entry, hostcmd, net, public, users
+        from subsync.settings import Settings
+
+        class Served(Exception):
+            pass
+        s = Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY})
+        with mock.patch.object(net, "configure"), mock.patch.object(entry, "public_store"), \
+                mock.patch.object(users, "Users") as people, mock.patch.object(public, "Pool"), \
+                mock.patch.object(public, "PublicService"), mock.patch.object(public, "serve_public", side_effect=Served):
+            with self.assertRaises(Served):
+                entry.main_public(s)
+        self.assertEqual(people.call_args.args[0], os.path.join(s.data, hostcmd.USERS_DB))
+
     def test_public_mode_stops_on_sigterm_and_keeps_house_every_round(self):
         # main_public's SIGTERM handler and its housekeeping thread never ran in a test (the self-hosted
         # stop has test_service's StopTest)

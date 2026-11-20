@@ -20,9 +20,10 @@ from contextlib import closing
 from .settings import Settings
 from .store import day_of
 
-# The databases ./setup copies before an update and puts back on a rollback (installer/dockerenv.py's DATABASES is kept
-# equal by a test): the people's records, then the shared store. sources.sqlite3 (only the subtitle sites' daily
-# counters) is left out on purpose: a rollback leaves it as it is.
+# The databases ./setup copies before an update and puts back on a rollback: the people's records, then the shared
+# store. Tests keep this equal to the files the service opens (store.USERS_DATABASE, store.DATABASE) and to
+# installer/dockerenv.py's DATABASES, whose test reads this line as a literal. sources.sqlite3 (only the subtitle sites'
+# daily counters) is left out on purpose: a rollback leaves it as it is.
 DATABASES = ("users.sqlite3", "subsync.sqlite3")
 USERS_DB, STORE_DB = DATABASES
 USAGE = "usage: python -m subsync.hostcmd status | copy-databases DEST"

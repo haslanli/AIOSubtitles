@@ -9,7 +9,7 @@ from . import explain
 from .addon import App, serve
 from .settings import Settings
 from .sources import Aios
-from .store import Store
+from .store import USERS_DATABASE, Store
 from .worker import EXPIRE_EVERY_S, Safety, StoreUsenetCounts, UsenetGate, Worker
 
 HOUSEKEEPING_EVERY_S = 60   # public mode's housekeeping runs this often (housekeeping_round)
@@ -144,7 +144,7 @@ def main_public(s):
     from .users import Users
     net.configure(public_only=True)
     store = public_store(s)
-    users = Users(os.path.join(s.data, "users.sqlite3"), s.secret_bytes())
+    users = Users(os.path.join(s.data, USERS_DATABASE), s.secret_bytes())
     env = dict(os.environ)
     pool = Pool(s, env, store, users)
     server = serve_public(PublicService(s, env, store, users, pool), s.port, s.bind)

@@ -795,6 +795,31 @@ class NumbersTest(unittest.TestCase):
         self.assertIn(days, dict(explain.RULES)["Public mode: what is kept, and for how long"])
         self.assertIn(days, dict(explain.PRIVACY_PARTS)["What is stored"])
 
+    def test_what_is_read_of_a_file(self):
+        # The index cap's, read timeout's and text pairing's numbers were typed in words only
+        from subsync import mkv, mp4, reader, textpair
+        from subsync.settings import MB
+        index = explain.SETTINGS["SUBSYNC_INDEX_CAP_MB"][1]
+        self.assertIn(f"(the start, the index, and {mkv.HASH_CHUNK // 1024} KB at each end)", index)
+        self.assertIn(f"an index over {mkv.MAX_CUES // MB} MB ({mp4.MAX_MOOV // MB} MB in an MP4 file) is never read, "
+                      f"whatever the cap. Recommended: 32. Higher, up to {mp4.MAX_MOOV // MB}:", index)
+        self.assertIn(f"plus one second for every {reader.READ_BYTES_PER_S // 1024} KB it asked for.",
+                      explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
+        self.assertIn(f"reads the words of up to {textpair.MAX_LINES} of the track's lines, once per file and language "
+                      f"(up to {textpair.MAX_LINES * mkv.WORD_READ // 1024} KB of text; on an image track, with a reader "
+                      f"installed for the language, each line's picture, up to {mkv.IMAGE_READ // 1024} KB)",
+                      explain.SETTINGS["SUBSYNC_TEXT_PAIRING"][1])
+
+    def test_what_is_kept_and_what_waits(self):
+        # The store's 180 days beside its cap, and a file Usenet doesn't have, waiting a day
+        from subsync.store import KEEP_SERVED_S
+        from subsync.worker import USENET_UNLISTED_S
+        self.assertIn(f"what nobody used for {KEEP_SERVED_S // 86400} days is deleted",
+                      explain.SETTINGS["SUBSYNC_STORE_CAP_MB"][1])
+        day = {86400: "a day"}[USENET_UNLISTED_S]
+        self.assertIn(f"A file it doesn't find there isn't looked for again for {day},",
+                      dict(explain.RULES)["Usenet: only parts of a file, only when you turn it on"])
+
     def test_the_privacy_page_names_the_rows_kept_for_a_person_alone(self):
         # The files a person waits to pick and the original subtitles listed for what they play were kept
         # (for up to 7 days, Delete or not) and not named among what is stored
