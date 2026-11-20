@@ -50,12 +50,13 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import digits, explain, origlang, srclimits
+from .bounded import put_bounded
 from .langs import name as lang_name
 from .sources import parse_extras
 from .store import JUDGED_FOR_S
 from .subs import apply_recipe, format_of, parse, to_srt
 from .version import VERSION
-from .worker import Job, put_bounded
+from .worker import Job
 
 log = logging.getLogger("subsync.addon")
 

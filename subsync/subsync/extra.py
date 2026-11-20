@@ -22,6 +22,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from . import choose, digits, net, realdebrid, srclimits
+from .bounded import put_bounded
 from .langs import lang2, lang3, name as lang_name
 from .sourcestate import Health, Ledger
 from .sources import extras, release_info, release_name, resource_path
@@ -57,6 +58,12 @@ def split_id(video_id):
     if season is not None and episode is not None:
         return parts[0], season, episode
     return parts[0], None, None
+
+
+def site_path(value):
+    """Is a field of a site's answer a path on that site ("/…"), to put after the site's own address? Anything else
+    would make no address ("…None") or another one ("@host/…", ".host/…"), so it is left out."""
+    return isinstance(value, str) and value.startswith("/")
 
 
 def other_episode(release, season, episode):
@@ -141,17 +148,16 @@ class ExtraSources:
             raise
 
     def _id(self, kind, key, lookup):
-        """An id another site gives for a title, kept for the process; "none" is asked again after EMPTY_TTL_S. The
-        table is shared by the pool's threads (cache_lock); the lookup itself runs outside the lock."""
+        """An id another site gives for a title, kept for the process; "none" is asked again after EMPTY_TTL_S (then
+        kept as the newest, put_bounded). The table is shared by the pool's threads (cache_lock); the lookup itself
+        runs outside the lock."""
         with self.cache_lock:
             got = self.ids.get((kind, key))
         if got and (got[1] is not None or self.clock() - got[0] < srclimits.EMPTY_TTL_S):
             return got[1]
         value = lookup()
         with self.cache_lock:
-            self.ids[(kind, key)] = (self.clock(), value)
-            while len(self.ids) > srclimits.SEARCH_CACHE_ENTRIES:
-                self.ids.pop(next(iter(self.ids)))
+            put_bounded(self.ids, (kind, key), (self.clock(), value), srclimits.SEARCH_CACHE_ENTRIES)
         return value
 
     def _count(self, source, kind="request", n=1):
@@ -159,10 +165,13 @@ class ExtraSources:
             self.ledger.count(source, kind, n)
 
     def headers_for(self, cand):
-        """The headers a candidate's download needs (a source's key), never part of its address; only for an address
-        on the source's own origin (the scheme, host and port of its configured address), so a key goes neither to
+        """The headers a candidate's download needs (a source's key), never part of its address; only for a subtitle
+        found here (not one of the person's own list, fetched as a player would) and only for an address on
+        the source's own origin (the scheme, host and port of its configured address), so a key goes neither to
         another site nor over http to an https source."""
         source, url = cand.get("source"), cand.get("url") or ""
+        if cand.get("from_config"):
+            return {}
         if source == "subsource" and self.s.subsource_key and net.same_origin(url, self.s.subsource_url):
             return {"X-API-Key": self.s.subsource_key}
         if source == "tsdb" and self.s.tsdb_key and net.same_origin(url, self.s.tsdb_url):
@@ -242,10 +251,8 @@ class ExtraSources:
             if (c["id"], c["lang"]) not in seen:
                 seen.add((c["id"], c["lang"]))
                 unique.append(c)
-        with self.cache_lock:
-            self.cache[key] = (self.clock(), unique)
-            while len(self.cache) > srclimits.SEARCH_CACHE_ENTRIES:
-                self.cache.pop(next(iter(self.cache)))
+        with self.cache_lock:   # an answer asked again goes last, never first (put_bounded)
+            put_bounded(self.cache, key, (self.clock(), unique), srclimits.SEARCH_CACHE_ENTRIES)
         return unique
 
     def _answered(self, source):
@@ -439,9 +446,9 @@ class ExtraSources:
                          f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__)
                 continue
             for it in got.get("matchingSubtitles") or []:
-                if not it.get("completed"):
+                if not it.get("completed") or not site_path(it.get("downloadUri")):
                     continue
-                out.append(self._cand("gestdown", f"gd-{it.get('subtitleId')}", f"{self.s.gestdown_url}{it.get('downloadUri')}",
+                out.append(self._cand("gestdown", f"gd-{it.get('subtitleId')}", f"{self.s.gestdown_url}{it['downloadUri']}",
                                       lang, it.get("version"), hi=bool(it.get("hearingImpaired"))))
         if busy and not out:
             raise Busy()
@@ -463,8 +470,8 @@ class ExtraSources:
         got = self._get(f"{self.s.subdl_url}/api/v1/subtitles?{urllib.parse.urlencode(q)}") or {}
         out = []
         for it in got.get("subtitles") or []:
-            url = it.get("url") or ""
-            if not url:
+            url = it.get("url")
+            if not site_path(url):
                 continue
             frag = f"#S{season:02d}E{episode:02d}" if season is not None else ""   # which file of a zip to take
             out.append(self._cand("subdl", f"subdl-{url.rsplit('/', 1)[-1]}", f"{self.s.subdl_download_url}{url}{frag}",

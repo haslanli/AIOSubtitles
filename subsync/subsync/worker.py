@@ -25,6 +25,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 
 from . import audiofit, choose, langcheck, pipeline, realdebrid, srclimits
 from . import origlang
+from .bounded import put_bounded, trim_oldest
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .mkv import NotMatroska
@@ -71,20 +72,6 @@ AUDIO_NEED_MARGIN = 2.5
 # Why every read stops for a while (Stopped): the refusal back-off (Safety), or the day's budget spent
 BACKING_OFF = "backing off after a refusal"
 BUDGET_SPENT = "daily budget spent"
-
-
-def put_bounded(d, key, value, limit):
-    """d[key] = value as the newest entry of a map kept to `limit` entries, the oldest dropped first: a key set again
-    moves to the end (a dict keeps a key set again in its first place, so the file just asked about would go first)."""
-    d.pop(key, None)
-    d[key] = value
-    trim_oldest(d, limit)
-
-
-def trim_oldest(d, limit):
-    """Drops a map's oldest entries (a dict keeps insertion order) past `limit`."""
-    while len(d) > limit:
-        d.pop(next(iter(d)))
 
 
 def plain_address(url):

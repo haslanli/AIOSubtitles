@@ -421,6 +421,75 @@ class ReviewCycle1Test(SourcesHarness, unittest.TestCase):
                 self.assertEqual([c["id"] for c in ex.search("series", "tt2:1:2")], ["gd-G1"])   # nothing was kept
 
 
+
+class ReviewCycle2Test(SourcesHarness, unittest.TestCase):
+    """to (the review, cycle 2)."""
+
+    def test_an_answer_asked_again_is_kept_as_the_newest(self):
+        # An answer stored again after its time kept its first place, so it was the next one dropped
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
+        with mock.patch.object(srclimits, "SEARCH_CACHE_ENTRIES", 2):
+            ex.search("movie", "tt1")
+            ex.search("movie", "tt8")
+            self.clock.t += srclimits.SEARCH_TTL_S + 1
+            ex.search("movie", "tt1")                                 # asked again: the newest now
+            ex.search("movie", "tt9")                                 # makes room: tt8, the oldest, goes
+            n = len(self.fake.calls)
+            self.assertEqual(len(ex.search("movie", "tt1")), 2)
+            self.assertEqual(len(self.fake.calls), n)                 # kept
+
+    def test_an_id_looked_up_again_is_kept_as_the_newest(self):
+        # The same for the ids: a "none" looked up again after its hour went first
+        ex = self.extra()
+        with mock.patch.object(srclimits, "SEARCH_CACHE_ENTRIES", 2):
+            ex._id("tvdb", "tt1", lambda: None)
+            ex._id("tvdb", "tt2", lambda: 2)
+            self.clock.t += srclimits.EMPTY_TTL_S + 1
+            ex._id("tvdb", "tt1", lambda: None)
+            ex._id("tvdb", "tt3", lambda: 3)
+        self.assertEqual(set(ex.ids), {("tvdb", "tt1"), ("tvdb", "tt3")})
+
+    def test_a_persons_own_subtitle_on_a_keyed_site_goes_without_the_key(self):
+        # A person's own list could name any address on SubSource's or TheSubtitleDB's API, and it was asked
+        # with the instance's key, its answer served back as an "(original)"
+        ex = self.extra(SUBSYNC_SUBSOURCE_KEY="ss-key", SUBSYNC_TSDB_KEY="sdb_k",
+                        SUBSYNC_SUBSOURCE_URL="https://api.subsource.net/api/v1",
+                        SUBSYNC_TSDB_URL="https://api.thesubtitledb.org")
+        own = {"subsource": "https://api.subsource.net/api/v1/subtitles/7/download",
+               "tsdb": "https://api.thesubtitledb.org/get/1"}
+        listed = {"subsource": "https://api.subsource.net/api/v1/anything/the/person/chose?x=1",
+                  "tsdb": "https://api.thesubtitledb.org/v1/account"}
+        for source, key in (("subsource", {"X-API-Key": "ss-key"}), ("tsdb", {"Authorization": "Bearer sdb_k"})):
+            with self.subTest(source=source):
+                self.assertEqual(ex.headers_for({"source": source, "url": own[source]}), key)   # found here
+                for url in (own[source], listed[source]):
+                    self.assertEqual(ex.headers_for({"source": source, "url": url, "from_config": True}), {})
+
+    def test_a_download_path_that_is_no_path_is_left_out(self):
+        # A site's field was put after its address as it came: "@host/…" moved the download to another host,
+        # a missing one made "…None"
+        ex = self.extra(SUBSYNC_SUBDL_KEY="k1")
+        answer = {"subtitles": [{"url": url, "language": "EN", "release_name": "x"}
+                                for url in ("@evil.example/subtitle/1.zip", ".evil.example/subtitle/2.zip", None, 7, "",
+                                            "/subtitle/3-4.zip")]}
+        with mock.patch.object(ex, "_get", return_value=answer):
+            got = ex._subdl("series", "tt2:1:2", ["eng"], {})
+        self.assertEqual([c["url"] for c in got], [f"{self.fake.url}/subdl-dl/subtitle/3-4.zip#S01E02"])
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="gestdown")
+        real = ex._get
+
+        def get(url, *args, **kwargs):
+            if "/subtitles/get/" not in url:
+                return real(url, *args, **kwargs)
+            items = ({}, {"downloadUri": None}, {"downloadUri": "@evil.example/x"}, {"downloadUri": 5},
+                     {"downloadUri": "/subtitles/download/G9"})
+            return {"matchingSubtitles": [dict(it, subtitleId=f"G{i}", completed=True) for i, it in enumerate(items)]}
+        with mock.patch.object(ex, "_get", side_effect=get):
+            got = ex.search("series", "tt2:1:2")
+        self.assertEqual([(c["id"], c["lang"], c["url"]) for c in got],
+                         [("gd-G4", lang, f"{self.fake.url}/gestdown/subtitles/download/G9") for lang in ("eng", "rus")])
+
+
 class StateTest(unittest.TestCase):
     def test_ledger_windows_and_fair_share(self):
         clock = Clock()
