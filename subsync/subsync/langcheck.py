@@ -130,12 +130,11 @@ def units(plain):
 
 
 def measure(text, lang):
-    """What the check reads: {"words", "letters", "script" (share of the units in the language's scripts, None when
-    its script isn't known), "common" ({code: share of the words that are that language's common words})}."""
+    """What the check reads: {"words", "script" (share of the units in the language's scripts, None when its script
+    isn't known), "common" ({code: share of the words that are that language's common words})}."""
     code = lang3(lang)
     plain = plain_text(text)
     words = _TOKEN.findall(plain)
-    letters = [ch for ch in plain if ch.isalpha()]
     scripts = SCRIPTS.get(code)
     script = None
     written = units(plain) if scripts else []
@@ -143,7 +142,7 @@ def measure(text, lang):
         script = round(sum(1 for s in written if s in scripts) / len(written), 3)
     common = {c: round(sum(1 for w in words if w in distinct) / len(words), 4) if words else 0.0
               for c, distinct in _DISTINCT.items()}
-    return {"words": len(words), "letters": len(letters), "script": script, "common": common}
+    return {"words": len(words), "script": script, "common": common}
 
 
 def verdict(m, lang):
