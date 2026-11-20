@@ -2197,6 +2197,7 @@ class LanguageSync:
         # D1: a subtitle of this language passed the main rule against its own language
         self.settled = False
         self.fitted, self.shas = 0, set()   # best fit: alass runs so far, and the subtitles fitted (each once)
+        self.fit_judged = False     # a fit was judged against the file's tracks (not left to the audio route)
 
     def run(self):
         """The language's result key to offer, if any (Worker._sync_language); then its original is checked again and,
@@ -2332,8 +2333,8 @@ class LanguageSync:
             if self._duplicate(e) or self._wrong_language(e):
                 continue
             entries.append(e)
-            if e["got"]:
-                done = self._listed_cached(e) or done
+            if e["got"]:   # a stored pass is offered; it ends the judging only as a fresh one would
+                done = (self._listed_cached(e) and self._ends_judging(e["got"])) or done
             elif self._check_one(e):
                 done = True
             elif e["checked"] and self.s.shift_path:
@@ -2362,8 +2363,11 @@ class LanguageSync:
 
     def _fit_all(self, entries):
         """alass (or the audio route) on the downloads in try order, stopping at the first that passes, unless best fit
-        judges them all; a file with no text or image subtitle track stops at the first: only the audio route can judge
-        it (_to_audio)."""
+        judges them all. A fit only the audio route could judge (waits_audio: the file's only track too small for that
+        subtitle's lines) stores nothing, and the next is fitted: one with fewer lines may be judged against the track
+; when no fit of the language could be (fit_judged, _fit_early's too), it is left to the audio route
+        (_to_audio)."""
+        waiting = None
         for e in entries:
             if e["got"]:
                 if not self.s.fast_path and self._listed_cached(e) and not self.best_fit:
@@ -2372,13 +2376,13 @@ class LanguageSync:
             if self.best_fit and not self._fitting(e):
                 continue
             r, t0 = self._fit(e)
-            if not self.audio and r.get("waits_audio"):   # no text or image track: only the audio route can judge it
-                self._to_audio(e, entries)
-                return   # nothing stored
-            if r["outcome"] == "in_sync":
-                r = self._in_sync_result(e, r)
-            if self._record(e, r, t0) and not self.best_fit:
+            if not self.audio and r.get("waits_audio"):   # only the audio route can judge it: nothing stored
+                waiting = waiting or e
+                continue
+            if self._record_fit(e, r, t0) and not self.best_fit:
                 return
+        if waiting is not None and not self.fit_judged:
+            self._to_audio(waiting, entries)
 
     def _fitting(self, e):
         """Best fit: one of the SUBSYNC_MAX_TRIES alass runs taken for the download; False when the same subtitle from
@@ -2400,12 +2404,13 @@ class LanguageSync:
         log.info("sync %s %s rank %d: picked, none of %d checked fits: alass now", self.job.label, self.lang, e["rank"],
                  len(checked))
         r, t0 = self._fit(e)
-        self._record(e, self._in_sync_result(e, r) if r["outcome"] == "in_sync" else r, t0)
+        self._record_fit(e, r, t0)
 
     def _to_audio(self, e, entries):
-        """A file with no text or image subtitle track: the language is left to the audio route (job.to_audio) and,
-        unless the audio route is off, the file waits for the viewer's pick (Worker._needs_pick), with the downloads
-        made so far kept for the anchored guesses when every try was downloaded before the fits."""
+        """A language none of whose fits the file's tracks could judge (each said waits_audio: its only track too small
+        for them,; `e` the first of them): it is left to the audio route (job.to_audio) and, unless the audio
+        route is off, the file waits for the viewer's pick (Worker._needs_pick), with the downloads made so far kept for
+        the anchored guesses when every try was downloaded before the fits."""
         job, lang = self.job, self.lang
         job.to_audio.add(lang)
         if self.s.audio_choice != "off":   # a Usenet file too
@@ -2438,6 +2443,12 @@ class LanguageSync:
             self._offer(result_key(self.file_key, lang, e["sha"]))
         return ok
 
+    def _ends_judging(self, row):
+        """A stored pass ends the language's judging as a fresh one does (_stream): an original that fits as it is
+        (_check_one) or a copy moved by one shift that passes the main rule (_shift_one), Worker.fit_rank's first class;
+        after any other the new downloads still get alass."""
+        return self.w.fit_rank(row)[0] == 0
+
     def _check_one(self, e):
         """The fast path for one download: its original against the release track (a gate, no alass). In sync?"""
         s, lang = self.s, self.lang
@@ -2457,7 +2468,9 @@ class LanguageSync:
 
     def _shift_one(self, e):
         """The shift path for one download whose original was judged and not in sync: one steady offset, in
-        milliseconds. A pass by the main rule against its own language (no alass needed)?"""
+        milliseconds. A pass by the main rule against its own language (no alass needed)? A copy that passes otherwise
+        (clearly better, or aligned to another language's track) is stored and offered, and kept as "shifted": alass may
+        still fit the subtitle better (_record_fit)."""
         s = self.s
         t0 = time.time()
         r = pipeline.shift_sync(self.index, self._text(e), self.lang, snap=s.snap, snap_within=s.snap_within,
@@ -2466,8 +2479,11 @@ class LanguageSync:
         if not (r and r["outcome"] == "synced"):
             return False
         self._record(e, dict(r, fast=True), t0)
-        e["got"] = self._fresh(e)
-        return self.w.passed_as(r, r["reason"]) == "main"
+        if self.w.passed_as(r, r["reason"]) == "main":
+            e["got"] = self._fresh(e)
+            return True
+        e["shifted"] = self._fresh(e)
+        return False
 
     def _fit(self, e):
         """alass (or the audio route) on one download: (result, start time)."""
@@ -2496,6 +2512,28 @@ class LanguageSync:
         if r.get("body") is not None:
             return dict(r, outcome="synced", reason=f"{listed}: lines snapped to the release's own")
         return dict(r, outcome="synced", reason=f"{listed}: listed unchanged", body=self._text(e), unchanged=True)
+
+    def _record_fit(self, e, r, t0):
+        """An alass (or audio-route) result of a download recorded (_record; an original in sync as it is as
+        _in_sync_result lists it). A download whose one-shift copy passed (_shift_one, "shifted") has one stored result:
+        the fit replaces that copy only when it passes and fits better (Worker.fit_rank), so a failed or worse fit keeps
+        it. Whether a new pass was recorded."""
+        self.fit_judged = True
+        if r["outcome"] == "in_sync":
+            r = self._in_sync_result(e, r)
+        if e.get("shifted") and not self._fits_better(e, r, e["shifted"]):
+            log.info("sync %s %s rank %d: %s (%s); its one-shift copy fits better, kept", self.job.label, self.lang,
+                     e["rank"], r["outcome"], r.get("reason"))
+            return False
+        return self._record(e, r, t0)
+
+    def _fits_better(self, e, r, row):
+        """Does result `r` of the download pass and fit better (Worker.fit_rank) than the stored result `row`?"""
+        if r["outcome"] not in ("synced", "in_sync"):
+            return False
+        mine = {"outcome": r["outcome"], "reason": r.get("reason"),
+                "detail": dict({k: r[k] for k in self.RECORDED if k in r}, stacked=self._stacked(e))}
+        return self.w.fit_rank(mine) < self.w.fit_rank(row)
 
     def _record(self, e, r, t0):
         """A judged download's result stored (offered at once unless best fit offers it) and logged. Passes?"""

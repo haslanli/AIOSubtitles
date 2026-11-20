@@ -632,6 +632,117 @@ class LanguageSyncStepsTest(unittest.TestCase):
         self.assertEqual([r["candidate_id"] for r in self.store.offers("f-1", ["eng"], {"eng": 3})], ["os-b", "os-c"])
 
 
+class AlassAfterOtherPassesTest(unittest.TestCase):
+    """Best fit with the fast path (the defaults): a pass neither in sync as it is nor moved by one shift that passes
+    the main rule leaves alass to run, on the other downloads when it is stored and on its own subtitle when it
+    is made now; a fit only the audio route could judge leaves the next subtitle to be fitted. The
+    pipeline's checks are stubs (sync_subtitle too, but in the test); downloads are fakes: no network."""
+    NOT_IN_SYNC = {"in_sync": False, "route": "cues", "gate_original": {"within200": 0.5, "median_ms": 400}}
+    CLEARLY_BETTER = {"outcome": "synced", "reason": "clearly better than the original (one shift)", "route": "cues",
+                      "better": {"pass": True}, "shift_fit": {"scale": 1.0, "offset_s": 1.0, "votes": 90},
+                      "gate_synced": {"within200": 0.6, "median_ms": 250}}
+    MAIN_SHIFT = {"outcome": "synced", "reason": "passes against the release track (one shift)", "route": "cues",
+                  "shift_fit": {"scale": 1.0, "offset_s": 1.0, "votes": 90},
+                  "gate_synced": {"within200": 0.95, "median_ms": 40}}
+    KEPT = {"outcome": "keep_original", "reason": "below the bar", "route": "cues"}
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="subsync-test-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.texts = {f"http://subs.test/{cid}.srt": dialogue_srt("eng", start=start)
+                      for cid, start in (("os-a", 30.0), ("os-c", 33.0))}
+        self.downloads = FakeDownloads(self.texts)
+        for patcher in (self.downloads.patch(), local_network_only()):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.store = closed_after(self, Store(os.path.join(self.dir, "store")))
+        self.w = Worker(Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_AUDIO_ROUTE": "off",
+                                  "SUBSYNC_PARALLEL_LANGUAGES": "off", "SUBSYNC_IMAGE_REF": "off",
+                                  "SUBSYNC_ALASS": "/nonexistent/alass", "SUBSYNC_EXTRA_SOURCES": "",
+                                  "SUBSYNC_LANGUAGES": "eng"}), self.store, FakeAios(), None)
+        self.assertTrue(self.w.s.best_fit and self.w.s.fast_path and self.w.s.shift_path)
+
+    def cands(self, *cids):
+        return [{"id": cid, "url": f"http://subs.test/{cid}.srt", "lang": "eng", "release": ""} for cid in cids]
+
+    def cid(self, text):
+        """The id of the subtitle whose text this is (told by its first line's times: each starts at its own)."""
+        return next(url.rsplit("/", 1)[1][:-4] for url, t in self.texts.items()
+                    if t.split("\n")[1] == text.split("\n")[1])
+
+    def judge(self, file_key, shifts=None, fits=None, index=None, job=None, real_fit=False):
+        """The language judged, its subtitles listed in self.texts' order: no original in sync as it is; the one shift
+        of a subtitle gives `shifts`' result for its id (else keeps it), and its fit `fits`' (else keeps it; with
+        `real_fit` the pipeline's own fit). Returns the ids fitted, in order."""
+        fitted, real = [], pipeline.sync_subtitle
+
+        def result(got, text, kept):
+            return dict(got, body=text) if got else dict(kept)
+
+        def sync_subtitle(index, text, lang, **kw):
+            fitted.append(self.cid(text))
+            if real_fit:
+                return real(index, text, lang, **kw)
+            return result((fits or {}).get(self.cid(text)), text, self.KEPT)
+
+        def shift_sync(index, text, lang, **kw):
+            return result((shifts or {}).get(self.cid(text)), text, dict(self.KEPT, reason="below the bar (one shift)"))
+        with mock.patch.object(pipeline, "check_original", lambda *a, **k: dict(self.NOT_IN_SYNC)), \
+                mock.patch.object(pipeline, "shift_sync", shift_sync), \
+                mock.patch.object(pipeline, "sync_subtitle", sync_subtitle):
+            self.w._sync_language(job or Job("movie", "tt1"), index or FakeIndex(), file_key, "eng",
+                                  self.cands(*(url.rsplit("/", 1)[1][:-4] for url in self.texts)), "abcd", "Movie.mkv")
+        return fitted
+
+    def reasons(self, file_key):
+        return dict(self.store.db.execute("SELECT candidate_id, reason FROM results WHERE file_key=?", (file_key,)))
+
+    def test_a_stored_pass_ends_the_judging_only_as_a_fresh_one_would(self):
+        # Any stored pass ended it, so a subtitle listed since (here os-c, failing as it is and by one shift)
+        # never got alass; a stored copy moved by one shift that passes the main rule still ends it, as a fresh one does
+        for n, (stored, fitted) in enumerate(((self.CLEARLY_BETTER, ["os-c"]), (self.MAIN_SHIFT, []))):
+            with self.subTest(stored=stored["reason"]):
+                file_key, text = f"f-{n}", self.texts["http://subs.test/os-a.srt"]
+                detail = dict({k: v for k, v in stored.items() if k not in ("outcome", "reason", "route")},
+                              rule=self.w.s.rule_id)
+                self.store.put(file_key, hashlib.sha256(text.encode()).hexdigest(), "eng", 0, "synced",
+                               stored["reason"], "cues", detail, "srt", text, "os-a", offer=True, original=text)
+                self.assertEqual(self.judge(file_key), fitted)
+                self.assertEqual([r["candidate_id"] for r in self.store.offers(file_key, ["eng"], {"eng": 3})],
+                                 ["os-a"])                                     # the stored pass is still offered
+
+    def test_a_one_shift_copy_that_passes_otherwise_is_still_fitted_and_kept_unless_beaten(self):
+        # A one-shift copy that passed only as clearly better ended its subtitle's judging, so no alass or
+        # sectioned fit (D4: a slightly different cut) ran on it; the fit replaces the copy only when it fits better
+        worse = {"outcome": "synced", "reason": "clearly better than the original", "route": "cues",
+                 "better": {"pass": True}, "gate_synced": {"within200": 0.55, "median_ms": 300}}
+        main = {"outcome": "synced", "reason": "passes the main rule", "route": "cues",
+                "gate_synced": {"within200": 0.9, "median_ms": 30}}
+        fitted = self.judge("f-1", shifts={"os-a": self.CLEARLY_BETTER, "os-c": self.CLEARLY_BETTER},
+                            fits={"os-a": main, "os-c": worse})
+        self.assertEqual(fitted, ["os-a", "os-c"])
+        self.assertEqual(self.reasons("f-1"), {"os-a": "passes the main rule",
+                                               "os-c": "clearly better than the original (one shift)"})
+        self.assertEqual([r["candidate_id"] for r in self.store.offers("f-1", ["eng"], {"eng": 3})], ["os-a", "os-c"])
+
+    def test_a_subtitle_the_files_small_track_can_judge_is_fitted_after_one_only_the_audio_route_could(self):
+        # The first fit that waited for the audio route ended the fits: a later subtitle with fewer lines, which
+        # the file's 400-line track can judge (at least half its lines), was never fitted, and the language was left to
+        # the audio route. The pipeline's own fit decides (no alass here: it fails, and keeps the original)
+        index = FakeIndex(text=[{"number": 3, "language": "eng", "codec": "S_TEXT/UTF8", "name": "", "forced": False,
+                                 "cues": [(30.0 + 5 * i, 2.0) for i in range(400)]}])
+        for second, left_to_audio in ((700, set()), (1700, {"eng"})):
+            with self.subTest(second=second):
+                first, other = f"sdh-{second}", f"os-{second}"   # addresses of their own: downloads are kept a while
+                self.texts = {f"http://subs.test/{first}.srt": dialogue_srt("eng", n=1700, start=30.0, step=1.5),
+                              f"http://subs.test/{other}.srt": dialogue_srt("eng", n=second, start=31.0, step=3.0)}
+                self.downloads.files = {url: text.encode() for url, text in self.texts.items()}
+                job = Job("movie", "tt1")
+                self.assertEqual(self.judge(f"f-{second}", index=index, job=job, real_fit=True), [first, other])
+                self.assertEqual(job.to_audio, left_to_audio)
+                self.assertEqual(self.reasons(f"f-{second}"), {} if left_to_audio else {other: "alass failed"})
+
+
 class SettledLanguageTest(unittest.TestCase):
     """D1: a language is settled, so the track's words are no longer read to confirm its later
     subtitles, only by a pass against a track in its own language. The pipeline is a stub; downloads are fakes."""
@@ -985,12 +1096,14 @@ class PickedLanguageTest(unittest.TestCase):
         self.assertIn(w.measured_original(job.alias, "spa"), {c["id"] for c in self.cands["spa"]})   # not measured
 
     def test_a_file_with_no_track_of_its_own_is_unchanged(self):
-        # nothing can be checked against the file: no early alass and nothing measured (its anchored guesses stay)
+        # nothing can be checked against the file: no early alass and nothing measured (its anchored guesses stay).
+        # Each fit finds no track it can be judged against, so the next is fitted (one with fewer lines might be, as a
+        # small track can judge it): SUBSYNC_MAX_TRIES (3) fits
         self.fakes(track=False)
         w = self.worker(SUBSYNC_LANGUAGES="eng")
         job = self.picked(w, "eng")
         self.judge(w, job, ["eng"])
-        self.assertEqual([kind for kind, _ in self.events], ["check"] * 8 + ["alass"])   # one fit finds no track
+        self.assertEqual([kind for kind, _ in self.events], ["check"] * 8 + ["alass"] * 3)
         self.assertIsNone(w.measured_original(job.alias, "eng"))
         audio = Job("movie", "tt2", {"filename": "b.mp4", "videoSize": 5})
         audio.audio = True                                       # picked: the audio route of a file with no track
@@ -1000,15 +1113,15 @@ class PickedLanguageTest(unittest.TestCase):
 
 
     def test_the_no_track_case_is_told_by_the_pipelines_flag_not_its_words(self):
-        # Only the audio route could judge it (waits_audio): one fit, then nothing more is fitted or stored,
-        # whatever the reason says
+        # Only the audio route could judge it (waits_audio): nothing is stored, whatever the reason says; the
+        # next subtitle is fitted, within SUBSYNC_MAX_TRIES (3)
         self.fakes(track=False)
         fake = pipeline.sync_subtitle
         with mock.patch.object(pipeline, "sync_subtitle",
                                lambda *a, **kw: dict(fake(*a, **kw), reason="the file has no subtitle track of its own")):
             w = self.worker(SUBSYNC_LANGUAGES="eng")
             self.judge(w, self.picked(w, "eng"), ["eng"])
-        self.assertEqual([kind for kind, _ in self.events], ["check"] * 8 + ["alass"])
+        self.assertEqual([kind for kind, _ in self.events], ["check"] * 8 + ["alass"] * 3)
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
 
 if __name__ == "__main__":
