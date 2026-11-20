@@ -1741,8 +1741,11 @@ class Worker(threading.Thread):
         to fit are left to the audio route (job.to_audio), so turning it on later syncs the file."""
         with self.cv:
             originals = dict(self.originals.get(job.alias) or {})
-        want = {lang: [(r, c) for r, c in enumerate(cands) if c["id"] == (originals.get(lang) or {}).get("id")][:1]
-                for lang, cands in per_lang.items() if cands}
+        want = {}
+        for lang, cands in per_lang.items():
+            if cands:   # the original served (none when every subtitle is AI-made or forced, with SUBSYNC_SKIP_AI)
+                guess = (originals.get(lang) or {}).get("id")
+                want[lang] = [(r, c) for r, c in enumerate(cands) if c["id"] == guess][:1]
         got = self._fetch_languages(job, want)
         for lang, tries in want.items():
             job.fetched[lang] = [(cand, decode(raw, lang)) for _, cand, raw in got[lang]]
