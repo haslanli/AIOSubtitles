@@ -329,6 +329,8 @@ class Personal(BackgroundWork, FlowFixture):
         _, _, text = self.b.get('')                                                    # the page after setup now
         self.assertIn('AIOSubtitles · subsync status', text)
         self.assertIn(update.NEWEST, text)
+        for secret in self.setup_secrets():                       # nor a password, key or link of setup's own
+            self.assertFalse(any(secret in page for page in self.b.pages))
 
     def test_the_audio_answer_through_the_page(self):
         # One of three answers; a yes asks the audio limit next, and "as soon as a file is opened" is written

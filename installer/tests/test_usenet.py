@@ -45,6 +45,8 @@ class Personal(FlowFixture):
         listed = [p for m, p, _ in self.aios.log if m == 'GET' and f"/stremio/{keys['USENET_UUID']}/stream" in str(p)]
         self.assertEqual(listed, [])                                      # the self-test searches no indexer
         self.assertNotIn(keys['USENET_PASSWORD'], out)
+        for secret in self.setup_secrets():                     # nor the Usenet config's link, nor the others'
+            self.assertNotIn(secret, out)
 
         # a re-run with Usenet off: its config is removed, its lines go
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'USENET': 'no', 'TEST_READ': 'no'})

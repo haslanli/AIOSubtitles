@@ -15,7 +15,7 @@ from unittest import mock
 
 from subsync import settings, ui
 
-ROOT =Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[2]
 FLOWS = ROOT / '.github' / 'workflows'
 PUBLISHERS = ('publish-amd64', 'publish-arm64', 'manifest')
 ON_PUSH_ONLY = ("github.event_name == 'push' && (github.ref == 'refs/heads/main' || "

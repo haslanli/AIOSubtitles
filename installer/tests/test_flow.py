@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, hosting, plan, tests, ui, where, wizard
+from installer import dockerenv, engine, hosting, plan, screens, tests, ui, where, wizard
 from subsync import aiosconfig, explain, origlang, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
@@ -394,14 +394,20 @@ class FlowFixture(AnswersRun, unittest.TestCase):
             return real(url, timeout)
         return fetch
 
+    def setup_secrets(self):
+        """What setup keeps in state/secrets.env and never shows: each password and key, and the link of each config
+        it made, from /stremio/<the config's id>/ on (its password follows). The viewer's own config is the person's:
+        its link is checked where it is pasted."""
+        keys = engine.read_kv(self.state / 'secrets.env')
+        keys.pop('VIEWER_UUID', None)
+        return [f'/stremio/{value}/' if name.endswith('_UUID') else value for name, value in keys.items() if value]
+
     ANSWERS = {'AIOS_CONFIG_ID': f'{PUBLIC}/stremio/{UUID}/ENC/manifest.json', 'AIOS_CONFIG_PASSWORD': PASSWORD,
                'LANGUAGES': 'English, Russian', 'TEST_READ': 'yes'}
     LINK = f'{PUBLIC}/stremio/{UUID}/ENC/manifest.json'
 
 
 class Flow(FlowFixture):
-
-
     def test_install_rerun_uninstall(self):
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
@@ -454,7 +460,8 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])   # as before
         self.assertNotIn(sync_id, self.aios.users)
-        self.assertFalse((self.state / 'secrets.env').exists())
+        for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):      # every one of them
+            self.assertFalse((self.state / name).exists(), name)
 
     def test_the_audio_limit_is_asked_only_with_the_audio_route(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
@@ -743,8 +750,12 @@ class Flow(FlowFixture):
     def test_closing_text(self):
         code, out = self.run_setup(self.ANSWERS)
         self.assertEqual(code, 0, out)
-        self.assertNotIn(f'/stremio/{UUID}/ENC-', out)                 # none of the install links setup makes
-        self.assertNotIn(f'/stremio/{UUID}/', out)                     # nor the one pasted in the answers file
+        secrets = self.setup_secrets()
+        keys = engine.read_kv(self.state / 'secrets.env')
+        self.assertLessEqual({keys['SYNC_PASSWORD'], keys['ADDON_KEY'], f"/stremio/{keys['SYNC_UUID']}/"}, set(secrets))
+        for secret in secrets:                                         # no password, key or link of setup's own
+            self.assertNotIn(secret, out)
+        self.assertNotIn(f'/stremio/{UUID}/', out)                     # nor the link pasted in the answers file
         self.assertIn('JELLYFIN_SUBTITLE_TTL', out)                    # AIOMetadata users are told
         self.assertIn('docker restart', out)
         self.assertIn('Starting subsync', out)
@@ -764,10 +775,11 @@ class Flow(FlowFixture):
         self.assertEqual(code, 0, out)
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}, '--uninstall')
         self.assertEqual(code, 0, out)
-        self.assertIn(f'docker image rm {IMAGE}', out)
-        self.assertIn('this folder, /home/me/aiosubtitles, ', out)        # its path on the machine
-        self.assertIn('state/backups', out)
-        self.assertIn('web server', out)
+        stays = out.split(screens.STAYS, 1)[1]                           # the list, not the lines before it
+        self.assertIn(f'docker image rm {IMAGE}', stays)
+        self.assertIn('this folder, /home/me/aiosubtitles, with copies of your config in state/backups/ '   # its path
+                      '(./setup --restore FILE puts one back)', stays)
+        self.assertIn('web server', stays)
 
     def test_optional_subtitle_source_keys_reach_subsync_and_are_never_shown(self):
         # SubDL and Wyzie are searched by subsync itself when the user gives a free key
@@ -1034,17 +1046,18 @@ class Flow(FlowFixture):
     def test_removing_on_the_page(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
-        e =self.page_engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'REMOVE': 'yes'})
+        e = self.page_engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_OPENSUBTITLES': 'yes', 'REMOVE': 'yes'})
         e.remove()
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
         self.assertIn(('ok', 'Done.'), [tuple(r[:2]) for r in e.out.rows])
         self.assertTrue(any(f'docker image rm {IMAGE}' in line for line in e.stays))
-        self.assertFalse((self.state / 'settings.json').exists())
+        for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
+            self.assertFalse((self.state / name).exists(), name)
 
     def test_removing_needs_the_config_password(self):
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         self.assertEqual(code, 0, out)
-        e =self.page_engine({'REMOVE': 'yes'})
+        e = self.page_engine({'REMOVE': 'yes'})
         with self.assertRaises(engine.Problem) as caught:
             e.remove()
         self.assertEqual(caught.exception.field, 'AIOS_CONFIG_PASSWORD')
