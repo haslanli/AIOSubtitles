@@ -19,7 +19,7 @@ RUNS_AT_ONCE = available_cpus()
 _runs = threading.BoundedSemaphore(RUNS_AT_ONCE)
 # One run's limits (programs.limited). alass's memory grows with the time the subtitles span, whatever their
 # lines: a real 3-hour pair takes 1.1 to 1.2 GB, while a track or a subtitle made to span days (cue times are the
-# file's, and nothing else bounds them) took 4 to 10 GB; past the limit the run fails and the original is kept
+# file's, and nothing else bounds them) took 4 GB and more; past the limit the run fails and the original is kept
 TIMEOUT_S = 120                     # the longest a run may take, then it is stopped
 MEMORY_KB = 3 * 1024 * 1024         # address space of a run on Linux (3 GiB)
 CPU_S = TIMEOUT_S                   # processor seconds of a run on Linux (alass runs on one thread)
