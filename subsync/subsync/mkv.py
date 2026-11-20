@@ -11,7 +11,6 @@ import math
 import re
 import struct
 import subprocess
-import sys
 import threading
 import zlib
 from array import array
@@ -20,6 +19,7 @@ from itertools import accumulate
 from operator import itemgetter
 
 from .imageref import IMAGE_CODECS
+from .programs import limited
 from .reader import IndexTooLarge, ReadFailed, Refused, Stopped
 
 AUDIO_BYTES_LOCK = threading.Lock()
@@ -37,17 +37,11 @@ AUDIO_DECODERS = ("aac", "ac3", "eac3", "dca", "truehd", "mlp", "flac", "opus", 
 
 def decoder_cmd(ffmpeg, fmt, args, linux=None):
     """An ffmpeg command that decodes audio from standard input in the format `fmt`: it opens only the pipe (no file
-    or network address a file could name), only that one demuxer and only the decoders of AUDIO_DECODERS; on Linux the
-    shell sets its memory and processor limits just before ffmpeg starts (no preexec_fn: the worker has threads), and
-    ffmpeg dies past them."""
+    or network address a file could name), only that one demuxer and only the decoders of AUDIO_DECODERS; on Linux
+    within its memory and processor limits (programs.limited), past which ffmpeg dies."""
     cmd = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "pipe", "-format_whitelist", fmt,
            "-codec_whitelist", ",".join(AUDIO_DECODERS), "-f", fmt, "-i", "pipe:0", *args]
-    on_linux = sys.platform.startswith("linux") if linux is None else linux
-    if on_linux:
-        # the limits where the shell can set them; ffmpeg runs either way, so a shell that can't never stops decoding
-        return ["sh", "-c", f'ulimit -v {FFMPEG_MEMORY_KB} 2>/dev/null; ulimit -t {FFMPEG_CPU_S} 2>/dev/null; exec "$@"',
-                "ffmpeg", *cmd]
-    return cmd
+    return limited(cmd, "ffmpeg", FFMPEG_MEMORY_KB, FFMPEG_CPU_S, linux)
 
 
 def add_audio_bytes(index, n):
