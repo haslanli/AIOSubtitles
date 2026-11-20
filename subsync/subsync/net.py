@@ -5,10 +5,10 @@ network next to subsync.
 
 Public mode: what people type and what their listings contain decides where the service connects, so it connects only
 to public internet addresses. A name is looked up once and refused when any of its addresses is private, loopback,
-link-local (the cloud's own metadata service among them), shared, multicast or reserved; the connection goes to the
-addresses checked, and the address it really reached is checked again. An IPv6 address that stands for an IPv4 one
-(IPv4-mapped, or a translator's prefix such as NAT64's) is judged as that IPv4 address. Redirects are opened through the
-same connections. Only http and https are opened, and proxies from the environment are not used.
+link-local (the cloud's own metadata service among them), site-local, shared, multicast or reserved; the connection
+goes to the addresses checked, and the address it really reached is checked again. An IPv6 address that stands for an
+IPv4 one (IPv4-mapped, or a translator's prefix such as NAT64's) is judged as that IPv4 address. Redirects are opened
+through the same connections. Only http and https are opened, and proxies from the environment are not used.
 
 Both modes: a request held within a Deadline has one bound for the whole of it, its connections and every read.
 
@@ -23,6 +23,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import digits
 
 _public_only = False
 _resolver = socket.getaddrinfo
@@ -44,10 +46,6 @@ def configure(public_only, resolver=None):
     _resolver = resolver or socket.getaddrinfo
 
 
-def public_only():
-    return _public_only
-
-
 def is_public_ip(ip):
     """Whether an address is on the public internet (an IPv6 address carrying an IPv4 one: whether that one is)."""
     try:
@@ -56,7 +54,9 @@ def is_public_ip(ip):
         return False
     if address.version == 6 and any(address in prefix for prefix in _CARRY_IPV4):
         address = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
-    return address.is_global and not address.is_multicast
+    # Python counts IPv6's old site-local block and its unassigned reserved blocks as global
+    return address.is_global and not (address.is_multicast or address.is_reserved
+                                      or (address.version == 6 and address.is_site_local))
 
 
 def _public_addresses(host, port):
@@ -131,13 +131,11 @@ def credentials_follow(url, new_url):
 
 
 def retry_after(value):
-    """The seconds a "too many requests" answer's Retry-After asks to wait, as a number; None without one or for one
-    that isn't a number (an HTTP-date, "nan"): each caller then takes its own default, and applies its own bounds."""
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return None
-    return None if math.isnan(seconds) else seconds
+    """The seconds a "too many requests" answer's Retry-After asks to wait, as a number in the ASCII digits (digits.py);
+    None without one or for one that isn't a number (an HTTP-date, "nan"): each caller then takes its own default, and
+    applies its own bounds."""
+    seconds = digits.decimal(value)
+    return None if seconds is None or math.isnan(seconds) else seconds
 
 
 class Deadline:

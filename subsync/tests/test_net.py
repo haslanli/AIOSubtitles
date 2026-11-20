@@ -87,6 +87,16 @@ class RangesTest(unittest.TestCase):
             with self.subTest(ip=ip):
                 self.assertTrue(net.is_public_ip(ip))
 
+    def test_ipv6_site_local_and_reserved_space_is_refused(self):
+        # Python counts IPv6's old site-local block (fec0::/10) and the unassigned blocks it marks reserved
+        # (4000::/3, 5f00::/16 of SRv6 among them) as global; the gate refuses them, as its docstring says
+        for ip in ("fec0::1", "feff::1", "5f00::1", "4000::1", "e000::1", "200::1"):
+            with self.subTest(ip=ip):
+                self.assertFalse(net.is_public_ip(ip))
+        for ip in ("2001:4860:4860::8888", "2a00:1450:4001::1"):     # in 2000::/3, the global unicast space: public
+            with self.subTest(ip=ip):
+                self.assertTrue(net.is_public_ip(ip))
+
 
 class OriginTest(unittest.TestCase):
     def test_where_credentials_may_follow_a_redirect(self):
@@ -312,6 +322,12 @@ class RetryAfterTest(unittest.TestCase):
             self.assertEqual(net.retry_after(value), seconds)
         for value in (None, "", "nan", "NaN", "Wed, 21 Oct 2026 07:28:00 GMT"):
             self.assertIsNone(net.retry_after(value))
+
+    def test_digits_of_other_scripts_are_no_number(self):
+        # A header's number is read in the ASCII digits only (digits.py), as AiosApi reads this header
+        for value in ("١٢٠", "１２", "٣٠٠٠", "１.５"):
+            with self.subTest(value=value):
+                self.assertIsNone(net.retry_after(value))
 
 
 if __name__ == "__main__":
