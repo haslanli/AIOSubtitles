@@ -571,6 +571,7 @@ class Engine:
         self.suggested_invite = None        # the invite code suggested on a first setup (host_signups)
         self.secret = None                  # a public instance's secret key (host_signups)
         self.host_usenet = self.host_audio = self.host_tmdb_personal = False      # a public instance's (host_choices)
+        self.forget_rule()                  # the web server rule an install step shows (show_rule)
 
     # what the page shows filled in on a re-run ------------------------------------------------------------------
     def prefill(self):
@@ -1134,6 +1135,7 @@ class Engine:
     # 7 -------------------------------------------------------------------------------------------------------
     def install(self):
         self.show_step('install')
+        self.forget_rule()
         if self.s['public_kind'] == 'path':
             self.proxy_rule()
         def link(kind):
@@ -1246,21 +1248,30 @@ class Engine:
             self.out.ok(f"Your web server already reaches subsync at {self.s['public_base']}")
             return
         target_host = f'127.0.0.1:{self.s["port"]}'
-        self.web_server_rule = plan.proxy_snippets(self.s['public_base'], target_host)
-        self.rule_intro = (f"Your web server needs one rule so {self.s['public_base']}/... reaches subsync. Add it next to "
-                           'your AIOStreams rule (keep the path as it is; don\'t strip it):')
-        # the rule's note, under it in the terminal and on the page (which shows the rule's words, not as rows)
-        self.rule_note = (f'Web server running in Docker on AIOStreams\' network: use {plan.SUBSYNC_HOST}:'
-                          f'{plan.SUBSYNC_PORT} instead of {target_host}.') if self.s['mode'] == 'network' else None
+        self.show_rule(plan.proxy_snippets(self.s['public_base'], target_host),
+                       f"Your web server needs one rule so {self.s['public_base']}/... reaches subsync. Add it next to "
+                       'your AIOStreams rule (keep the path as it is; don\'t strip it):',
+                       note=(f'Web server running in Docker on AIOStreams\' network: use {plan.SUBSYNC_HOST}:'
+                             f'{plan.SUBSYNC_PORT} instead of {target_host}.') if self.s['mode'] == 'network' else None)
+        self.ask.pause('Add the rule and reload your web server, then press Enter (or press Enter now and add it later):')
+
+    def forget_rule(self):
+        """No web server rule shown: at the start of each run of an install step (the page keeps one engine for every
+        run, and shows the rule it holds)."""
+        self.web_server_rule = self.rule_intro = self.rule_note = None
+
+    def show_rule(self, rule, intro, note=None):
+        """The web server rule this install needs ({server: lines}), under its intro and with its note: kept for the
+        page, which shows the rule's words after the step's rows, and printed in a terminal."""
+        self.web_server_rule, self.rule_intro, self.rule_note = rule, intro, note
         self.out.say()
-        self.out.wrap(self.rule_intro)
-        for name, lines in self.web_server_rule.items():
+        self.out.wrap(intro)
+        for name, lines in rule.items():
             self.out.say(f'    {self.out.paint("1", name)}')
             for line in lines:
                 self.out.say(f'      {line}')
-        if self.rule_note:
-            self.out.say(self.out.paint('2', f'     {self.rule_note}'))     # as a note prints, with the rule's lines
-        self.ask.pause('Add the rule and reload your web server, then press Enter (or press Enter now and add it later):')
+        if note:
+            self.out.say(self.out.paint('2', f'     {note}'))     # as a note prints, with the rule's lines
 
     # 8 -------------------------------------------------------------------------------------------------------
     def self_test(self):
@@ -1540,6 +1551,7 @@ class Engine:
 
     def host_install(self):
         self.show_step('hostinstall', 'host')
+        self.forget_rule()
         if self.secret_new:
             self.out.ok('Made the secret key and kept it in state/subsync.env, readable only by your user.')
         answers = {'HOST_ADDRESS': self.address, 'SUBSYNC_TRUSTED_PROXY': self.trusted_proxy,
@@ -1554,18 +1566,11 @@ class Engine:
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         self._deploy('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
-        self.web_server_rule = None
         if not hosting.health_ok(self.address):
-            self.web_server_rule = hosting.web_server_rule(self.address, f"127.0.0.1:{self.s['port']}")
-            self.rule_intro = (f'Your web server needs one rule so {self.address} reaches AIOSubtitles on this machine. '
-                               'Add it with the https certificate your web server has for that name, and reload the '
-                               'web server:')
-            self.out.say()
-            self.out.wrap(self.rule_intro)
-            for name, lines in self.web_server_rule.items():
-                self.out.say(f'    {self.out.paint("1", name)}')
-                for line in lines:
-                    self.out.say(f'      {line}')
+            self.show_rule(hosting.web_server_rule(self.address, f"127.0.0.1:{self.s['port']}"),
+                           f'Your web server needs one rule so {self.address} reaches AIOSubtitles on this machine. '
+                           'Add it with the https certificate your web server has for that name, and reload the web '
+                           'server:')
 
     def host_check(self):
         self.show_step('hostcheck', 'host')

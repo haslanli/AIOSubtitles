@@ -693,6 +693,26 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertEqual(len(checks), 2)
         self.assertIn('AIOStreams asks subsync for subtitles', text)
 
+    def test_a_rule_an_earlier_install_showed_is_gone_once_it_isnt_needed(self):
+        # The page keeps one engine, and only a run that needed the rule set it: an install after the rule was
+        # in place (or for an address with a port) still told the person to add it
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        _, _, text = self.b.settle('install')
+        self.assertIn('Your web server needs one rule', text)
+        self.b.follow('install', {'go': 'next'})
+        self.b.settle('check')
+        self.b.get('choices')                                                       # the browser's Back
+        self.b.follow('choices', {'LANGUAGES': ['eng', 'spa', ''], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
+                                  'ADD_OPENSUBTITLES': 'yes', 'go': 'next'})
+        self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        self.b.post('review', {'CONFIRM': 'yes'})
+        _, _, text = self.b.settle('install')
+        self.assertIn(f'Your web server already reaches subsync at {PUBLIC}/subsync', text)
+        self.assertNotIn('Your web server needs one rule', text)
+        self.assertNotIn('reverse_proxy', text)
+        self.assertIsNone(self.app.session.e.rule_note)
+
     def test_while_the_install_runs_the_steps_before_it_lead_to_its_page(self):
         # an earlier step's answers once changed under the running install
         release = threading.Event()
