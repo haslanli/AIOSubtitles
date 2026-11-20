@@ -14,7 +14,7 @@ from unittest import mock
 from helpers import AUDIO_BETTER, FakeIndex, FIXTURES, rhythm, truth_fit
 from subsync import mkv, mp4, pipeline, sections, shift, textpair  # noqa: E402
 from subsync.audiofit import AudioFit  # noqa: E402
-from subsync.reader import ReadFailed, Refused  # noqa: E402
+from subsync.reader import CapReached, ReadFailed, Refused, Stopped  # noqa: E402
 from subsync.relgate import relgate  # noqa: E402
 
 
@@ -760,6 +760,22 @@ class TrackWordsLockTest(unittest.TestCase):
         finally:
             go.set()
             hanging.join(10)
+
+    def test_word_reads_past_the_jobs_byte_cap_give_no_words(self):
+        # They raised CapReached, which Worker._run took for an index larger than the cap: the file was marked
+        # and never read again, though its index fit and only the optional word reads went past the cap
+        def capped(number, starts):
+            raise CapReached(8 * 1024 * 1024)
+        index, (english, _) = self.index(capped)
+        self.assertIsNone(pipeline.track_words(index, english, True))
+        self.assertIsNone(pipeline.track_words(index, english, False))    # kept for the job: not read again
+        for stop in (Refused("HTTP 429"), Stopped("backing off after a refusal")):   # these still end the job
+            with self.subTest(stop=type(stop).__name__):
+                def stopped(number, starts, stop=stop):
+                    raise stop
+                index, (english, _) = self.index(stopped)
+                with self.assertRaises(type(stop)):
+                    pipeline.track_words(index, english, True)
 
 
 class AudioLockTest(unittest.TestCase):

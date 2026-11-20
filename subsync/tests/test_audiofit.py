@@ -152,6 +152,21 @@ class SeekIndexTest(unittest.TestCase):
         self.assertEqual((out["decision"], out["why"]), ("keep_original", "seek index too sparse for the audio budget"))
         self.assertEqual(idx.reads, [])
 
+    def test_the_audio_budget_is_named_in_its_settings_unit(self):
+        # SUBSYNC_AUDIO_BUDGET_GB is a GB setting (settings.GB); a kept original's reason named it in decimal
+        # MB ("audio budget reached (1000 MB)")
+        idx, lines = self.index([(0.0, 0)], 1)
+        out = AudioFit(idx, lines, vad=LoudVad(), better=AUDIO_BETTER, budget=10 ** 6).run()
+        self.assertEqual((out["decision"], out["why"]),
+                         ("keep_original", "the file's bitrate is too high for the audio budget (0.001 GB)"))
+        self.assertEqual(idx.reads, [])
+        fit = AudioFit(idx, lines, vad=LoudVad(), better=AUDIO_BETTER, budget=10 ** 9)
+
+        def spent():
+            raise audiofit.AudioBudget()
+        fit._run = spent
+        self.assertEqual(fit.run()["why"], "audio budget reached (1 GB)")
+
     def test_each_window_counts_what_it_really_reads(self):
         idx, lines = self.index([(0.0, 0)], 3)
         one = idx.window_bytes(0.0, 30.0)

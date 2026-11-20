@@ -13,7 +13,7 @@ from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, for
                      wait_until)
 from subsync import sources
 from subsync import worker as worker_mod
-from subsync.reader import ReadFailed, Refused, Stopped
+from subsync.reader import CapReached, ReadFailed, Refused, Stopped
 from subsync.settings import Settings
 from subsync.store import Store
 from subsync.worker import Job, Safety, StoreAudioCounts, Worker, audio_places
@@ -735,6 +735,30 @@ class AudioEndingTest(Base):
         w.audio_turn = StopsWhileWaiting(w)
         w._loop("audio")
         self.assertTrue(w.waits_for_pick(self.alias))
+
+    def test_the_caps_are_logged_in_their_settings_units(self):
+        # The audio route's per-file cap is a GB setting (SUBSYNC_FILE_CAP_GB) and was logged in MiB ("5722 MB"
+        # for 6 GB); the index cap (SUBSYNC_INDEX_CAP_MB) is logged in MB, as before
+        settings = self.settings(SUBSYNC_FILE_CAP_GB="6", SUBSYNC_INDEX_CAP_MB="32")
+        w = self.picked(self.worker(Limits(), settings=settings))
+        real = w.process
+
+        def capped(job):
+            raise CapReached(w._cap(job))
+        w.process = capped
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            w._run(w._next("audio"), "audio")                       # the audio sync reached its cap
+            self.assertIsNone(self.store.over_cap(self.alias))
+            w.submit(Job("movie", "tt1", self.hints))
+            w._run(w._next("main"), "main")                         # a first pass whose index passes the cap
+            w.process = real
+            self.store.cap_reached(self.alias, w.s.file_cap)        # an audio job's index past the audio cap, say
+            self.assertTrue(w.pick(self.alias))
+            w.process(w.jobs.pop(self.alias))
+        said = [line.split(":", 2)[2] for line in logs.output if "cap" in line]
+        self.assertEqual(said, ["stopped movie/tt1 at the audio cap (6 GB): it waits for another pick",
+                                "index larger than the cap movie/tt1 (32 MB): originals kept",
+                                "index larger than the cap movie/tt1 (6 GB): originals kept"])
 
     def test_a_job_stopped_by_a_pause_after_its_worker_stopped_isnt_queued_on_it(self):
         # The worker stops (Pool.stop: a settings save, a Refresh, the daily check) while the audio sync runs,

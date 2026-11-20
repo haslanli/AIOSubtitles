@@ -55,6 +55,7 @@ from .mp4 import NoAudioThere
 from .reader import ReadFailed, Refused, Stopped
 from .relgate import within
 from .sections import moved_back
+from .settings import GB
 from .shift import BIN_S, END_WEIGHT, SCALES   # the one-shift path's frame-rate scales, bin and end weight (one list)
 from .vad import SR, SileroVad
 
@@ -491,7 +492,7 @@ class AudioFit:
             w = planned_window(self.budget, self.rate(), self.K, self.V, self.W)
             if w is None:
                 return {"decision": "keep_original", "windows": 0, "audio_s": 0.0,
-                        "why": f"the file's bitrate is too high for the audio budget ({self.budget / 1e6:.0f} MB)"}
+                        "why": f"the file's bitrate is too high for the audio budget ({self.budget / GB:g} GB)"}
             self.W = w
         try:
             why = self.unseekable()
@@ -500,7 +501,7 @@ class AudioFit:
             first = self._run()
         except AudioBudget:
             return {"decision": "keep_original", "windows": self.windows_read, "audio_s": self.audio_s,
-                    "why": f"audio budget reached ({self.budget / 1e6:.0f} MB)"}
+                    "why": f"audio budget reached ({self.budget / GB:g} GB)"}
         except NotMatroska as e:    # no audio this module can decode (a window past the audio's end is NoAudioThere)
             return {"decision": "keep_original", "windows": self.windows_read, "audio_s": self.audio_s,
                     "why": f"the file's audio can't be read ({e})"}

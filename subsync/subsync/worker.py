@@ -30,6 +30,7 @@ from .langs import name as lang_name
 from .mkv import NotMatroska
 from .mp4 import open_index
 from .reader import MAX_RE_RESOLVE, CapReached, IndexTooLarge, RangeReader, ReadFailed, Refused, Stopped
+from .settings import GB, MB
 from .sources import bt_alias, expected_size, fetch_subtitle, plausible_size, same_hash
 from .store import DAY, JUDGED_FOR_S, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, result_key
 from .subs import NO_DIALOGUE, decode, fingerprint, is_ass, parse, recognised
@@ -653,6 +654,11 @@ class Worker(threading.Thread):
         """The most a job reads of its file (JobGuard's byte cap): the audio route's per-file cap, else the index cap."""
         return self.s.file_cap if self.audio_allowed(job) else self.s.index_cap
 
+    def _cap_words(self, job, cap):
+        """A byte cap of the job's kind (_cap) as a log line says it, in its setting's unit (settings.MB, GB): the audio
+        route's per-file cap (SUBSYNC_FILE_CAP_GB) in GB, the index cap (SUBSYNC_INDEX_CAP_MB) in MB."""
+        return f"{cap / GB:g} GB" if self.audio_allowed(job) else f"{cap / MB:.0f} MB"
+
     def capped(self, job, bt=None):
         """A job of this file stopped at a byte cap at least as large as the one it would read under now:
         the file isn't read again and keeps its original subtitles until the cap is raised. `bt`: the listed row's
@@ -1148,16 +1154,16 @@ class Worker(threading.Thread):
             # while the cap is not raised (capped). An audio job stopped at the audio route's cap says nothing
             # about the index, so the file isn't marked: it waits for another pick, as when the day runs out. An index
             # larger than the parsers ever read is marked under the job's cap too, so it isn't opened again
-            # until the cap is raised
+            # until the cap is raised. The optional word reads never end a job here (pipeline.track_words: no words)
             if job.audio and not isinstance(e, IndexTooLarge):
-                log.info("stopped %s at the audio cap (%.0f MB): it waits for another pick", job.label,
-                         e.cap / 2 ** 20)
+                log.info("stopped %s at the audio cap (%s): it waits for another pick", job.label,
+                         self._cap_words(job, e.cap))
                 unfinished = True
             else:
                 cap = max(e.cap, self._cap(job) or 0)
                 for alias in {job.alias, job.bt} - {None}:   # its torrent file too, as _process_row records aliases
                     self.store.cap_reached(alias, cap)
-                log.info("index larger than the cap %s (%.0f MB): originals kept", job.label, e.cap / 2 ** 20)
+                log.info("index larger than the cap %s (%.0f MB): originals kept", job.label, e.cap / MB)
         except Stopped as e:
             log.info("stopped %s: %s", job.label, e)
             # its retry checks the pause first, so nothing is listed, asked or counted again while it lasts
@@ -1397,7 +1403,8 @@ class Worker(threading.Thread):
             candidates = self._candidates(job, hints)
             if candidates:
                 self._set_originals(job.alias, candidates, hints.get("filename"), hints.get("videoHash"))
-            log.info("index larger than the cap %s (%.0f MB): originals kept", job.label, self._cap(job) / 2 ** 20)
+            log.info("index larger than the cap %s (%s): originals kept", job.label,
+                     self._cap_words(job, self._cap(job)))
             return
         # an audio job is the same file as its first pass: it isn't counted again; nor is a job queued again
         # after a stop, counted already (README: new files are counted)

@@ -22,6 +22,7 @@ from . import alass as alass_mod
 from . import imageref, imagetext, refine, sections, shift, textpair
 from .audiofit import fit_tracks
 from .langs import lang3, same_language, written
+from .reader import CapReached
 from .relgate import MIN_PAIRED, TENTHS, WITHIN_SHARE, aligned, clearly_better, relgate
 from .subs import dialogue_ends, dialogue_starts, parse, plain_srt, timing_srt, write_like
 
@@ -309,7 +310,9 @@ def track_words(index, ref, may_read):
     """D1: the words of some of a reference's lines (textpair.pick), read once per file and track and kept on its
     index for the job (hashes of word pairs only). A text track's lines are read as text; an image track's as
     their display sets, read by the language's recogniser (imagetext). None when there are none: another kind of track,
-    no recogniser for an image track's language, nothing read yet and `may_read` off, or nothing could be read.
+    no recogniser for an image track's language, nothing read yet and `may_read` off, or nothing could be read, the
+    job's byte cap reached included (the words are optional: the judging goes on without them, and the file isn't
+    marked as one whose index passes the cap, Worker._run).
     Each track has its own lock: a language checked against its own track never waits for another language's reads of
     another track, so two tracks' lines may be read at once, each WORD_READS_AT_ONCE at a time."""
     route = ref.get("route")
@@ -330,17 +333,20 @@ def track_words(index, ref, may_read):
             cues = ref["cues"]
             picks = textpair.pick(cues)
             starts = [cues[i][0] for i in picks]
-            if route == "image":   # read and recognised a batch at a time, so the time budget also stops the reads
-                private = index.codec_private(key) if hasattr(index, "codec_private") else b""
-                got, t0 = {}, time.monotonic()
-                for k in range(0, len(starts), IMAGE_BATCH):
-                    left = imagetext.BUDGET_S - (time.monotonic() - t0)
-                    if left <= 0:
-                        break
-                    batch = index.line_images(key, starts[k:k + IMAGE_BATCH])
-                    got.update(imagetext.texts(ref.get("codec", ""), batch, rec, private, budget=left))
-            else:
-                got = index.line_words(key, starts)
+            try:
+                if route == "image":   # read and recognised a batch at a time, so the time budget also stops the reads
+                    private = index.codec_private(key) if hasattr(index, "codec_private") else b""
+                    got, t0 = {}, time.monotonic()
+                    for k in range(0, len(starts), IMAGE_BATCH):
+                        left = imagetext.BUDGET_S - (time.monotonic() - t0)
+                        if left <= 0:
+                            break
+                        batch = index.line_images(key, starts[k:k + IMAGE_BATCH])
+                        got.update(imagetext.texts(ref.get("codec", ""), batch, rec, private, budget=left))
+                else:
+                    got = index.line_words(key, starts)
+            except CapReached:   # no words; a refusal or another stop is raised as it is
+                got = {}
             texts = {i: got[cues[i][0]] for i in picks if cues[i][0] in got}
             kept[key] = textpair.Track(cues, texts) if texts else None
     return kept[key]

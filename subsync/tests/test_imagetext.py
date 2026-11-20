@@ -11,7 +11,7 @@ import numpy as np
 from helpers import FIXTURES, IMAGE_BUILD
 import imagesubs as I  # noqa: E402
 from subsync import imagetext, mkv, pipeline, textpair  # noqa: E402
-from subsync.reader import ReadFailed, Refused  # noqa: E402
+from subsync.reader import CapReached, ReadFailed, Refused  # noqa: E402
 
 WORDS = ("time money house water night light dream river stone heart road friend father mother brother sister city "
          "story letter window garden forest winter summer morning evening doctor captain soldier machine").split()
@@ -375,6 +375,20 @@ class ImageWordsPipelineTest(unittest.TestCase):
         cues, index, text, ref = self.setup_film()
         self.assertIsNone(pipeline.track_words(index, ref, False))
         self.assertEqual(index.asked, [])
+
+    def test_image_reads_past_the_jobs_byte_cap_give_no_words(self):
+        # A PGS track's display sets (up to 64 KB each) reached a lowered SUBSYNC_INDEX_CAP_MB, and the
+        # CapReached marked the file as one whose index passes the cap; batches recognised before it count for nothing
+        cues, index, text, ref = self.setup_film()
+        real = index.line_images
+
+        def capped(number, starts):
+            if index.asked:
+                raise CapReached(8 * 1024 * 1024)
+            return real(number, starts)
+        index.line_images = capped
+        self.assertIsNone(pipeline.track_words(index, ref, True))
+        self.assertEqual(len(index.asked), 1)
 
 
 def _models_here():
