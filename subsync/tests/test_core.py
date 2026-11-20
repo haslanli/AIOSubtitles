@@ -524,17 +524,18 @@ class ChooseTest(unittest.TestCase):
         self.assertEqual([r for r, _ in choose.order(cands, "Movie.2001.2160p.BluRay.REMUX-Y.mkv", "AB12")], [0, 1, 2])
         self.assertEqual([r for r, _ in choose.order(cands, None, None)], [0, 1, 2])   # nothing known: viewer order
 
-    def test_best_guess_when_nothing_can_be_checked_yet(self):
+    def test_the_guess_when_nothing_can_be_checked_yet(self):
         # Detectorists S01E01 WEBRip (no subtitle track): the viewer's first, a DVD rip, was 41.7 s off; the WEB one fits
-        # the speech as it is and is AutoSync's pick by name
+        # the speech as it is and is AutoSync's pick by name. The guess is order's first with no place of the
+        # viewer's own (Worker._name_order)
         cands = [{"release": "Detectorists S01E01 Episode 1.1.DVDRip.NonHI.en.ACORN"},
                  {"release": "Detectorists.S01E01.WEB"}, {"release": "Detectorists.S01E01.1080p.WEB-DL.DD+2.0.H.264-SbR"}]
         name = "Detectorists.S01E01.WEBRip.x264-XEN0N.mkv"
-        self.assertIs(choose.best_guess(cands, name), cands[1])
+        self.assertIs(choose.order(cands, name, viewer_first=False)[0][1], cands[1])
         hashed = cands + [{"release": "x", "hash": "ab12"}]
-        self.assertIs(choose.best_guess(hashed, name, "AB12"), hashed[3])          # made for this very file
-        self.assertIs(choose.best_guess(cands, None), cands[0])                    # nothing known: the viewer's first
-        self.assertIsNone(choose.best_guess([{"release": "x", "ai": True}], name, skip=True))
+        self.assertIs(choose.order(hashed, name, "AB12", viewer_first=False)[0][1], hashed[3])   # made for this very file
+        self.assertIs(choose.order(cands, None, viewer_first=False)[0][1], cands[0])   # nothing known: the viewer's first
+        self.assertEqual(choose.order([{"release": "x", "ai": True}], name, skip=True, viewer_first=False), [])
         self.assertEqual([r for r, _ in choose.order(cands, name)], [0, 1, 2])      # tries still start with the viewer's
 
     KOH_FILE = "Kingdom.Of.Heaven.2005.DC.2160p.4K.BluRay.x265.10bit.AAC5.1-[YTS.MX].mkv"
@@ -557,14 +558,14 @@ class ChooseTest(unittest.TestCase):
     def test_a_subtitle_of_the_files_edition_is_the_best_guess(self):
         # Kingdom of Heaven DC: the theatrical WEB subtitle won by its release group alone
         self.assertEqual([r for r, _ in choose.order(self.KOH, self.KOH_FILE, viewer_first=False)], [2, 0, 1])
-        self.assertIn("DIRECTOR'S.CUT", choose.best_guess(self.KOH, self.KOH_FILE)["release"])
+        self.assertIn("DIRECTOR'S.CUT", choose.order(self.KOH, self.KOH_FILE, viewer_first=False)[0][1]["release"])
         self.assertEqual(choose.tier_of(1, self.KOH[1], self.KOH_FILE, viewer_first=False), 2)     # bluray: 3, up one
         self.assertLess(choose.tier_of(2, self.KOH[2], self.KOH_FILE, viewer_first=False), 2)      # group: 2, up
 
     def test_no_edition_in_the_file_name_changes_nothing(self):
         name = self.KOH_FILE.replace(".DC", "")
         self.assertEqual([r for r, _ in choose.order(self.KOH, name, viewer_first=False)], [0, 2, 1])
-        self.assertIs(choose.best_guess(self.KOH, name), self.KOH[0])
+        self.assertIs(choose.order(self.KOH, name, viewer_first=False)[0][1], self.KOH[0])
 
     def test_a_subtitle_of_another_edition_goes_last(self):
         name = "The.Lord.Of.The.Rings.2001.EXTENDED.1080p.BluRay.x264-GRP.mkv"

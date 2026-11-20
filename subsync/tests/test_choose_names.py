@@ -2,6 +2,7 @@
 underscores, four-digit episodes, several episodes in one tag), every video extension left out before a trailing
 release group, source tags written with a hyphen, "Non-Forced" subtitles, and AI-made, machine-translated and forced
 subtitles last when they are not skipped."""
+import time
 import unittest
 
 from helpers import SourcesHarness  # (first: it puts the package on the import path)
@@ -54,7 +55,8 @@ class VideoExtensionTest(unittest.TestCase):
 
     def test_a_m4v_file_ranks_its_groups_subtitles_first(self):
         cands = [cand("other", "Movie.2020.1080p.WEB-DL-OTHER"), cand("own", "Movie.2020.720p.WEB-DL-NTb")]
-        self.assertEqual(choose.best_guess(cands, "Movie.2020.1080p.WEB-DL.DDP5.1.H.264-NTb.m4v")["id"], "own")
+        name = "Movie.2020.1080p.WEB-DL.DDP5.1.H.264-NTb.m4v"
+        self.assertEqual(choose.order(cands, name, viewer_first=False)[0][1]["id"], "own")
 
 
 class TheSubtitleDBNameTest(SourcesHarness, unittest.TestCase):
@@ -115,7 +117,67 @@ class UnwantedTest(unittest.TestCase):
                  cand("forced", "Movie.2010.BluRay.Forced"), cand("plain", "Movie.2010.WEB"),
                  cand("ai", "Movie.2010.BluRay", ai=True)]
         self.assertEqual([c["id"] for _, c in choose.order(cands, name)], ["first", "plain", "mt", "forced", "ai"])
-        self.assertEqual(choose.best_guess(cands[1:], name)["id"], "plain")
+        self.assertEqual(choose.order(cands[1:], name, viewer_first=False)[0][1]["id"], "plain")
+
+
+class ReviewCycle2NamesTest(unittest.TestCase):
+    """to (the review, cycle 2): how a file's or a release's name is read."""
+
+    def test_a_name_of_many_unclosed_brackets_is_read_in_linear_time(self):
+        # From every "[" with no "]" after it, the bracket patterns read to the end of the name (a request's
+        # filename hint of 40,000 "[" took 8.7 s of CPU, holding the interpreter)
+        for opener in ("[", "("):
+            t0 = time.process_time()
+            self.assertEqual(choose.groups(opener * 60_000), set())
+            self.assertLess(time.process_time() - t0, 1.0, opener)
+        self.assertEqual(choose.groups("Movie [a[Group]] (x(y)z).2010.1080p-GRP.mkv"), {"group", "grp"})
+
+    def test_the_end_of_a_hyphenated_title_is_no_release_group(self):
+        # "Ant-Man.mkv" named the group "man", so every subtitle naming Spider-Man or Iron Man was tier 2
+        for name in ("Ant-Man.mkv", "X-Men.2000.mkv", "Frieren-01.mkv", "Spider-Man.2002.1080p.mkv",
+                     "Ant-Man.and.the.Wasp.2018.mkv"):
+            self.assertEqual(choose.groups(name), set(), name)
+        self.assertEqual(choose.groups("[Judas] Kaguya-sama.mkv"), {"judas"})
+        self.assertEqual(choose.groups("Spider-Man.Homecoming.2017.1080p.BluRay.x264-SPARKS.mkv"), {"sparks"})
+        self.assertEqual(choose.groups("Movie.2019.1080p.BluRay-YTS.MX.mp4"), {"yts mx"})
+        self.assertEqual(choose.groups("Show.S01E01-GRP.mkv"), {"grp"})              # an episode tag is a release's
+        self.assertEqual(choose.tier_of(3, cand("a", "Spider-Man.Homecoming.2017.1080p.WEB"), "Ant-Man.mkv"), 4)
+        cands = [cand("other", "[Other] Kaguya-sama - 01"), cand("own", "[Judas] Kaguya-sama - 01")]
+        self.assertEqual(choose.order(cands, "[Judas] Kaguya-sama.mkv", viewer_first=False)[0][1]["id"], "own")
+
+    def test_a_pack_of_several_seasons_the_files_among_them_is_not_another(self):
+        # Only a pack's first season was read, so S01-S03 was "another season" for an S02 file
+        ep = (2, 5)
+        for release in ("Show.S01-S03.Complete", "Show.S01.S02.S03.Pack", "Show.Season.1-3", "Show.S02.Complete"):
+            self.assertFalse(choose.other_episode(release, ep), release)
+        for release in ("Show.S03-S04.Complete", "Show.S01.S03.Pack", "Show.Season.3-4", "Show.S01.Complete"):
+            self.assertTrue(choose.other_episode(release, ep), release)
+        self.assertEqual(choose.seasons("Show.S03-S01"), {1, 2, 3})
+        self.assertEqual(choose.seasons("Movie.2010.1080p"), set())
+        self.assertEqual(choose.season_episode("Show.S01-S03.Complete"), (1, None))   # its first season, as before
+        name = "Show.S02E05.1080p.WEB-DL-GRP.mkv"
+        self.assertEqual(choose.tier_of(3, cand("pack", "Show.S01-S03.Complete.1080p.WEB-DL-GRP"), name), 2)
+
+    def test_a_tag_written_with_a_hyphen_gives_its_kind(self):
+        # "HD-TV" split into "hd-tv", "hd" and "tv", none of them a TV tag
+        self.assertEqual(choose.source_kind("Show.S01E01.HD-TV.x264-LOL"), "tv")
+        self.assertEqual(choose.tier_of(3, cand("a", "Show.S01E01.720p.HDTV.x264-OTHER"), "Show.S01E01.HD-TV.x264-LOL.mkv"),
+                         3)
+        for name, kind in (("Movie.DVD-R.mkv", "dvd"), ("Movie.2020.WEB-DLRip.x264", "web"),
+                           ("Movie.2010.Blu-ray.mkv", "bluray")):
+            self.assertEqual(choose.source_kind(name), kind, name)
+
+    def test_a_titles_own_words_are_no_source_tags(self):
+        # "Charlottes.Web.2006.DVDRip" was a web release, so its WEB-DL subtitles got the same-source credit
+        for name, kind in (("Charlottes.Web.2006.DVDRip.XviD-GRP", "dvd"), ("The.Dark.Web.2019.DVDRip", "dvd"),
+                           ("Web.of.Lies.S01E01.HDTV.x264", "tv"), ("Charlottes.Web.2006.1080p.WEB-DL", "web"),
+                           ("Spirited Away (2001) JAPANESE.Bluray.REMUX.H264", "remux"),
+                           ("[Group] Show - 01 [BD 1080p HEVC]", "bluray")):
+            self.assertEqual(choose.source_kind(name), kind, name)
+        cands = [cand("web", "Charlottes.Web.2006.1080p.WEB-DL.x264-OTHER"),
+                 cand("dvd", "Charlottes.Web.2006.DVDRip.x264-OTHER")]
+        self.assertEqual([c["id"] for _, c in choose.order(cands, "Charlottes.Web.2006.DVDRip.XviD-GRP.mkv",
+                                                           viewer_first=False)], ["dvd", "web"])
 
 
 if __name__ == "__main__":
