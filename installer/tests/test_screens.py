@@ -383,6 +383,8 @@ class Rules(unittest.TestCase):
                                            problem=(limits.AUDIO.setting, HOSTILE), audio=True),
             'host-limits': screens.limits('host', {'SUBSYNC_SYNCS_AT_ONCE': HOSTILE},
                                           problem=('SUBSYNC_SYNCS_AT_ONCE', HOSTILE)),
+            'host-limits-audio': screens.limits('host', {limits.AUDIO_PER_DAY.setting: HOSTILE},
+                                                problem=(limits.AUDIO_PER_DAY.setting, HOSTILE), audio=True),
             'review': screens.review([(HOSTILE, [('+', HOSTILE)], HOSTILE)]),
             'installing': screens.installing('host', rows, running=False, stop=stop, rule={HOSTILE: [HOSTILE]},
                                              rule_intro=HOSTILE),
@@ -396,11 +398,19 @@ class Rules(unittest.TestCase):
             'working': screens.working(HOSTILE, rows, running=False, stop=stop),
             'removed': screens.removed(HOSTILE, rows, [HOSTILE]),
         }
+        # A screen that dropped the value passed as escaping it. The audio limit is a row of buttons: it shows
+        # its own options only, whatever the value, and says what to choose instead of the problem it was given
+        shows_no_value = {'limits-audio': limits.choose(limits.AUDIO)}
         for name, html in shown.items():
             with self.subTest(screen=name):
                 self.assertNotIn('<script>alert', html)
                 self.assertNotIn('<b>x</b>', html)
                 self.assertNotIn('"&gt;&lt;script', html)        # the value's quote left raw would end its attribute
+                if name in shows_no_value:
+                    self.assertNotIn(htmllib.escape(HOSTILE), html)
+                    self.assertIn(htmllib.escape(shows_no_value[name]), html)
+                else:
+                    self.assertIn(htmllib.escape(HOSTILE), html)     # shown, escaped
 
     def test_the_steps_are_the_approved_ones(self):
         self.assertEqual(screens.PERSONAL, ('This machine', 'Your AIOStreams', 'The config your apps use',
@@ -476,6 +486,7 @@ class StopsAndLines(unittest.TestCase):
                      screens.host_choices(stop=(HOSTILE, HOSTILE))):
             self.assertNotIn('<script>alert', html)
             self.assertNotIn('"&gt;&lt;script', html)
+            self.assertIn(htmllib.escape(HOSTILE), html)                 # shown, escaped
 
 
 class Titles(unittest.TestCase):
@@ -588,6 +599,7 @@ class Removal(unittest.TestCase):
         for html in shown:
             self.assertNotIn('<script>alert', html)
             self.assertNotIn('"&gt;&lt;script', html)
+            self.assertIn(htmllib.escape(HOSTILE), html)                 # shown, escaped
 
 
 class TerminalOnly(unittest.TestCase):
