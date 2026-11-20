@@ -1675,6 +1675,15 @@ class ImageRefTest(unittest.TestCase):
         self.assertGreater(sum(x in truth for x in got) / len(got), 0.95)   # precision
         self.assertGreater(len(got) / len(lines), 0.4)                         # recall
 
+    def test_a_display_set_cued_twice_counts_once(self):
+        # The labelling takes times within SAME_EVENT_S as one event, but the share of sure starts was divided
+        # by every cue, so a track whose Cues list each display set twice lost half its share (and its plausibility)
+        events = pgs_events(realistic(400, 5))
+        once = imageref.reference({"codec": "S_HDMV/PGS", "cues": events})
+        twice = imageref.reference({"codec": "S_HDMV/PGS", "cues": events + [(t + 0.004, 0.0) for t, _ in events]})
+        self.assertTrue(once["plausible"])
+        self.assertEqual(twice, once)
+
     def test_vobsub_starts_and_noise_is_not_plausible(self):
         r = imageref.reference({"codec": "S_VOBSUB", "cues": [(s, 0.0) for s, _ in self.lines]})
         self.assertEqual(len(r["cues"]), len(self.lines))

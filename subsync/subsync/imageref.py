@@ -19,12 +19,13 @@ IMAGE_CODECS = ("S_HDMV/PGS", "S_VOBSUB")
 MAX_SHOWN = 8.0
 MIN_SHOWN = 0.3
 SAME_EVENT_S = 0.010
-VOBSUB_DEFAULT_S = 3.0
+DEFAULT_LINE_S = 3.0  # a line's length when nothing gives it: a VobSub cue without a duration, PGS's last start
 MIN_LINES = 20
 MIN_PLAUSIBLE = 0.85
 
 
 MERGE = 0.3
+LAST_START_COST = 0.25  # the last event as a start rather than an end: it most likely clears the last line
 SURE = 0.75           # how much cheaper "start" must be than "end" for an event to be used
 MIN_SURE_SHARE = 0.35 # sure starts per line the events imply (events / 2); fewer: too thin to be a reference
 # MERGE/SURE chosen on PGS times simulated from 6 real subtitles and a synthetic mix: sure starts are
@@ -48,14 +49,21 @@ def _steps(gap):
     return ((0, 1, shown), (0, 0, shown + MERGE), (1, 0, 0.0), (1, 1, END_END))
 
 
-def pgs_lines(events, margin=SURE):
-    """events: cue times of a PGS track. Returns [(start, duration)] for the events that are starts with at least
-    `margin` to spare: forward and backward min-sum costs give, for each event, the cheapest labelling with it as a
-    start and as an end; an event whose two costs are close could be either, so it is left out."""
+def _merged(times):
+    """The events of a PGS track's cue times: sorted, a time within SAME_EVENT_S of the one before (the same display
+    set cued twice) left out."""
     ev = []
-    for t in sorted(events):
+    for t in sorted(times):
         if not ev or t - ev[-1] > SAME_EVENT_S:
             ev.append(t)
+    return ev
+
+
+def pgs_lines(events, margin=SURE):
+    """events: cue times of a PGS track. Returns [(start, duration)] for the events (_merged) that are starts with at
+    least `margin` to spare: forward and backward min-sum costs give, for each event, the cheapest labelling with it as
+    a start and as an end; an event whose two costs are close could be either, so it is left out."""
+    ev = _merged(events)
     n = len(ev)
     if n == 0:
         return []
@@ -67,7 +75,7 @@ def pgs_lines(events, margin=SURE):
             if fwd[k][a] + c < fwd[k + 1][b]:
                 fwd[k + 1][b] = fwd[k][a] + c
     bwd = [[INF, INF] for _ in range(n)]
-    bwd[-1] = [0.25, 0.0]                      # the last event most likely clears the last line
+    bwd[-1] = [LAST_START_COST, 0.0]
     for k in range(n - 2, -1, -1):
         for a, b, c in _steps(ev[k + 1] - ev[k]):
             if c + bwd[k + 1][b] < bwd[k][a]:
@@ -76,7 +84,7 @@ def pgs_lines(events, margin=SURE):
     for k in range(n):
         as_start, as_end = fwd[k][0] + bwd[k][0], fwd[k][1] + bwd[k][1]
         if as_start + margin <= as_end:
-            end = ev[k + 1] if k + 1 < n else ev[k] + VOBSUB_DEFAULT_S
+            end = ev[k + 1] if k + 1 < n else ev[k] + DEFAULT_LINE_S
             lines.append((ev[k], end - ev[k]))
     return lines
 
@@ -86,8 +94,8 @@ def vobsub_lines(cues):
     out = []
     for k, (t, d) in enumerate(cues):
         if d <= 0:
-            nxt = cues[k + 1][0] if k + 1 < len(cues) else t + VOBSUB_DEFAULT_S
-            d = min(VOBSUB_DEFAULT_S, max(0.0, nxt - t))
+            nxt = cues[k + 1][0] if k + 1 < len(cues) else t + DEFAULT_LINE_S
+            d = min(DEFAULT_LINE_S, max(0.0, nxt - t))
         out.append((t, d))
     return out
 
@@ -95,15 +103,17 @@ def vobsub_lines(cues):
 def reference(track):
     """track: {"codec", "cues": [(time, duration)]}. Returns {"cues": [(start, duration)], "plausible", "stats"}."""
     cues = sorted(track.get("cues") or [])
-    if track.get("codec", "").startswith("S_VOBSUB"):
-        lines = vobsub_lines(cues)
-    else:
-        lines = pgs_lines([t for t, _ in cues])
+    vobsub = track.get("codec", "").startswith("S_VOBSUB")
+    if vobsub:
+        events, lines = cues, vobsub_lines(cues)
+    else:   # the share of sure starts is of the events pgs_lines labels, a display set cued twice once
+        events = _merged(t for t, _ in cues)
+        lines = pgs_lines(events)
     shown = [d for _, d in lines]   # uncapped: a sparse or random set of times shows as long "shown" intervals
     ok_share = sum(MIN_SHOWN <= d <= MAX_SHOWN for d in shown) / len(shown) if shown else 0.0
-    stats = {"events": len(cues), "lines": len(lines), "shown_ok": round(ok_share, 3),
+    stats = {"events": len(events), "lines": len(lines), "shown_ok": round(ok_share, 3),
              "shown_median_s": round(statistics.median(shown), 2) if shown else None}
-    sure = len(lines) / max(1.0, len(cues) / 2) if not track.get("codec", "").startswith("S_VOBSUB") else 1.0
+    sure = 1.0 if vobsub else len(lines) / max(1.0, len(events) / 2)
     stats["sure_share"] = round(sure, 3)
     plausible = len(lines) >= MIN_LINES and ok_share >= MIN_PLAUSIBLE and sure >= MIN_SURE_SHARE
     return {"cues": lines, "plausible": plausible, "stats": stats}
