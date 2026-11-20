@@ -539,6 +539,84 @@ class LongIntegerTest(unittest.TestCase):
             open_index(Memory(matroska(tracks=el("1654AE6B", track))))
 
 
+def crc_element(crc):
+    """A CRC-32 element as ffmpeg writes it: id, a 1-byte size, the 4-byte checksum."""
+    return bytes.fromhex("BF84") + crc
+
+
+def ffmpeg_shaped(crc):
+    """A file laid out as ffmpeg writes one (write_crc32, its default): a CRC-32 with checksum `crc` first in the
+    SeekHead, Info, Tracks and Cues. Returns the file, its Segment's data start and its one Cluster's place in the
+    Segment."""
+    ebml = el("1A45DFA3", el("4282", b"matroska"))
+    seg = bytes.fromhex("18538067") + bytes.fromhex("01FFFFFFFFFFFFFF")
+    info = el("1549A966", crc_element(crc) + el("2AD7B1", (1_000_000).to_bytes(4, "big"))
+              + el("4489", struct.pack(">d", 90_000.0)))
+    tracks = el("1654AE6B", crc_element(crc) + text_track(1)
+                + el("AE", el("D7", b"\x02") + el("83", b"\x02") + el("86", b"A_AAC")))
+    cluster = el("1F43B675", el("E7", b"\x00"))
+
+    def seekhead(tracks_at, cues_at):
+        def seek(eid, at):
+            return el("4DBB", el("53AB", bytes.fromhex(eid)) + el("53AC", at.to_bytes(8, "big")))
+        return el("114D9B74", crc_element(crc) + seek("1654AE6B", tracks_at) + seek("1C53BB6B", cues_at))
+    tracks_at = len(seekhead(0, 0)) + len(info)
+    cluster_at = tracks_at + len(tracks)
+
+    def point(ms):
+        return el("BB", el("B3", ms.to_bytes(2, "big")) + el("B7", el("F7", b"\x01")
+                                                             + el("F1", cluster_at.to_bytes(4, "big"))))
+    cues = el("1C53BB6B", crc_element(crc) + point(1000) + point(2000))
+    head = seekhead(tracks_at, cluster_at + len(cluster)) + info + tracks + cluster
+    return ebml + seg + head + cues, len(ebml) + len(seg), cluster_at
+
+
+class ChildIdTest(unittest.TestCase):
+    """The children of SeekHead, Tracks, ContentEncodings and Cues are read by their id, so
+    the CRC-32 ffmpeg writes first in each top-level element, or a Void, is passed over. Read as an entry, a checksum
+    with a 0x00 where an id or a size is read refused the whole file (about one ffmpeg-made file in twenty, then never
+    synced), and another (D7 81 05 9A) made up a track 5."""
+
+    def test_an_ffmpeg_made_file_reads_its_tracks_and_cues_whatever_its_checksums(self):
+        for crc in ("00112233", "81001234", "d781059a", "00a1b2c3", "ec801f00"):
+            with self.subTest(crc=crc):
+                data, seg_data, cluster_at = ffmpeg_shaped(bytes.fromhex(crc))
+                index = open_index(Memory(data))
+                self.assertEqual([(t["number"], t.get("type"), t["codec"]) for t in index.tracks],
+                                 [(1, 0x11, "S_TEXT/UTF8"), (2, 2, "A_AAC")])
+                self.assertEqual(index.positions[mkv.CUES], index.cues_at)
+                self.assertEqual(index.cue_points, [(1.0, seg_data + cluster_at)])
+                self.assertEqual(index.track_cues, {1: [(1.0, 0.0), (2.0, 0.0)]})
+                self.assertEqual(index.duration(), 90.0)
+
+    def test_a_void_among_content_encodings_is_passed_over(self):
+        for void in (el("EC", bytes(3)), bytes.fromhex("EC80")):
+            encodings = el("6D80", void + el("6240", void + el("5034", el("4254", b"\x03") + el("4255", b"\x80"))))
+            track = el("AE", el("D7", b"\x01") + el("83", b"\x11") + el("86", b"S_TEXT/UTF8") + encodings)
+            index = open_index(Memory(matroska(tracks=el("1654AE6B", track))))
+            self.assertEqual(index.tracks[0]["compression"], {"algo": 3, "settings": b"\x80"}, void.hex())
+
+    def test_children_skips_any_other_id(self):
+        buf = crc_element(bytes(4)) + el("AE", b"") + el("EC", bytes(2)) + el("AE", b"\x80\x80")
+        self.assertEqual(list(mkv.children(buf, 0, len(buf), 0xAE)), [(15, 0), (35, 2)])
+
+
+class PaddedStringTest(unittest.TestCase):
+    """An EBML string ends at its first NUL (the bytes from there on are padding, RFC 8794): a zero-padded
+    Language b"fre\\0\\0" is French, where it was kept as "fre\\0\\0", a language that matched nothing."""
+
+    def test_strings_end_at_their_first_nul(self):
+        text = el("AE", el("D7", b"\x01") + el("83", b"\x11") + el("86", b"S_TEXT/UTF8\0") + el("22B59C", b"fre\0\0")
+                  + el("536E", b"Full\0\0"))
+        audio = el("AE", el("D7", b"\x02") + el("83", b"\x02") + el("86", b"A_AAC\0") + el("22B59D", b"de\0junk"))
+        index = open_index(Memory(matroska(tracks=el("1654AE6B", text + audio))))
+        [t] = index.text_tracks()
+        self.assertEqual((t["language"], t["name"], t["codec"]), ("fre", "Full", "S_TEXT/UTF8"))
+        self.assertEqual([(a["language"], a["tagged"]) for a in index.audio_tracks()], [("de", True)])
+        self.assertEqual(mkv.utf8("Ünïcödé".encode() + b"\0x"), "Ünïcödé")
+        self.assertEqual(mkv.utf8(b"no padding"), "no padding")
+
+
 class Ending(Memory):
     """Memory with RangeReader's rule at the file's end: a read that starts at or past it fails (ReadFailed)."""
 

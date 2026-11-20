@@ -63,8 +63,27 @@ MAX_CUES = 32 * 1024 * 1024        # 7.27 MB on a file with 75 PGS tracks; large
 MAX_CUE_POINTS = 1_000_000
 MAX_DURATION_S = 7 * 24 * 3600     # the longest runtime taken from a file; past it (or NaN, infinite, 0) it is unknown
 
+# Matroska element ids (RFC 9559), by the specification's names: the top-level ones, then the children read
 EBML, SEGMENT, SEEKHEAD, INFO, TRACKS, CUES, CLUSTER = (0x1A45DFA3, 0x18538067, 0x114D9B74, 0x1549A966,
                                                         0x1654AE6B, 0x1C53BB6B, 0x1F43B675)
+# a CRC-32 or a Void may stand among any element's children (ffmpeg writes a CRC-32 first in each top-level one)
+CRC32, VOID = 0xBF, 0xEC
+SEEK, SEEK_ID, SEEK_POSITION = 0x4DBB, 0x53AB, 0x53AC
+TIMESTAMP_SCALE, DURATION = 0x2AD7B1, 0x4489
+TRACK_ENTRY, TRACK_NUMBER, TRACK_TYPE, CODEC_ID, CODEC_PRIVATE, NAME = 0xAE, 0xD7, 0x83, 0x86, 0x63A2, 0x536E
+LANGUAGE, LANGUAGE_BCP47 = 0x22B59C, 0x22B59D
+FLAG_DEFAULT, FLAG_FORCED, FLAG_HEARING_IMPAIRED, FLAG_VISUAL_IMPAIRED, FLAG_COMMENTARY = (0x88, 0x55AA, 0x55AB,
+                                                                                          0x55AC, 0x55AF)
+CONTENT_ENCODINGS, CONTENT_ENCODING, CONTENT_COMPRESSION = 0x6D80, 0x6240, 0x5034
+CONTENT_COMP_ALGO, CONTENT_COMP_SETTINGS = 0x4254, 0x4255
+CUE_POINT, CUE_TIME, CUE_TRACK_POSITIONS = 0xBB, 0xB3, 0xB7
+CUE_TRACK, CUE_CLUSTER_POSITION, CUE_RELATIVE_POSITION, CUE_DURATION = 0xF7, 0xF1, 0xF0, 0xB2
+SIMPLE_BLOCK, BLOCK_GROUP, BLOCK = 0xA3, 0xA0, 0xA1
+TYPE_AUDIO, TYPE_SUBTITLE = 2, 0x11            # TrackType values
+ZLIB, HEADER_STRIPPING = 0, 3                  # the ContentCompAlgo values undone (uncompressed); another is no answer
+# a Segment's header with an 8-byte unknown size (all ones): an audio window's Segment is the rest of its input
+UNKNOWN_SIZE_SEGMENT = SEGMENT.to_bytes(4, "big") + b"\x01" + b"\xff" * 7
+
 TEXT_CODECS = ("S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT", "S_TEXT/ASCII")
 # a track whose name holds one of these (whole words) is no dialogue: a commentary (the word in the main languages,
 #) or an audio description, and of subtitle tracks a forced, signs or songs one; but not when its name also says
@@ -152,13 +171,13 @@ def block_extent(buf, track):
 def _block_extent(buf, o, track):
     try:
         eid, n = vint(buf, o, strip=False)
-        if eid not in (0xA3, 0xA0):
+        if eid not in (SIMPLE_BLOCK, BLOCK_GROUP):
             return None
         size, m = vint(buf, o + n)
         p = o + n + m
-        if eid == 0xA0:
+        if eid == BLOCK_GROUP:
             cid, n2 = vint(buf, p, strip=False)
-            if cid != 0xA1:
+            if cid != BLOCK:
                 return None
             size, m2 = vint(buf, p + n2)
             p += n2 + m2
@@ -188,9 +207,9 @@ def uncompressed(payload, comp, limit):
     megabytes long). A zlib payload cut short (a text line's block past WORD_READ) gives what its start inflates to."""
     if payload is None or not comp:
         return payload
-    if comp["algo"] == 3:
+    if comp["algo"] == HEADER_STRIPPING:
         return comp["settings"] + payload if len(comp["settings"]) + len(payload) <= limit else None
-    if comp["algo"] == 0:
+    if comp["algo"] == ZLIB:
         d = zlib.decompressobj()
         try:
             out = d.decompress(payload, limit)
@@ -370,12 +389,25 @@ def elements(buf, pos, end, spill=False):
         pos = data + size
 
 
+def children(buf, pos, end, want):
+    """(data start, data size) of each child element `want` in buf[pos:end] (elements). Any other child is passed over
+    unread: a CRC-32 or a Void may stand among any element's children (ffmpeg writes a CRC-32 first in every
+    top-level element, whose 4 bytes, read as entries, refused about one ffmpeg-made file in twenty)."""
+    return ((p, size) for eid, _, p, size in elements(buf, pos, end) if eid == want)
+
+
 def uint(b):
     """An EBML unsigned integer: at most 8 bytes; a longer one is damage (a TrackNumber of thousands of digits
     opened as fine, then failed every job that recorded it)."""
     if len(b) > 8:
         raise NotMatroska("an integer longer than 8 bytes")
     return int.from_bytes(b, "big") if b else 0
+
+
+def utf8(b):
+    """An EBML String or UTF-8 value: up to its first NUL, as the bytes from there on are padding (RFC 8794;: a
+    zero-padded Language b"eng\\0" is English, not the unknown "eng\\0")."""
+    return b.split(b"\0", 1)[0].decode("utf-8", "replace")
 
 
 def oshash(size, first, last):
@@ -463,66 +495,64 @@ class MkvIndex:
 
     def _element(self, buf, eid, raw, p, sz):
         if eid == SEEKHEAD:
-            for _, _, sp, ssz in elements(buf, p, p + sz):
+            for sp, ssz in children(buf, p, p + sz, SEEK):
                 sid = spos = None
                 for cid, _, cp, csz in elements(buf, sp, sp + ssz):
-                    if cid == 0x53AB:
+                    if cid == SEEK_ID:
                         sid = uint(buf[cp:cp + csz])
-                    elif cid == 0x53AC:
+                    elif cid == SEEK_POSITION:
                         spos = uint(buf[cp:cp + csz])
                 if sid is not None and spos is not None:
                     self.positions.setdefault(sid, self.seg_data + spos)
         elif eid == INFO:
             self.info = bytes(buf[raw:p + sz])
             for cid, _, cp, csz in elements(buf, p, p + sz):
-                if cid == 0x2AD7B1:
+                if cid == TIMESTAMP_SCALE:
                     self.scale = uint(buf[cp:cp + csz])
-                elif cid == 0x4489 and csz in (0, 4, 8):   # an EBML float; else damaged
+                elif cid == DURATION and csz in (0, 4, 8):   # an EBML float; else damaged
                     self.duration_s = struct.unpack(">f" if csz == 4 else ">d", buf[cp:cp + csz])[0] if csz else 0.0
             if self.duration_s is not None:
                 self.duration_s = self.duration_s * self.scale / 1e9
         elif eid == TRACKS:
             self.tracks_raw = bytes(buf[raw:p + sz])
-            for _, _, tp, tsz in elements(buf, p, p + sz):
+            for tp, tsz in children(buf, p, p + sz, TRACK_ENTRY):
                 t = {"forced": 0, "default": 1, "language": "eng", "name": "", "codec": ""}
                 for cid, _, cp, csz in elements(buf, tp, tp + tsz):
                     v = buf[cp:cp + csz]
-                    if cid == 0xD7:
+                    if cid == TRACK_NUMBER:
                         t["number"] = uint(v)
-                    elif cid == 0x83:
+                    elif cid == TRACK_TYPE:
                         t["type"] = uint(v)
-                    elif cid == 0x86:
-                        t["codec"] = v.decode(errors="replace")
-                    elif cid == 0x22B59C:
-                        t["language"] = v.decode(errors="replace")
+                    elif cid == CODEC_ID:
+                        t["codec"] = utf8(v)
+                    elif cid == LANGUAGE:
+                        t["language"] = utf8(v)
                         t["tagged"] = True        # a track without it is English by Matroska's rule, not by its tag
-                    elif cid == 0x22B59D:
-                        t["bcp47"] = v.decode(errors="replace")
+                    elif cid == LANGUAGE_BCP47:
+                        t["bcp47"] = utf8(v)
                         t["tagged"] = True
-                    elif cid == 0x536E:
-                        t["name"] = v.decode(errors="replace")
-                    elif cid == 0x55AA:
+                    elif cid == NAME:
+                        t["name"] = utf8(v)
+                    elif cid == FLAG_FORCED:
                         t["forced"] = uint(v)
-                    elif cid == 0x55AF:   # FlagCommentary
+                    elif cid == FLAG_COMMENTARY:
                         t["commentary"] = uint(v)
-                    elif cid == 0x55AC:   # FlagVisualImpaired: an audio description
+                    elif cid == FLAG_VISUAL_IMPAIRED:   # an audio description
                         t["descriptive"] = uint(v)
-                    elif cid == 0x55AB:   # FlagHearingImpaired: SDH (pipeline.is_secondary)
+                    elif cid == FLAG_HEARING_IMPAIRED:  # SDH (pipeline.is_secondary)
                         t["hearing_impaired"] = uint(v)
-                    elif cid == 0x88:
+                    elif cid == FLAG_DEFAULT:
                         t["default"] = uint(v)
-                    elif cid == 0x63A2:   # CodecPrivate: VobSub's palette (the .idx header), ASS's header
+                    elif cid == CODEC_PRIVATE:          # VobSub's palette (the .idx header), ASS's header
                         t["private"] = bytes(v)
-                    elif cid == 0x6D80:   # ContentEncodings: the compression of each block's payload
-                        for _, _, ep, esz in elements(buf, cp, cp + csz):
-                            for kid, _, kp, ksz in elements(buf, ep, ep + esz):
-                                if kid != 0x5034:
-                                    continue
-                                comp = {"algo": 0, "settings": b""}
+                    elif cid == CONTENT_ENCODINGS:      # the compression of each block's payload
+                        for ep, esz in children(buf, cp, cp + csz, CONTENT_ENCODING):
+                            for kp, ksz in children(buf, ep, ep + esz, CONTENT_COMPRESSION):
+                                comp = {"algo": ZLIB, "settings": b""}
                                 for zid, _, zp, zsz in elements(buf, kp, kp + ksz):
-                                    if zid == 0x4254:
+                                    if zid == CONTENT_COMP_ALGO:
                                         comp["algo"] = uint(buf[zp:zp + zsz])
-                                    elif zid == 0x4255:
+                                    elif zid == CONTENT_COMP_SETTINGS:
                                         comp["settings"] = bytes(buf[zp:zp + zsz])
                                 t["compression"] = comp
                 if t.get("number"):
@@ -567,29 +597,29 @@ class MkvIndex:
         return self
 
     def _cue_points(self, body):
-        subtitle = {t["number"] for t in self.tracks if t.get("type") == 0x11 and t.get("number")}
+        subtitle = {t["number"] for t in self.tracks if t.get("type") == TYPE_SUBTITLE and t.get("number")}
         seen, kept = set(), 0
-        for _, _, pp, psz in elements(body, 0, len(body)):
+        for pp, psz in children(body, 0, len(body), CUE_POINT):
             t = None
             for cid, _, cp, csz in elements(body, pp, pp + psz):
-                if cid == 0xB3:
+                if cid == CUE_TIME:
                     t = uint(body[cp:cp + csz]) * self.scale / 1e9
-                elif cid == 0xB7 and t is not None:
+                elif cid == CUE_TRACK_POSITIONS and t is not None:
                     kept += 1
                     if kept > MAX_CUE_POINTS:
                         raise NotMatroska(f"more than {MAX_CUE_POINTS} cue points")
                     trk = dur = cpos = rel = None
                     for gid, _, gp, gsz in elements(body, cp, cp + csz):
-                        if gid == 0xF1:
+                        if gid == CUE_CLUSTER_POSITION:
                             cpos = self.seg_data + uint(body[gp:gp + gsz])
                             if cpos not in seen:
                                 seen.add(cpos)
                                 self.cue_points.append((t, cpos))
-                        elif gid == 0xF7:
+                        elif gid == CUE_TRACK:
                             trk = uint(body[gp:gp + gsz])
-                        elif gid == 0xB2:
+                        elif gid == CUE_DURATION:
                             dur = uint(body[gp:gp + gsz]) * self.scale / 1e9
-                        elif gid == 0xF0:
+                        elif gid == CUE_RELATIVE_POSITION:
                             rel = uint(body[gp:gp + gsz])
                     if trk in subtitle:   # only subtitle tracks' cues are asked for (text_tracks, image_tracks)
                         self.track_cues.setdefault(trk, []).append((t, dur or 0.0))
@@ -616,7 +646,7 @@ class MkvIndex:
         signs, songs, commentary: not_dialogue) marked forced, and those flagged for the hearing impaired so marked."""
         out = []
         for t in self.tracks:
-            if t.get("type") != 0x11 or not t.get("codec", "").startswith(codecs):
+            if t.get("type") != TYPE_SUBTITLE or not t.get("codec", "").startswith(codecs):
                 continue
             out.append({"number": t["number"], "language": t.get("bcp47") or t.get("language", "und"),
                         "codec": t["codec"], "name": t.get("name", ""),
@@ -699,7 +729,7 @@ class MkvIndex:
 
     def audio_track_index(self):
         """Index among audio tracks (ffmpeg -map 0:a:N) of the default audio track, else the first."""
-        audio = [t for t in self.tracks if t.get("type") == 2]
+        audio = [t for t in self.tracks if t.get("type") == TYPE_AUDIO]
         for i, t in enumerate(audio):
             if t.get("default", 1):
                 return i
@@ -729,7 +759,7 @@ class MkvIndex:
         """Audio tracks in file order: {"index" (ffmpeg 0:a:N), "language", "default", "name", "tagged" (whether the
         file names its language; untagged is English by Matroska's rule), "commentary", "descriptive" (the file's
         flags: a commentary, an audio description)}."""
-        audio = [t for t in self.tracks if t.get("type") == 2]
+        audio = [t for t in self.tracks if t.get("type") == TYPE_AUDIO]
         default = self.audio_track_index()
         return [{"index": i, "language": t.get("bcp47") or t.get("language", "und"), "default": i == default,
                  "name": t.get("name") or "", "tagged": bool(t.get("tagged")),
@@ -746,7 +776,7 @@ class MkvIndex:
         to the first seek point after the window, which can be far past it on a file with sparse Cues: the read is
         streamed into the decoder and stops once the window is decoded. Bytes read are added to `audio_bytes`."""
         a, b = self.byte_range(start, length)
-        header = self.ebml + bytes.fromhex("18538067") + bytes.fromhex("01FFFFFFFFFFFFFF") + self.info + self.tracks_raw
+        header = self.ebml + UNKNOWN_SIZE_SEGMENT + self.info + self.tracks_raw
         cmd = decoder_cmd(ffmpeg, "matroska", [
             "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-copyts",
             "-map", f"0:a:{track if track is not None else (self.audio_track_index() or 0)}",
