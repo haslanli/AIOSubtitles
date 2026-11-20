@@ -302,6 +302,12 @@ def data_volume(s):
     return s.get('external_volume') or f'{plan.project()}_{plan.VOLUME}'
 
 
+def volume_gone(name):
+    """Whether Docker has no volume named `name` (removed by hand since, or state/ brought to another machine)."""
+    code, _, err = dockerenv.run(['docker', 'volume', 'inspect', name])
+    return code != 0 and 'no such volume' in err.lower()
+
+
 def unlabelled_own(s):
     """What the install saved in `s` has under setup's names without its label: all three while setup 1.3.0 or before
     made it, then the volume kept from it."""
@@ -1139,11 +1145,15 @@ class Engine:
     def own_image(self):
         """This install's id (kept from the last setup) and the image the service runs: setup's own, pinned. An install
         setup 1.3.0 or before made is taken over here: it gets an id, and its volume, which Docker can't label, is kept
-        as it is (recorded in state/settings.json, declared external in its compose file); its container and network
+        as it is (recorded in state/settings.json, declared external in its compose file) while Docker has it; once it
+        is gone, Compose makes the usual labelled one instead (an external volume must exist). Its container and network
         are made again with the label when it starts."""
         self.s['install_id'] = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
-        if made_before_labels(self.prev) or self.prev.get('external_volume'):
-            self.s['external_volume'] = data_volume(self.prev)
+        kept = data_volume(self.prev) if made_before_labels(self.prev) or self.prev.get('external_volume') else None
+        if kept and not volume_gone(kept):
+            self.s['external_volume'] = kept
+        else:
+            self.s.pop('external_volume', None)
         self.s['version'] = setup_version()
         if PLACE:
             self.s.update(image=PLACE.image, local=PLACE.local)

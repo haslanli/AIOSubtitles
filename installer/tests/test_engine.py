@@ -15,6 +15,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
+import types
 import unittest
 from html import escape as html_escape
 from pathlib import Path
@@ -1015,6 +1017,32 @@ class WaitHealthy(TmpState):
             self.assertEqual(out.getvalue(), 'ok\n')
 
 
+class StartedButSilent(Offline):
+    def test_a_service_that_starts_but_never_answers_stops_the_install_with_its_log(self):
+        # The install's own wait was never reached by a test: every fixture's service answered once started
+        clock, asked = [0.0], []
+        fixtures_exec_in = dockerenv.exec_in
+
+        def exec_in(name, cmd, stdin=None, timeout=120):
+            if cmd == engine.HEALTH:
+                asked.append(name)
+                return 1, '', 'Connection refused'           # it restarts in a loop
+            return fixtures_exec_in(name, cmd, stdin, timeout)
+
+        def sleep(seconds):
+            clock[0] += seconds
+            if clock[0] > 1000:
+                raise AssertionError('the wait never ends')
+        quick = types.SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep, strftime=time.strftime, gmtime=time.gmtime)
+        with mock.patch.object(dockerenv, 'exec_in', exec_in), mock.patch.object(engine, 'time', quick):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 1, out)
+        self.assertIn('✗ subsync started but does not answer. See its log: docker logs aiosubtitles-subsync', flat(out))
+        self.assertNotIn('subsync is running', out)
+        self.assertEqual(asked, [engine.CONTAINER] * 45)                 # every 2 seconds for 90 seconds
+        self.assertEqual(self.ours(), [])                                # your config is left as it was
+
+
 class HostPort(TmpState):
     """A public instance's port: its own on a re-run, never a personal install's; checked unless this install's
     container already holds it."""
@@ -1767,6 +1795,8 @@ class TakeOver(Offline):
             self.volume_calls.append(cmd)
             if cmd[2] == 'rm' and self.docker.pop(('volume', cmd[3]), None) is None:
                 return 1, '', f'Error response from daemon: get {cmd[3]}: no such volume'
+            if cmd[2] == 'inspect' and ('volume', cmd[3]) not in self.docker:
+                return 1, '[]\n', f'Error response from daemon: get {cmd[3]}: no such volume'
         return 0, '', ''
 
     def _compose(self, state, *args, **kw):
@@ -1774,6 +1804,8 @@ class TakeOver(Offline):
         external = f'\n  subsync-data: {{external: true, name: "{KEPT_VOLUME}"}}\n' in text
         if 'up' in args:
             label = re.search(r'org\.aiosubtitles\.install: "(\w+)"', text).group(1)
+            if external and ('volume', KEPT_VOLUME) not in self.docker:
+                return 1, '', f'external volume "{KEPT_VOLUME}" not found'
             if not external and self.docker.get(('volume', KEPT_VOLUME), label) != label:
                 return 1, '', (f'Volume "{KEPT_VOLUME}" exists but doesn\'t match configuration in compose file. '
                                'Recreate (data will be lost)? [y/N]')
@@ -1805,7 +1837,7 @@ class TakeOver(Offline):
         self.assertEqual(self.docker, {('container', 'aiosubtitles-subsync'): s['install_id'],
                                        ('volume', KEPT_VOLUME): '',          # never made, labelled or made again
                                        ('network', 'aiosubtitles_default'): s['install_id']})
-        self.assertEqual(self.volume_calls, [])
+        self.assertEqual(self.volume_calls, [['docker', 'volume', 'inspect', KEPT_VOLUME]])    # only looked up
         # a second ./setup passes the guard: the one unlabelled volume is this install's own, nothing is taken over
         code, out = self.again()
         self.assertEqual(code, 0, out)
@@ -1813,6 +1845,32 @@ class TakeOver(Offline):
         again = engine.load_settings()
         self.assertEqual((again['install_id'], again['external_volume']), (s['install_id'], KEPT_VOLUME))
         self.assertIn(f'  subsync-data: {{external: true, name: "{KEPT_VOLUME}"}}\n', self.compose())
+
+    def test_a_volume_gone_since_is_made_again_by_compose_never_declared_missing(self):
+        # It was declared external without asking Docker, and Compose refuses an external volume that isn't
+        # there: the start failed, then and on every later run (the declaration was saved)
+        del self.docker[('volume', KEPT_VOLUME)]
+        s, out = self.take_over()
+        self.assertNotIn('external_volume', s)
+        label = f'{{labels: {{org.aiosubtitles.install: "{s["install_id"]}"}}}}'
+        self.assertIn(f'\nvolumes:\n  subsync-data: {label}\n', self.compose())
+        self.assertEqual(self.docker[('volume', KEPT_VOLUME)], s['install_id'])     # Compose's own, labelled
+        code, out = self.again()                                                    # and so on every later run
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('external_volume', engine.load_settings())
+
+    def test_a_volume_kept_by_an_earlier_take_over_and_gone_since_is_no_longer_declared(self):
+        s, _ = self.take_over()
+        self.assertEqual(s['external_volume'], KEPT_VOLUME)
+        del self.docker[('volume', KEPT_VOLUME)]
+        code, out = self.again()
+        self.assertEqual(code, 0, out)
+        again = engine.load_settings()
+        self.assertEqual(again['install_id'], s['install_id'])
+        self.assertNotIn('external_volume', again)
+        label = f'{{labels: {{org.aiosubtitles.install: "{s["install_id"]}"}}}}'
+        self.assertIn(f'\nvolumes:\n  subsync-data: {label}\n', self.compose())
+        self.assertEqual(self.docker[('volume', KEPT_VOLUME)], s['install_id'])
 
     def test_on_the_page_too(self):
         e = self.page_engine({})                    # through step 1's guard, AIOStreams and the config
@@ -1876,7 +1934,8 @@ class TakeOver(Offline):
         self.take_over()
         code, out = self.again('--uninstall', REMOVE='yes')
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.volume_calls, [['docker', 'volume', 'rm', KEPT_VOLUME]])   # Compose never removes it
+        self.assertEqual(self.volume_calls, [['docker', 'volume', 'inspect', KEPT_VOLUME],     # the take-over's
+                                             ['docker', 'volume', 'rm', KEPT_VOLUME]])     # Compose never removes it
         self.assertEqual(self.docker, {})
         self.assertFalse((self.state / 'settings.json').exists())
 
