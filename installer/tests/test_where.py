@@ -212,6 +212,24 @@ class SetupScript(unittest.TestCase):
             self.assertTrue(where.write_setup_script(self.place(), folder))
             self.assertIn('-p 127.0.0.1:8899:8789', (folder / 'setup').read_text())
 
+    def test_run_as_root_the_setup_file_belongs_to_the_folders_owner(self):
+        # Setup runs as root in its container; the chown that gives the person's ./setup back to them was
+        # tested nowhere (the tests run as the developer)
+        place = where.place_from(inspect(), PULLED, '1.4.0', 'image', (1000, 1001))
+        chowned = []
+
+        def chown(path, uid, gid):
+            chowned.append((Path(path).name, uid, gid, (Path(path).parent / 'setup').exists()))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(where.os, 'geteuid', lambda: 0), \
+                mock.patch.object(where.os, 'chown', chown):
+            self.assertTrue(where.write_setup_script(place, tmp))
+            self.assertTrue((Path(tmp) / 'setup').exists())
+        self.assertEqual(chowned, [('.setup.tmp', 1000, 1001, False)])         # the new file, before it takes the name
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(where.os, 'geteuid', lambda: 1000), \
+                mock.patch.object(where.os, 'chown', chown):
+            where.write_setup_script(place, tmp)
+        self.assertEqual(len(chowned), 1)                                       # not root: its own file already
+
     def test_a_local_image_is_never_pulled(self):
         mounts = [{'Type': 'bind', 'Source': '/x', 'Destination': '/folder'}]
         p = where.place_from(inspect(image='aiosubtitles:local-1.4.0', mounts=mounts), BUILT, '1.4.0', 'image', (0, 0))

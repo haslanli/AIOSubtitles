@@ -349,7 +349,7 @@ class App:
             e.answers[limits.DAILY.setting] = one.get(limits.DAILY.setting, '')
             if one.get(limits.AUDIO.setting):
                 e.answers['AUDIO_BUDGET'] = one[limits.AUDIO.setting]
-            if one.get(limits.USENET.setting):
+            if limits.USENET.setting in one:        # its box emptied: the current value again, not the last answer
                 e.answers[limits.USENET.setting] = one[limits.USENET.setting]
             if s.run('limits', e.limits):
                 return self.go('review')
@@ -482,8 +482,10 @@ class App:
     def step_hostlimits(self, s, method, form, one):
         e = s.e
         if method == 'POST':
+            # a box emptied gives the current value again, not the last answer; a row of buttons none of which is
+            # picked sends nothing and keeps it
             for lim in limits.hosting(e.host_usenet, e.host_audio):
-                if one.get(lim.setting):
+                if lim.setting in one:
                     e.answers[lim.setting] = one[lim.setting]
             if s.run('hostlimits', e.host_limits):
                 s.start_job('hostinstall', e.host_install)
@@ -500,9 +502,11 @@ class App:
 
     def step_hostcheck(self, s, method, form, one):
         if method == 'POST' and not s.running('hostcheck'):
-            if one.get('go') == 'again':
+            if one.get('go') == 'again':            # Check again, then its page (a reload doesn't send it again)
                 s.again('hostcheck')
-            elif 'hostcheck' in s.jobs:
+                s.start_job('hostcheck', s.e.host_check)
+                return self.go('hostcheck')
+            if 'hostcheck' in s.jobs:
                 s.done.add('hostcheck')
                 return self.go('done')
         s.start_job('hostcheck', s.e.host_check)

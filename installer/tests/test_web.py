@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from installer import engine, screens, tests, update, web
+from installer import engine, limits, screens, tests, update, web
 from installer.tests import samples
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_hosting import ADDRESS, RouteFixture
@@ -484,6 +484,25 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertIn('The cost: at most 7 extra searches a day through your indexers', text)
         self.assertNotIn('(at most 5 a day)', text)
         self.assertNotIn('at most 10 extra searches', text)
+
+    def test_the_usenet_limit_box_emptied_after_a_refused_answer_takes_the_current_value(self):
+        # The emptied box was skipped, so the refused answer stayed and was refused again
+        self.aios.users[UUID]['config'] = {'services': [TORBOX, ENGINE], 'presets': [ZILEAN, NEWZNAB, SUBS],
+                                           'failover': {'enabled': True}}
+        self.walk_to_config()
+        self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+        _, _, text = self.b.follow('choices', {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync',
+                                               'USENET': 'yes', 'go': 'next'})
+        self.assertIn(limits.USENET.label, text)
+        status, _, text = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.USENET.setting: 'abc',
+                                                 'go': 'next'})
+        self.assertEqual(status, 200)
+        self.assertIn('A whole number from 1', text)
+        status, headers, _ = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.USENET.setting: '',
+                                                    'go': 'next'})
+        self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/review'))
+        self.assertEqual(self.app.session.e.limit_values[limits.USENET.setting], limits.current(limits.USENET, {}))
 
     def test_after_the_real_debrid_stop_continue_reads_the_config_again(self):
         # the stop's way out: once the config has another debrid service, Continue there goes on, with no retyping
@@ -1211,6 +1230,37 @@ class Hosting(BackgroundWork, RouteFixture):
         _, _, text = b.settle('hostcheck')                                          # checked again
         self.assertIn(f'People can reach AIOSubtitles at {ADDRESS}', text)
 
+    def test_check_again_runs_the_check_once_and_leads_to_its_page(self):
+        # Its POST was answered with the page itself, so reloading it sent "Check again" once more
+        b = Browser(web.App(port=8818))
+        self.walk_to_limits(b)
+        checks, real = [], engine.Engine.host_check
+        with mock.patch.object(engine.Engine, 'host_check', lambda e: checks.append(e) or real(e)):
+            b.post('hostlimits', {'SUBSYNC_MAX_USERS': '150', 'go': 'next'})
+            b.settle('hostinstall')
+            b.follow('hostinstall', {'go': 'next'})
+            b.settle('hostcheck')
+            status, headers, _ = b.post('hostcheck', {'go': 'again'})
+            self.assertEqual((status, headers.get('Location')), (303, f'/{b.app.key}/hostcheck'))
+            _, _, text = b.settle('hostcheck')
+        self.assertIn(f'People can reach AIOSubtitles at {ADDRESS}', text)
+        self.assertEqual(len(checks), 2)
+        status, headers, _ = b.post('hostcheck', {'go': 'next'})
+        self.assertEqual((status, headers.get('Location')), (303, f'/{b.app.key}/done'))
+
+    def test_a_limit_box_emptied_after_a_refused_answer_takes_the_current_value(self):
+        # An emptied box was skipped, so the refused answer stayed: the same error and the same box again
+        b = Browser(web.App(port=8819))
+        self.walk_to_limits(b)
+        status, _, text = b.post('hostlimits', {'SUBSYNC_MAX_USERS': 'abc', 'go': 'next'})
+        self.assertEqual(status, 200)
+        self.assertIn('A whole number from 1', text)
+        status, headers, _ = b.post('hostlimits', {'SUBSYNC_MAX_USERS': '', 'go': 'next'})
+        self.assertEqual((status, headers.get('Location')), (303, f'/{b.app.key}/hostinstall'))
+        b.settle('hostinstall')
+        users = next(lim for lim in limits.hosting() if lim.setting == 'SUBSYNC_MAX_USERS')
+        self.assertEqual(b.app.session.e.limit_values['SUBSYNC_MAX_USERS'], limits.current(users, {}))
+
     def test_a_limit_subsync_cant_hold_is_refused_on_the_page(self):
         # a 400-digit number was written and crashed subsync at start; over 4300 digits ended the request with no answer
         b = Browser(web.App(port=8815))
@@ -1376,6 +1426,20 @@ class Removing(BackgroundWork, FlowFixture):
         self.assertFalse((self.state / 'settings.json').exists())
         self.assertEqual(len(self.b.pages), 4)
         self.assertEqual([found for page in self.b.pages for found in terminal_only_shown(page)], [])
+
+    def test_opensubtitles_stays_when_its_box_is_unticked(self):
+        # An unticked box sends nothing, which the page reads as no; the engine's own default is yes, and no
+        # test looked at the presets after such a removal
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        added = engine.load_settings()['added_opensubtitles']
+        self.assertTrue(added)
+        self.assertIn('name="REMOVE_OPENSUBTITLES"', self.b.get('')[2])                 # the box the person unticks
+        text = self.remove()
+        self.assertIn('These stay, in case you set it up again', text)
+        self.assertFalse((self.state / 'settings.json').exists())
+        presets = self.aios.users[UUID]['config']['presets']
+        self.assertEqual([p['type'] for p in presets if p.get('instanceId') == added], ['opensubtitles'])
+        self.assertEqual([p['type'] for p in presets], ['zilean', 'newznab', 'opensubtitles'])
 
     def test_a_failed_container_removal_keeps_setups_files_and_says_what_docker_said(self):
         # it said "Removed the subsync container" and deleted setup's files while the container kept running
