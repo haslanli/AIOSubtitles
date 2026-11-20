@@ -6,6 +6,7 @@ MAX_CUE_POINTS, a plausible runtime, and the clusters an audio window needs. No 
 memory."""
 import math
 import os
+import random
 import struct
 import subprocess
 import sys
@@ -759,6 +760,50 @@ class ClusterRangeTest(unittest.TestCase):
         self.assertEqual(index.byte_range(0.05, 1.0), (5698, 37494))     # nothing cued that early: the first cluster
         index.first_cluster = None                                       # not in the head: the first cue cluster
         self.assertEqual(index.byte_range(0.05, 1.0), (5698, 37494))
+
+    @staticmethod
+    def walked(index, start, length):
+        """byte_range as it was written before: a walk of every cue point, three times."""
+        points, end_t = index.cue_points, start + length
+        a = max((p for t, p in points if t <= start - mkv.WINDOW_MARGIN_S), default=None)
+        if a is None:
+            a = index.first_cluster if index.first_cluster is not None else min((p for _, p in points), default=None)
+        past = min((p for t, p in points if t >= end_t + 0.001 and p > a), default=None)
+        b = None if past is None else next((p for _, p in points if p > past), None)
+        return a, b if b is not None else index.cues_at if index.cues_at and index.cues_at > a else index.size
+
+    def test_the_bisection_finds_what_a_walk_of_every_cue_point_finds(self):
+        """byte_range bisects the cue clusters kept in time order; what it finds is the same, cue times out of
+        file order included (a cluster cued late by a subtitle line)."""
+        rnd = random.Random(7)
+        for case in range(2000):
+            n = rnd.randint(0, 30)
+            times = [round(rnd.uniform(0, 300), rnd.choice((0, 1, 3))) for _ in range(n)]
+            points = list(zip(sorted(times) if case % 2 else times, sorted(rnd.sample(range(1000, 10 ** 6), n))))
+            index = MkvIndex(None)
+            index.cue_points = rnd.sample(points, n)                     # kept in file order whatever the order given
+            index.size, index.cues_at = 3 * 10 ** 6, rnd.choice((None, rnd.randint(0, 10 ** 6)))
+            index.first_cluster = rnd.choice((None, 500))
+            self.assertEqual(index.cue_points, points)
+            if not points and index.first_cluster is None:
+                with self.assertRaises(NotMatroska):
+                    index.byte_range(10.0, 6.0)
+                continue
+            for start in [rnd.uniform(-1, 310) for _ in range(4)] + times[:4] + [t + 0.1 for t in times[:2]]:
+                length = rnd.choice((0.0, 1.0, 6.0, 30.0))
+                self.assertEqual(index.byte_range(start, length), self.walked(index, start, length), (case, start))
+            self.assertEqual(index.duration(), max(times, default=None) or None)
+
+    def test_a_window_costs_no_walk_of_every_cue_point(self):
+        """50 windows of a file of 300,000 cue clusters (each cue in its own cluster, under MAX_CUE_POINTS)
+        took about 0.8 s of CPU, and an audio fit plans and reads dozens."""
+        index = MkvIndex(None)
+        index.cue_points = [(k * 0.01, 1000 + 37 * k) for k in range(300_000)]
+        index.size, index.cues_at, index.first_cluster = 10 ** 9, None, 1000
+        t0 = time.process_time()
+        ranges = [index.byte_range(100.0 + 50 * k, 30.0) for k in range(50)]
+        self.assertLess(time.process_time() - t0, 0.2)
+        self.assertEqual(ranges[0], self.walked(index, 100.0, 30.0))
 
 
 if __name__ == "__main__":

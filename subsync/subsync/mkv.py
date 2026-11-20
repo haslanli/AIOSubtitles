@@ -16,6 +16,8 @@ import threading
 import zlib
 from array import array
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from itertools import accumulate
+from operator import itemgetter
 
 from .imageref import IMAGE_CODECS
 from .reader import IndexTooLarge, ReadFailed, Refused, Stopped
@@ -437,7 +439,7 @@ class MkvIndex:
         self.duration_s = None
         self.tracks = []
         self.positions = {}
-        self.cue_points = []     # (time s, absolute cluster position), any track, in file order
+        self.cue_points = []     # the cue clusters (a property: set whole, with what byte_range bisects)
         self.track_cues = {}     # subtitle track number -> [(start s, duration s)]
         # subtitle track number -> (start times s, the byte where the line's block is looked for, -1 when the cue
         # doesn't say), in time order: compact arrays, as a file can have hundreds of thousands
@@ -447,6 +449,22 @@ class MkvIndex:
         self.ebml = self.info = self.tracks_raw = b""
         self.first64 = self.last64 = b""   # the file's first and last 64 KiB, when a read holds them (index_hash)
         self.line_reads = {}               # subtitle track number -> its LineReads, one for the job (_line_reads)
+
+    @property
+    def cue_points(self):
+        """[(time s, absolute position)] of the cue clusters in file order, a cluster's time its first cue's (any
+        track's)."""
+        return self._points
+
+    @cue_points.setter
+    def cue_points(self, points):
+        """Set whole, never changed in place: kept in file order, and beside them their times in time order with the
+        furthest cluster cued by each, which byte_range bisects (it walked every cue point three times a
+        window, and a fit plans and reads dozens of windows)."""
+        self._points = sorted(points, key=itemgetter(1))
+        by_time = sorted(self._points)
+        self._times = array("d", [t for t, _ in by_time])
+        self._reach = array("q", accumulate((p for _, p in by_time), max))
 
     # -- reads -------------------------------------------------------------------------------------------------
     def read_head(self, head=None):
@@ -609,7 +627,7 @@ class MkvIndex:
 
     def _cue_points(self, body):
         subtitle = {t["number"] for t in self.tracks if t.get("type") == TYPE_SUBTITLE and t.get("number")}
-        seen, kept = set(), 0
+        clusters, seen, kept = [], set(), 0
         for pp, psz in children(body, 0, len(body), CUE_POINT):
             t = None
             for cid, _, cp, csz in elements(body, pp, pp + psz):
@@ -625,7 +643,7 @@ class MkvIndex:
                             cpos = self.seg_data + uint(body[gp:gp + gsz])
                             if cpos not in seen:
                                 seen.add(cpos)
-                                self.cue_points.append((t, cpos))
+                                clusters.append((t, cpos))
                         elif gid == CUE_TRACK:
                             trk = uint(body[gp:gp + gsz])
                         elif gid == CUE_DURATION:
@@ -639,7 +657,7 @@ class MkvIndex:
                         times, places = self.track_places.setdefault(trk, (array("d"), array("q")))
                         times.append(t)
                         places.append(place if place < self.size else -1)
-        self.cue_points.sort(key=lambda x: x[1])
+        self.cue_points = clusters
         for lst in self.track_cues.values():
             lst.sort()
         for times, places in self.track_places.values():
@@ -755,7 +773,7 @@ class MkvIndex:
 
     def duration(self):
         """The runtime in seconds: Info's Duration, else the last cue's time; None when neither is plausible."""
-        return sane_duration(self.duration_s) or sane_duration(max((t for t, _ in self.cue_points), default=None))
+        return sane_duration(self.duration_s) or sane_duration(self._times[-1] if self._times else None)
 
     def byte_range(self, start, length):
         """The bytes that hold [start, start + length) and the WINDOW_MARGIN_S before it: from the last cue cluster at
@@ -763,15 +781,20 @@ class MkvIndex:
         (else to the Cues or the file's end). A cluster's time here is its first cue's, which can be later than the
         cluster's own start (mkvmerge cues every subtitle block, video only at keyframes), so that first one may still
         begin inside the window; the one after it can't, since the first one holds a block past the end."""
-        end_t = start + length
-        a = max((p for t, p in self.cue_points if t <= start - WINDOW_MARGIN_S), default=None)
-        if a is None:   # nothing cued that early: the window starts with the file
-            a = self.first_cluster if self.first_cluster is not None else min((p for _, p in self.cue_points),
-                                                                              default=None)
+        points, place = self._points, itemgetter(1)
+        k = bisect.bisect_right(self._times, start - WINDOW_MARGIN_S)
+        if k:
+            a = self._reach[k - 1]
+        else:           # nothing cued that early: the window starts with the file
+            a = self.first_cluster if self.first_cluster is not None else (points[0][1] if points else None)
         if a is None:
             raise NotMatroska("no cluster position")
-        past = min((p for t, p in self.cue_points if t >= end_t + 0.001 and p > a), default=None)
-        b = None if past is None else next((p for _, p in self.cue_points if p > past), None)   # in file order
+        b, end_t = None, start + length
+        for j in range(bisect.bisect_right(points, a, key=place), len(points)):   # after `a`, in file order
+            if points[j][0] >= end_t + 0.001:   # the first one cued past the end: to the one after it
+                after = bisect.bisect_right(points, points[j][1], key=place)
+                b = points[after][1] if after < len(points) else None
+                break
         if b is None:
             b = self.cues_at if self.cues_at and self.cues_at > a else self.size
         return a, b
