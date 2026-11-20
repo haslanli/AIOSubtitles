@@ -7,6 +7,7 @@ import http.server
 import io
 import json
 import os
+import socket
 import stat
 import tempfile
 import threading
@@ -17,7 +18,7 @@ from unittest import mock
 
 from installer import dockerenv, docs, engine, hosting, limits, plan, screens, wizard
 from installer.tests.test_flow import AnswersRun
-from subsync import explain
+from subsync import explain, realdebrid
 
 ADDRESS = 'https://subs.example.com'
 SECRET_WORDS = 'kept it in state/subsync.env'
@@ -43,6 +44,16 @@ class Pieces(unittest.TestCase):
                 # it repeated the question's own explanation, with no word of what was wrong (a path, say)
                 self.assertEqual(message, 'Type an https address with no path after the name, like '
                                           'https://subtitles.example.com: the pages and links start at its root.')
+
+    def test_a_name_that_cant_be_looked_up_is_refused(self):
+        # IDNA refuses an empty label or one over 63 characters; the address was taken, and every check of it
+        # then stopped setup with UnicodeError (after the install, and at each later update and rollback)
+        for bad in ('https://subtitles..example.com', 'https://.example.com', f'https://{"a" * 64}.example.com'):
+            with self.subTest(bad=bad):
+                self.assertEqual(hosting.check_address(bad), (False, hosting.ADDRESS_REFUSED, bad))
+        for good in (f'https://{"a" * 63}.example.com', 'https://bücher.example', 'https://subs.example.com:8443'):
+            with self.subTest(good=good):
+                self.assertEqual(hosting.check_address(good), (True, '', good))
 
     def test_the_env_passes_subsyncs_own_checks_never_has_wyzie_and_audio_only_when_chosen(self):
         # WYZIE_KEY and AUDIO are a personal install's answers: neither may reach a public instance's lines; the limits
@@ -212,6 +223,16 @@ class Switches(unittest.TestCase):
         self.assertEqual(plan.audio_when_of({'SUBSYNC_AUDIO_ON_PICK': 'off'}), 'open')
 
 
+class Rows:
+    """hosting.check's `out`: the rows it shows, as (kind, text)."""
+
+    def __init__(self):
+        self.rows = []
+
+    def __getattr__(self, kind):
+        return lambda text: self.rows.append((kind, text))
+
+
 class Fetch(unittest.TestCase):
     """One GET from this machine (127.0.0.1 here), as hosting.check makes them."""
 
@@ -264,6 +285,78 @@ class Fetch(unittest.TestCase):
         self.addCleanup(other.server_close)
         self.addCleanup(other.shutdown)
         self.assertFalse(hosting.health_ok(f'http://127.0.0.1:{other.server_address[1]}'))   # something else answers
+
+    def test_an_answer_that_isnt_http_or_a_name_that_cant_be_looked_up_is_a_reason_not_a_stop(self):
+        # The sign-up page's check caught OSError only, so a non-HTTP answer (BadStatusLine) or a name IDNA
+        # refuses (UnicodeError) stopped setup with a traceback, at the install and at every update's check
+        class NotHttp(http.server.BaseHTTPRequestHandler):
+            def handle(self):
+                self.request.recv(1024)
+                self.request.sendall(b'SSH-2.0-OpenSSH_9.6\r\n')
+        other = http.server.ThreadingHTTPServer(('127.0.0.1', 0), NotHttp)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.server_close)
+        self.addCleanup(other.shutdown)
+        base = f'http://127.0.0.1:{other.server_address[1]}'
+        with self.assertRaises(OSError) as caught:
+            hosting.fetch(base + '/')
+        self.assertEqual(str(caught.exception), 'SSH-2.0-OpenSSH_9.6')         # one line, the answer's own words
+        tried, real_connect = [], socket.create_connection
+
+        def connect(address, *args, **kwargs):
+            """As the resolver starts (IDNA first, before any lookup), then this machine only."""
+            address[0].encode('idna')
+            if address[0] != '127.0.0.1':
+                tried.append(address)
+                raise OSError(f'test: no connection to {address[0]}')
+            return real_connect(address, *args, **kwargs)
+        for address, reason in ((base, 'SSH-2.0-OpenSSH_9.6'), ('https://subtitles..example.com', 'idna')):
+            with self.subTest(address=address), mock.patch.object(socket, 'create_connection', connect):
+                out = Rows()
+                self.assertFalse(hosting.check(address, out))
+                self.assertEqual(out.rows[0], ('warn', hosting.NO_ANSWER.format(address=address)))
+                kind, text = out.rows[-1]
+                self.assertEqual(kind, 'bad')
+                self.assertTrue(text.startswith(f"The sign-up page doesn't load at {address}: "), text)
+                self.assertIn(reason, text)                     # its own words (IDNA's differ by Python version)
+                self.assertNotIn('\n', text)
+        self.assertEqual(tried, [])
+
+    def test_no_request_reaches_real_debrid_nor_a_redirect_to_it(self):
+        # Setup's one request outside subsync's gate (realdebrid.urlopen) opened the address as typed, and
+        # followed a redirect to wherever it pointed
+        tried, opened = [], []
+        real_connect = socket.create_connection
+
+        def connect(address, *args, **kwargs):     # nothing but this machine, whatever the code under test does
+            if address[0] not in ('127.0.0.1', 'localhost'):
+                tried.append(address)
+                raise OSError(f'test: no connection to {address[0]}')
+            return real_connect(address, *args, **kwargs)
+
+        class Away(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header('Location', 'https://real-debrid.com/health')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+        away = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Away)
+        threading.Thread(target=away.serve_forever, daemon=True).start()
+        self.addCleanup(away.server_close)
+        self.addCleanup(away.shutdown)
+        with mock.patch.object(socket, 'create_connection', connect), \
+                mock.patch('urllib.request.urlopen', lambda *a, **k: opened.append(a) or self.fail('urllib opened it')):
+            for url in ('https://real-debrid.com/health', 'https://API.Real-Debrid.com./',
+                        f'http://127.0.0.1:{away.server_address[1]}/health'):
+                with self.subTest(url=url), self.assertLogs('subsync.realdebrid', 'WARNING') as logged, \
+                        self.assertRaises(realdebrid.Blocked):
+                    hosting.fetch(url)
+                self.assertEqual(logged.output, ['WARNING:subsync.realdebrid:blocked a request to Real-Debrid '
+                                                 f'({"api.real-debrid.com" if "API" in url else "real-debrid.com"})'])
+        self.assertEqual((tried, opened), ([], []))
 
     def test_it_says_which_release_of_setup_asks(self):
         # It said "AIOSubtitles-setup", no version; every User-Agent now carries the release's (VERSION)

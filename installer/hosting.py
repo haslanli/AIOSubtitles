@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 from installer import limits, plan
+from subsync import realdebrid
 from subsync.version import user_agent
 
 LIMITS = limits.hosting(audio=True)
@@ -49,13 +50,23 @@ def suggested_invite():
     return '-'.join(''.join(secrets.choice(_INVITE_LETTERS) for _ in range(4)) for _ in range(3))
 
 
+def _named(host):
+    """Whether `host` is a name the resolver can look up as written: IDNA refuses an empty label (as in
+    subtitles..example.com) and one longer than 63 characters, and every request to it would stop there."""
+    try:
+        host.encode('idna')
+    except UnicodeError:
+        return False
+    return True
+
+
 def check_address(value):
     """(good, message, value) for the web address question: https and a whole host (public mode's pages and links
     start at the address's root), written the same way every time."""
     text = (value or '').strip()
     parts = urllib.parse.urlsplit(text)
-    if parts.scheme != 'https' or not parts.hostname or not plan.has_usable_port(parts) or parts.path not in ('', '/') \
-            or parts.query or parts.fragment or parts.username or parts.password:
+    if parts.scheme != 'https' or not parts.hostname or not _named(parts.hostname) or not plan.has_usable_port(parts) \
+            or parts.path not in ('', '/') or parts.query or parts.fragment or parts.username or parts.password:
         return False, ADDRESS_REFUSED, text
     if plan.has_space(text):
         return False, plan.NO_SPACES, text
@@ -105,21 +116,25 @@ def web_server_rule(address, target):
 
 
 def fetch(url, timeout=10):
-    """(status, headers, body) of one GET from this machine. OSError when nothing answers."""
-    request = urllib.request.Request(url, headers={'User-Agent': user_agent('setup')})
+    """(status, headers, body) of one GET from this machine, through subsync's request gate (realdebrid.urlopen: never
+    to Real-Debrid, nor on to it by a redirect). OSError when nothing answers with HTTP: no answer, a name that can't
+    be looked up as written, or an answer that isn't HTTP."""
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        request = urllib.request.Request(url, headers={'User-Agent': user_agent('setup')})
+        with realdebrid.urlopen(request, timeout) as response:
             return response.status, dict(response.headers.items()), response.read(4096)
     except urllib.error.HTTPError as e:
         with e:             # its response, closed now rather than when it is collected
             return e.code, dict(e.headers.items()), b''
+    except (ValueError, http.client.HTTPException) as e:     # IDNA's UnicodeError; BadStatusLine, IncompleteRead, ...
+        raise OSError(' '.join(str(e).split()) or type(e).__name__) from e
 
 
 def health_ok(address):
     """Whether subsync answers "ok" at `address`/health from this machine: the check of the address on both routes."""
     try:
         status, _, body = fetch(address + '/health')
-    except (OSError, ValueError, http.client.HTTPException):      # nothing answers, or not with HTTP
+    except OSError:      # nothing answers, or not with HTTP
         return False
     return status == 200 and body.strip() == b'ok'
 

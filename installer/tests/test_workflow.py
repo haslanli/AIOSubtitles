@@ -357,9 +357,9 @@ class VersionRules(unittest.TestCase):
         """git with none of the developer's own git settings (commit signing, hooks, ...)."""
         env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
         env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
-        subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'init.defaultBranch=main',
-                        *args], cwd=self.repo, check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=60,
-                       env=env)
+        subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid',
+                        '-c', 'init.defaultBranch=main', *args],
+                       cwd=self.repo, check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=60, env=env)
 
     def change(self, name, text='changed\n'):
         path = self.repo / name
@@ -435,9 +435,9 @@ class BuildxSumCheck(unittest.TestCase):
         (or fails as curl does)."""
         curl = ('curl() { local out=; while [ $# -gt 1 ]; do [ "$1" = -o ] && out="$2"; shift; done; '
                 'printf "%s" "$1" > "$RUNNER_TEMP/asked"; [ "$DOWNLOAD" = yes ] || return 22; cp "$RELEASE" "$out"; }')
-        env = dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), RUNNER_ARCH=arch, RUNNER_TEMP=str(self.folder / 'temp'),
-                   HOME=str(self.folder), BUILDX_AMD64=amd64, BUILDX_ARM64=arm64, RELEASE=str(self.release),
-                   DOWNLOAD='yes' if download else 'no')
+        env = dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), RUNNER_ARCH=arch,
+                   RUNNER_TEMP=str(self.folder / 'temp'), HOME=str(self.folder), BUILDX_AMD64=amd64,
+                   BUILDX_ARM64=arm64, RELEASE=str(self.release), DOWNLOAD='yes' if download else 'no')
         if config:
             env['DOCKER_CONFIG'] = str(self.folder / 'config')
         done = subprocess.run(['bash', '-c', curl + '\n' + self.script], capture_output=True, text=True, timeout=60,
@@ -449,15 +449,16 @@ class BuildxSumCheck(unittest.TestCase):
 
     def test_the_published_binary_is_installed_as_dockers_plugin(self):
         release = 'https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-'
-        self.assertEqual(self.install('X64', self.sum, '0' * 64), (0, [f'{self.plugin}: buildx v0.39.0 as published']))
+        published = (0, [f'{self.plugin}: buildx v0.39.0 as published'])
+        self.assertEqual(self.install('X64', self.sum, '0' * 64), published)
         self.assertEqual(self.asked(), release + 'amd64')
         self.assertEqual(self.plugin.read_bytes(), b'buildx as published')
         self.assertEqual(self.plugin.stat().st_mode & 0o777, 0o755)
         self.plugin.unlink()
-        self.assertEqual(self.install('ARM64', '0' * 64, self.sum), (0, [f'{self.plugin}: buildx v0.39.0 as published']))
+        self.assertEqual(self.install('ARM64', '0' * 64, self.sum), published)
         self.assertEqual(self.asked(), release + 'arm64')
         self.assertEqual(self.plugin.read_bytes(), b'buildx as published')
-        default = self.folder / '.docker' / 'cli-plugins' / 'docker-buildx'      # Docker's own folder without DOCKER_CONFIG
+        default = self.folder / '.docker' / 'cli-plugins' / 'docker-buildx'   # Docker's own, without DOCKER_CONFIG
         self.assertEqual(self.install('X64', self.sum, '0' * 64, config=False),
                          (0, [f'{default}: buildx v0.39.0 as published']))
         self.assertEqual(default.read_bytes(), b'buildx as published')
