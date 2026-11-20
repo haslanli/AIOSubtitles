@@ -28,6 +28,14 @@ class UiAdditions(unittest.TestCase):
         panel = ui.update_panel('Updates', 'About.', 'Running.', 'Ready.', 'Update')
         self.assertIn('<button class="btn primary" type="submit">Update</button>', panel)
 
+    def test_the_update_panels_lines_are_texts_each_in_a_paragraph_of_its_own(self):
+        # The page after setup got its second line by splicing '</p><p>' into the running version's HTML
+        panel = ui.update_panel('Updates', 'About.', 'Runs <1.0.0>.', None, 'Update', note='Newest & best.')
+        self.assertIn('<div class="version"><p>Runs &lt;1.0.0&gt;.</p><p>Newest &amp; best.</p></div>', panel)
+        self.assertNotIn('<button', panel)
+        ready = ui.update_panel('Updates', 'About.', 'Runs 1.0.0.', 'Ready.', 'Update')
+        self.assertIn('<div class="version"><p>Runs 1.0.0.</p><p class="new">Ready.</p></div>', ready)
+
     def test_a_long_address_in_a_check_row_wraps(self):
         # the 16-shape check at 360 x 640: an address in a check row pushed the page sideways
         self.assertRegex(ui.APP_CSS, r'\.checks \.tx\{[^}]*overflow-wrap:anywhere')

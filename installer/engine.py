@@ -1740,7 +1740,7 @@ class Engine:
 
     def say_what_stays(self):
         self.out.say()
-        self.out.say('  These stay, in case you set it up again; remove them when you no longer need them:')
+        self.out.say(f'  {screens.STAYS}')
         for line in self.stays:
             self.out.say(f'    • {line}')
 

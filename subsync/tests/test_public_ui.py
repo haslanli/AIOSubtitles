@@ -1413,7 +1413,7 @@ class PartsTest(unittest.TestCase):
 
     def test_the_update_panel(self):
         from subsync import ui
-        tree = Tree(ui.update_panel("Updates", "About.", "Runs <b>1.0.0</b>.", "1.1.0 ready.", "Update"))
+        tree = Tree(ui.update_panel("Updates", "About.", "Runs 1.0.0.", "1.1.0 ready.", "Update"))
         self.assertIn("1.1.0 ready.", tree.text())
         self.assertEqual(len(tree.all("button")), 1)
         self.assertFalse(Tree(ui.update_panel("Updates", "About.", "Runs.", None, "Update")).all("button"))

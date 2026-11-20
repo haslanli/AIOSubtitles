@@ -431,10 +431,12 @@ def row(hid, heading, about_html, controls_html):
             f"{e(heading)}</h2>{about_html}</div>{controls_html}</section>")
 
 
-def update_panel(heading, about, running_html, ready, action):
-    """The update panel: what updating does, the version running (HTML the caller built from escaped parts),
-    the one ready (None: up to date), and the action. The heading's id is up-h, for the section's aria-labelledby."""
-    lines = f"<p>{running_html}</p>" + (f"<p class=\"new\">{e(ready)}</p>" if ready else "")
+def update_panel(heading, about, running, ready, action, note=None):
+    """The update panel: what updating does, the version running, the one ready (None: up to date), a `note`
+    under them (why there is none to install, say), and the action. The heading's id is up-h, for the section's
+    aria-labelledby."""
+    lines = (f"<p>{e(running)}</p>" + (f"<p class=\"new\">{e(ready)}</p>" if ready else "")
+             + (f"<p>{e(note)}</p>" if note else ""))
     actions = f"<div class=\"actions\">{button(action, type='submit')}</div>" if ready else ""
     return row("up-h", heading, f"<p class=\"help\">{e(about)}</p>",
                f"<div class=\"controls\"><div class=\"version\">{lines}</div>{actions}</div>")

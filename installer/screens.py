@@ -4,7 +4,7 @@ Each function returns a whole page, built from subsync's parts (subsync/subsync/
 public site, so the installer looks and works like it. Every word is an approved one: subsync's explain.py,
 the site's pages.UI_WORDS, and INSTALLER_WORDS below (each with the decision that approved it); values from the
 person, from AIOStreams and the engine's rows are escaped by the parts. Every form posts to the page it is on and works
-without the script; a page whose work runs shows its progress again every 2 seconds (ui.page's refresh).
+without the script; a page whose work runs shows its progress again every REFRESH_S seconds (ui.page's refresh).
 """
 from installer import hosting
 from installer import limits as limit_list
@@ -98,6 +98,10 @@ UNEXPECTED = ('Something unexpected went wrong, so setup stopped here.',
               'Run ./setup again. If it happens again, send what the terminal shows with a bug report.')
 # a refused answer's summary at the top of its step, as the site's settings page titles one (pages.UI_WORDS)
 REFUSED = "That didn't go through"
+UPDATES = 'Updates'     # the update panel's heading after setup, and the updating page's (web.after_updating)
+# after removing, what stays on the machine: the page's (removed) and the terminal's (engine.say_what_stays)
+STAYS = 'These stay, in case you set it up again; remove them when you no longer need them:'
+REFRESH_S = 2           # seconds after which a page whose work runs (installing, checking, updating) shows it again
 
 # words the screens use besides explain.py's texts and the site's UI_WORDS, each approved by the owner
 INSTALLER_WORDS = (
@@ -112,19 +116,19 @@ INSTALLER_WORDS = (
     'Secret key',
     # the original-language lookup: TMDB's notice and its logo's name
     explain.TMDB_NOTICE, 'TMDB',
-    'Updates', 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
+    UPDATES, 'Update', 'Your answers', 'Change your answers', 'Remove subsync',
     RUN_AGAIN, ENDED, CHECK_AGAIN, DELETE_RECORDS, TICK_TO_REMOVE, REMOVE_HOST, REMOVE_HOST_TEXT,
     TRY_AGAIN, *UNEXPECTED,
     # a button row's refused limit, as the page says it
     *[limit_list.choose(lim) for lim in limit_list.hosting(audio=True) if lim.kind == 'segmented'],
     *[REMOVE_TEXT.format(count='', configs=configs) for configs in REMOVED_CONFIGS.values()], REMOVE_SAVED_KEY,
     KEPT_ANSWERS,
-    update.ABOUT, update.ABOUT_HOSTING, update.NEWEST, update.ROLLBACK_HEADING, update.ROLLBACK_ABOUT,
+    update.ABOUT, update.NEWEST, update.ROLLBACK_HEADING, update.ROLLBACK_ABOUT,
     update.RESTORE_HELP,
     # the terminal setup's lines, as headings
     *STATUS.values(),
     'Already set up here: your answers are kept unless you change them.', *REMOVING.values(),
-    'These stay, in case you set it up again; remove them when you no longer need them:',
+    STAYS,
     'AIOStreams', 'languages', 'audio', 'config', "subsync's config", 'logs',
     # Usenet
     "subsync's Usenet config",
@@ -387,7 +391,7 @@ def installing(route, rows, running, stop=None, rule=None, rule_intro=None, rule
         if rule_note:
             body += f'<p class="help">{e(rule_note)}</p>'
     if running:
-        return step(route, step_id, body, _continue(False), back=False, refresh=2)
+        return step(route, step_id, body, _continue(False), back=False, refresh=REFRESH_S)
     if stop:
         _, ids = _steps(route)
         again = ui.button(TRY_AGAIN, 'primary', type='submit', attrs='name="go" value="again"')
@@ -401,7 +405,7 @@ def check(route, rows, running, offer_test_read=False, stop=None):
     step_id = 'hostcheck' if route == 'host' else 'check'
     body = _rows(rows) + _stop(stop)
     if running:
-        return step(route, step_id, body, _continue(False), back=False, refresh=2)
+        return step(route, step_id, body, _continue(False), back=False, refresh=REFRESH_S)
     if offer_test_read:
         body += ui.choices(_choice('TEST_READ', LABELS['TEST_READ'], False))
     actions = _continue(True)
@@ -483,16 +487,15 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
     status = (f'<h1>{e(STATUS[route])}</h1><div class="grid12 band">' + ui.check_rows(list(rows))
               + '<dl class="details">' + ''.join(f'<div><dt>{e(label)}</dt><dd>{e(value)}</dd></div>'
                                                  for label, value in details) + '</dl></div>')
-    running = e(update.RUNNING.format(version=running_version))
-    about = update.ABOUT_HOSTING if route == 'host' else update.ABOUT
+    running = update.RUNNING.format(version=running_version)
     if ready and ready.how == 'ready':
-        panel = ui.update_panel('Updates', about, running, update.READY.format(version=ready.version), 'Update')
+        panel = ui.update_panel(UPDATES, update.ABOUT, running, update.READY.format(version=ready.version), 'Update')
         panel = f'<form method="post" action="update">{panel}</form>'
     else:
-        words = update.NEWEST
+        note = update.NEWEST
         if ready and ready.how == 'newer-here':
-            words = update.NEWER_HERE.format(running=running_version, setup=ready.version)
-        panel = ui.update_panel('Updates', about, running + f'</p><p>{e(words)}', None, 'Update')
+            note = update.NEWER_HERE.format(running=running_version, setup=ready.version)
+        panel = ui.update_panel(UPDATES, update.ABOUT, running, None, 'Update', note=note)
     if rollback:
         version, copy = rollback
         controls = ''
@@ -538,14 +541,13 @@ def working(heading, rows, running, stop=None, back='./'):
     actions = '' if running else ui.link_button('Continue', back, 'primary', arrow=True)
     content = (f'<h1>{e(heading)}</h1><div class="body">{body}</div>'
                + (f'<div class="actions">{actions}</div>' if actions else ''))
-    return _page(f'<main class="letter">{content}</main>', refresh=2 if running else None, heading=heading)
+    return _page(f'<main class="letter">{content}</main>', refresh=REFRESH_S if running else None, heading=heading)
 
 
 def removed(heading, rows, stays):
     body = _rows(rows)
     if stays:
-        body += (f'<p>{e("These stay, in case you set it up again; remove them when you no longer need them:")}</p>'
-                 + ui.dots(stays))
+        body += f'<p>{e(STAYS)}</p>' + ui.dots(stays)
     return _page(f'<main class="letter"><h1>{e(heading)}</h1><div class="body">{body}</div></main>',
                  heading=heading)
 

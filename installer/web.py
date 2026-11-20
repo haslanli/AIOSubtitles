@@ -9,10 +9,10 @@ it, and DNS rebinding gets nothing). Every page has the public site's security h
 its own address, and nothing inline. Passwords and keys typed in stay in this process's memory for the run and are never
 sent back in a page. The work of each step is installer/engine.py; long work (installing, checking, updating) runs in
 the background once (an install that stopped is tried again on the person's word, and one whose answers changed after
-it runs again), and its page shows the progress again every 2 seconds until it is done (the script fetches the page;
-without it the page loads itself again); meanwhile the steps before it lead to its page. An error setup doesn't know is
-a stop on the page with its way out, its details only in the terminal. The page stops when setup is done, after 60
-minutes without a request under its key, or with Ctrl-C.
+it runs again), and its page shows the progress again every screens.REFRESH_S seconds until it is done (the script
+fetches the page; without it the page loads itself again); meanwhile the steps before it lead to its page. An error
+setup doesn't know is a stop on the page with its way out, its details only in the terminal. The page stops when setup
+is done, after 60 minutes without a request under its key, or with Ctrl-C.
 """
 import os
 import re
@@ -220,7 +220,7 @@ class App:
 
     def static(self, path):
         """The stylesheet and script (their addresses carry their hash) and the typefaces are cached as the public site
-        caches them: the install, check and update pages are shown again every 2 seconds."""
+        caches them: the install, check and update pages are shown again every screens.REFRESH_S seconds."""
         if path == '/static/app.css':
             return 200, dict(SCRIPT_HEADERS, **{'Content-Type': 'text/css; charset=utf-8'}), ui.APP_CSS.encode()
         if path == '/static/app.js':
@@ -368,7 +368,7 @@ class App:
             if s.saved:
                 return self.go('install')
             e.answers['CACHE'] = 'yes' if one.get('CACHE') else 'no'
-            for key in ('AIOS_USERNAME', 'AIOS_PASSWORD'):
+            for key in SIGN_IN:
                 if one.get(key):
                     e.answers[key] = one[key]
             e.answers['CONFIRM'] = 'yes'
@@ -589,7 +589,8 @@ class App:
         if not self.after:
             return self.go('')
         running = self.after.running('update')
-        return self.page(screens.working('Updates', self.after.live('update'), running, self.after.stops.get('update')))
+        return self.page(screens.working(screens.UPDATES, self.after.live('update'), running,
+                                         self.after.stops.get('update')))
 
     # ------------------------------------------------------------------------------------- stopping
     def finish_in(self, seconds):

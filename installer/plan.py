@@ -1,7 +1,8 @@
 """What ./setup changes, as pure functions (no network, no Docker), so each rule is tested on its own.
 
-Nothing here talks to AIOStreams; wizard.py reads the config, calls these, shows the result and saves it only after
-the user says yes.
+Nothing here talks to AIOStreams; installer/engine.py reads the config, calls these, shows the result through its two
+front ends (the setup page, installer/web.py, and the terminal, installer/wizard.py) and saves it only after the user
+says yes.
 """
 import ipaddress
 import math
@@ -53,7 +54,7 @@ def public_default(aios_public, lan_ip, port=SUBSYNC_PORT):
         return 'path', f'{parts.scheme}://{parts.netloc}/subsync'
     if is_local_host(host):
         host = lan_ip or '127.0.0.1'
-    return 'port', f'http://{host}:{port}'
+    return 'port', f"http://{f'[{host}]' if ':' in host else host}:{port}"     # an IPv6 address in its brackets
 
 
 def has_usable_port(parts):
@@ -118,7 +119,7 @@ def subtitle_cache_value(current, host):
 # ------------------------------------------------------------------------------------------- subsync's files
 
 def subsync_env(s):
-    """The service's settings. `s` holds the answers and what was found (see wizard.py); everything else keeps
+    """The service's settings. `s` holds the answers and what was found (see engine.py's install); everything else keeps
     subsync's own defaults."""
     env = {
         'SUBSYNC_SOURCE_MANIFEST': s.get('sync_manifest', ''),     # none for a config read through Usenet only

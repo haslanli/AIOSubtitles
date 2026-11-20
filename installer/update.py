@@ -20,7 +20,6 @@ READY = 'Version {version} is ready.'
 ABOUT = ('Updating saves a copy of the databases, checks the new version while the old one keeps running, then '
          "switches: AIOSubtitles is offline for a few seconds. If the new version doesn't answer, the old one is put "
          'back.')
-ABOUT_HOSTING = ABOUT
 NEWEST = 'This is the newest version.'
 NEWER_HERE = ('This machine runs version {running}, newer than this setup ({setup}): from here, only a rollback can be '
               'made.')

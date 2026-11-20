@@ -242,6 +242,15 @@ class Addresses(unittest.TestCase):
         self.assertEqual(plan.public_default('http://localhost:3000', '192.168.1.5'), ('port', 'http://192.168.1.5:8790'))
         self.assertEqual(plan.public_default('https://nas.local', '192.168.1.5'), ('port', 'http://nas.local:8790'))
 
+    def test_an_ipv6_address_is_suggested_in_its_brackets(self):
+        # Urlsplit's hostname drops the brackets; written back without them the suggestion was refused
+        for aios, lan, suggested in (('http://[fd00::5]:3000', '', 'http://[fd00::5]:8790'),
+                                     ('http://[::1]:3000', 'fd00::7', 'http://[fd00::7]:8790'),
+                                     ('https://[fd00::5]', '192.168.1.5', 'http://[fd00::5]:8790')):
+            with self.subTest(aios=aios):
+                self.assertEqual(plan.public_default(aios, lan), ('port', suggested))
+                self.assertEqual(plan.check_public(suggested), (True, '', suggested))
+
     def test_aiostreams_default_address_is_the_one_its_explanation_gives(self):
         # the example leaves the address empty, as AIOS_CONTAINER: an answers file made from it finds AIOStreams in
         # Docker first; the explanation still names setup's default address
