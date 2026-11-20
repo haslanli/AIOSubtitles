@@ -22,7 +22,7 @@ from html import escape as html_escape
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, docs, engine, hosting, plan, screens, ui, wizard
+from installer import dockerenv, docs, engine, hosting, limits, plan, screens, ui, wizard
 from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
 from subsync import aiosconfig, explain
@@ -1055,6 +1055,16 @@ class StartedButSilent(Offline):
         self.assertNotIn('subsync is running', out)
         self.assertEqual(asked, [engine.CONTAINER] * 45)                 # every 2 seconds for 90 seconds
         self.assertEqual(self.ours(), [])                                # your config is left as it was
+
+
+class StepResults(TmpState):
+    def test_what_a_step_finds_has_one_default_before_it_runs(self):
+        # Read before a public instance's choices ran, Usenet was on for the limits asked and off for the
+        # settings written
+        e = engine.Engine({}, page=True)
+        self.assertEqual((e.host_usenet, e.host_audio, e.host_tmdb_personal), (False, False, False))
+        e.host_limits()
+        self.assertEqual(set(e.limit_values), {lim.setting for lim in limits.hosting(False, False)})
 
 
 class HostPort(TmpState):

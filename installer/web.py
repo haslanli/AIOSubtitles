@@ -359,7 +359,7 @@ class App:
         problem = s.problems.get('limits')
         if problem and problem[0] == 'AUDIO_BUDGET':        # the engine's key for the page's audio limit
             problem = (limits.AUDIO.setting, problem[1])
-        return self.page(screens.limits('yourself', values, problem, audio=e.audio, usenet=getattr(e, 'usenet', False),
+        return self.page(screens.limits('yourself', values, problem, audio=e.audio, usenet=e.usenet,
                                         stop=s.stops.get('limits')))
 
     def step_review(self, s, method, form, one):
@@ -479,14 +479,14 @@ class App:
     def step_hostlimits(self, s, method, form, one):
         e = s.e
         if method == 'POST':
-            for lim in limits.hosting(getattr(e, 'host_usenet', True), getattr(e, 'host_audio', False)):
+            for lim in limits.hosting(e.host_usenet, e.host_audio):
                 if one.get(lim.setting):
                     e.answers[lim.setting] = one[lim.setting]
             if s.run('hostlimits', e.host_limits):
                 s.start_job('hostinstall', e.host_install)
                 return self.go('hostinstall')
         env = engine.env_values()
-        usenet, audio = getattr(e, 'host_usenet', True), getattr(e, 'host_audio', False)
+        usenet, audio = e.host_usenet, e.host_audio
         values = {lim.setting: e.answers.get(lim.setting) or limits.current(lim, env)
                   for lim in limits.hosting(usenet, audio)}
         return self.page(screens.limits('host', values, s.problems.get('hostlimits'), usenet=usenet, audio=audio,

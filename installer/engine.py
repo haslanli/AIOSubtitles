@@ -373,6 +373,8 @@ class PageAsk:
     Problem(missing=True), so the page shows that question. An optional answer sent empty (its "Remove the saved key"
     box) removes the current one: '' is returned."""
 
+    yes = False         # never answers for the person (ui.Asker's --yes): a question without an answer is asked
+
     def __init__(self, answers, out):
         self.answers, self.out = answers, out
 
@@ -534,6 +536,17 @@ class Engine:
         self.aios = None
         self.status = None
         self.limit_values = {}
+        # what a step finds, read by steps and pages that may come first: each with its one default
+        self.route = None                   # the route whose steps run (choose_route; the page sets it)
+        self.install_id = None              # this install's id when the last setup saved none (check_machine)
+        self.uuid = None                    # the config your apps use (read_viewer)
+        self.usenet = False                 # Usenet on (choices)
+        self.audio_budget_kept = None       # the audio limit kept while the audio route is off (limits)
+        self.tmdb_checked = None            # a new TMDB key TMDB was asked about in this run (check_tmdb_key)
+        self.admin = False                  # whether AIOStreams' sign-in is an admin's (sign_in)
+        self.suggested_invite = None        # the invite code suggested on a first setup (host_signups)
+        self.secret = None                  # a public instance's secret key (host_signups)
+        self.host_usenet = self.host_audio = self.host_tmdb_personal = False      # a public instance's (host_choices)
 
     # what the page shows filled in on a re-run ------------------------------------------------------------------
     def prefill(self):
@@ -566,12 +579,12 @@ class Engine:
 
     # 1 -------------------------------------------------------------------------------------------------------
     def check_machine(self):
-        self.show_step('machine', getattr(self, 'route', None))
+        self.show_step('machine', self.route)
         problem = dockerenv.docker_problem()
         if problem:
             stop(*problem)
         # before any question: nothing under setup's names that this install didn't make
-        self.install_id = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
+        self.install_id = self.prev.get('install_id') or self.install_id or new_install_id()
         guard(self.install_id, unlabelled_own(self.prev))
         self.out.ok('Docker and Docker Compose work')
         free = dockerenv.free_gb(str(STATE.parent))
@@ -791,7 +804,7 @@ class Engine:
         terminal, a number is its option as listed."""
         given = self.ask.answers.get('AUDIO')
         if given is not None and digits.whole(str(given).strip()) is not None:
-            if getattr(self.ask, 'yes', False):
+            if self.ask.yes:
                 stop(plan.AUDIO_NUMBER_REFUSED)
             self.out.warn(plan.AUDIO_NUMBER_REFUSED)
             del self.ask.answers['AUDIO']
@@ -836,7 +849,7 @@ class Engine:
         settings page checks a person's own key, at the TMDB address subsync uses): refused, it is asked again, and not
         kept as the answer (the page's box is empty again: left empty, the step goes on without it); when TMDB doesn't
         answer, it is kept with a warning. The saved key, and one checked before in this run, aren't checked again."""
-        if value in (self.keys.get('TMDB_KEY'), getattr(self, 'tmdb_checked', None)):
+        if value in (self.keys.get('TMDB_KEY'), self.tmdb_checked):
             return True, '', value
         url = env_values().get('SUBSYNC_TMDB_URL')
         accepted = origlang.check_key(Settings({'SUBSYNC_TMDB_URL': url} if url else {}), value)
@@ -1070,7 +1083,7 @@ class Engine:
             return None
         if not self.aios.signed_in:
             self.sign_in(screens.SIGN_IN_ADMIN)
-        if not getattr(self, 'admin', False):
+        if not self.admin:
             self.out.warn('That account is not an admin; the setting stays as it is.')
             return None
         found = self.aios.subtitle_cache_setting()
@@ -1126,23 +1139,30 @@ class Engine:
         write_env(STATE / 'subsync.env', env)
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
-        self.own_image()
-        guard(self.s['install_id'], unlabelled_own(self.prev))
-        write_compose(self.s)
         if self.audio:
             self.s['audio_when'] = self.audio_when
         self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio, usenet=self.usenet,
-                      audio_budget=self.audio_budget or getattr(self, 'audio_budget_kept', None),   # for when it's on again
-                      manifest_url=self.manifest_url, installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
+                      audio_budget=self.audio_budget or self.audio_budget_kept,   # for when it's on again
+                      manifest_url=self.manifest_url)
         for kept in ('cache_before', 'added_opensubtitles'):
             self.s.setdefault(kept, self.prev.get(kept))
+        self._deploy('subsync', 'subsync is running (it restarts by itself after a reboot)')
+        self.save_viewer()
+
+    def _deploy(self, name, running):
+        """How both routes' install ends, once this run's settings are in self.s: the image and this install's id
+        (own_image), the guard, compose.yaml, state/settings.json with the install's date, the keys, the service started
+        and answering, and the folder's ./setup."""
+        self.own_image()
+        guard(self.s['install_id'], unlabelled_own(self.prev))
+        write_compose(self.s)
+        self.s['installed'] = self.prev.get('installed') or time.strftime('%Y-%m-%d')
         save_settings(self.s)
         self.write_keys()
-        self.start('subsync', 'subsync is running (it restarts by itself after a reboot)')
+        self.start(name, running)
         if made_before_labels(self.prev):
             self.out.ok(TAKEN_OVER)
         self.write_setup_script()
-        self.save_viewer()
 
     def own_image(self):
         """This install's id (kept from the last setup) and the image the service runs: setup's own, pinned. An install
@@ -1150,7 +1170,7 @@ class Engine:
         as it is (recorded in state/settings.json, declared external in its compose file) while Docker has it; once it
         is gone, Compose makes the usual labelled one instead (an external volume must exist). Its container and network
         are made again with the label when it starts."""
-        self.s['install_id'] = self.prev.get('install_id') or getattr(self, 'install_id', None) or new_install_id()
+        self.s['install_id'] = self.prev.get('install_id') or self.install_id or new_install_id()
         kept = data_volume(self.prev) if made_before_labels(self.prev) or self.prev.get('external_volume') else None
         if kept and not volume_gone(kept):
             self.s['external_volume'] = kept
@@ -1256,7 +1276,7 @@ class Engine:
             self.out.bad('AIOStreams did not reach subsync.')
             self.out.note(f"It calls {manifest_base(self.manifest_url).rsplit('/', 1)[0]}/…; check that address works from AIOStreams.")
         # d) subsync's Usenet config answers: its manifest only, no search, so no indexer call is spent
-        if getattr(self, 'usenet', False) and self.keys.get('USENET_UUID'):
+        if self.usenet and self.keys.get('USENET_UUID'):
             usenet_base = self.addon_base(self.keys['USENET_UUID'], self.usenet_encrypted)
             try:
                 self.aios.addon_get(usenet_base, '/manifest.json', timeout=40)
@@ -1351,7 +1371,7 @@ class Engine:
         return subsync_status()
 
     def write_keys(self):
-        self.keys['VIEWER_UUID'] = getattr(self, 'uuid', self.keys.get('VIEWER_UUID'))
+        self.keys['VIEWER_UUID'] = self.uuid or self.keys.get('VIEWER_UUID')
         write_kv(STATE / 'secrets.env', self.keys, 'Written by ./setup. Private: subsync\'s keys and its AIOStreams config login.')
 
     # ---------------------------------------------------------------------------------------------------------
@@ -1450,9 +1470,9 @@ class Engine:
         elif 'SUBSYNC_PUBLIC_INVITE' in env or self.prev.get('route') == 'host':
             self.invite = env.get('SUBSYNC_PUBLIC_INVITE', '')
         else:
-            self.invite = getattr(self, 'suggested_invite', None) or hosting.suggested_invite()
+            self.invite = self.suggested_invite or hosting.suggested_invite()
             self.suggested_invite = self.invite
-        self.secret = env.get('SUBSYNC_SECRET_KEY') or getattr(self, 'secret', None)
+        self.secret = env.get('SUBSYNC_SECRET_KEY') or self.secret
         self.secret_new = not env.get('SUBSYNC_SECRET_KEY')
         if not self.secret:
             self.secret = hosting.new_secret()
@@ -1480,7 +1500,7 @@ class Engine:
         self.show_step('hostlimits', 'host')
         env = env_values()
         self.limit_values = {}
-        for lim in limits.hosting(getattr(self, 'host_usenet', True), getattr(self, 'host_audio', False)):
+        for lim in limits.hosting(self.host_usenet, self.host_audio):
             def check(value, lim=lim):
                 chosen, error = limits.check(lim, value, places=self.places())
                 return (False, error, value) if error else (True, '', chosen)
@@ -1503,24 +1523,14 @@ class Engine:
                    'SUBSYNC_PUBLIC_INVITE': self.invite, 'SUBDL_KEY': self.keys.get('SUBDL_KEY', ''),
                    'SUBSYNC_SUBSOURCE_KEY': self.keys.get('SUBSYNC_SUBSOURCE_KEY', ''),
                    'TMDB_KEY': self.keys.get('TMDB_KEY', '')}
-        env = hosting.public_env(answers, self.secret, self.limit_values, usenet=getattr(self, 'host_usenet', False),
-                                 audio=getattr(self, 'host_audio', False),
-                                 tmdb_personal=getattr(self, 'host_tmdb_personal', False))
+        env = hosting.public_env(answers, self.secret, self.limit_values, usenet=self.host_usenet, audio=self.host_audio,
+                                 tmdb_personal=self.host_tmdb_personal)
         env, kept = plan.merge_env(env, env_values(as_written=True), owned=hosting.OWNED)
         write_env(STATE / 'subsync.env', env)
         self.secret_new = False
         if kept:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
-        self.own_image()
-        guard(self.s['install_id'], unlabelled_own(self.prev))
-        write_compose(self.s)
-        self.s.update(installed=self.prev.get('installed') or time.strftime('%Y-%m-%d'))
-        save_settings(self.s)
-        self.write_keys()
-        self.start('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
-        if made_before_labels(self.prev):
-            self.out.ok(TAKEN_OVER)
-        self.write_setup_script()
+        self._deploy('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
         self.web_server_rule = None
         if not self.public_health_at(self.address):
             self.web_server_rule = hosting.web_server_rule(self.address, f"127.0.0.1:{self.s['port']}")
