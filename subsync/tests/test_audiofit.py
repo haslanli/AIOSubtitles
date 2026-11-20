@@ -365,9 +365,9 @@ class PlaceTest(unittest.TestCase):
         lines = [{"s": r.uniform(0, 7000), "e": 7001.0, "text": "x", "kind": "dialogue"} for _ in range(400)]
         for D in (1e9, 1e17):
             fit = self.fit(lines)
-            margin = 0.03 * D
+            fit.index.end = D                                   # the plan's runtime, its margin and stretches
             done = []
-            t = threading.Thread(target=lambda: done.append(fit.plan(D, margin, (D - 2 * margin) / fit.K)), daemon=True)
+            t = threading.Thread(target=lambda: done.append(fit.plan()), daemon=True)
             t.start()
             t.join(10)
             self.assertTrue(done, f"plan() still running after 10 s for a {D:g} s runtime")
@@ -384,6 +384,22 @@ class PlaceTest(unittest.TestCase):
             usual = r.uniform(lo, hi)
             avoid = [r.uniform(lo - 60, hi + 60) for _ in range(r.choice([0, 0, 2, 8]))]
             self.assertAlmostEqual(fit.place(usual, lo, hi, avoid), scanned(fit, usual, lo, hi, avoid), delta=1e-6)
+
+
+class ClearOfTest(unittest.TestCase):
+    """Whether a window overlaps another is one rule, float noise aside: a window W apart from another but for
+    a hair of rounding is clear for place() as for aside(), beside() and the extra held-out windows' check."""
+
+    def test_a_window_side_by_side_but_for_float_noise_is_clear_everywhere(self):
+        lines = [{"s": 125.0 + i, "e": 125.5 + i, "text": "x", "kind": "dialogue"} for i in range(30)]
+        fit = AudioFit(SpeechIndex([], 7200.0), lines, vad=LoudVad())
+        a, W = 100.0, fit.W
+        t = a + W - 1e-9                                   # side by side with the window at a
+        self.assertTrue(fit.clear(t, [a]))
+        self.assertFalse(fit.clear(a + W - 0.01, [a]))     # a real overlap
+        self.assertEqual(fit.aside(t, [a]), t)
+        self.assertEqual(fit.beside(10.0, 10.0, 1, [10.0 + 2 * W - 1e-9], 0.0, 7200.0), [10.0 + W])
+        self.assertEqual(fit.place(t, t - 10.0, t + 60.0, avoid=[a]), t)   # its usual place, with lines there
 
 
 class SignalLengthTest(unittest.TestCase):

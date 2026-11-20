@@ -5,8 +5,9 @@ per-window offsets confirmed by a second window, bisection of each offset change
 from speech onsets, lines of a removed scene dropped (sections.moved_back), per-segment refinement to speech onsets,
 then a gate on V held-out windows never used for fitting: no window read for the fit (a confirmation, a bisection
 step) overlaps one, and each window counts once. The gate also judges each held-out part (a held-out window, with
-those read beside it): where the copy is clearly off in one, neither way to pass is met and the verdict is a close
-call. Shifts under 100 ms on one segment are never published.
+those read beside it): where the copy is clearly off in one, neither way to pass is met; when the pooled numbers are
+near the bar, that verdict is a close call (close_call) that first reads the windows beside the part. Shifts under
+100 ms on one segment are never published.
 
 A copy the speech gate refuses still passes when it is clearly better (`better`): a subtitle made by someone else
 never starts its lines exactly where the speech starts, so after a perfect shift only about 60 % of its lines are
@@ -53,7 +54,7 @@ from .langs import lang3, same_language
 from .mkv import COMMENTARY, NotMatroska, not_dialogue
 from .mp4 import NoAudioThere
 from .reader import ReadFailed, Refused, Stopped
-from .relgate import within
+from .relgate import EPS_S, within
 from .sections import moved_back
 from .settings import GB
 from .shift import BIN_S, END_WEIGHT, SCALES   # the one-shift path's frame-rate scales, bin and end weight (one list)
@@ -65,6 +66,10 @@ SCALE_GAIN = 0.1    # a scale other than 1.0 must score this much more per fit w
 OMAX = 600.0        # the largest offset tried, each way (s)
 PAD = int(OMAX / DT)
 LAGS = np.arange(-PAD, PAD + 1) * DT   # the offsets a window is scored at (s)
+FIT_WINDOWS = 8     # K: the fit windows, one in each of K equal stretches of the runtime
+CHECK_WINDOWS = 4   # V: the held-out windows, one in each of V equal stretches
+WINDOW_S = 30.0     # W: a window's length (s), shorter when the audio budget needs it (planned_window)
+MARGIN_SHARE = 0.03   # no window is planned in this share of the runtime at either end
 MIN_W = 10.0        # shorter windows hold too few lines for the held-out check
 PLANNED = 4         # windows a fit reads beyond its K + V (a confirmation, bisections, extra held-out windows)
 MIN_WINDOW_LINES = 5  # a window whose usual place holds fewer of the subtitle's lines is moved to where they are
@@ -77,6 +82,9 @@ FULL_WINDOW = 0.95  # a window decoded to less of its length is a failed read, n
 RUN_GAP = 6         # speech runs (10 ms frames): gaps under 60 ms are closed,
 RUN_MIN = 10        # and runs under 100 ms dropped
 SAME_OFFSET_S = 0.5   # two windows' offsets this close are the same offset
+EDGE_S = 0.5        # a line is judged in a window only when it starts (and ends) at least this far inside it
+PAIR_S = 1.0        # a line's start pairs with a speech onset (its end with a speech-run end) at most this far away
+SMALL_SHIFT_S = 0.10  # one segment moved at most this, at 1.0 speed: below the bar's resolution, never published
 FITS_Z = 0.3        # a window fits an offset where it scores at least this (per 50 ms frame, -1 to 1)
 OWN_PEAK_Z = 0.45   # a window's own offset when its best score is at least this
 OWN_GAIN_Z = 0.15   # and this much above its score at the global offset
@@ -102,8 +110,8 @@ SPEECH_MIN = 0.05   # a window with speech in less of its length (music, noise u
 # a held-out part (a held-out window, with those read beside it: starts at most PART_REACH windows apart) is clearly
 # off when the copy has at least PART_LINES lines there with under PART_WITHIN of them within WITHIN_MS of the speech or
 # a median error over PART_MEDIAN_MS, or has fewer while the speech has PART_MANY onsets there and the original
-# PART_MANY lines; neither speech bar passes then, and the verdict is a close call that first reads the windows beside
-# the part (up to PART_REACH - 1 on each side)
+# PART_MANY lines; neither speech bar passes then, and when the pooled numbers are near the bar (close_call) the close
+# call first reads the windows beside the part (up to PART_REACH - 1 on each side)
 PART_REACH = 3
 PART_LINES = 5
 PART_WITHIN = 0.10      # on the synthetic corpus a right copy 60 % within 200 ms is off in 0.2 % of its windows, a
@@ -112,7 +120,13 @@ PART_MEDIAN_MS = 500
 PART_MANY = 10
 
 
-def planned_window(budget, rate, k=8, v=4, w=30.0):
+def byte_rate(index):
+    """A file's average bytes per second; 0 when its size or runtime isn't known."""
+    d = index.duration()
+    return (getattr(index, "size", 0) or 0) / d if d else 0.0
+
+
+def planned_window(budget, rate, k=FIT_WINDOWS, v=CHECK_WINDOWS, w=WINDOW_S):
     """The length of a file's audio windows: W, or shorter so all K + V + PLANNED windows fit the audio budget at the
     file's byte rate; None when they would be shorter than MIN_W (the file keeps its original, no audio is read)."""
     if not (budget and rate):
@@ -121,9 +135,9 @@ def planned_window(budget, rate, k=8, v=4, w=30.0):
     return None if fit < MIN_W else min(w, math.floor(fit * 10) / 10)     # tenths, rounded down: never over the budget
 
 
-def most_read(rate, budget=None, extra=0, tracks=1, k=8, v=4, w=30.0):
+def most_read(rate, budget=None, extra=0, tracks=1, k=FIT_WINDOWS, v=CHECK_WINDOWS, w=WINDOW_S):
     """The most an audio sync of a file could read, in bytes: every planned window and every close-call
-    window, on each audio track it may fit (fit_tracks: two when a second language's track exists), within the budget.
+    window, on each audio track it may fit (track_order: up to three), within the budget.
     The whole budget when the file's byte rate isn't known; 0 when its windows would be too short to read."""
     if not rate:
         return budget or 0
@@ -204,8 +218,8 @@ class AudioBudget(Exception):
 
 
 class AudioFit:
-    def __init__(self, index, lines, vad=None, k=8, w=30.0, v=4, lead=0.0, ffmpeg="ffmpeg", better=None, budget=None,
-                 track=None, extra=0):
+    def __init__(self, index, lines, vad=None, k=FIT_WINDOWS, w=WINDOW_S, v=CHECK_WINDOWS, lead=0.0, ffmpeg="ffmpeg",
+                 better=None, budget=None, track=None, extra=0):
         self.index, self.allines = index, lines
         self.track = track          # an audio track index (ffmpeg 0:a:N); None = the file's default track
         self.track_arg = {} if track is None else {"track": track}   # window_pcm's (an MP4 has one track, no argument)
@@ -229,8 +243,7 @@ class AudioFit:
     # -- audio -------------------------------------------------------------------------------------------------
     def rate(self):
         """The file's average bytes per second (0 when unknown)."""
-        d = self.index.duration()
-        return (getattr(self.index, "size", 0) or 0) / d if d else 0.0
+        return byte_rate(self.index)
 
     def estimate(self, length):
         """What a window of `length` seconds costs to read, by the file's average byte rate."""
@@ -252,9 +265,7 @@ class AudioFit:
         if not self.index.cue_points:
             return "no seek index"
         if self.budget and self.rate():
-            D = self.index.duration()
-            margin = 0.03 * D
-            plan = self.plan(D, margin, (D - 2 * margin) / self.K)
+            plan = self.plan()
             if any(self.cost(start, self.W) > SPARSE_INDEX * self.estimate(self.W)
                    for start in plan["fit"] + plan["check"]):
                 return "seek index too sparse for the audio budget"
@@ -397,10 +408,10 @@ class AudioFit:
         key="offsets", speech-run ends against line ends."""
         errs = []
         for w in windows:
-            inside = [s for s in starts if w["start"] + 0.5 <= s <= w["start"] + w["len"] - 0.5]
+            inside = [s for s in starts if w["start"] + EDGE_S <= s <= w["start"] + w["len"] - EDGE_S]
             marks = w.get(key, ())
             pairs = sorted((abs(o - s), i, j) for i, s in enumerate(inside) for j, o in enumerate(marks)
-                           if abs(o - s) <= 1.0)
+                           if abs(o - s) <= PAIR_S)
             used_l, used_o, got = set(), set(), {}
             for _, i, j in pairs:
                 if i in used_l or j in used_o:
@@ -441,7 +452,7 @@ class AudioFit:
         before it is in that one's part."""
         out = []
         for w in sorted(verify, key=lambda w: w["start"]):
-            if out and w["start"] - out[-1][-1]["start"] <= PART_REACH * self.W + 1e-6:
+            if out and w["start"] - out[-1][-1]["start"] <= PART_REACH * self.W + EPS_S:
                 out[-1].append(w)
             else:
                 out.append([w])
@@ -458,7 +469,7 @@ class AudioFit:
             return (sum(within(x, WITHIN_MS) for x in off) < PART_WITHIN * len(errs)
                     or bool(off) and statistics.median(off) > PART_MEDIAN_MS)
         onsets = sum(int(np.count_nonzero(np.abs(np.asarray(w["onsets"]) - (w["start"] + w["len"] / 2))
-                                          <= w["len"] / 2 - 0.5)) for w in ws)    # inside, as onset_errors counts lines
+                                          <= w["len"] / 2 - EDGE_S)) for w in ws)   # inside, as onset_errors counts lines
         return onsets >= PART_MANY and len(self.onset_errors(original, ws)) >= PART_MANY
 
     def end_lag(self, c, o, windows):
@@ -472,11 +483,12 @@ class AudioFit:
                 continue
             for l in self.lines:
                 s, e = l["s"] * c + o, l["e"] * c + o
-                if s < w["start"] + 0.5 or e > w["start"] + w["len"] - 0.5 or np.min(np.abs(on - s)) > 0.2:
+                if s < w["start"] + EDGE_S or e > w["start"] + w["len"] - EDGE_S \
+                        or np.min(np.abs(on - s)) > WITHIN_MS / 1000:
                     continue
                 d = off - e
                 k = int(np.argmin(np.abs(d)))
-                if abs(d[k]) <= 1.0:
+                if abs(d[k]) <= PAIR_S:
                     errs.append(float(d[k]))
         return float(np.median(errs)) if len(errs) >= 10 else None
 
@@ -545,8 +557,7 @@ class AudioFit:
         why = self.close_call(first) if self.extra else None
         if not why:
             return first
-        plan, D = first["plan"], self.index.duration()
-        margin = 0.03 * D
+        plan, (D, margin, _, _) = first["plan"], self.geometry()
         n_check = round(self.extra * 2 / 3)
         n_fit = self.extra - n_check
         read = [k[0] for k in self.cache if k[1:] == self._key(0.0, self.W)[1:]]   # fit, held-out and the rest
@@ -575,13 +586,19 @@ class AudioFit:
         second["audio_s"] = self.audio_s
         return second
 
+    def clear(self, t, starts):
+        """Whether a window starting at t overlaps none of the windows starting in `starts`, float noise aside: one W
+        from another but for rounding is beside it, not over it (aside, beside, place and the extra held-out windows
+        all judge by this)."""
+        return all(abs(t - a) >= self.W - EPS_S for a in starts)
+
     def aside(self, t, avoid, lo=-math.inf, hi=math.inf):
         """A window's start at t, or moved aside by its overlap with the windows starting in `avoid`: of t and the
         starts just clear of an avoided window, the nearest to t whose window overlaps none of them and lies in
         [lo, hi]; None when none does (always one when hi is open)."""
         W = self.W
         for c in sorted({t} | {a + d for a in avoid for d in (-W, W)}, key=lambda c: (abs(c - t), c)):
-            if lo <= c and c + W <= hi and all(abs(c - a) >= W - 1e-6 for a in avoid):
+            if lo <= c and c + W <= hi and self.clear(c, avoid):
                 return c
         return None
 
@@ -592,7 +609,7 @@ class AudioFit:
         W, out = self.W, []
         steps = [x for d in range(1, PART_REACH) for x in (a - d * W, b + d * W)]
         for t in steps:
-            if len(out) < n and lo <= t and t + W <= hi and all(abs(t - x) >= W - 1e-6 for x in list(taken) + out):
+            if len(out) < n and lo <= t and t + W <= hi and self.clear(t, [*taken, *out]):
                 out.append(round(t, 2))
         return out
 
@@ -648,11 +665,11 @@ class AudioFit:
             return bisect.bisect_left(starts, t + W) - bisect.bisect_left(starts, t)
 
         def free(t):
-            return all(abs(t - a) >= W for a in avoid)
+            return self.clear(t, avoid)
         if free(usual) and lines_in(usual) >= MIN_WINDOW_LINES:
             return usual
         best, best_n = usual, lines_in(usual) if free(usual) else -1
-        room = (hi + 1e-6 - W - lo) / PLACE_STEP
+        room = (hi + EPS_S - W - lo) / PLACE_STEP
         if not room >= 0:   # no start fits (or no runtime to place in)
             return best
         # from one step to the next, a window holds more lines only once it takes in another line's start, and becomes
@@ -667,7 +684,14 @@ class AudioFit:
                 best, best_n = t, lines_in(t)
         return best
 
-    def plan(self, D, margin, span):
+    def geometry(self):
+        """(D, margin, span, vspan): the runtime, the margin at each end where no window is planned, and the length of
+        each of the K stretches the fit windows are planned in and of the V the held-out ones are."""
+        D = self.index.duration()
+        margin = MARGIN_SHARE * D
+        return D, margin, (D - 2 * margin) / self.K, (D - 2 * margin) / self.V
+
+    def plan(self):
         """Where the fit and the held-out check windows go: one in each of K (and V) equal stretches of the
         runtime, moved within its stretch to where the subtitle has lines when its usual place has almost none (a quiet
         film: Upstream Color heard 10 lines in evenly spread windows); check windows never overlap fit windows. Planned once
@@ -678,10 +702,9 @@ class AudioFit:
             plans = {}
         key = (self.K, self.V, round(self.W, 1))
         if key not in plans:
-            W = self.W
+            W, (_, margin, span, vspan) = self.W, self.geometry()
             fit = [self.place(max(0.0, margin + (i + 0.5) * span - W / 2), margin + i * span, margin + (i + 1) * span)
                    for i in range(self.K)]
-            vspan = (D - 2 * margin) / self.V
             check = [self.place(max(0.0, margin + (i + 0.5) * vspan + span / 4 - W / 2), margin + i * vspan,
                                 margin + (i + 1) * vspan, avoid=fit) for i in range(self.V)]
             plans[key] = {"fit": fit, "check": check, "window_s": self.W}
@@ -690,10 +713,8 @@ class AudioFit:
     def _run(self, fit_starts=None, check_starts=None):
         K, W, V = self.K, self.W, self.V
         allines, lines = self.allines, self.lines
-        D = self.index.duration()
-        margin = 0.03 * D
-        span = (D - 2 * margin) / K
-        plan = self.plan(D, margin, span)
+        D, margin, span, vspan = self.geometry()
+        plan = self.plan()
         if fit_starts is not None:      # a close call judged again with more windows
             plan = {"fit": list(fit_starts), "check": list(check_starts), "window_s": W}
             K = len(plan["fit"])
@@ -802,7 +823,6 @@ class AudioFit:
         new = [dict(l, s=l["s"] * c + seg_of[k] + fine[seg_of[k]], e=l["e"] * c + seg_of[k] + fine[seg_of[k]],
                     drop=k in dropped) for k, l in enumerate(allines)]
         fit_count = len(windows)
-        vspan = (D - 2 * margin) / V
         verify = [self.read_window(start, W) for start in checks]
         dial_new = [l["s"] for l in new if l["kind"] == "dialogue" and not l["drop"]]
 
@@ -820,7 +840,7 @@ class AudioFit:
             taken = [w["start"] for w in windows + verify]
             at = self.place(max(0.0, margin + (i + 0.5) * vspan + 3 * span / 4 - W / 2), margin + i * vspan,
                             margin + (i + 1) * vspan, avoid=taken)
-            if any(abs(at - a) < W - 1e-6 for a in taken):
+            if not self.clear(at, taken):
                 continue
             w = self.read_if_room(at)
             if w is None:
@@ -837,7 +857,7 @@ class AudioFit:
         shift = None if applied is None else applied + fine[applied]
         agree = all(l is None or abs(l - o_glob) <= SAME_OFFSET_S for l in labels) \
             and sum(l is not None for l in labels) >= 0.6 * K
-        small = c == 1.0 and shift is not None and abs(shift) <= 0.10  # below the bar's resolution: never publish
+        small = c == 1.0 and shift is not None and abs(shift) <= SMALL_SHIFT_S   # never published
         moved = statistics.median(abs(n["s"] - l["s"]) for n, l in zip(new, allines)
                                   if l["kind"] == "dialogue" and not n["drop"]) if dial_new else 0.0
         why = None

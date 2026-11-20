@@ -114,8 +114,7 @@ def audio_facts(index):
     """What an audio sync of a file could read depends on: its average byte rate and how many audio tracks
     the fit may try; None when the index doesn't tell."""
     try:
-        duration = index.duration()
-        rate = (getattr(index, "size", 0) or 0) / duration if duration else 0
+        rate = audiofit.byte_rate(index)
     except Exception:   # an index without a duration: the whole audio limit is assumed
         return None
     if not rate:
