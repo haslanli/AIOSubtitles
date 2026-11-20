@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Writes the settings section of README.md and docs/answers.example from subsync/subsync/explain.py, where every
 explanation lives: python3 -I installer/docs.py. The installer's tests fail while either file is out of date."""
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -10,13 +11,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import installer  # noqa: E402,F401  (its __init__ puts subsync's folder on the import path)
 from installer import hosting, limits  # noqa: E402
 from subsync import explain  # noqa: E402
+from subsync.version import PROJECT  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 START = '<!-- settings: written by python3 -I installer/docs.py from subsync/subsync/explain.py -->'
 END = '<!-- end of settings -->'
 WIDTH = 116
 
-# The keys of an answers file, in four parts, as ./setup asks them (a test checks them against the engine's questions).
+# The keys of an answers file, in four parts (a test checks they are every key setup reads from one), each part's
+# mostly in the order ./setup asks them: your own install's limits (AUDIO_BUDGET and the two below), which setup asks
+# after PUBLIC_ADDRESS, follow the audio and Usenet questions they belong to.
 # Your own install: every question but the route's, the public instance's, removing's and restoring's, with the limits
 # it asks under their setting names after the audio limit's question.
 YOURSELF_LIMITS = limits.names(limits.personal(audio=False, usenet=True))
@@ -36,7 +40,7 @@ PARTS = ('Install it for yourself (ROUTE=yourself)',
          'instance only REMOVE.',
          'Restoring a saved copy (./setup --restore FILE --answers FILE). AIOS_CONFIG_PASSWORD above is asked here '
          'too.')
-EXAMPLE_ON_GITHUB = 'https://github.com/haslanli/AIOSubtitles/blob/main/docs/answers.example'   # the image has no docs/
+EXAMPLE_ON_GITHUB = f'{PROJECT}/blob/main/docs/answers.example'   # the image has no docs/
 # A comment line under a key's explanation in docs/answers.example, for what only an answers file needs; the question's
 # own text stays as setup shows it
 ANSWERS_NOTES = {'AUDIO': 'In an answers file: no, pick or open.'}
@@ -119,16 +123,30 @@ def answers_example():
     return '\n'.join(out) + '\n'
 
 
+def write_whole(path, text):
+    """`path` in UTF-8 (whatever the locale's encoding), written whole or not at all: a temporary file beside it,
+    renamed over it once written, so a failure leaves the last one as it was."""
+    tmp = path.with_name(path.name + '.tmp')
+    try:
+        tmp.write_text(text, encoding='utf-8')
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def write():
+    """README.md's settings section and docs/answers.example, both built before either file is written."""
     readme = REPO / 'README.md'
-    text = readme.read_text()
+    text = readme.read_text(encoding='utf-8')
     if START not in text:
         raise SystemExit(f'README.md has no line "{START}": put it where the settings section goes.')
     before, rest = text.split(START, 1)
     if END not in rest:
         raise SystemExit(f'README.md has no line "{END}" after "{START}": put it where the settings section ends.')
-    readme.write_text(before + readme_section() + rest.split(END, 1)[1])
-    (REPO / 'docs' / 'answers.example').write_text(answers_example())
+    files = {readme: before + readme_section() + rest.split(END, 1)[1],
+             REPO / 'docs' / 'answers.example': answers_example()}
+    for path, content in files.items():
+        write_whole(path, content)
 
 
 if __name__ == '__main__':

@@ -15,6 +15,7 @@ from typing import NamedTuple
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .realdebrid import REASON
+from .version import PROJECT
 
 
 def plural(n, one, many=None):
@@ -241,7 +242,8 @@ AUDIO_BUDGET_TEXT = (
     "high-bitrate files keep their originals. Smaller files are read only as far as needed. A change makes "
     "subsync judge again the files it kept as originals.")
 
-# answers-file key -> (example value for docs/answers.example, explanation), in the order ./setup asks them
+# answers-file key -> (example value for docs/answers.example, explanation), in the order ./setup asks them, except
+# AUDIO_BUDGET: setup asks it with the limits, after PUBLIC_ADDRESS; here it follows the audio and Usenet questions
 QUESTIONS = {
     "ROUTE": (
         "yourself",
@@ -1055,7 +1057,7 @@ PUBLIC_PASSWORD_TEXT = (
     "password\" below. You'll be asked again only if you refresh.")
 
 # The project's own Questions link, on ./setup's pages (a public instance's pages show SUBSYNC_CONTACT's)
-CONTACT = "https://github.com/haslanli/AIOSubtitles/issues"
+CONTACT = f"{PROJECT}/issues"
 
 # one explanation for each field and button of the public pages; "{every}" (how often the check runs) and "{backups}"
 # (how long the host's backups keep what is deleted) take the instance's words (field_help)

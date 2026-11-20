@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 
 def section(title, joined=True):
     """A '## title' section of the README; `joined`: its words joined by single spaces."""
-    text = (REPO / 'README.md').read_text().split(f'\n## {title}\n', 1)[1].split('\n## ', 1)[0]
+    text = (REPO / 'README.md').read_text(encoding='utf-8').split(f'\n## {title}\n', 1)[1].split('\n## ', 1)[0]
     return ' '.join(text.split()) if joined else text
 
 

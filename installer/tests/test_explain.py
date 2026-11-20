@@ -1,14 +1,17 @@
 """Every ./setup question has its one explanation, and the README's settings section and docs/answers.example are the
 texts of subsync/subsync/explain.py, written by installer/docs.py."""
 import ast
+import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from installer import docs, hosting, limits, plan, screens, ui, web
-from subsync import explain
+from subsync import explain, version
 
 REPO = Path(__file__).resolve().parent.parent.parent
 ASKS = {'text', 'yesno', 'choose'}
@@ -145,7 +148,7 @@ class QuestionTexts(unittest.TestCase):
 
 class Documents(unittest.TestCase):
     def test_the_readme_settings_section_is_current(self):
-        readme = (REPO / 'README.md').read_text()
+        readme = (REPO / 'README.md').read_text(encoding='utf-8')
         self.assertIn(docs.readme_section(), readme, 'run: python3 -I installer/docs.py')
         self.assertEqual(readme.count(docs.START), 1)
 
@@ -163,7 +166,7 @@ class Documents(unittest.TestCase):
         self.assertIn('Change your answers', screens.INSTALLER_WORDS)       # the page after setup's button
 
     def test_the_answers_example_is_current(self):
-        self.assertEqual((REPO / 'docs' / 'answers.example').read_text(), docs.answers_example(),
+        self.assertEqual((REPO / 'docs' / 'answers.example').read_text(encoding='utf-8'), docs.answers_example(),
                          'run: python3 -I installer/docs.py')
 
     def test_the_answers_examples_header_says_where_the_file_goes(self):
@@ -310,8 +313,61 @@ class Documents(unittest.TestCase):
                         self.assertFalse((folder / 'docs' / 'answers.example').exists())
                 readme.write_text(f'# Title\n{docs.START}\nold\n{docs.END}\n## After\n')
                 docs.write()
-            self.assertEqual(readme.read_text(), f'# Title\n{docs.readme_section()}\n## After\n')
-            self.assertEqual((folder / 'docs' / 'answers.example').read_text(), docs.answers_example())
+            self.assertEqual(readme.read_text(encoding='utf-8'), f'# Title\n{docs.readme_section()}\n## After\n')
+            self.assertEqual((folder / 'docs' / 'answers.example').read_text(encoding='utf-8'), docs.answers_example())
+            self.assertEqual(sorted(p.name for p in folder.rglob('*')), ['README.md', 'answers.example', 'docs'])
+
+    def test_both_files_are_utf8_whatever_the_locale(self):
+        # They were read and written in the locale's encoding, README.md in place: under a locale that can't
+        # write its "…" README.md was left empty, and docs/answers.example wasn't written
+        self.assertFalse(docs.readme_section().isascii())
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / 'docs').mkdir()
+            (folder / 'README.md').write_bytes(f'# Title\n{docs.START}\nold\n{docs.END}\n## After\n'.encode())
+            script = ('import locale, sys\nfrom pathlib import Path\nfrom unittest import mock\n'
+                      'from installer import docs\nprint(locale.getencoding())\n'
+                      'with mock.patch.object(docs, "REPO", Path(sys.argv[1])):\n    docs.write()\n')
+            env = dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), LC_ALL='C', PYTHONCOERCECLOCALE='0',
+                       PYTHONDONTWRITEBYTECODE='1')
+            done = subprocess.run([sys.executable, '-X', 'utf8=0', '-c', script, tmp], cwd=REPO, env=env, timeout=60,
+                                  capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            if done.stdout.strip().lower().replace('-', '') in ('utf8', ''):
+                self.skipTest(f'no locale here writes other than UTF-8 ({done.stdout.strip()} {done.stderr[-200:]})')
+            self.assertEqual(done.returncode, 0, done.stderr[-600:])
+            self.assertEqual((folder / 'README.md').read_bytes().decode('utf-8'),
+                             f'# Title\n{docs.readme_section()}\n## After\n')
+            self.assertEqual((folder / 'docs' / 'answers.example').read_bytes().decode('utf-8'), docs.answers_example())
+
+    def test_a_failure_leaves_both_files_as_they_were(self):
+        # README.md was rewritten before docs/answers.example's text was built
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / 'docs').mkdir()
+            readme, example = folder / 'README.md', folder / 'docs' / 'answers.example'
+            readme.write_text(f'# Title\n{docs.START}\nold\n{docs.END}\n## After\n', encoding='utf-8')
+            example.write_text('KEY=old\n', encoding='utf-8')
+            with mock.patch.object(docs, 'REPO', folder), \
+                    mock.patch.object(docs, 'answers_example', side_effect=RuntimeError('stopped')), \
+                    self.assertRaises(RuntimeError):
+                docs.write()
+            self.assertEqual(readme.read_text(encoding='utf-8'), f'# Title\n{docs.START}\nold\n{docs.END}\n## After\n')
+            self.assertEqual(example.read_text(encoding='utf-8'), 'KEY=old\n')
+            with mock.patch.object(docs, 'REPO', folder), \
+                    mock.patch.object(docs.os, 'replace', side_effect=OSError('disk full')), self.assertRaises(OSError):
+                docs.write()
+            self.assertEqual(readme.read_text(encoding='utf-8'), f'# Title\n{docs.START}\nold\n{docs.END}\n## After\n')
+            self.assertEqual(sorted(p.name for p in folder.rglob('*')), ['README.md', 'answers.example', 'docs'])
+
+    def test_the_projects_address_is_written_once(self):
+        # README's link to the example and the setup pages' Questions link wrote the repository's address
+        # again; a move of the repository changed version.PROJECT only
+        self.assertEqual(docs.EXAMPLE_ON_GITHUB, f'{version.PROJECT}/blob/main/docs/answers.example')
+        self.assertEqual(explain.CONTACT, f'{version.PROJECT}/issues')
+        modules = sorted((REPO / 'installer').glob('*.py')) + sorted((REPO / 'subsync' / 'subsync').glob('*.py'))
+        written = [path.relative_to(REPO).as_posix() for path in modules
+                   if 'github.com/haslanli/AIOSubtitles' in path.read_text(encoding='utf-8')]
+        self.assertEqual(written, ['subsync/subsync/version.py'])
 
     def test_comments_keep_the_whole_text(self):
         text = explain.SETTINGS['SUBSYNC_DAILY_BUDGET_GB'][1]
