@@ -24,10 +24,20 @@ PIN = re.compile(r'^\s*(?:-\s+)?uses:\s+([\w.-]+/[\w.-]+)@([0-9a-f]{40}) # v\d+\
 LOCAL = re.compile(r'^\s*(?:-\s+)?uses:\s+\./\.github/workflows/[\w-]+\.yml$')
 # a YAML block scalar's header: | or >, its indentation and chomping indicators in either order, and a comment
 BLOCK = re.compile(r'^[|>]([1-9]?[+-]?|[+-]?[1-9]?)\s*(#.*)?$')
+# a pipe (| or |&) into a quiet grep (StartCheckGreps): grep, egrep or fgrep, run with variables set or not, with q in
+# a group of short options or --quiet or --silent anywhere before the next pipe
+QUIET_GREP = re.compile(r'\|&?\s*(\w+=\S*\s+)*[ef]?grep\b[^|]*\s(-\w*q\w*|--quiet|--silent)\b')
 
 
 def read(name):
     return (FLOWS / name).read_text()
+
+
+def quiet_grep_pipes(script):
+    """The commands of a shell script that pipe into a quiet grep: its lines without the comments, a line continued
+    with a backslash read as one."""
+    code = '\n'.join(line for line in script.splitlines() if not line.lstrip().startswith('#'))
+    return [line for line in code.replace('\\\n', ' ').splitlines() if QUIET_GREP.search(line)]
 
 
 def workflows(folder):
@@ -312,9 +322,23 @@ class StartCheckGreps(unittest.TestCase):
     def test_no_check_pipes_into_a_quiet_grep(self):
         for name in ('image.yml', 'image-build.yml'):
             for script in run_scripts(read(name)):
-                for line in script.splitlines():
-                    if not line.lstrip().startswith('#'):
-                        self.assertNotRegex(line, r'\|\s*grep\s+(-\w+\s+)*-\w*q', name)
+                self.assertEqual(quiet_grep_pipes(script), [], name)
+
+    def test_every_spelling_of_a_pipe_into_a_quiet_grep_is_found(self):
+        # The rule found `grep -q` and `grep -Fq` only: not the long options, egrep or fgrep, a -q after the
+        # pattern, a grep run with a variable set, |&, or a pipe continued on the next line
+        for script in ('x | grep -q y', 'x | grep -Fq y', 'x | grep -s -q y', 'x |grep -qF y', 'x | grep -qiE y',
+                       'x | grep --quiet y', 'x | grep --silent y', 'x | egrep -q y', 'x | fgrep -q y',
+                       'x | grep -e y -q', 'x | grep -qF -e "$secret"', 'x | LC_ALL=C grep -q y', 'x |& grep -q y',
+                       'x | \\\n  grep -q y', 'x \\\n  | grep -q y', '# a note\nx | grep -q y'):
+            with self.subTest(script=script):
+                self.assertEqual(len(quiet_grep_pipes(script)), 1)
+        # what the workflows write: a quiet grep reading a captured text, a grep whose output is used, a comment
+        for script in ('grep -qF -e "$secret" <<< "$logs"', 'grep -qi "^x" <<< "$headers" \\\n  || fail "No header"',
+                       "git tag -l 'v*' | grep -E '^v[0-9]+$' | head -n 1 || true", 'docker logs c 2>&1 | tail -n 30',
+                       'x | grep -c y', 'x | grep -E y > /dev/null', '# in `cmd | grep -q` under pipefail'):
+            with self.subTest(script=script):
+                self.assertEqual(quiet_grep_pipes(script), [])
 
 
 class ChecksJobPython(unittest.TestCase):

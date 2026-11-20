@@ -82,6 +82,28 @@ class Place(unittest.TestCase):
         self.assertEqual(p.image, 'aiosubtitles:local-1.4.0@' + DIGEST)      # its own tag, pinned to this build
         self.assertNotIn('--pull', where.setup_script(p))
 
+    def test_a_container_started_by_its_image_id_names_the_release_for_the_next_run(self):
+        # `docker run sha256:... setup` gives that ID as the container's image: the folder's ./setup would run
+        # it for good, never pulling the next release
+        p = where.place_from(inspect(image=PULLED['Id']), PULLED, '1.4.0', 'image', (0, 0))
+        self.assertEqual(p.run_as, 'ghcr.io/haslanli/aiosubtitles:1.4.0')
+        self.assertEqual(p.image, 'ghcr.io/haslanli/aiosubtitles:1.4.0@' + DIGEST)
+        self.assertFalse(p.local)
+        self.assertIn('--pull always', where.setup_script(p))
+        self.assertNotIn(PULLED['Id'], where.setup_script(p))
+
+    def test_an_image_from_a_registry_named_by_a_port_or_localhost_is_pulled(self):
+        # A registry's name has a dot, a port or is localhost; only a name without one is a build of this
+        # machine's, never pulled
+        for repo in ('localhost:5000/aiosubtitles', 'localhost/aiosubtitles', 'registry:5000/aiosubtitles',
+                     'registry.example:5000/aio/aiosubtitles'):
+            with self.subTest(repo=repo):
+                pulled = dict(PULLED, RepoDigests=[f'{repo}@{DIGEST}'])
+                p = where.place_from(inspect(image=f'{repo}:1.4.0'), pulled, '1.4.0', 'image', (0, 0))
+                self.assertFalse(p.local)
+                self.assertEqual(p.image, f'{repo}:1.4.0@{DIGEST}')
+                self.assertIn('--pull always', where.setup_script(p))
+
     def test_no_port_for_the_page_is_none(self):
         p = where.place_from(inspect(ports={}), PULLED, '1.4.0', 'image', (0, 0))
         self.assertIsNone(p.page_port)
@@ -150,6 +172,46 @@ class Discover(unittest.TestCase):
                                          'AIOSUBTITLES_SETUP_ID': '4242-17'})
         self.assertEqual((p.route, p.network, p.container, p.host_folder),
                          ('source', 'host', full, '/srv/AIOSubtitles'))
+
+    def discover(self, container, route='image'):
+        """discover() on `route`, Docker answering `container` (code, out, err) for setup's own container and PULLED
+        for its image, in a folder of its own; the commands it ran are in self.calls."""
+        self.calls = []
+
+        def run(cmd, timeout=60, stdin=None):
+            self.calls.append(cmd)
+            if cmd[:2] == ['docker', 'inspect']:
+                return container
+            if cmd[:3] == ['docker', 'image', 'inspect']:
+                return 0, json.dumps([PULLED]), ''
+            return 1, '', 'unexpected'
+        environ = {'HOSTNAME': 'c0ffeec0ffee', 'AIOSUBTITLES_ROUTE': route}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(dockerenv, 'run', run), \
+                mock.patch.object(where, 'FOLDER', Path(tmp)):
+            (Path(tmp) / 'state').mkdir()
+            return where.discover('1.4.0', environ)
+
+    def test_a_container_without_the_folder_stops_before_its_image_is_read(self):
+        # test_cli stands in for discover, so its refusals never ran
+        sock = {'Type': 'bind', 'Source': '/var/run/docker.sock', 'Destination': '/var/run/docker.sock'}
+        folder = {'Type': 'bind', 'Source': '/srv/AIOSubtitles', 'Destination': '/folder'}
+        for route, mounts in (('image', [sock]), ('source', [sock, folder])):      # the source route mounts state/
+            with self.subTest(route=route):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.discover((0, json.dumps([inspect(mounts=mounts)]), ''), route)
+                self.assertEqual(str(raised.exception), where.NO_FOLDER)
+                self.assertEqual(self.calls, [['docker', 'inspect', '--type', 'container', 'c0ffeec0ffee']])
+
+    def test_a_failed_inspect_stops_with_dockers_last_line(self):
+        for answer, said in (((1, '', 'Error: one\nError: No such container: c0ffeec0ffee\n'),
+                              'Error: No such container: c0ffeec0ffee'),
+                             ((1, 'Cannot connect to the Docker daemon\n', ''), 'Cannot connect to the Docker daemon'),
+                             ((1, '', ''), 'docker inspect failed')):
+            with self.subTest(answer=answer):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.discover(answer)
+                self.assertEqual(str(raised.exception), said)
+                self.assertEqual(len(self.calls), 1)
 
 
 class Scripts(unittest.TestCase):
