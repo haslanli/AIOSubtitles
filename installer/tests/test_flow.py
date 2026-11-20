@@ -5,6 +5,7 @@ import io
 import itertools
 import json
 import os
+import re
 import socket
 import stat
 import tempfile
@@ -16,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, hosting, plan, ui, where, wizard
+from installer import dockerenv, engine, hosting, plan, tests, ui, where, wizard
 from subsync import aiosconfig, explain, origlang, realdebrid
 
 UUID = '1a2b3c4d-1234-4abc-8def-0123456789ab'
@@ -1242,6 +1243,35 @@ class Fixtures(unittest.TestCase):
         aios, folder = made[0]
         self.assertEqual(aios.server.socket.fileno(), -1)                     # the stand-in is closed
         self.assertFalse(folder.exists())
+
+
+class Package(unittest.TestCase):
+    """installer/tests/__init__.py: what every test runs with, whatever terminal and environment the tests start in."""
+
+    def test_the_variables_setup_reads_are_never_the_developers(self):
+        # An exported AIOSUBTITLES_IN_IMAGE had every ./setup the tests run take the image's route
+        read = set()
+        for path in Path(engine.__file__).parent.glob('*.py'):
+            read |= set(re.findall(r'AIOSUBTITLES_[A-Z_]+', path.read_text(encoding='utf-8')))
+        self.assertEqual(read, {*tests.SETUP_VARIABLES, 'AIOSUBTITLES_STATE'})
+        self.assertEqual([name for name in tests.SETUP_VARIABLES if name in os.environ], [])
+        self.assertEqual(os.environ['AIOSUBTITLES_STATE'], tests.STATE)
+
+    def test_nothing_printed_has_colour(self):
+        # In a terminal the words tests look for had colour codes in them
+        self.assertFalse(ui.COLOR)
+
+    def test_a_question_no_test_answers_ends_the_run(self):
+        # In a terminal it waited for the keyboard; it ends as setup's own stop, a password's too, whatever
+        # there is to read
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        for secret in (False, True):
+            with self.subTest(secret=secret), mock.patch('sys.stdin', Terminal('typed\n')):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ui.Stop) as caught:
+                    ui.Asker().text('AIOS_URL', 'Address', secret=secret)
+                self.assertEqual(caught.exception.message, 'No more input.')
 
 
 if __name__ == '__main__':
