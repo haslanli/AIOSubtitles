@@ -21,7 +21,7 @@ from unittest import mock
 
 from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_track, RangeServer,
                      realistic, srt_of, start_server, stop_server, TempDir, translated, watch_the_log)
-from subsync import imageref, mkv, pipeline, realdebrid, selftest, sources
+from subsync import imageref, mkv, mp4, pipeline, realdebrid, selftest, sources
 from subsync.addon import App
 from subsync.mkv import MkvIndex, NotMatroska, oshash, pipe_until
 from subsync.mp4 import Mp4Index, open_index
@@ -1730,7 +1730,11 @@ class FirstReadRetryTest(unittest.TestCase):
 
     def test_the_link_is_asked_at_most_one_plus_max_re_resolve_times_in_all(self):
         # a file whose index takes four reads (its head, its Cues' header and body, the hash's last 64 KiB): tiny.mkv
-        # with 300 KiB after it, as its Cues in the last 64 KiB would come in one read with that tail
+        # with 300 KiB after it, as its Cues in the last 64 KiB would come in one read with that tail, and a
+        # head read of 128 KiB, as Cues the head holds are taken from it
+        patch = mock.patch.object(mp4, "HEAD_BYTES", 128 * 1024)
+        patch.start()
+        self.addCleanup(patch.stop)
         with open(os.path.join(self.dir, "tiny.mkv"), "ab") as f:
             f.write(bytes(300 * 1024))
         self.job = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": self.size + 300 * 1024})

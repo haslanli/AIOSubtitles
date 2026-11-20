@@ -19,7 +19,7 @@ from array import array
 from unittest import mock
 
 from helpers import el, fixture, FIXTURES, have, matroska, Memory, Opener, text_track  # noqa: E402
-from subsync import mkv  # noqa: E402
+from subsync import mkv, mp4  # noqa: E402
 from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash  # noqa: E402
 from subsync.mp4 import Mp4Index, open_index  # noqa: E402
 from subsync.reader import CapReached, IndexTooLarge, RangeReader, ReadFailed  # noqa: E402
@@ -298,6 +298,8 @@ class TailReadTest(unittest.TestCase):
     """Cues (or a moov) at the end of the file are read with the file's last 64 KiB, which the hash
     then takes as it is: one read for both where there were three. The hash is the same."""
 
+    SMALL_HEAD = 128 * 1024
+
     def hashed(self, data):
         r = Memory(data)
         index = open_index(r)
@@ -305,13 +307,22 @@ class TailReadTest(unittest.TestCase):
         self.assertEqual(index.read_hash(), oshash(len(data), data[:HASH_CHUNK], data[-HASH_CHUNK:]))
         return index, r.reads, index_reads
 
+    def small_head(self):
+        """A head read of SMALL_HEAD bytes, so that tiny.mkv's Cues (at 185,378 of its 188,024 bytes) lie past the head
+        as a real file's do: Cues the head holds are taken from it."""
+        patch = mock.patch.object(mp4, "HEAD_BYTES", self.SMALL_HEAD)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_cues_in_the_last_64_kib(self):
+        self.small_head()
         data = fixture("tiny.mkv")
         index, reads, _ = self.hashed(data)
-        self.assertEqual(reads, [(0, HEAD_BYTES), (len(data) - HASH_CHUNK, HASH_CHUNK)])
+        self.assertEqual(reads, [(0, self.SMALL_HEAD), (len(data) - HASH_CHUNK, HASH_CHUNK)])
         self.assertEqual(len(index.text_tracks()[0]["cues"]), len(open_index(Memory(data)).text_tracks()[0]["cues"]))
 
     def test_cues_that_end_in_the_last_64_kib(self):
+        self.small_head()
         data = fixture("tiny.mkv")
         cues_at = open_index(Memory(data)).cues_at
         padded = data + bytes(cues_at + HASH_CHUNK - len(data) + 100)   # they start 100 bytes before the last 64 KiB
@@ -321,10 +332,56 @@ class TailReadTest(unittest.TestCase):
         self.assertEqual(index.text_tracks(), open_index(Memory(data)).text_tracks())
 
     def test_cues_far_from_the_end_are_read_as_before(self):
+        self.small_head()
         data = fixture("tiny.mkv") + bytes(300 * 1024)
         index, reads, index_reads = self.hashed(data)
         self.assertEqual(index_reads, 3)
         self.assertEqual(reads[-1], (len(data) - HASH_CHUNK, HASH_CHUNK))
+
+    def test_cues_the_head_holds_are_taken_from_it(self):
+        """Cues inside the head read (written at the front: mkclean, ffmpeg's reserve_index_space) are not read
+        again, where their header and their body were two more requests."""
+        data = fixture("tiny.mkv")
+        padded = data + bytes(300 * 1024)                            # the Cues in the head, the file past it
+        index, reads, index_reads = self.hashed(padded)
+        self.assertEqual(reads, [(0, HEAD_BYTES), (len(padded) - HASH_CHUNK, HASH_CHUNK)])
+        self.assertEqual(index_reads, 1)
+        self.small_head()
+        self.assertEqual(index.text_tracks(), open_index(Memory(data)).text_tracks())   # what reading them gives
+        self.assertEqual(index.cue_points, open_index(Memory(data)).cue_points)
+
+    def seeked_tracks(self, after, private=b""):
+        """A file whose Tracks lie past the head, found through the SeekHead, with `after` bytes after them; its Tracks'
+        place and the reads that open it."""
+        track = el("AE", el("D7", b"\x01") + el("83", b"\x11") + el("86", b"S_TEXT/ASS") + el("63A2", private))
+        data = matroska(tracks=el("1654AE6B", track), pad_to=HEAD_BYTES + 1000, seek_tracks=True) + bytes(after)
+        r = Memory(data)
+        index = open_index(r)
+        self.assertEqual(index.tracks[0]["private"], private)
+        return data, HEAD_BYTES + 1000, r.reads
+
+    def test_tracks_found_through_the_seekhead_take_one_read(self):
+        """A 16-byte read of their header was followed by one of the whole of them from the same place."""
+        data, at, reads = self.seeked_tracks(after=200_000)
+        self.assertEqual(reads, [(0, HEAD_BYTES), (at, mkv.ELEMENT_READ)])
+        data, at, reads = self.seeked_tracks(after=200_000, private=b"[Script Info]\n" + b";" * 100_000)
+        size = 12 + len(el("AE", el("D7", b"\x01") + el("83", b"\x11") + el("86", b"S_TEXT/ASS")
+                               + el("63A2", b"[Script Info]\n" + b";" * 100_000)))
+        self.assertEqual(reads, [(0, HEAD_BYTES), (at, mkv.ELEMENT_READ),
+                                 (at + mkv.ELEMENT_READ, size - mkv.ELEMENT_READ)])   # the rest, not all again
+
+    def test_tracks_begun_in_the_head_are_read_from_its_end(self):
+        data = matroska(pad_to=HEAD_BYTES - 6, seek_tracks=True) + bytes(200_000)   # Tracks' id in the head, size cut
+        r = Memory(data)
+        self.assertEqual([t["codec"] for t in open_index(r).text_tracks()], ["S_TEXT/UTF8"])
+        self.assertEqual(r.reads, [(0, HEAD_BYTES), (HEAD_BYTES, mkv.ELEMENT_READ - 6)])   # not the 6 bytes again
+
+    def test_tracks_at_the_end_are_read_with_the_hashs_last_64_kib(self):
+        data, at, reads = self.seeked_tracks(after=0)
+        self.assertEqual(reads, [(0, HEAD_BYTES), (len(data) - HASH_CHUNK, HASH_CHUNK)])
+        index = open_index(Memory(data))
+        self.assertEqual(index.read_hash(), oshash(len(data), data[:HASH_CHUNK], data[-HASH_CHUNK:]))
+        self.assertEqual(len(index.r.reads), 2)                      # the hash took what the Tracks' read holds
 
     def test_a_movie_box_at_the_end(self):
         data = fixture("tiny.mp4")                                    # ftyp, free, mdat, moov at 175,630

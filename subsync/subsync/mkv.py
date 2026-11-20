@@ -58,6 +58,7 @@ def add_audio_bytes(index, n):
 
 HEAD_BYTES = 256 * 1024
 HASH_CHUNK = 64 * 1024
+ELEMENT_READ = 64 * 1024           # the first read of Info or Tracks found through the SeekHead (a few KB each)
 MAX_ELEMENT = 8 * 1024 * 1024      # Info/Tracks larger than this are not read
 MAX_CUES = 32 * 1024 * 1024        # 7.27 MB on a file with 75 PGS tracks; larger ones are never read (IndexTooLarge)
 # cue track positions kept of one file (the 7.27 MB above hold a few hundred thousand); each is a few Python objects
@@ -448,6 +449,7 @@ class MkvIndex:
         self.first_cluster = None
         self.ebml = self.info = self.tracks_raw = b""
         self.first64 = self.last64 = b""   # the file's first and last 64 KiB, when a read holds them (index_hash)
+        self._head = b""                   # what the head read holds, from read_head to read_cues (_bytes)
         self.line_reads = {}               # subtitle track number -> its LineReads, one for the job (_line_reads)
 
     @property
@@ -494,12 +496,33 @@ class MkvIndex:
                 self._within_file(p + sz)
                 head = head + self.r.get(len(head), p + sz - len(head))   # only the part not held yet
             self._element(head, eid, raw, p, sz)
+        self._head = head
         for eid in (INFO, TRACKS):  # not in the first read: follow the SeekHead
             if eid in self.positions and not (self.info if eid == INFO else self.tracks_raw):
                 self._fetch_element(self.positions[eid], eid)
         if not self.tracks:
             raise NotMatroska("no Tracks")
         return self
+
+    def _bytes(self, at, n):
+        """The file's bytes [at, at + n) (fewer at its end), read only when no read holds them already: the head, until
+        read_cues, or the last 64 KiB. Bytes that reach the last 64 KiB are read on to the file's end, which the hash
+        needs too (kept as `last64`): one request for both."""
+        end = min(at + n, self.size)
+        if at < len(self._head):   # the head holds them, or their start: only the rest is read
+            held = self._head[at:end]
+            return held if at + len(held) == end else held + self._bytes(len(self._head), end - len(self._head))
+        tail_at = self.size - min(HASH_CHUNK, self.size)
+        held = len(self.last64) == self.size - tail_at
+        if held and at >= tail_at:
+            return self.last64[at - tail_at:end - tail_at]
+        if not held and end >= tail_at:
+            start = min(at, tail_at)
+            rest = self.r.get(start, self.size - start)
+            if len(rest) == self.size - start:
+                self.last64 = rest[tail_at - start:]
+            return rest[at - start:end - start]
+        return self.r.get(at, end - at)
 
     def _within_file(self, end):
         """An element the index reads that ends past the file's end (a file cut short, or made up) is damage,
@@ -508,17 +531,20 @@ class MkvIndex:
             raise NotMatroska("an element runs past the file's end")
 
     def _fetch_element(self, at, want):
-        """Info or Tracks (`want`) where the SeekHead puts them; a place at or past the file's end is not followed."""
+        """Info or Tracks (`want`) where the SeekHead puts them, in one read of ELEMENT_READ bytes and, for a longer
+        one, a read of its rest (its header was read, then all of it again); one in the file's last 64 KiB
+        comes with them (_bytes). A place at or past the file's end is not followed."""
         if at >= self.size:
             return
-        hdr = self.r.get(at, 16)
-        eid, n = vint(hdr, 0, strip=False)
-        sz, m = vint(hdr, n)
+        buf = self._bytes(at, ELEMENT_READ)
+        eid, n = vint(buf, 0, strip=False)
+        sz, m = vint(buf, n)
         if eid != want or sz > MAX_ELEMENT:
             return
         self._within_file(at + n + m + sz)
-        body = self.r.get(at, n + m + sz)
-        self._element(body, eid, 0, n + m, sz)
+        if n + m + sz > len(buf):
+            buf += self._bytes(at + len(buf), n + m + sz - len(buf))
+        self._element(buf, eid, 0, n + m, sz)
 
     def _element(self, buf, eid, raw, p, sz):
         if eid == SEEKHEAD:
@@ -589,41 +615,29 @@ class MkvIndex:
 
     def read_cues(self):
         """The seek index (Cues): each cue cluster's place and first cue time, and each subtitle track's cue times and
-        block places. Cues at the end of the file, where mkvmerge and ffmpeg write them, are read together with the
-        file's last 64 KiB, which the hash needs too (kept as `last64`): one or two requests instead of three."""
-        at = self.positions.get(CUES)
-        if not at or at >= self.size:   # none listed, or listed past the end of a file cut short: no Cues
-            return self
-        n_hash = min(HASH_CHUNK, self.size)
-        tail_at = self.size - n_hash
-        tail = tail_at <= at               # the Cues start in the file's last 64 KiB: one read for them and the hash
-        if tail:
-            self.last64 = self.r.get(tail_at, n_hash)
-            hdr = self.last64[at - tail_at:at - tail_at + 16]
-        else:
-            hdr = self.r.get(at, 16)
+        block places. Cues the head read holds (at the front: mkclean, ffmpeg's reserve_index_space) are taken from it;
+        Cues at the end of the file, where mkvmerge and ffmpeg write them, are read together with the file's last 64
+        KiB, which the hash needs too (_bytes): one or two requests instead of three. The head is let go here."""
         try:
-            eid, n = vint(hdr, 0, strip=False)
-            csize, m = vint(hdr, n)
-        except IndexError:                 # the header is cut off at the file's end: no Cues
+            at = self.positions.get(CUES)
+            if not at or at >= self.size:   # none listed, or listed past the end of a file cut short: no Cues
+                return self
+            hdr = self._bytes(at, 16)
+            try:
+                eid, n = vint(hdr, 0, strip=False)
+                csize, m = vint(hdr, n)
+            except IndexError:              # the header is cut off at the file's end: no Cues
+                return self
+            if eid != CUES:
+                return self
+            if csize > MAX_CUES:   # ends as an index over the job's cap does, whatever that cap
+                raise IndexTooLarge(MAX_CUES)
+            body = self._bytes(at + n + m, csize)
+            self.cues_at = at
+            self._cue_points(body)
             return self
-        if eid != CUES:
-            return self
-        if csize > MAX_CUES:   # ends as an index over the job's cap does, whatever that cap
-            raise IndexTooLarge(MAX_CUES)
-        body_at = at + n + m
-        if tail:
-            body = self.last64[body_at - tail_at:body_at - tail_at + csize]
-        elif body_at + csize >= tail_at:   # they end in the last 64 KiB: read on to the end, for the hash too
-            rest = self.r.get(body_at, self.size - body_at)
-            body = rest[:csize]
-            if len(rest) >= n_hash:
-                self.last64 = rest[len(rest) - n_hash:]
-        else:
-            body = self.r.get(body_at, csize)
-        self.cues_at = at
-        self._cue_points(body)
-        return self
+        finally:
+            self._head = b""
 
     def _cue_points(self, body):
         subtitle = {t["number"] for t in self.tracks if t.get("type") == TYPE_SUBTITLE and t.get("number")}
