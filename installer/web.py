@@ -40,6 +40,9 @@ MAX_BODY = 16 * 1024
 IDLE_S = 3600
 DONE_S = 60          # the page stays up this long after setup is done, so the browser has the last page whole
 FONT = re.compile(r'^/static/fonts/([A-Za-z0-9-]+\.(?:ttf|txt))$')
+# the stylesheet and script by their path: the address that carries their hash, their type and their text
+ASSETS = {'/static/app.css': (ui.CSS_URL, 'text/css; charset=utf-8', ui.APP_CSS.encode()),
+          '/static/app.js': (ui.JS_URL, 'text/javascript; charset=utf-8', ui.APP_JS.encode())}
 
 STOPS = ('Setup is done; the page has stopped.',)
 PERSONAL_KEYS = ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY')          # the optional keys each route asks
@@ -199,7 +202,7 @@ class App:
             return 404, dict(PAGE_HEADERS, **{'Content-Type': 'text/plain'}), b''
         parsed = urllib.parse.urlsplit(path)
         if parsed.path.startswith('/static/'):
-            return self.static(parsed.path)
+            return self.static(path)
         prefix = f'/{self.key}/'
         if not parsed.path.startswith(prefix):
             return self.page(screens.ended(), 404)
@@ -224,13 +227,15 @@ class App:
         return 303, dict(PAGE_HEADERS, **{'Location': f'/{self.key}/{name}', 'Content-Length': '0'}), b''
 
     def static(self, path):
-        """The stylesheet and script (their addresses carry their hash) and the typefaces are cached as the public site
-        caches them: the install, check and update pages are shown again every screens.REFRESH_S seconds."""
-        if path == '/static/app.css':
-            return 200, dict(SCRIPT_HEADERS, **{'Content-Type': 'text/css; charset=utf-8'}), ui.APP_CSS.encode()
-        if path == '/static/app.js':
-            return 200, dict(SCRIPT_HEADERS, **{'Content-Type': 'text/javascript; charset=utf-8'}), ui.APP_JS.encode()
-        m = FONT.match(path)
+        """The stylesheet and script and the typefaces, cached as the public site caches them (public.py's _asset and
+        _font): the stylesheet and script for good at the address that carries their hash (ui.CSS_URL, ui.JS_URL),
+        which every page links to, and for an hour at any other: the install, check and update pages are shown again
+        every screens.REFRESH_S seconds. `path`: as asked, with its query."""
+        name = urllib.parse.urlsplit(path).path
+        if name in ASSETS:
+            url, kind, text = ASSETS[name]
+            return 200, dict(FONT_HEADERS if path == url else SCRIPT_HEADERS, **{'Content-Type': kind}), text
+        m = FONT.match(name)
         file = os.path.join(ui.STATIC, 'fonts', m.group(1)) if m else None    # the typefaces and their licence (image)
         if file and os.path.isfile(file):
             if file.endswith('.ttf'):
@@ -241,15 +246,14 @@ class App:
     # ------------------------------------------------------------------------------------- the routes
     def route(self, method, name, form):
         one = {k: v[-1] for k, v in form.items()}
-        installed = bool(engine.load_settings().get('installed'))
         if name == '':
+            prev = engine.load_settings()
             # where it is installed, the page after setup: its route is never switched in place (it is removed first)
-            if installed:
+            if prev.get('installed'):
                 return self.after_setup() if method == 'GET' else self.go('')
             if method == 'POST':
                 return self.start_session(one.get('ROUTE') if one.get('ROUTE') in ('yourself', 'host') else 'yourself')
-            prev = engine.load_settings().get('route') or 'yourself'
-            return self.page(screens.start(self.session.route if self.session else prev))
+            return self.page(screens.start(self.session.route if self.session else prev.get('route') or 'yourself'))
         if name in ('update', 'updating', 'rollback', 'remove', 'answers'):
             return getattr(self, f'after_{name}')(method, one)
         s = self.session

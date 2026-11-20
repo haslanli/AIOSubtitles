@@ -891,11 +891,16 @@ class Engine:
 
     def address_default(self):
         """subsync's address for your apps when there is no answer to keep or given (plan.public_default): it holds this
-        machine's LAN address only when AIOStreams' own address is local. That address is looked up only then: on the
-        bridge network the lookup starts a helper container (setup's own container has an address of its own there,
-        which phones can't reach)."""
+        machine's LAN address only when AIOStreams' own address is local. That address is looked up only then, and once
+        a run (self.lan): on the bridge network the lookup starts a helper container (setup's own container has an
+        address of its own there, which phones can't reach)."""
         local = plan.is_local_host(plan.host_of(self.s['aios_public']))
-        return plan.public_default(self.s['aios_public'], lan_address() if local else '')[1]
+        return plan.public_default(self.s['aios_public'], self.lan if local else '')[1]
+
+    @functools.cached_property
+    def lan(self):
+        """This machine's LAN address, looked up the first time it is needed (address_default)."""
+        return lan_address()
 
     def public_address(self):
         prev = self.prev.get('public_base')

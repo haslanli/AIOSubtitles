@@ -214,6 +214,17 @@ class Security(unittest.TestCase):
         for path in ('/static/app.css', '/static/app.js'):
             with self.subTest(path=path):
                 self.assertEqual(self.b.request('GET', path)[1]['Cache-Control'], 'public, max-age=3600')
+        # As the public site caches them (public.py's _asset): for good at the address that carries their
+        # hash, which every page links to; an hour at any other (none, or an old page's hash)
+        for path, kind, cache in ((ui.CSS_URL, 'text/css', 'public, max-age=31536000, immutable'),
+                                  (ui.JS_URL, 'text/javascript', 'public, max-age=31536000, immutable'),
+                                  ('/static/app.css?v=0000000000', 'text/css', 'public, max-age=3600'),
+                                  ('/static/app.js?v=0000000000', 'text/javascript', 'public, max-age=3600')):
+            with self.subTest(path=path):
+                status, headers, text = self.b.request('GET', path)
+                self.assertEqual((status, headers['Cache-Control']), (200, cache))
+                self.assertEqual(headers['Content-Type'], f'{kind}; charset=utf-8')
+                self.assertEqual(text, ui.APP_CSS if kind == 'text/css' else ui.APP_JS)
         host = {'Host': f'127.0.0.1:{self.app.port}'}
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / 'fonts').mkdir()
@@ -912,6 +923,15 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertNotIn('Permission denied', text)
         self.assertIn('PermissionError', terminal.getvalue())
 
+    def test_a_step_page_never_reads_the_settings_file(self):
+        # Every request read and parsed state/settings.json, each progress poll too, for the start page only
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        with mock.patch.object(engine, 'load_settings', side_effect=AssertionError('settings.json read')):
+            _, _, text = self.b.get('install')
+        self.assertIn('subsync is running (it restarts by itself after a reboot)', text)
+
     def test_an_aiostreams_error_outside_a_step_shows_its_words(self):
         # it ended the request with no answer
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
@@ -1440,6 +1460,30 @@ class OnBridge(BackgroundWork, FlowFixture):
                                                 'go': 'next'})
         self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/limits'))
         self.assertEqual(b.app.session.e.s['public_base'], 'http://192.168.1.7:8790')
+
+    def test_this_machines_network_address_is_looked_up_once(self):
+        # Each showing of Your choices without an address, and a Continue with its box emptied, started the
+        # helper container again to look it up
+        lookups = []
+
+        def probe(image, checks):
+            if not checks:
+                lookups.append(image)
+            return {'lan': '192.168.1.7', 'taken': []}
+        b = self.b
+        b.post('', {'ROUTE': 'yourself'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('aios', {'go': 'next'})
+        b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        with mock.patch.object(engine.dockerenv, 'probe', probe):
+            b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+            _, _, text = b.get('choices')                                       # a reload
+            self.assertRegex(text, r'<input[^>]*name="PUBLIC_ADDRESS"[^>]*value="http://192\.168\.1\.7:8790"')
+            status, headers, _ = b.post('choices', {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': '', 'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/limits'))
+        self.assertEqual(b.app.session.e.s['public_base'], 'http://192.168.1.7:8790')
+        self.assertEqual(len(lookups), 1)
 
 
 class Removing(BackgroundWork, FlowFixture):
