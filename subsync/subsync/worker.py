@@ -55,6 +55,7 @@ USENET_ROWS_ENTRIES = 200   # files found on Usenet
 LISTS_ENTRIES = 200         # files' subtitle lists
 FETCH_AT_ONCE = 4   # a language's subtitle downloads at once: one round (a picked language's alass after it)
 CONSENSUS_TRIES = 12   # a file with no track: the main language's downloads beside its guess, for a consensus
+RELEASE_CHARS = 120   # a subtitle's release name as its stored results record it, cut to this many characters
 # Originals downloaded (and subtitle lists fetched again) on a request's own time (Worker.original_for) at once, in one
 # pool for the worker's life: more than one person's player asks for at a time; one that outlives its request ends
 # there and is kept (fetched_subs, lists)
@@ -330,6 +331,15 @@ class Safety:
 
 class OverLimit(Exception):
     """A person's own limit is reached (public mode): the job is dropped, not tried again later."""
+
+
+class _Late(Exception):
+    """Worker.original_for: the request's deadline (or, for a pick or pending entry, the file's synced copy) came
+    before the download of `cand` ended."""
+
+    def __init__(self, cand):
+        super().__init__()
+        self.cand = cand
 
 
 class BudgetSpent(Stopped):
@@ -1928,26 +1938,24 @@ class Worker(threading.Thread):
             return decode(got[1], lang) if got and time.time() - got[0] < LIST_TTL_S else None
 
         def download(c):
+            """Its text, or None when the download failed; _Late when the wait ended first."""
             # timed out here, not by fetch_subtitle's own timeout: that one bounds each socket wait only (not a site's
             # turn or its 429 retries), and a download it stopped would be lost to the player's next try
             tried.add(c["url"])
             left = deadline - time.time()
             if left <= 0:
-                return False
+                raise _Late(c)
             future = self.original_pool.submit(self._fetch_one, job, lang, 0, c)
             future.add_done_callback(self._wake)
             with self.cv:
                 self.cv.wait_for(lambda: future.done() or (until_copy and self.published(alias, lang) is not None),
                                  left)
             if not future.done():   # it goes on and is kept (fetched_subs): the player's next try gets it at once
-                return False
+                raise _Late(c)
             got = future.result()
             return decode(got[2], lang) if got else None
 
-        def late(c):
-            return None, "late", self.player_address(c)
-
-        def passes(c, text):
+        def passes(text):
             if text is None:
                 return False
             if langcheck.refuses(text, lang):
@@ -1955,27 +1963,25 @@ class Worker(threading.Thread):
                 return False
             return True
 
-        text = downloaded(ordered[0])
-        if text is None:
-            text = download(ordered[0])
-            if text is False:
-                return late(ordered[0])
-        tried.add(ordered[0]["url"])
-        if passes(ordered[0], text):
-            return text, None, None
-        for c in ordered[1:]:          # the next that passes among those downloaded already
-            text = downloaded(c)
-            if text is not None:
-                tried.add(c["url"])
-                if passes(c, text):
-                    return text, None, None
-        more = [c for c in ordered if c["url"] not in tried][: langcheck.MORE_DOWNLOADS]
-        for c in more:
-            text = download(c)
-            if text is False:
-                return late(c)
-            if passes(c, text):
+        try:
+            text = downloaded(ordered[0])
+            if text is None:
+                text = download(ordered[0])
+            tried.add(ordered[0]["url"])
+            if passes(text):
                 return text, None, None
+            for c in ordered[1:]:          # the next that passes among those downloaded already
+                text = downloaded(c)
+                if text is not None:
+                    tried.add(c["url"])
+                    if passes(text):
+                        return text, None, None
+            for c in [c for c in ordered if c["url"] not in tried][: langcheck.MORE_DOWNLOADS]:
+                text = download(c)
+                if passes(text):
+                    return text, None, None
+        except _Late as late:
+            return None, "late", self.player_address(late.cand)
         return None, "none", None
 
     def player_address(self, cand):
@@ -2235,6 +2241,30 @@ class LanguageSync:
         """The download's stored result that needs no new attempt (Worker.fresh), if any."""
         return self.w.fresh(result_key(self.file_key, self.lang, e["sha"]), self.job.rule)
 
+    # a download's facts worked out once, by the first step that needs them, and kept on it for the later ones
+    def _text(self, e):
+        """The download's text (subs.decode)."""
+        if "text" not in e:
+            e["text"] = decode(e["raw"], self.lang)
+        return e["text"]
+
+    def _ext(self, e):
+        """The download's format as it is stored: "ass" or "srt"."""
+        if "ext" not in e:
+            e["ext"] = "ass" if is_ass(self._text(e)) else "srt"
+        return e["ext"]
+
+    def _stacked(self, e):
+        """The share of the download's lines stacked over another (pipeline.stacked_share), as its results record it."""
+        if "stacked" not in e:
+            e["stacked"] = round(pipeline.stacked_share(parse(self._text(e))), 3)
+        return e["stacked"]
+
+    def _detail_base(self, e):
+        """What every stored result of the download records: the rule it was judged under and its release name (at
+        most RELEASE_CHARS)."""
+        return {"rule": self.job.rule or self.s.rule_id, "release": (e["cand"].get("release") or "")[:RELEASE_CHARS]}
+
     def _downloads(self):
         """The downloads when they aren't judged as each ends (_stream), those in another language left out
         (_wrong_language): with the fast path every try at once (Worker._fetch_all), so the originals can be checked
@@ -2251,20 +2281,19 @@ class LanguageSync:
     def _wrong_language(self, e):
         """A download whose text isn't in this language is recorded as kept, and never judged, offered or
         anchored on."""
-        lang = self.lang
-        e.setdefault("text", decode(e["raw"], lang))
-        m = langcheck.measure(e["text"], lang)
+        lang, text = self.lang, self._text(e)
+        m = langcheck.measure(text, lang)
         if langcheck.verdict(m, lang) != langcheck.FAIL:
-            self.texts[e["cand"]["id"]] = e["text"]
+            self.texts[e["cand"]["id"]] = text
             return False
         self.refused.add(e["cand"]["id"])
         got = e["got"]
         if not (got and got["outcome"] == "keep_original" and got.get("reason") == self.not_language):
-            detail = {"rule": self.job.rule or self.s.rule_id, "release": (e["cand"].get("release") or "")[:120],
-                      "language": {"verdict": langcheck.FAIL, "words": m["words"], "script": m["script"],
-                                   "common": {c: v for c, v in m["common"].items() if v}}}
+            detail = dict(self._detail_base(e), language={"verdict": langcheck.FAIL, "words": m["words"],
+                                                          "script": m["script"],
+                                                          "common": {c: v for c, v in m["common"].items() if v}})
             self.store.put(self.file_key, e["sha"], lang, e["rank"], "keep_original", self.not_language, None, detail,
-                           "ass" if is_ass(e["text"]) else "srt", None, e["cand"]["id"], offer=not self.best_fit)
+                           self._ext(e), None, e["cand"]["id"], offer=not self.best_fit)
         log.info("sync %s %s rank %d: keep_original (%s)", self.job.label, lang, e["rank"], self.not_language)
         return True
 
@@ -2274,8 +2303,7 @@ class LanguageSync:
         if e["sha"] in self.fingerprints:
             return True
         try:
-            e["text"] = decode(e["raw"], self.lang)   # kept: the judging below reads it again
-            fp = fingerprint(e["text"])
+            fp = fingerprint(self._text(e))
         except Exception:   # unreadable: judged on its own, as before
             return False
         if fp in self.fingerprints:   # R3-8: every text with no dialogue line has one fingerprint (subs.NO_DIALOGUE)
@@ -2380,7 +2408,7 @@ class LanguageSync:
         if self.s.audio_choice != "off":   # a Usenet file too
             # every try downloaded before the fits (not one at a time): kept for an anchored guess (_set_provisional)
             if (self.best_fit or self.s.fast_path) and self.s.anchored_guess:
-                job.fetched[lang] = [(x["cand"], x.get("text") or decode(x["raw"], lang)) for x in entries]
+                job.fetched[lang] = [(x["cand"], self._text(x)) for x in entries]
             if not self.w._needs_pick(job):   # a sync that starts at once logs its own line
                 log.info("sync %s %s rank %d: no text or image subtitle track; the audio route waits for "
                          "the viewer to pick the Subsync entry", job.label, lang, e["rank"])
@@ -2394,13 +2422,11 @@ class LanguageSync:
         got, lang = e["got"], self.lang
         outcome = got["outcome"]
         if outcome == "in_sync" and (e["rank"] > 0 or self.best_fit) and self.s.list_in_sync:
-            text = decode(e["raw"], lang)   # stored before the switch was on: list it now, unchanged
+            text = self._text(e)   # stored before the switch was on: list it now, unchanged
             self.store.put(self.file_key, e["sha"], lang, e["rank"], "synced",
                            f"in sync as it is (viewer's #{e['rank'] + 1}): listed unchanged", got.get("route"),
-                           dict(got.get("detail") or {}, unchanged=True,
-                                stacked=round(pipeline.stacked_share(parse(text)), 3)),
-                           "ass" if is_ass(text) else "srt", text, e["cand"]["id"], offer=not self.best_fit,
-                           original=text)
+                           dict(got.get("detail") or {}, unchanged=True, stacked=self._stacked(e)),
+                           self._ext(e), text, e["cand"]["id"], offer=not self.best_fit, original=text)
             outcome = "synced"
         ok = outcome in ("synced", "in_sync")
         if ok and pipeline.settles(dict(got, reference=(got.get("detail") or {}).get("reference")), lang):
@@ -2413,9 +2439,7 @@ class LanguageSync:
         """The fast path for one download: its original against the release track (a gate, no alass). In sync?"""
         s, lang = self.s, self.lang
         t0 = time.time()
-        e.setdefault("text", decode(e["raw"], lang))
-        e["ext"] = "ass" if is_ass(e["text"]) else "srt"
-        chk = pipeline.check_original(self.index, e["text"], lang, splits=s.gate_splits, image_ref=s.image_ref,
+        chk = pipeline.check_original(self.index, self._text(e), lang, splits=s.gate_splits, image_ref=s.image_ref,
                                       prefer_plain=s.prefer_plain, snap_within=s.snap_within if s.snap else None,
                                       better=s.better, fallback=s.fallback_reference, text_pairing=s.text_pairing)
         e["checked"] = chk is not None
@@ -2433,7 +2457,7 @@ class LanguageSync:
         milliseconds. A pass by the main rule against its own language (no alass needed)?"""
         s = self.s
         t0 = time.time()
-        r = pipeline.shift_sync(self.index, e["text"], self.lang, snap=s.snap, snap_within=s.snap_within,
+        r = pipeline.shift_sync(self.index, self._text(e), self.lang, snap=s.snap, snap_within=s.snap_within,
                                 splits=s.gate_splits, image_ref=s.image_ref, better=s.better,
                                 prefer_plain=s.prefer_plain, fallback=s.fallback_reference, text_pairing=s.text_pairing)
         if not (r and r["outcome"] == "synced"):
@@ -2446,9 +2470,7 @@ class LanguageSync:
         """alass (or the audio route) on one download: (result, start time)."""
         s, w = self.s, self.w
         t0 = time.time()
-        e.setdefault("text", decode(e["raw"], self.lang))
-        e.setdefault("ext", "ass" if is_ass(e["text"]) else "srt")
-        return pipeline.sync_subtitle(self.index, e["text"], self.lang, alass=s.alass, audio=self.audio,
+        return pipeline.sync_subtitle(self.index, self._text(e), self.lang, alass=s.alass, audio=self.audio,
                                       audio_lead=s.audio_lead, vad=w.vad() if self.audio else None,
                                       ffmpeg=s.ffmpeg, snap=s.snap, snap_within=s.snap_within,
                                       splits=s.gate_splits, image_ref=s.image_ref,
@@ -2470,19 +2492,18 @@ class LanguageSync:
             listed += ", aligned to another language's track"
         if r.get("body") is not None:
             return dict(r, outcome="synced", reason=f"{listed}: lines snapped to the release's own")
-        return dict(r, outcome="synced", reason=f"{listed}: listed unchanged", body=e["text"], unchanged=True)
+        return dict(r, outcome="synced", reason=f"{listed}: listed unchanged", body=self._text(e), unchanged=True)
 
     def _record(self, e, r, t0):
         """A judged download's result stored (offered at once unless best fit offers it) and logged. Passes?"""
         lang = self.lang
         detail = {k: r[k] for k in self.RECORDED if k in r}
         detail["seconds"] = round(time.time() - t0, 2)
-        detail["rule"] = self.job.rule or self.s.rule_id
-        detail["release"] = (e["cand"].get("release") or "")[:120]
-        detail["stacked"] = round(pipeline.stacked_share(parse(e.get("text") or decode(e["raw"], lang))), 3)
+        detail.update(self._detail_base(e))
+        detail["stacked"] = self._stacked(e)
         key = self.store.put(self.file_key, e["sha"], lang, e["rank"], r["outcome"], r.get("reason"), r.get("route"),
-                             detail, e["ext"], r.get("body"), e["cand"]["id"], offer=not self.best_fit,
-                             original=e.get("text") or decode(e["raw"], lang))
+                             detail, self._ext(e), r.get("body"), e["cand"]["id"], offer=not self.best_fit,
+                             original=self._text(e))
         log.info("sync %s %s rank %d: %s (%s)", self.job.label, lang, e["rank"], r["outcome"], r.get("reason"))
         if pipeline.settles(r, lang):
             self.settled = True

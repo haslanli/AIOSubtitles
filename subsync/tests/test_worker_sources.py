@@ -565,6 +565,22 @@ class LanguageSyncStepsTest(unittest.TestCase):
         self.assertEqual([sync._fitting(e) for e in entries], [True, False, True, False])
         self.assertEqual(sync.fitted, 2)
 
+    def test_each_download_is_decoded_once(self):
+        # The language check, the original's check and the fit each decoded the download again (setdefault
+        # works its default out first), although the duplicate check had kept its text
+        from subsync import worker as worker_mod
+        real, decoded = worker_mod.decode, []
+        passes = {"outcome": "synced", "reason": "passes the main rule", "route": "cues",
+                  "gate_synced": {"within200": 0.9, "median_ms": 30}}
+        sync = self.steps([self.cand("os-a"), self.cand("os-b")], SUBSYNC_FAST_PATH="on")
+        with mock.patch.object(worker_mod, "decode", lambda raw, lang: decoded.append(raw) or real(raw, lang)), \
+                mock.patch.object(pipeline, "check_original", lambda *a, **k: {
+                    "in_sync": False, "route": "cues", "gate_original": {"within200": 0.3, "median_ms": 400}}), \
+                mock.patch.object(pipeline, "shift_sync", lambda *a, **k: None), \
+                mock.patch.object(pipeline, "sync_subtitle", lambda index, text, lang, **k: dict(passes, body=text)):
+            self.assertIsNotNone(sync.run())
+        self.assertEqual(sorted(decoded), sorted([self.raw("os-a"), self.raw("os-b")]))
+
     def test_a_waiting_pick_is_served_only_a_better_pass(self):
         sync = self.steps(SUBSYNC_MAIN_ALTERNATIVES="2")
         keys = [self.stored(cid, r, "synced", "re-timed", within) for r, (cid, within) in
