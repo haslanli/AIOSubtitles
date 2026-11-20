@@ -383,6 +383,10 @@ class Files(unittest.TestCase):
         self.assertIn('network_mode: host', host)
         self.assertNotIn('ports:', host)
         self.assertNotIn('networks:', host)
+        # On either network it starts again after a reboot, and its logs are rotated (three files of 10 MB)
+        for shape in (text, host):
+            self.assertIn('\n    restart: unless-stopped\n', shape)
+            self.assertIn('\n    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}\n', shape)
 
     def test_compose_runs_the_image_setup_runs_from_and_never_builds(self):
         text = self.compose(bind='127.0.0.1')

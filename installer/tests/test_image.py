@@ -109,7 +109,9 @@ class Notice(unittest.TestCase):
         self.text = DOCKERFILE.read_text()
 
     def has_row(self, part):
-        return any(row.lower().startswith(part.lower()) for row in self.parts)
+        """Whether a row's Part cell is `part`, in any case: the whole cell, so a pin of pycparser 3.1 never takes the
+        row of pycparser 3.12 for its own."""
+        return part.lower() in {row.lower() for row in self.parts}
 
     def test_every_pinned_package_has_its_row(self):
         pins = re.findall(r'^([A-Za-z0-9_.-]+)==(\S+)', (REPO / 'subsync' / 'requirements.txt').read_text(), re.M)

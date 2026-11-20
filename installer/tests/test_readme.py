@@ -1,6 +1,7 @@
 """The README's own texts (its Settings section is test_explain's) say what setup and subsync do, in the words the owner
 approved, and the numbers they give are the code's."""
 import ast
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,11 @@ def section(title, joined=True):
     """A '## title' section of the README; `joined`: its words joined by single spaces."""
     text = (REPO / 'README.md').read_text(encoding='utf-8').split(f'\n## {title}\n', 1)[1].split('\n## ', 1)[0]
     return ' '.join(text.split()) if joined else text
+
+
+def files(folder):
+    """The names in a folder, Finder's own .DS_Store aside (the image build leaves it out too)."""
+    return sorted(p.name for p in folder.iterdir() if p.name != '.DS_Store')
 
 
 def pct(share):
@@ -144,10 +150,17 @@ class Folder(unittest.TestCase):
                                                      'publishing to ghcr.io only after they pass.')
         self.assertEqual(rows['VERSION'], "This release's version number, which the image carries and updates "
                                           'compare.')
-        self.assertEqual(sorted(p.name for p in (REPO / 'docs').iterdir()), ['answers.example'])
+        self.assertEqual(files(REPO / 'docs'), ['answers.example'])
         for path in rows:
             if path != 'state/':                                  # made by setup, never in the repository
                 self.assertTrue((REPO / path).exists(), path)
+
+    def test_finders_own_file_is_no_part_of_the_repository(self):
+        # Opening docs/ in Finder made the test above fail; any other file there still counts
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ('answers.example', '.DS_Store', 'notes.md', '.notes.md'):
+                (Path(tmp) / name).write_text('')
+            self.assertEqual(files(Path(tmp)), ['.notes.md', 'answers.example', 'notes.md'])
 
     def test_each_suites_command_is_the_one_the_image_build_runs(self):
         # subsync's had none (R3-1)
