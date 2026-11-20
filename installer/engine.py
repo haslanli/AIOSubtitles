@@ -858,14 +858,22 @@ class Engine:
             port = port or (443 if url.startswith('https') else 80)
             bind = '0.0.0.0'
         else:
-            port = int(self.prev.get('port') or plan.SUBSYNC_PORT)
+            # behind your web server: the last path address's port, never a port address's own (80, say: the one your
+            # web server needs)
+            kept = self.prev.get('port') if self.prev.get('public_kind') == 'path' else None
+            port = int(kept or plan.SUBSYNC_PORT)
             bind = '127.0.0.1'
         if self.s['mode'] == 'host':
             bind = None   # host network: subsync listens on the port itself, at SUBSYNC_BIND (install)
-        if port != self.prev.get('port') and port_taken(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0') \
-                and not dockerenv.container_state(CONTAINER):
+        if self.port_in_use(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0'):
             raise Problem('PUBLIC_ADDRESS', f'Port {port} on this machine is already in use.')
         self.s.update(public_base=url, public_kind=kind, port=port, bind=bind)
+
+    def port_in_use(self, port, host):
+        """Whether `port` on this machine (at `host`) is taken by anything but this install's own container, which holds
+        its last port while it exists (both routes)."""
+        held = self.prev.get('port') if dockerenv.container_state(CONTAINER) else None
+        return port != held and port_taken(port, host)
 
     # 5 -------------------------------------------------------------------------------------------------------
     def limits(self):
@@ -1395,8 +1403,7 @@ class Engine:
         # a public instance keeps its own port on a re-run; a personal install's (80, say) is never taken over. The port
         # is checked unless this install's own container holds it.
         port = int(self.prev.get('port') or hosting.PORT) if self.prev.get('route') == 'host' else hosting.PORT
-        held = self.prev.get('port') if dockerenv.container_state(CONTAINER) else None
-        if port != held and port_taken(port, '127.0.0.1'):
+        if self.port_in_use(port, '127.0.0.1'):
             stop(f'Port {port} on this machine is already in use.')
         self.s.update(route='host', public_base=self.address, port=port, version=setup_version())
 

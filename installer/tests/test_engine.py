@@ -619,6 +619,42 @@ class AiostreamsShapes(Offline):
                          ('PUBLIC_ADDRESS', 'Port 80 on this machine is already in use.'))
         self.assertEqual(asked, [(80, '0.0.0.0')])
 
+    LAST = {'route': 'yourself', 'installed': '2026-11-13', 'install_id': 'id-1', 'mode': 'network'}
+
+    def public_address(self, last, address, taken=()):
+        """Your choices answered with `address` after an install saved as `last`, its container there (the fixture's):
+        the port, bind and kind chosen, and the ports checked."""
+        engine.save_settings(dict(self.LAST, **last))
+        asked = []
+        with mock.patch.object(dockerenv, 'port_in_use', lambda port, host: asked.append((port, host)) or port in taken):
+            e = self.page_engine({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': address})
+            e.choices()
+        return (e.s['public_kind'], e.s['port'], e.s['bind']), asked
+
+    def test_a_new_port_is_checked_though_the_container_holds_the_last_one(self):
+        # Once the container existed, no new port was checked; it holds the last one only, so the start
+        # failed on "port is already allocated" and took down a service that worked
+        last = {'public_base': 'http://192.168.1.10:8790', 'public_kind': 'port', 'port': 8790, 'bind': '0.0.0.0'}
+        with self.assertRaises(engine.Problem) as caught:
+            self.public_address(last, 'http://192.168.1.10:9000', taken={9000})
+        self.assertEqual((caught.exception.field, caught.exception.message),
+                         ('PUBLIC_ADDRESS', 'Port 9000 on this machine is already in use.'))
+        self.assertEqual(self.public_address(last, 'http://192.168.1.10:9000'),
+                         (('port', 9000, '0.0.0.0'), [(9000, '0.0.0.0')]))
+        # the port the container holds isn't checked: it is in use, by this install
+        self.assertEqual(self.public_address(last, 'http://192.168.1.10:8790', taken={8790}),
+                         (('port', 8790, '0.0.0.0'), []))
+
+    def test_a_path_address_after_a_port_address_starts_from_subsyncs_own_port(self):
+        # It kept the port address's port (80: the web server's), published on 127.0.0.1, unchecked, and the
+        # web server's rule pointed at that port, its own
+        last = {'public_base': 'http://192.168.1.10', 'public_kind': 'port', 'port': 80, 'bind': '0.0.0.0'}
+        self.assertEqual(self.public_address(last, f'{PUBLIC}/subsync'),
+                         (('path', plan.SUBSYNC_PORT, '127.0.0.1'), [(plan.SUBSYNC_PORT, '127.0.0.1')]))
+        # a path address after a path address keeps the port its container holds
+        last = {'public_base': f'{PUBLIC}/subsync', 'public_kind': 'path', 'port': 8791, 'bind': '127.0.0.1'}
+        self.assertEqual(self.public_address(last, f'{PUBLIC}/subtitles'), (('path', 8791, '127.0.0.1'), []))
+
     def test_two_aiostreams_on_this_machine(self):
         two = [self.container(name='aio-one', networks=['one_default']),
                self.container(name='aio-two', networks=['two_default'])]
@@ -717,7 +753,9 @@ class OnBridge(Offline):
         return e
 
     def test_the_lan_address_is_looked_up_only_for_a_default_that_needs_it(self):
-        # on the bridge network each lookup starts a helper container
+        # on the bridge network each lookup starts a helper container. The fixture's container runs and holds 8790 (the
+        # helper finds it taken): the port its install saved, which is never checked again
+        engine.save_settings({'port': 8790})
         e = self.address_engine({})                       # no answer, no last one: the default is the LAN address
         e.public_address()
         self.assertEqual(e.s['public_base'], 'http://192.168.1.7:8790')
