@@ -637,6 +637,37 @@ class ShiftChangeTest(unittest.TestCase):
         self.assertEqual(res["model"]["offset"], round(res["segment_offsets"][0], 2))    # not the overall -291 s
         self.assertAlmostEqual(res["model"]["offset"], 9.0, delta=0.3)
 
+    def test_sign_lines_never_move_the_change(self):
+        # Where the change is placed was scored on sign and song lines too, against speech onsets, though every
+        # other step judges dialogue only; 150 sign lines near the change moved it, and with it the fine shift of the
+        # hundreds of lines after it. The sign lines are still moved with their neighbours.
+        for seed, at, scene in ((11, 1500, 120), (13, 3000, -100)):
+            with self.subTest(seed=seed, at=at, scene=scene):
+                truth, sub, _ = scene_film(at, scene, seed=seed)
+                r = random.Random(5)
+                speech = [(s + r.gauss(0, 0.08), s + d) for s, d in truth]
+                end = truth[-1][0] + truth[-1][1] + 30
+
+                class Index:
+                    def duration(self):
+                        return end
+                lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, d in sub]
+                rs = random.Random(seed + 7)
+                signs = []
+                for _ in range(150):
+                    s = rs.uniform(at - 100, at + 100)
+                    signs.append({"s": s, "e": s + rs.uniform(1.5, 5.0), "text": "sign", "kind": "sign"})
+                fit = timeline_fit(speech, ends=True)
+                plain = fit(Index(), lines, vad=object(), better=AUDIO_BETTER).run()
+                signed = fit(Index(), lines + signs, vad=object(), better=AUDIO_BETTER).run()
+                self.assertEqual((plain["decision"], signed["decision"]), ("synced", "synced"))
+                self.assertEqual(len(plain["model"]["segments"]), 1)
+                self.assertEqual(signed["lines"][:len(lines)], plain["lines"])
+                shifts = {round(n["s"] - line["s"], 6) for n, line in zip(plain["lines"], lines)}     # the two parts'
+                self.assertEqual(len(shifts), 2)
+                moved = {round(n["s"] - sign["s"], 6) for n, sign in zip(signed["lines"][len(lines):], signs)}
+                self.assertLessEqual(moved, shifts)                     # each sign line moved with its part
+
 
 class HeldOutTest(unittest.TestCase):
     """The held-out windows are never used for the fit: no window read for it (a confirmation, a step narrowing

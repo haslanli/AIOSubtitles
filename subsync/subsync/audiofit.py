@@ -618,8 +618,6 @@ class AudioFit:
         second["close_call"] = {"why": why, "windows": self.windows_read - before,
                                 "first": {"decision": first["decision"], "why": first.get("why"),
                                           "gate_new": first.get("gate_new")}}
-        second["windows"] = self.windows_read
-        second["audio_s"] = self.audio_s
         return second
 
     def clear(self, t, starts):
@@ -817,6 +815,7 @@ class AudioFit:
         order = sorted(range(len(allines)), key=lambda k: allines[k]["s"])
         st = [allines[k]["s"] * c for k in order]       # the lines' scaled starts and ends in time order, once
         en = [allines[k]["e"] * c for k in order]
+        talk = [i for i, k in enumerate(order) if allines[k]["kind"] == "dialogue"]   # the dialogue lines' ranks
         placing = [w for w in windows if all(w is not x for x in undecided)]   # none that decided nothing
         lag = self.end_lag(c, o_glob, windows) if bounds else None
         cuts = []
@@ -824,19 +823,21 @@ class AudioFit:
             best_k, best_score = None, -1
             # k, the first line of the second shift, only where the lines land in reach of the bracket under one shift
             # or the other; the lines after it that land before the last line under the first shift are a scene the file
-            # lacks, left out by the drop step, so they count for no k
+            # lacks, left out by the drop step, so they count for no k. Every line is moved by the cut, but only the
+            # dialogue lines are scored against the speech, as everywhere else in the fit (signs and songs aren't spoken)
             first, last = bisect.bisect_left(st, lo - W - max(oa, ob)), bisect.bisect_right(st, hi + W - min(oa, ob))
             for k in range(first, last + 1):
-                rest = range(max(k, bisect.bisect_left(st, st[k - 1] + oa - ob)) if k else 0, len(st))
-                errs = self.onset_errors([x + oa for x in st[:k]] + [st[i] + ob for i in rest], placing)
+                rest = max(k, bisect.bisect_left(st, st[k - 1] + oa - ob)) if k else 0
+                before, after = talk[:bisect.bisect_left(talk, k)], talk[bisect.bisect_left(talk, rest):]
+                errs = self.onset_errors([st[i] + oa for i in before] + [st[i] + ob for i in after], placing)
                 score = sum(1 for e in errs if e is not None and abs(e) < CUT_ERR_S)
                 if lag is not None:     # the line ends too, against the subtitle's own lag (D3)
-                    ends = [x + oa for x in en[:k]] + [en[i] + ob for i in rest]
+                    ends = [en[i] + oa for i in before] + [en[i] + ob for i in after]
                     score += END_WEIGHT * sum(1 for e in self.onset_errors(ends, placing, "ends")
                                               if e is not None and abs(e - lag) < CUT_ERR_S)
                 if score > best_score:
                     best_k, best_score = k, score
-            if best_k is not None:
+            if best_k is not None:      # None only for no k at all: a bracket inside out (narrow never gives one)
                 cuts.append((best_k, oa, ob))
         seg_of = [None] * len(allines)
         cur = seq[0][1] if seq else o_glob
@@ -846,7 +847,7 @@ class AudioFit:
                 cur = cuts[ci][2]
                 ci += 1
             seg_of[k] = cur
-        spoken = [k for k in order if allines[k]["kind"] == "dialogue"]
+        spoken = [order[i] for i in talk]
         was = [(allines[k]["s"] * c, allines[k]["e"] * c) for k in spoken]     # the scale moves every line alike
         dropped = {spoken[i] for i in moved_back(was, [(s + seg_of[k], e + seg_of[k])
                                                        for k, (s, e) in zip(spoken, was)])}
@@ -858,7 +859,6 @@ class AudioFit:
             fine[o] = float(np.median(errs)) if len(errs) >= 5 else 0.0
         new = [dict(l, s=l["s"] * c + seg_of[k] + fine[seg_of[k]], e=l["e"] * c + seg_of[k] + fine[seg_of[k]],
                     drop=k in dropped) for k, l in enumerate(allines)]
-        fit_count = len(windows)
         verify = [self.read_window(start, W) for start in checks]
         dial_new = [l["s"] for l in new if l["kind"] == "dialogue" and not l["drop"]]
 
@@ -915,7 +915,7 @@ class AudioFit:
                           "lead_ms": round(self.lead * 1000),
                           "segments": [{"after_rank": k, "from": a, "to": b} for k, a, b in cuts],
                           "fine_ms": {str(k): round(v * 1000) for k, v in fine.items()}, "dropped": len(dropped)},
-                "gate_new": g_new, "gate_old": g_old, "fit_windows": fit_count, "windows": self.windows_read, "plan": plan,
+                "gate_new": g_new, "gate_old": g_old, "windows": self.windows_read, "plan": plan,
                 "audio_s": self.audio_s}
 
 
