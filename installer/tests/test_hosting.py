@@ -14,6 +14,7 @@ import string
 import tempfile
 import threading
 import unittest
+import urllib.error
 import warnings
 from pathlib import Path
 from unittest import mock
@@ -375,6 +376,50 @@ class Fetch(unittest.TestCase):
                 self.assertEqual(logged.output, ['WARNING:subsync.realdebrid:blocked a request to Real-Debrid '
                                                  f'({"api.real-debrid.com" if "API" in url else "real-debrid.com"})'])
         self.assertEqual((tried, opened), ([], []))
+
+    def check_with(self, health, page):
+        """hosting.check of ADDRESS, with /health and the sign-up page answering as given: (status, headers, body), or
+        the error the request raises. (what it returns, the rows it shows)"""
+        def fetch(url, timeout=10):
+            answer = {f'{ADDRESS}/health': health, f'{ADDRESS}/': page}[url]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        out = Rows()
+        with mock.patch.object(hosting, 'fetch', fetch):
+            return hosting.check(ADDRESS, out), out.rows
+
+    def test_the_address_and_the_sign_up_page_with_its_security_headers_are_checked(self):
+        # The public instance's last step, and the check before and after an update ("Done" or 3); only an
+        # address where nothing answers was tested, so a page without its security headers or another page at /health
+        # could have passed unnoticed
+        ok = (200, {}, b'ok\n')
+        page = (200, {'Content-Security-Policy': "default-src 'none'; script-src 'self'"}, b'<!doctype html>')
+        reach = ('ok', f'People can reach AIOSubtitles at {ADDRESS}')
+        loads = ('ok', f'The sign-up page loads at {ADDRESS}, with its security headers')
+        no_answer = [('warn', hosting.NO_ANSWER.format(address=ADDRESS)),
+                     *(('note', line) for line in hosting.NO_ANSWER_NOTES)]
+        doesnt = f"The sign-up page doesn't load at {ADDRESS}: "
+        for case, health, answer, expected in (
+                ('both good', ok, page, (True, [reach, loads])),
+                ('its header named in lower case', ok, (200, {'content-security-policy': "default-src 'none'"}, b''),
+                 (True, [reach, loads])),
+                ('no security header', ok, (200, {'Content-Type': 'text/html'}, b'<!doctype html>'),
+                 (False, [reach, ('bad', doesnt + 'HTTP 200.')])),
+                ("the web server's own header instead", ok,
+                 (200, {'Content-Security-Policy': "default-src 'self'"}, b''),
+                 (False, [reach, ('bad', doesnt + 'HTTP 200.')])),
+                ('an error page', ok, (502, {'Content-Security-Policy': "default-src 'none'"}, b''),
+                 (False, [reach, ('bad', doesnt + 'HTTP 502.')])),
+                ('the page refused', ok, urllib.error.URLError('refused'),
+                 (False, [reach, ('bad', doesnt + 'refused.')])),
+                ('no route to it', ok, OSError('no route to host'),
+                 (False, [reach, ('bad', doesnt + 'no route to host.')])),
+                ("a web server's own page at /health", (200, {}, b'<h1>Welcome to nginx!</h1>'), page,
+                 (False, [*no_answer, loads])),
+                ('/health answering an error', (503, {}, b'ok'), page, (False, [*no_answer, loads]))):
+            with self.subTest(case):
+                self.assertEqual(self.check_with(health, answer), expected)
 
     def test_it_says_which_release_of_setup_asks(self):
         # It said "AIOSubtitles-setup", no version; every User-Agent now carries the release's (VERSION)
