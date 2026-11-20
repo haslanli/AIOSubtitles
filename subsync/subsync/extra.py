@@ -5,10 +5,13 @@ key; SubDL, SubSource and Wyzie with a key. A subtitle made from the very releas
 found there, and only such a subtitle fits a file as closely as its own track.
 
 All sources are asked at once. Each answer must come within SUBSYNC_SOURCE_TIMEOUT_S; a later answer is still kept
-(srclimits.SEARCH_TTL_S, "nothing found" EMPTY_TTL_S), so the next play of the title has it. A source that keeps failing
-is paused (sourcestate.Health); a site's own limits are counted (sourcestate.Ledger). A source the user's config already
-has is skipped (`skip`): its answers come through the config. Only an IMDb id is sent as one; for other ids (Kitsu,
-MAL) only the lookups that need no id are made. No key or link is ever logged or put in a subtitle's address.
+(srclimits.SEARCH_TTL_S, "nothing found" EMPTY_TTL_S), so the next play of the title has it. An answer is kept by what
+its request is made of (ASKED_WITH), so another release of the same episode reuses it; an ask or an id lookup still
+running is waited for, not made again; an answer part of which failed is kept EMPTY_TTL_S, one part of which was busy
+not at all (Partial). A source that keeps failing is paused (sourcestate.Health); a site's own limits are counted
+(sourcestate.Ledger). A source the user's config already has is skipped (`skip`): its answers come through the config.
+Only an IMDb id is sent as one; for other ids (Kitsu, MAL) only the lookups that need no id are made. No key or link is
+ever logged or put in a subtitle's address.
 """
 import json
 import logging
@@ -19,7 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 
 from . import choose, digits, net, realdebrid, srclimits
 from .bounded import put_bounded
@@ -40,6 +43,13 @@ SUBSOURCE_LANGS = {"eng": "english", "rus": "russian", "jpn": "japanese", "fre":
                    "hin": "hindi", "per": "farsi_persian"}
 SUBSOURCE_BY_NAME = {v: k for k, v in SUBSOURCE_LANGS.items()}
 MACHINE = re.compile(r"(?i)machine|\bai\b|auto[ ._-]?translat")
+# What a source's request is made of besides the title: the file's hints it sends, and whether it asks by language. Its
+# answer is kept under those alone (search), so another release of the same episode reuses it, and so does another set
+# of languages for a source that lists every language.
+ASKED_WITH = {"osv3": (("videoHash", "videoSize", "filename"), False),
+              "osv3plus": (("videoHash", "videoSize", "filename"), True),
+              "tsdb": (("filename", "infoHash"), True),
+              "gestdown": ((), True), "subdl": ((), True), "subsource": ((), True), "wyzie": ((), True)}
 
 
 def two_letter(langs):
@@ -112,15 +122,32 @@ class Limited(Exception):
         self.retry_after = retry_after
 
 
+class Partial(list):
+    """A source's answer when part of it failed (a language, a lookup) or was busy: what the rest found, used now. It is
+    kept as "nothing found" is (EMPTY_TTL_S), or not at all when a part was busy (`busy`: Busy's rule, asked again next
+    time), so the missing part is asked again soon."""
+
+    def __init__(self, found=(), busy=False):
+        super().__init__(found)
+        self.busy = busy
+
+
+def kept_s(answer):
+    """How long a source's answer is kept: a found one SEARCH_TTL_S; "nothing found" and a Partial one EMPTY_TTL_S."""
+    return srclimits.SEARCH_TTL_S if answer and not isinstance(answer, Partial) else srclimits.EMPTY_TTL_S
+
+
 class ExtraSources:
     def __init__(self, settings, ledger=None, health=None, clock=time.time):
         self.s = settings
         self.clock = clock
         self.health = health or Health(clock)
         self.ledger = ledger
-        self.cache = {}             # (source, type, id, langs, keys) -> (time, candidates)
+        self.cache = {}             # (source, type, id, langs, hints: ASKED_WITH) -> (time, candidates)
         self.ids = {}               # (kind, key) -> (time, id or None): TVDB ids, Gestdown shows, SubSource ids
-        self.cache_lock = threading.Lock()      # the pool's threads share cache and ids
+        self.running = {}           # a cache key -> the Future of its ask while it runs (_start, _ask)
+        self.looking = {}           # an ids key -> the Future of its lookup while it runs (_id)
+        self.cache_lock = threading.Lock()      # the pool's threads share cache, ids, running and looking
         self.pool = ThreadPoolExecutor(max_workers=srclimits.CALLS_AT_ONCE, thread_name_prefix="subsync-extra")
         self.asking = threading.local()        # per pool thread: the requests made of the source it asks (_ask)
 
@@ -150,14 +177,29 @@ class ExtraSources:
     def _id(self, kind, key, lookup):
         """An id another site gives for a title, kept for the process; "none" is asked again after EMPTY_TTL_S (then
         kept as the newest, put_bounded). The table is shared by the pool's threads (cache_lock); the lookup itself
-        runs outside the lock."""
+        runs outside the lock, one at a time for an id: a thread that needs an id another one is looking up waits for
+        that lookup's answer, or its error, instead of asking again."""
         with self.cache_lock:
             got = self.ids.get((kind, key))
-        if got and (got[1] is not None or self.clock() - got[0] < srclimits.EMPTY_TTL_S):
-            return got[1]
-        value = lookup()
+            if got and (got[1] is not None or self.clock() - got[0] < srclimits.EMPTY_TTL_S):
+                return got[1]
+            answer = self.looking.get((kind, key))
+            mine = answer is None
+            if mine:
+                answer = self.looking[(kind, key)] = Future()
+        if not mine:
+            return answer.result()      # bounded: the lookup's own requests time out
+        try:
+            value = lookup()
+        except BaseException as e:
+            with self.cache_lock:
+                del self.looking[(kind, key)]
+            answer.set_exception(e)
+            raise
         with self.cache_lock:
             put_bounded(self.ids, (kind, key), (self.clock(), value), srclimits.SEARCH_CACHE_ENTRIES)
+            del self.looking[(kind, key)]
+        answer.set_result(value)
         return value
 
     def _count(self, source, kind="request", n=1):
@@ -190,25 +232,27 @@ class ExtraSources:
         hints = hints or {}
         fns = {"osv3": self._osv3, "osv3plus": self._osv3plus, "tsdb": self._tsdb, "gestdown": self._gestdown,
                "subdl": self._subdl, "subsource": self._subsource, "wyzie": self._wyzie}
-        cache_hints = (hints.get("videoHash"), hints.get("videoSize"), hints.get("filename"), hints.get("infoHash"),
-                       hints.get("fileIdx"))
         now = self.clock()
         answers, futures = {}, {}
         for source in self.sources(type_):
             if source in skip:
                 continue
-            key = (source, type_, str(video_id), tuple(langs), cache_hints)
+            sent, by_language = ASKED_WITH[source]
+            key = (source, type_, str(video_id), tuple(langs) if by_language else (), tuple(hints.get(h) for h in sent))
             with self.cache_lock:
                 got = self.cache.get(key)
-            if got and now - got[0] < (srclimits.SEARCH_TTL_S if got[1] else srclimits.EMPTY_TTL_S):
+                running = self.running.get(key)
+            if got and now - got[0] < kept_s(got[1]):
                 answers[source] = got[1]
                 continue
-            if source in srclimits.KEYED and self.ledger is not None \
-                    and self.ledger.exhausted(source, "request"):
-                continue
-            if not self.health.allowed(source):
-                continue
-            futures[self.pool.submit(self._ask, source, fns[source], key, type_, video_id, langs, hints)] = source
+            if running is None:     # else the same ask runs already (another file's, or a late one): its answer
+                if source in srclimits.KEYED and self.ledger is not None \
+                        and self.ledger.exhausted(source, "request"):
+                    continue
+                if not self.health.allowed(source):
+                    continue
+                running = self._start(source, fns[source], key, type_, video_id, langs, hints)
+            futures[running] = source
         t0 = time.time()
         if futures:
             done, late = wait(futures, timeout=self.s.source_timeout)
@@ -223,8 +267,31 @@ class ExtraSources:
                  ", ".join(f"{src} {sum(c['source'] == src for c in out)}" for src in answers), (time.time() - t0) * 1000)
         return out
 
+    def _start(self, source, fn, key, type_, video_id, langs, hints):
+        """The ask of a cache key, started now in the pool (_ask), or the one another search started meanwhile."""
+        with self.cache_lock:
+            running = self.running.get(key)
+            if running is None:
+                running = self.running[key] = self.pool.submit(self._ask, source, fn, key, type_, video_id, langs,
+                                                               hints)
+        return running
+
     def _ask(self, source, fn, key, type_, video_id, langs, hints):
-        """One source's answer (a list; empty when it failed), kept in the cache unless it failed or was busy."""
+        """One source's answer (a list; empty when it failed), kept in the cache unless it failed or was busy (Partial:
+        part of it); until then, a search of the same key waits for this ask (running) instead of making another."""
+        got = None
+        try:
+            got = self._answer(source, fn, type_, video_id, langs, hints)
+        finally:
+            with self.cache_lock:
+                if got is not None and not (isinstance(got, Partial) and got.busy):
+                    # an answer asked again goes last, never first (put_bounded)
+                    put_bounded(self.cache, key, (self.clock(), got), srclimits.SEARCH_CACHE_ENTRIES)
+                self.running.pop(key, None)
+        return [] if got is None else got
+
+    def _answer(self, source, fn, type_, video_id, langs, hints):
+        """A source's answer, each subtitle once (a Partial stays one); None when it failed or was busy."""
         self.asking.requests = 0
         try:
             got = fn(type_, video_id, langs, hints)
@@ -233,27 +300,49 @@ class ExtraSources:
         except Busy:
             self._answered(source)
             log.info("source %s busy for %s/%s: asked again next time", source, type_, video_id)
-            return []
+            return None
         except Limited as e:
             self.health.limited(source, e.retry_after)
-            return []
+            return None
         except urllib.error.HTTPError as e:
             self.health.failed(source, f"HTTP {e.code}")
             log.info("source %s failed for %s/%s: HTTP %d", source, type_, video_id, e.code)
-            return []
+            return None
         except Exception as e:  # a source that fails is left out; the others still count
             self.health.failed(source, type(e).__name__)
             log.info("source %s failed for %s/%s: %s", source, type_, video_id, type(e).__name__)
-            return []
+            return None
         self._answered(source)
         seen, unique = set(), []
         for c in got:          # the same subtitle found twice by one source (TheSubtitleDB's three lookups) counts once
             if (c["id"], c["lang"]) not in seen:
                 seen.add((c["id"], c["lang"]))
                 unique.append(c)
-        with self.cache_lock:   # an answer asked again goes last, never first (put_bounded)
-            put_bounded(self.cache, key, (self.clock(), unique), srclimits.SEARCH_CACHE_ENTRIES)
-        return unique
+        return Partial(unique, busy=got.busy) if isinstance(got, Partial) else unique
+
+    def _each_language(self, source, type_, video_id, langs, one):
+        """one(lang)'s subtitles for each language, for a source asked once per language: a language with nothing (404)
+        gives none, one that fails or is busy leaves the others', as a Partial answer; all of them
+        busy is Busy, all failed the first error; "too many requests" ends them all (it pauses the source)."""
+        out, errors, busy = [], [], False
+        for lang in langs:
+            try:
+                out += one(lang)
+            except NotFound:
+                continue
+            except Busy:
+                busy = True
+            except Limited:
+                raise
+            except Exception as e:
+                errors.append(e)
+                log.info("source %s %s/%s %s: %s", source, type_, video_id, lang,
+                         f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__)
+        if busy and not out:
+            raise Busy()
+        if errors and len(errors) == len(langs):
+            raise errors[0]
+        return Partial(out, busy=busy) if busy or errors else out
 
     def _answered(self, source):
         """The source answered: it is open again (Health.ok) when it was asked at all; a call that asked it nothing (an
@@ -311,7 +400,8 @@ class ExtraSources:
     # -- TheSubtitleDB -----------------------------------------------------------------------------------------
     def _tsdb(self, type_, video_id, langs, hints):
         """By the torrent's hash first (subtitles for that very video), then by release name, then by IMDb id; a
-        subtitle found twice counts once. Lookups have no limit; downloads are counted by the worker.
+        subtitle found twice counts once; a lookup that fails leaves the others' (Partial). Lookups have no limit;
+        downloads are counted by the worker.
         A release-name lookup answers with the closest title TheSubtitleDB has, which can be another film (an
         Inception file name got Nomadland, score 0.57): its subtitles count only when that title is the played one,
         and only its matched subtitle, at a score of at least srclimits.TSDB_RELEASE_SCORE, is a release match; with
@@ -395,13 +485,13 @@ class ExtraSources:
                  query, pages=srclimits.TSDB_PAGES)
         if errors and len(errors) == tried:
             raise errors[0]
-        return out
+        return Partial(out) if errors else out
 
     # -- Gestdown (series) -------------------------------------------------------------------------------------
     def _gestdown(self, type_, video_id, langs, hints):
-        """Cinemeta's TVDB id -> Gestdown's show -> one lookup per language. A show or a language Gestdown doesn't
-        have (404) is no subtitles; one language's error doesn't drop the others; "being refreshed" (423)
-        means ask again next time; "too many requests" (429) pauses Gestdown."""
+        """Cinemeta's TVDB id -> Gestdown's show -> one lookup per language (_each_language). A show or a language
+        Gestdown doesn't have (404) is no subtitles; one language's error doesn't drop the others; "being
+        refreshed" (423) means ask again next time; "too many requests" (429) pauses Gestdown."""
         imdb, season, episode = split_id(video_id)
         if not imdb or season is None:
             return []
@@ -428,33 +518,15 @@ class ExtraSources:
         show = self._id("gestdown", tvdb, show_of)
         if not show:
             return []
-        out, errors, busy = [], [], False
-        for lang in langs:
-            try:
-                got = self._get(f"{self.s.gestdown_url}/subtitles/get/{show}/{season}/{episode}/"
-                                f"{urllib.parse.quote(lang_name(lang))}") or {}
-            except NotFound:
-                continue
-            except Busy:
-                busy = True
-                continue
-            except Limited:
-                raise
-            except Exception as e:
-                errors.append(e)
-                log.info("source gestdown %s/%s %s: %s", type_, video_id, lang,
-                         f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__)
-                continue
-            for it in got.get("matchingSubtitles") or []:
-                if not it.get("completed") or not site_path(it.get("downloadUri")):
-                    continue
-                out.append(self._cand("gestdown", f"gd-{it.get('subtitleId')}", f"{self.s.gestdown_url}{it['downloadUri']}",
-                                      lang, it.get("version"), hi=bool(it.get("hearingImpaired"))))
-        if busy and not out:
-            raise Busy()
-        if errors and len(errors) == len(langs):
-            raise errors[0]
-        return out
+
+        def one(lang):
+            got = self._get(f"{self.s.gestdown_url}/subtitles/get/{show}/{season}/{episode}/"
+                            f"{urllib.parse.quote(lang_name(lang))}") or {}
+            return [self._cand("gestdown", f"gd-{it.get('subtitleId')}", f"{self.s.gestdown_url}{it['downloadUri']}",
+                               lang, it.get("version"), hi=bool(it.get("hearingImpaired")))
+                    for it in got.get("matchingSubtitles") or []
+                    if it.get("completed") and site_path(it.get("downloadUri"))]
+        return self._each_language("gestdown", type_, video_id, langs, one)
 
     # -- SubDL (key) -------------------------------------------------------------------------------------------
     def _subdl(self, type_, video_id, langs, hints):
@@ -527,25 +599,22 @@ class ExtraSources:
 
     # -- Wyzie (key, self-hosted only) ---------------------------------------------------------------------------
     def _wyzie(self, type_, video_id, langs, hints):
+        """One search per language ISO 639-1 has a code for (_each_language: one language's error doesn't drop the
+        others)."""
         imdb, season, episode = split_id(video_id)
         if not imdb:
             return []
-        out = []
-        for lang in langs:
-            code = lang2(lang)
-            if not code:
-                continue
-            q = {"id": imdb, "language": code, "key": self.s.wyzie_key}
+
+        def one(lang):
+            q = {"id": imdb, "language": lang2(lang), "key": self.s.wyzie_key}
             if season is not None:
                 q.update(season=season, episode=episode)
             self._count("wyzie")
             got = self._get(f"{self.s.wyzie_url}/search?{urllib.parse.urlencode(q)}") or []
-            for it in got if isinstance(got, list) else []:
-                if not it.get("url"):
-                    continue
-                out.append(self._cand("wyzie", f"wyzie-{it.get('id')}", it["url"], lang3(it.get("language") or lang),
-                                      it.get("release") or it.get("display"), hi=bool(it.get("isHearingImpaired"))))
-        return out
+            return [self._cand("wyzie", f"wyzie-{it.get('id')}", it["url"], lang3(it.get("language") or lang),
+                               it.get("release") or it.get("display"), hi=bool(it.get("isHearingImpaired")))
+                    for it in (got if isinstance(got, list) else []) if it.get("url")]
+        return self._each_language("wyzie", type_, video_id, [x for x in langs if lang2(x)], one)
 
 
 def make_sources(settings):

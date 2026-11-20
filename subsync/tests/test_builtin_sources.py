@@ -5,15 +5,23 @@ import json
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
 from unittest import mock
 
 from helpers import Clock, FakeSources, HASH, PACK, SINGLE, SourcesHarness, wait_until
 from subsync import srclimits
-from subsync.extra import split_id
+from subsync.extra import Busy, split_id
 from subsync.settings import Settings
 from subsync.sourcestate import Health, Ledger
 from subsync.sources import fetch_subtitle
+
+
+def closed(error):
+    """An HTTP error closed, as ExtraSources._get raises one."""
+    error.close()
+    return error
+
 
 class Ticking:
     """A clock that gives `times` one reading after another, then stays at the last."""
@@ -488,6 +496,113 @@ class ReviewCycle2Test(SourcesHarness, unittest.TestCase):
             got = ex.search("series", "tt2:1:2")
         self.assertEqual([(c["id"], c["lang"], c["url"]) for c in got],
                          [("gd-G4", lang, f"{self.fake.url}/gestdown/subtitles/download/G9") for lang in ("eng", "rus")])
+
+
+    def test_another_release_of_the_episode_reuses_the_answers_not_asked_by_file(self):
+        # Every answer was kept under the file's hints, so each release of an episode asked SubDL, SubSource
+        # and Gestdown again for the same answer
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="osv3,gestdown", SUBSYNC_SUBDL_KEY="k1", SUBSYNC_SUBSOURCE_KEY="ss-key")
+        first = {"filename": "Show.S01E02.1080p.WEB-GRP.mkv", "videoHash": "ab" * 8, "videoSize": 5}
+        for name in (first["filename"], "Show.S01E02.720p.HDTV-LOL.mkv", "Show.S01E02.2160p.WEB-NTb.mkv"):
+            ex.search("series", "tt2:1:2", hints=dict(first, filename=name))
+        for path in ("/subdl/api/v1/subtitles", "/subsource/subtitles", "/gestdown/subtitles/get/S1/1/2/English"):
+            self.assertEqual(len(self.fake.asked(path)), 1, path)
+        self.assertEqual(len(self.fake.asked("/osv3/subtitles/")), 3)            # asked by the file: once per file
+        got = ex.search("series", "tt2:1:2", langs=["fre"], hints=first)
+        self.assertEqual([c["id"] for c in got if c["source"] == "osv3"], ["osv3-103"])
+        self.assertEqual(len(self.fake.asked("/osv3/subtitles/")), 3)            # it lists every language: kept
+
+    def test_a_search_while_the_same_ask_runs_waits_for_it(self):
+        # A search whose answer was still on its way (a source slower than SUBSYNC_SOURCE_TIMEOUT_S) asked the
+        # source again
+        self.fake.mode["tsdb"] = "slow"
+        ex = self.extra(clock=time.time, SUBSYNC_EXTRA_SOURCES="tsdb", SUBSYNC_SOURCE_TIMEOUT_S="0.2")
+        self.assertEqual(ex.search("movie", "tt1"), [])                          # too slow: left out
+        self.assertEqual(ex.search("movie", "tt1"), [])                          # still running: waited for
+
+        def kept():
+            with ex.cache_lock:
+                return any(key[0] == "tsdb" for key in ex.cache)
+        self.assertTrue(wait_until(kept, timeout=10))
+        self.assertEqual(len(self.fake.asked("/tsdb/v1/by-imdb/tt1")), 1)
+        self.assertEqual(len(ex.search("movie", "tt1")), 2)                      # its answer, kept
+        self.assertEqual(len(self.fake.asked("/tsdb/v1/by-imdb/tt1")), 1)
+
+    def test_an_id_being_looked_up_is_waited_for(self):
+        # Two threads needing the same id (a TVDB id, a SubSource id: a counted request) both looked it up
+        ex = self.extra()
+        started, release, calls, got = threading.Event(), threading.Event(), [], []
+
+        def lookup(answer):
+            calls.append(answer)
+            started.set()
+            release.wait(5)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        def need(key, answer):
+            try:
+                got.append(ex._id("subsource", key, lambda: lookup(answer)))
+            except Exception as e:
+                got.append(type(e).__name__)
+        for key, answer in (("tt2", 555), ("tt3", ValueError())):
+            with self.subTest(key=key):
+                for state in (started, release, calls, got):
+                    state.clear()
+                a = threading.Thread(target=need, args=(key, answer))
+                a.start()
+                self.assertTrue(started.wait(5))
+                b = threading.Thread(target=need, args=(key, answer))
+                b.start()
+                b.join(0.3)
+                self.assertTrue(b.is_alive())                                    # waiting
+                release.set()
+                a.join(5)
+                b.join(5)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(got, [555, 555] if key == "tt2" else ["ValueError", "ValueError"])
+                self.assertEqual(ex.looking, {})
+
+    def test_a_language_being_refreshed_beside_one_that_answered_is_asked_again_next_time(self):
+        # Gestdown's answer was kept for hours when one language was being refreshed (423) and another
+        # answered, so the first wasn't asked again as its docstring says
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="gestdown")
+        real = ex._get
+
+        def get(url, *args, **kwargs):
+            if url.endswith("/Russian"):
+                raise Busy()
+            return real(url, *args, **kwargs)
+        with mock.patch.object(ex, "_get", side_effect=get):
+            for n in (1, 2):
+                self.assertEqual([c["id"] for c in ex.search("series", "tt2:1:2")], ["gd-G1"])
+                self.assertEqual(len(self.fake.asked("/gestdown/subtitles/get/")), n)   # English, each time
+        self.assertEqual(ex.health.status(), {})
+
+    def test_an_answer_part_of_which_failed_is_kept_an_hour(self):
+        # A language (Gestdown) or a lookup (TheSubtitleDB) that failed beside others that answered: their
+        # answer was kept for hours as if whole; now as "nothing found" is
+        self.fake.mode["tsdb-release"] = "400"
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb,gestdown")
+        real = ex._get
+
+        def get(url, *args, **kwargs):
+            if url.endswith("/Russian"):
+                raise closed(urllib.error.HTTPError(url, 500, "down", None, None))
+            return real(url, *args, **kwargs)
+        hints = {"filename": "Show.S01E02.mkv", "infoHash": HASH}
+        with mock.patch.object(ex, "_get", side_effect=get):
+            ex.search("series", "tt2:1:2", hints=hints)
+            n = len(self.fake.calls)
+            got = ex.search("series", "tt2:1:2", hints=hints)
+            self.assertEqual(len(self.fake.calls), n)                            # kept for a while
+            self.assertTrue({"tsdb-41", "gd-G1"} <= {c["id"] for c in got})
+            self.clock.t += srclimits.EMPTY_TTL_S + 1
+            ex.search("series", "tt2:1:2", hints=hints)
+        self.assertEqual(len(self.fake.asked("/tsdb/v1/by-imdb/")), 2)            # then asked again
+        self.assertEqual(len(self.fake.asked("/gestdown/subtitles/get/")), 2)
+        self.assertEqual(ex.health.status(), {})
 
 
 class StateTest(unittest.TestCase):

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -271,6 +272,23 @@ class ExtraSourcesTest(unittest.TestCase):
         self.assertTrue(explain.SETTINGS["SUBSYNC_EXTRA_SOURCES"][1].endswith(
             "A site that is already an addon in your config isn't asked twice. Other names are ignored: SubDL, "
             "SubSource and Wyzie Subs have their own key settings."))
+
+    def test_one_wyzie_language_failing_keeps_the_others(self):
+        # Wyzie, asked once per language, dropped every language when one failed (Gestdown keeps the others)
+        from unittest import mock
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="", SUBSYNC_WYZIE_KEY="k2")
+        real = ex._get
+
+        def get(url, *args, **kwargs):
+            if "/wyzie/search" in url and "language=ru" in url:
+                error = urllib.error.HTTPError(url, 500, "down", None, None)
+                error.close()                                       # as _get raises one
+                raise error
+            return real(url, *args, **kwargs)
+        with mock.patch.object(ex, "_get", side_effect=get):
+            got = ex.search("series", "tt2:1:2")
+        self.assertEqual([(c["source"], c["lang"]) for c in got], [("wyzie", "eng")])
+        self.assertEqual(ex.health.status(), {})
 
     def test_off_means_nothing_is_asked(self):
         self.assertEqual(self.extra(SUBSYNC_EXTRA_SOURCES="").search("series", "tt2:1:2"), [])
