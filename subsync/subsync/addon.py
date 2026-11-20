@@ -123,7 +123,7 @@ def is_entry(path):
     return path == NOTICE_PATH or any(route.match(path) for route in ENTRY_ROUTES)
 
 
-def video_id(raw):
+def video_id_of(raw):
     """A subtitle route's Stremio id as its path carries it, decoded; None for one naming no title (MAX_VIDEO_ID)."""
     vid = urllib.parse.unquote(raw)
     return None if len(vid) > MAX_VIDEO_ID or not vid.isprintable() or "/" in vid else vid
@@ -138,7 +138,7 @@ def head_answer(path, key=""):
     without the body."""
     m = SUB_ROUTE.match(path)
     if m:
-        return (200, "application/json; charset=utf-8") if video_id(m.group(2)) is not None else (404, None)
+        return (200, "application/json; charset=utf-8") if video_id_of(m.group(2)) is not None else (404, None)
     m = next(filter(None, (route.match(path) for route in (PENDING_ROUTE, PICK_ROUTE, ORIGINAL_ROUTE))), None)
     if m is None:
         return None
@@ -351,7 +351,7 @@ class App:
 
     def _to_fit(self, alias, langs):
         """Of `langs`, those this person's subtitle list for the file has a subtitle of (all of them while that list
-        isn't known): the audio route gives a verdict to those only, so waiting for one on another would queue the
+        isn't known): the audio route gives a verdict to those only, and waiting for one it can't give would queue the
         file again on every request."""
         originals = self.worker.known_originals(alias)
         return langs if originals is None else [lang for lang in langs if originals.get(lang)]
@@ -571,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "bytes_today": app.store.day_count("read")})
             m = SUB_ROUTE.match(path)
             if m:
-                vid = video_id(m.group(2))
+                vid = video_id_of(m.group(2))
                 if vid is None:
                     return self._send(404, b"")
                 app.subtitle_requests += 1
