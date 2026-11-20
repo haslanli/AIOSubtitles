@@ -60,13 +60,12 @@ def refusal(config):
     return None
 
 
-def as_subprocess_takes(cmd):
-    """A command's argv as subprocess takes it, for the stand-ins of dockerenv.run: an item that isn't a str, bytes or a
-    path (None, say) raises the TypeError subprocess raises, which dockerenv.run doesn't catch."""
+def check_argv(cmd):
+    """For the stand-ins of dockerenv.run: a command's argv as subprocess takes it. An item that isn't a str, bytes or
+    a path (None, say) raises the TypeError subprocess raises, which dockerenv.run doesn't catch."""
     for item in cmd:
         if not isinstance(item, (str, bytes, os.PathLike)):
             raise TypeError(f'expected str, bytes or os.PathLike object, not {type(item).__name__}')
-    return cmd
 
 
 _NEWZ = {'torbox', 'nzbdav', 'altmount', 'stremio_nntp', 'stremthru_newz', 'aiostreams'}
@@ -324,6 +323,10 @@ class FlowFixture(AnswersRun, unittest.TestCase):
         container = {'name': 'aiostreams', 'image': 'ghcr.io/viren070/aiostreams:latest', 'port': 3000, 'base_url': PUBLIC,
                      'host_network': False, 'networks': ['aio_default'], 'ips': [], 'published': []}
 
+        def run(cmd, timeout=60, stdin=None):
+            check_argv(cmd)
+            return 0, '', ''
+
         def exec_in(name, cmd, stdin=None, timeout=120):
             self.exec_calls.append((cmd, stdin))
             if cmd == dockerenv.HEALTH:                     # subsync's /health, once it runs
@@ -347,7 +350,7 @@ class FlowFixture(AnswersRun, unittest.TestCase):
             mock.patch.object(dockerenv, 'lan_address', lambda: '192.168.1.5'),
             mock.patch.object(dockerenv, 'container_state', lambda n: 'running healthy'),
             mock.patch.object(dockerenv, 'compose', self._compose),
-            mock.patch.object(dockerenv, 'run', lambda cmd, *a, **k: as_subprocess_takes(cmd) and (0, '', '')),
+            mock.patch.object(dockerenv, 'run', run),
             mock.patch.object(dockerenv, 'exec_in', exec_in),
             mock.patch.object(hosting, 'fetch', self._fetch_public_health(hosting.fetch, self.aios)),
         ):

@@ -23,7 +23,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, docs, engine, hosting, limits, plan, screens, ui, wizard
-from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture, as_subprocess_takes
+from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture, check_argv
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
 from subsync import aiosconfig, explain
 
@@ -1881,7 +1881,7 @@ class TakeOver(Offline):
 
     def run_docker(self, cmd, timeout=60, stdin=None):
         """Docker's listings with each item's install label, and its volume commands."""
-        as_subprocess_takes(cmd)
+        check_argv(cmd)
         kind = {('docker', 'ps'): 'container', ('docker', 'volume'): 'volume', ('docker', 'network'): 'network'}.get(
             tuple(cmd[:2]))
         if kind and cmd[2] in ('-a', 'ls'):
