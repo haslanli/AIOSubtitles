@@ -496,11 +496,12 @@ class TrackWordsReadTest(unittest.TestCase):
         r = Bytes(os.path.join(FIXTURES, "tiny.mkv"))
         index = mkv.MkvIndex(r).read_head().read_cues()
         t = index.text_tracks()[0]
-        before = len(r.reads)
+        before, got, plain = len(r.reads), [], r.get
+        r.get = lambda start, length: got.append(plain(start, length)) or got[-1]   # the bytes each read returned
         index.line_words(t["number"], [s for s, _ in t["cues"]][:5])
         self.assertEqual(len(r.reads) - before, 5)
         self.assertTrue(all(n == mkv.WORD_READ for n in r.reads[before:]))
-        self.assertEqual(index.words_bytes, 5 * mkv.WORD_READ)
+        self.assertEqual(sum(map(len, got)), 5 * mkv.WORD_READ)
 
     def test_cues_without_block_places_give_no_words(self):
         r = Bytes(os.path.join(FIXTURES, "tiny.mkv"))

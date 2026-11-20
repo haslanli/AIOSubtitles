@@ -188,6 +188,7 @@ class DecoderCleanupTest(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 3.0)
         self.assertIsNotNone(procs[0].returncode)        # stopped and waited for, not left decoding
         self.assertTrue(procs[0].stdout.closed)
+        self.assertTrue(procs[0].stderr.closed)
 
     def test_the_output_pipe_is_closed_once_the_window_is_decoded(self):
         procs = self.started()
@@ -197,6 +198,32 @@ class DecoderCleanupTest(unittest.TestCase):
         self.assertEqual(procs[0].returncode, 0)
         self.assertTrue(procs[0].stdout.closed)
         self.assertTrue(procs[0].stdin.closed)
+        self.assertTrue(procs[0].stderr.closed)
+
+
+class DecoderSaidTest(unittest.TestCase):
+    """A decoder that fails short of its window has the end of its error output logged (its last
+    DECODER_SAID bytes), where it went nowhere and a window decoded short had no reason in the log; the output is read
+    as it comes, so a decoder that says a lot never waits on it."""
+
+    def test_a_failed_decoder_has_the_end_of_what_it_said_logged(self):
+        said = "'x' * 2_000_000 + '\\nCodec (wmav2) not on whitelist\\nError while opening decoder\\n'"
+        fails = [sys.executable, "-c", f"import sys; sys.stdin.buffer.read(); sys.stderr.write({said}); "
+                                       "sys.stdout.write('ab'); sys.exit(234)"]
+        t0 = time.monotonic()
+        with self.assertLogs("subsync.read", "INFO") as logs:
+            self.assertEqual(mkv.pipe_until(fails, b"", iter([b"x"]), need=100, timeout=20), b"ab")
+        self.assertLess(time.monotonic() - t0, 10.0)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("decoder failed (exit 234, 2 of 100 bytes): xxx", logs.output[0])
+        self.assertTrue(logs.output[0].endswith("x | Codec (wmav2) not on whitelist | Error while opening decoder"))
+        self.assertLess(len(logs.output[0]), mkv.DECODER_SAID + 100)
+
+    def test_a_decoder_that_ends_short_by_itself_logs_nothing(self):
+        ends = [sys.executable, "-c", "import sys; sys.stdin.buffer.read(); sys.stderr.write('File ended prematurely');"
+                                      "sys.stdout.write('ab')"]
+        with self.assertNoLogs("subsync.read", "INFO"):
+            self.assertEqual(mkv.pipe_until(ends, b"", iter([b"x"]), need=100, timeout=20), b"ab")
 
 
 class CutFieldTest(unittest.TestCase):

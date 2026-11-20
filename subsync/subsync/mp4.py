@@ -11,8 +11,8 @@ Fragmented files (an `mvex` box in the movie box, or `moof`) are not supported: 
 """
 import struct
 
-from .mkv import (HASH_CHUNK, HEAD_BYTES, WORD_READ, LineReads, NotMatroska, add_audio_bytes, add_words_bytes,
-                  decoder_cmd, index_hash, named_not_dialogue, pipe_until, read_lines, sane_duration, starts_at)
+from .mkv import (DAMAGED, EBML, HASH_CHUNK, HEAD_BYTES, WORD_READ, LineReads, MkvIndex, NotMatroska, add_audio_bytes,
+                  decoder_cmd, index_hash, named_not_dialogue, pipe_until, read_lines, sane_duration, starts_at, vint)
 from .reader import IndexTooLarge
 
 MAX_MOOV = 64 * 1024 * 1024      # a larger movie box is never read (IndexTooLarge)
@@ -272,7 +272,6 @@ class Mp4Index:
             data = reads.get(at, size)
             if data is None:
                 return s, None
-            add_words_bytes(self, len(data))
             return s, sample_text(t["codec"], data)
         return read_lines(want, one, reads)
 
@@ -475,7 +474,6 @@ def _adts(asc, frame_len):
 def open_index(reader):
     """The index for a file, chosen by its first bytes: Matroska, else MP4. Raises NotMatroska for anything else, and for
     a file whose index is damaged (mkv.DAMAGED)."""
-    from .mkv import DAMAGED, EBML, MkvIndex, vint
     head = reader.get(0, HEAD_BYTES)
     try:
         is_mkv = vint(head, 0, strip=False)[0] == EBML

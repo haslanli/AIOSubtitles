@@ -17,12 +17,14 @@ import zlib
 from array import array
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from .reader import IndexTooLarge
+from .imageref import IMAGE_CODECS
+from .reader import IndexTooLarge, ReadFailed, Refused, Stopped
 
 AUDIO_BYTES_LOCK = threading.Lock()
 # ffmpeg decodes bytes of files anyone can publish; on Linux each decoder gets its own limits
 FFMPEG_MEMORY_KB = 1024 * 1024    # address space of one decoder (1 GiB; a 30 s window needs a few MB)
 FFMPEG_CPU_S = 120                # processor seconds of one decoder (a window takes well under one)
+DECODER_SAID = 1024               # bytes of a decoder's error output kept, logged when it fails short
 # the only decoders ffmpeg may open, by its names for them (DTS's is dca, MP3's mp3float): those of the audio
 # codecs Matroska and MP4 files carry. A window's header names every track of the file, and ffmpeg's probing would
 # otherwise open each one's decoder (the video's too) on the window's bytes.
@@ -50,12 +52,6 @@ def add_audio_bytes(index, n):
     """Bytes of audio windows read for this file (its audio budget); windows may be read in parallel."""
     with AUDIO_BYTES_LOCK:
         index.audio_bytes = getattr(index, "audio_bytes", 0) + n
-
-
-def add_words_bytes(index, n):
-    """Bytes read for track lines' words (D1); lines are read in parallel."""
-    with AUDIO_BYTES_LOCK:
-        index.__dict__["words_bytes"] = index.__dict__.get("words_bytes", 0) + n
 
 
 HEAD_BYTES = 256 * 1024
@@ -243,7 +239,6 @@ class LineReads:
 
     def get(self, at, n):
         """reader.get(at, n), or None when it failed or the reads have stopped."""
-        from .reader import ReadFailed, Refused, Stopped
         if self.stop.is_set():
             return None
         try:
@@ -273,24 +268,33 @@ def _fed(pipe, data):
         return False
 
 
+def _read_some(pipe):
+    return pipe.read1(65536) if hasattr(pipe, "read1") else pipe.read(65536)
+
+
 def pipe_until(cmd, head, chunks, need, timeout=300):
     """Run a decoder on head + chunks (an iterator, e.g. RangeReader.stream) and stop feeding it once its output holds
     `need` bytes, or once it ends by itself; the iterator is then closed, which ends its read. Returns the output. An
-    error of the iterator (the read failed, or was refused or stopped) is raised, once the decoder is stopped."""
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    out, enough = bytearray(), threading.Event()
+    error of the iterator (the read failed, or was refused or stopped) is raised, once the decoder is stopped. A decoder
+    that fails (exits with an error) short of `need` has the end of its error output logged: why it decoded
+    too little (a codec it may not open, a -map that matches nothing, its limits)."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, said, enough = bytearray(), bytearray(), threading.Event()
 
     def drain():
-        while True:
-            b = p.stdout.read1(65536) if hasattr(p.stdout, "read1") else p.stdout.read(65536)
-            if not b:
-                break
+        while b := _read_some(p.stdout):
             out.extend(b)
             if len(out) >= need:
                 enough.set()
         enough.set()
-    reader = threading.Thread(target=drain, daemon=True)
-    reader.start()
+
+    def listen():   # the decoder's error output: only its last DECODER_SAID bytes are kept
+        while b := _read_some(p.stderr):
+            said.extend(b)
+            del said[:-DECODER_SAID]
+    readers = [threading.Thread(target=f, daemon=True) for f in (drain, listen)]
+    for t in readers:
+        t.start()
     try:
         try:
             if _fed(p.stdin, head):
@@ -314,8 +318,14 @@ def pipe_until(cmd, head, chunks, need, timeout=300):
         p.wait()
         raise
     finally:
-        reader.join(timeout)
+        for t in readers:
+            t.join(timeout)
         p.stdout.close()
+        p.stderr.close()
+    if p.returncode and len(out) < need:
+        lines = [line.strip() for line in said.decode("utf-8", "replace").splitlines()]
+        log.info("decoder failed (exit %s, %d of %d bytes): %s", p.returncode, len(out), need,
+                 " | ".join(line for line in lines if line) or "-")
     return bytes(out)
 
 
@@ -637,7 +647,6 @@ class MkvIndex:
             buf = reads.get(at, WORD_READ)
             if buf is None:
                 return s, None
-            add_words_bytes(self, len(buf))
             payload = uncompressed(block_payload(buf, track), comp, TEXT_INFLATE)
             if payload is None:
                 return s, None
@@ -668,22 +677,16 @@ class MkvIndex:
         want = self._places(track, starts)
         reads = LineReads(self.r)
 
-        def get(at, n):
-            buf = reads.get(at, n)
-            if buf is not None:
-                add_words_bytes(self, len(buf))
-            return buf
-
         def one(item):
             s, at = item
             if self.size is not None and at >= self.size:
                 return s, None
-            buf = get(at, min(WORD_READ, IMAGE_READ))
+            buf = reads.get(at, min(WORD_READ, IMAGE_READ))
             ext = block_extent(buf, track) if buf else None
             if ext is None or ext[1] > IMAGE_READ:
                 return s, None
             if ext[1] > len(buf):
-                more = get(at + len(buf), ext[1] - len(buf))
+                more = reads.get(at + len(buf), ext[1] - len(buf))
                 if more is None or len(more) < ext[1] - len(buf):
                     return s, None
                 buf = buf + more
@@ -692,7 +695,6 @@ class MkvIndex:
 
     def image_tracks(self):
         """Image subtitle tracks (PGS, VobSub) with their cue timings; forced/sign tracks marked."""
-        from .imageref import IMAGE_CODECS
         return self._subtitle_tracks(IMAGE_CODECS)
 
     def audio_track_index(self):
