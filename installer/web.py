@@ -470,10 +470,10 @@ class App:
             e.answers['SUBSYNC_AUDIO_ROUTE'] = 'yes' if one.get('SUBSYNC_AUDIO_ROUTE') else 'no'
             if s.run('hostchoices', e.host_choices):
                 return self.go('hostlimits')
-        chosen = {}
-        for key in ('SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_PERSONAL'):
-            chosen[key] = e.answers.get(key, '') == 'yes' if key in e.answers else \
-                plan.is_on(engine.env_values().get(key, 'off'))
+        kept = engine.env_settings()     # a switch not answered yet: state/subsync.env's, as subsync reads it
+        chosen = {key: e.answers[key] == 'yes' if key in e.answers else on
+                  for key, on in (('SUBSYNC_USENET', kept.usenet), ('SUBSYNC_AUDIO_ROUTE', kept.audio_route),
+                                  ('SUBSYNC_TMDB_PERSONAL', kept.tmdb_personal))}
         return self.page(screens.host_choices(s.problems.get('hostchoices'), usenet=chosen['SUBSYNC_USENET'],
                                               audio=chosen['SUBSYNC_AUDIO_ROUTE'],
                                               tmdb_personal=chosen['SUBSYNC_TMDB_PERSONAL'],

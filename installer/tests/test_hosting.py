@@ -211,16 +211,52 @@ class Switches(unittest.TestCase):
         self.assertEqual((env['SUBSYNC_USENET'], env['SUBSYNC_AUDIO_ROUTE'], env['SUBSYNC_TMDB_PERSONAL']),
                          ('off', 'off', 'off'))                                      # nothing chosen: all off
 
+    def read(self, text):
+        """state/subsync.env written as `text`, read as setup reads it: its switches and when the audio route starts."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(engine, 'STATE', Path(tmp)):
+            (Path(tmp) / 'subsync.env').write_text(text)
+            kept = engine.env_settings()
+            return (kept.usenet, kept.audio_route, kept.tmdb_personal), engine.env_audio_when()
+
     def test_a_switch_is_read_with_subsyncs_own_words(self):
+        # Setup reads them with subsync's own settings (it had copies of their words and defaults)
         tree = ast.parse((Path(__file__).resolve().parents[2] / 'subsync' / 'subsync' / 'settings.py').read_text())
         on = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_on')
-        self.assertEqual(sorted(plan.ON), sorted(ast.literal_eval(on.body[0].value.comparators[0])))
-        for value, expected in (('1', True), (' ON ', True), ('Yes', True), ('true', True), ('y', False),
-                                ('off', False), ('0', False), ('', False), (None, False)):
+        words = ast.literal_eval(on.body[0].value.comparators[0])
+        self.assertTrue(words)
+        cases = [*[(word, True) for word in words], ('1', True), (' ON ', True), ('Yes', True), ('true', True),
+                 ('y', False), ('off', False), ('0', False), ('', False), (None, False), ('enabled', False)]
+        for value, expected in cases:
             with self.subTest(value=value):
-                self.assertIs(plan.is_on(value), expected)
-        self.assertEqual(plan.audio_when_of({'SUBSYNC_AUDIO_ON_PICK': '1'}), 'pick')
-        self.assertEqual(plan.audio_when_of({'SUBSYNC_AUDIO_ON_PICK': 'off'}), 'open')
+                lines = '' if value is None else ''.join(f'{key}={value}\n' for key in (
+                    'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_PERSONAL'))
+                self.assertEqual(self.read(lines)[0], (expected,) * 3)
+        self.assertEqual(self.read('SUBSYNC_AUDIO_ON_PICK=1\n')[1], 'pick')
+        self.assertEqual(self.read('SUBSYNC_AUDIO_ON_PICK=off\n')[1], 'open')
+
+    def test_the_host_choices_start_from_the_switches_state_subsync_env_has(self):
+        # each one read as subsync reads it: Yes and 1 are on, a word it doesn't take is its default (off)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(engine, 'STATE', Path(tmp)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            (Path(tmp) / 'subsync.env').write_text('SUBSYNC_USENET=Yes\nSUBSYNC_AUDIO_ROUTE=enabled\n'
+                                                   'SUBSYNC_TMDB_PERSONAL=1\n')
+            for page in (True, False):                             # the page, and ./setup --yes
+                with self.subTest(page=page):
+                    e = engine.Engine({}, page=page)
+                    e.host_choices()
+                    self.assertEqual((e.host_usenet, e.host_audio, e.host_tmdb_personal), (True, False, True))
+
+    def test_when_the_audio_route_starts_is_read_as_subsync_reads_it(self):
+        # as state/subsync.env starts it, the setting SUBSYNC_AUDIO_WHEN replaced included (moved from test_plan)
+        for env, when in (({}, 'pick'), ({'SUBSYNC_AUDIO_WHEN': 'open'}, 'open'), ({'SUBSYNC_AUDIO_ON_PICK': 'off'}, 'open'),
+                          ({'SUBSYNC_AUDIO_ON_PICK': 'on'}, 'pick'), ({'SUBSYNC_AUDIO_ON_PICK': ''}, 'open'),
+                          ({'SUBSYNC_AUDIO_WHEN': 'pick', 'SUBSYNC_AUDIO_ON_PICK': 'off'}, 'pick')):
+            with self.subTest(env=env):
+                self.assertEqual(self.read(''.join(f'{k}={v}\n' for k, v in env.items()))[1], when)
+        self.assertEqual(self.read('SUBSYNC_AUDIO_WHEN="open"\n')[1], 'open')      # a quoted value, as Compose reads it
+        # Written wrong, it reads as its default, as subsync reads it and every setting written wrong (setup's
+        # copy fell back to SUBSYNC_AUDIO_ON_PICK: open here, while subsync refuses the value)
+        self.assertEqual(self.read('SUBSYNC_AUDIO_WHEN=later\nSUBSYNC_AUDIO_ON_PICK=off\n')[1], 'pick')
 
 
 class Rows:

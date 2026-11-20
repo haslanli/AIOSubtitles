@@ -1149,6 +1149,21 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertEqual((env['SUBSYNC_PUBLIC_INVITE'], env['SUBSYNC_MAX_USERS']), ('my-own-code', '150'))
         self.assertFalse(any(env['SUBSYNC_SECRET_KEY'] in page for page in b.pages))     # never on a page
 
+    def test_the_choices_page_starts_from_the_switches_subsync_env_has(self):
+        # Read as subsync reads them: Yes and 1 are on, a word it doesn't take is its default (off)
+        self.state.mkdir(parents=True)
+        (self.state / 'subsync.env').write_text('SUBSYNC_USENET=Yes\nSUBSYNC_AUDIO_ROUTE=enabled\n'
+                                                'SUBSYNC_TMDB_PERSONAL=1\n')
+        b = Browser(web.App(port=8817))
+        b.post('', {'ROUTE': 'host'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
+        _, _, text = b.follow('signups', {'SUBSYNC_PUBLIC_INVITE': 'my-own-code', 'go': 'next'})
+        ticked = {key: re.search(rf'id="{key.lower()}" name="{key}" value="yes"( checked)?', text).group(1) is not None
+                  for key in ('SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_PERSONAL')}
+        self.assertEqual(ticked, {'SUBSYNC_USENET': True, 'SUBSYNC_AUDIO_ROUTE': False, 'SUBSYNC_TMDB_PERSONAL': True})
+
     def walk_to_limits(self, b):
         b.post('', {'ROUTE': 'host'})
         b.get('machine')

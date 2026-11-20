@@ -186,9 +186,17 @@ def env_values(as_written=False):
 
 
 def env_settings():
-    """subsync's settings as state/subsync.env starts it, for the questions that state one (explain.setup_help); a
-    number or an on/off setting written wrong there reads as its default (Settings.written_wrong)."""
+    """subsync's settings as state/subsync.env starts it, for the questions that state one (explain.setup_help) and the
+    switches setup asks again; a number or an on/off setting written wrong there reads as its default
+    (Settings.written_wrong)."""
     return Settings(env_values())
+
+
+def env_audio_when():
+    """When the audio route starts as state/subsync.env has it, read as subsync reads it (SUBSYNC_AUDIO_WHEN, else the
+    setting it replaced, SUBSYNC_AUDIO_ON_PICK); written wrong there, it reads as its default, as every setting does
+    (env_settings)."""
+    return env_settings().audio_when or explain.SETTINGS['SUBSYNC_AUDIO_WHEN'][0]
 
 
 def remove_state_files():
@@ -801,7 +809,7 @@ class Engine:
         if not self.prev.get('audio'):
             return 'no'
         when = self.prev.get('audio_when')
-        return when if when in ('pick', 'open') else plan.audio_when_of(env_values())
+        return when if when in ('pick', 'open') else env_audio_when()
 
     def ask_audio(self):
         """Files with no subtitles of their own: no, when I pick the file, or as soon as a file is opened. An
@@ -1497,18 +1505,16 @@ class Engine:
         self.show_step('hostchoices', 'host')
         for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY'):
             self.optional_key(key, screens.LABELS[key])
+        kept = env_settings()       # each switch's current answer: state/subsync.env's, as subsync reads it
         # the original-language lookup: a TMDB key for everyone, or (with none) each person's own, or Wikidata alone
         self.host_tmdb_personal = False
         if self.tmdb_key_question(screens.TMDB_FOR_EVERYONE):
             self.ask.answers.pop('SUBSYNC_TMDB_PERSONAL', None)     # a key for everyone: never each person's too
         else:
-            kept = plan.is_on(env_values().get('SUBSYNC_TMDB_PERSONAL', 'off'))
             self.host_tmdb_personal = self.ask.yesno('SUBSYNC_TMDB_PERSONAL', screens.LABELS['SUBSYNC_TMDB_PERSONAL'],
-                                                     kept)
-        kept = plan.is_on(env_values().get('SUBSYNC_USENET', 'off'))
-        self.host_usenet = self.ask.yesno('SUBSYNC_USENET', screens.LABELS['SUBSYNC_USENET'], kept)
-        kept = plan.is_on(env_values().get('SUBSYNC_AUDIO_ROUTE', 'off'))
-        self.host_audio = self.ask.yesno('SUBSYNC_AUDIO_ROUTE', screens.LABELS['SUBSYNC_AUDIO_ROUTE'], kept)
+                                                     kept.tmdb_personal)
+        self.host_usenet = self.ask.yesno('SUBSYNC_USENET', screens.LABELS['SUBSYNC_USENET'], kept.usenet)
+        self.host_audio = self.ask.yesno('SUBSYNC_AUDIO_ROUTE', screens.LABELS['SUBSYNC_AUDIO_ROUTE'], kept.audio_route)
 
     def host_limits(self):
         """Every limit, in its three groups, the current value or subsync's default filled in."""
@@ -1617,7 +1623,7 @@ class Engine:
                          f"({checked}); read today: {st.get('bytes_today', 0) / 1e6:.1f} MB"))
             if st.get('backing_off'):
                 rows.append(('warn', 'backing off after a refused read (it waits before reading again)', None))
-        when = s.get('audio_when') if s.get('audio_when') in ('pick', 'open') else plan.audio_when_of(env_values())
+        when = s.get('audio_when') if s.get('audio_when') in ('pick', 'open') else env_audio_when()
         audio = (f"on when {'opened' if when == 'open' else 'picked'}, up to {s.get('audio_budget') or '1'} GB per file"
                  if s.get('audio') else 'off')
         details = [('AIOStreams', s.get('aios_public')), ('languages', ', '.join(s.get('languages', []))),

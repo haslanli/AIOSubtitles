@@ -166,25 +166,6 @@ def audio_answer(text):
     return 'pick' if value in _YES else 'no' if value in _NO else None
 
 
-# A switch in state/subsync.env is on with one of these words, as subsync reads it (subsync/subsync/settings.py _on;
-# a test keeps them equal). Typed answers take y too (ui.Asker.yesno); AUDIO's yes takes no number (_YES above).
-ON = ('1', 'on', 'true', 'yes')
-
-
-def is_on(value):
-    """A switch of state/subsync.env, read as subsync reads it."""
-    return str(value).strip().lower() in ON
-
-
-def audio_when_of(env):
-    """When the audio route starts as state/subsync.env has it, read as subsync reads it: SUBSYNC_AUDIO_WHEN, else
-    the setting it replaced (SUBSYNC_AUDIO_ON_PICK: anything but on means open); pick otherwise."""
-    when = str(env.get('SUBSYNC_AUDIO_WHEN') or '').strip().lower()
-    if when in ('pick', 'open'):
-        return when
-    return 'pick' if is_on(env.get('SUBSYNC_AUDIO_ON_PICK', 'on')) else 'open'
-
-
 def _gigabytes(text):
     """'1 GB', '1gb', '1.0' -> '1'; '.5' -> '0.5'; None when it isn't a positive number."""
     value = (text or '').strip().lower()

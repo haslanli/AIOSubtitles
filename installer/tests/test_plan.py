@@ -326,12 +326,7 @@ class Files(unittest.TestCase):
         for typed in ('', None, 'maybe', '1', '3'):          # a number is the terminal's own way to answer
             with self.subTest(typed=typed):
                 self.assertIsNone(plan.audio_answer(typed))
-        # when state/subsync.env starts it, as subsync reads it (the setting SUBSYNC_AUDIO_WHEN replaced included)
-        for env, when in (({}, 'pick'), ({'SUBSYNC_AUDIO_WHEN': 'open'}, 'open'), ({'SUBSYNC_AUDIO_ON_PICK': 'off'}, 'open'),
-                          ({'SUBSYNC_AUDIO_ON_PICK': 'on'}, 'pick'), ({'SUBSYNC_AUDIO_ON_PICK': ''}, 'open'),
-                          ({'SUBSYNC_AUDIO_WHEN': 'pick', 'SUBSYNC_AUDIO_ON_PICK': 'off'}, 'pick')):
-            with self.subTest(env=env):
-                self.assertEqual(plan.audio_when_of(env), when)
+        # when state/subsync.env starts it: test_hosting.Switches (setup reads it with subsync's own settings)
 
     def test_when_the_audio_route_starts_is_written_only_when_not_the_default(self):
         env = plan.subsync_env(dict(self.S, audio=True, audio_when='open'))
@@ -359,7 +354,6 @@ class Files(unittest.TestCase):
         # the lines setup keeps are written back as they were
         self.assertEqual(plan.parse_env(text, as_written=True),
                          dict(plan.parse_env(text), A='"pa ss #1"', D="'q' # c", E='"open"', K='""'))
-        self.assertEqual(plan.audio_when_of(plan.parse_env('SUBSYNC_AUDIO_WHEN="open"\n')), 'open')
 
     def test_hand_added_lines_are_kept(self):
         written = plan.subsync_env(self.S)
