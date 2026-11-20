@@ -394,6 +394,24 @@ class LanguageCheckWorkerTest(unittest.TestCase):
         self.assertIsNotNone(anchored)
         self.assertIn("Я не знаю", anchored)                                  # the Russian text, not the English one
         self.assertIn("http://subs.test/os-en.srt", self.downloads.asked)    # the next by name, downloaded to check it
+        # The texts the anchored guesses are made from are only those the check passed (not checked again)
+        self.assertEqual({lang: [c["id"] for c, _ in got] for lang, got in job.fetched.items()},
+                         {"eng": ["os-en"], "rus": ["os-ru"]})
+
+    def test_a_language_left_to_the_audio_route_keeps_only_downloads_in_its_language(self):
+        # A file whose only track can't judge the language (the fit says only the audio route can) keeps its
+        # downloads for the anchored guesses: only those the language check passed, which aren't checked again
+        self.judged()
+        no_track = {"outcome": "keep_original", "reason": "no text track", "route": None, "waits_audio": True}
+        patcher = mock.patch.object(pipeline, "sync_subtitle", lambda *a, **kw: dict(no_track))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        w = self.worker(SUBSYNC_LANGUAGES="eng,rus", SUBSYNC_AUDIO_ROUTE="on")
+        job = Job("movie", "tt9", {"filename": "b.mp4", "videoSize": 5})
+        cands = [self.cand("os-enru", "rus"), self.cand("os-ru", "rus")]
+        self.assertIsNone(w._sync_language(job, FakeIndex(), "f-1", "rus", cands, "abcd", "b.mp4"))
+        self.assertEqual(job.to_audio, {"rus"})
+        self.assertEqual([c["id"] for c, _ in job.fetched["rus"]], ["os-ru"])
 
     def test_a_failed_download_alone_keeps_the_original(self):
         # not a refusal: the language keeps its entry, and its original is downloaded again when served

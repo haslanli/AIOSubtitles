@@ -473,6 +473,8 @@ class SafetyTest(unittest.TestCase):
             other = JobGuard(safety, st, daily_budget=10 ** 12)
             other.before_read(1)
             self.assertEqual(safety.refused(), 900)
+            self.assertEqual(safety.refused(), 900)        # during its pause, the same refusal (not doubled)
+            clock.t += 900                                 # the pause ended: the next refusal is one in a row
             self.assertEqual(safety.refused(), 1800)
             with self.assertRaises(Stopped):
                 other.before_read(1)                       # a refusal stops every read
@@ -1060,6 +1062,22 @@ class PickTest(AddonFixture):
         self.assertEqual(len(self.worker.jobs), 0)
         self.assertEqual(self.worker.judged[self.ALIAS], {"eng", "rus"})
 
+    def test_a_file_waiting_for_its_pick_keeps_none_of_its_first_pass_downloads(self):
+        # The file waited as its first pass's own job, whose downloaded texts (the guess and its consensus
+        # tries, SUBSYNC_GATE_TRIES per other language) stayed in memory for as long as it waited; a pick needs the
+        # file's type, id and hints only
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
+        text = b"1\n00:00:01,000 --> 00:00:02,000\nx\n"
+        self.worker._fetch_all = lambda job, lang, tries: [(r, c, text) for r, c in tries]
+        first = Job(self.job.type, self.job.video_id, self.job.hints)
+        self.worker._await_pick(first, self.cands(), "b.mp4", None)
+        self.assertEqual(sorted(first.fetched), ["eng", "rus"])                  # the pass had them, for its guesses
+        waiting = self.worker.pickable[self.ALIAS]
+        self.assertIsNot(waiting, first)
+        self.assertEqual(waiting.fetched, {})
+        self.assertEqual((waiting.type, waiting.video_id, waiting.hints, waiting.audio),
+                         (first.type, first.video_id, first.hints, False))
+
     def test_a_picked_files_audio_job_waits_for_its_text_pass(self):
         text = Job(self.job.type, self.job.video_id, self.job.hints)
         self.worker.current = text                                                # the text pass still runs
@@ -1092,6 +1110,25 @@ class PickTest(AddonFixture):
         finally:
             pl.anchored_guess = real
         self.assertEqual(self.worker.provisional[self.ALIAS], {})
+
+    def test_the_anchored_guesses_check_no_language_again(self):
+        # job.fetched holds only texts the language check passed (_check_fetched, LanguageSync._wrong_language:
+        # test_worker_sources' LanguageCheckWorkerTest), and checking them again took about 38 ms a text, 1.6 s on the
+        # way to the audio route's start with three languages
+        from subsync import langcheck
+        import subsync.pipeline as pl
+        self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
+        job = Job(self.job.type, self.job.video_id, self.job.hints)
+        main = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+        job.fetched = {"eng": [({"id": "os-9"}, main)], "rus": [({"id": "os-r"}, main), ({"id": "os-s"}, main)]}
+        measured = []
+        real = langcheck.measure
+        with mock.patch.object(langcheck, "measure", lambda *a, **k: measured.append(1) or real(*a, **k)), \
+                mock.patch.object(pl, "anchored_guess", lambda main_text, texts: {"index": 1, "body": "anchored",
+                                                                                 "share": 0.9}):
+            self.worker._set_provisional(job)
+        self.assertEqual(self.worker.provisional[self.ALIAS], {"rus": "anchored"})
+        self.assertEqual(measured, [])
 
     def test_an_anchored_guess_is_logged_without_its_subtitles_id(self):
         # A subtitle a config lists without an id has its address as its id, and the log never holds a

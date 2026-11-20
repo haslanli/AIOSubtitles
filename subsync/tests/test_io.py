@@ -1039,6 +1039,44 @@ class PlayedFileHashTest(TinyFileFixture):
         self.assertGreater(store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
 
 
+class SafetyTest(unittest.TestCase):
+    """The refusal back-off doubles with each refusal in a row (README: SUBSYNC_403_BACKOFF_S). A read that was
+    already running when a refusal came, and ends during the pause with bytes, doesn't end the refusals in a row; a
+    refusal during the pause (the other lane's job, a read running then) is the same one, not a second."""
+
+    def setUp(self):
+        from helpers import Clock
+        self.clock = Clock()
+        self.safety = Safety(backoff_s=900, clock=self.clock)
+
+    def test_each_refusal_in_a_row_doubles_the_pause(self):
+        s = self.safety
+        self.assertEqual(s.refused(), 900)
+        self.clock.t += 900                                 # the pause ended: a read is refused again at once
+        self.assertEqual(s.refused(), 1800)
+        self.clock.t += 1800
+        s.read_ok()                                         # a read after the pause got bytes: the run ended
+        self.assertEqual(s.refused(), 900)
+
+    def test_a_read_running_when_the_refusal_came_doesnt_end_the_run(self):
+        s = self.safety
+        self.assertEqual(s.refused(), 900)
+        self.clock.t += 1
+        s.read_ok()                                         # it ends with bytes during the pause
+        self.assertEqual(s.refusals, 1)
+        self.clock.t += 899
+        self.assertEqual(s.refused(), 1800)                 # the next refusal after the pause: twice as long
+
+    def test_a_refusal_during_the_pause_is_the_same_one(self):
+        s = self.safety
+        self.assertEqual(s.refused(), 900)                  # the main lane's job
+        self.clock.t += 1
+        self.assertEqual(s.refused(), 899)                  # the audio lane's, refused by the same limit
+        self.assertEqual((s.refusals, s.refused_until), (1, self.clock.t + 899))
+        self.clock.t += 899
+        self.assertEqual(s.refused(), 1800)
+
+
 class GuardCapTest(unittest.TestCase):
     def test_a_job_stops_at_its_byte_cap(self):
         with tempfile.TemporaryDirectory() as d:

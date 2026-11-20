@@ -304,15 +304,24 @@ class Safety:
         self.lock = threading.Lock()
 
     def refused(self):
+        """A read was refused: every read waits, `backoff_s` doubling with each refusal in a row up to `backoff_max_s`.
+        Returns the wait in seconds. One that comes while the pause runs (a read already running when it began, the
+        other lane's job refused by the same limit) is that same refusal: what is left of the pause, nothing counted."""
         with self.lock:
+            now = self.clock()
+            if now < self.refused_until:
+                return self.refused_until - now
             self.refusals += 1
             wait = min(self.backoff_s * 2 ** (self.refusals - 1), self.backoff_max_s)
-            self.refused_until = self.clock() + wait
+            self.refused_until = now + wait
             return wait
 
     def read_ok(self):
+        """A read got bytes: the refusals in a row end. Not while the pause runs: no read starts then
+        (JobGuard.before_read), so one ending then was running when the refusal came, and says nothing of the limit."""
         with self.lock:
-            self.refusals = 0
+            if self.clock() >= self.refused_until:
+                self.refusals = 0
 
     def backing_off(self):
         return self.clock() < self.refused_until
@@ -776,7 +785,7 @@ class Worker(threading.Thread):
         it is opened, for a viewer who chose that, only when at least one of their languages that has a subtitle to fit
         (job.listed) has no synced copy from anyone and no audio verdict yet (a "keep original" one counts as tried).
         The room and today's counts are checked by the caller. A Real-Debrid file is never read (every read refuses it),
-    so it isn't checked here; a Usenet file counts like any other."""
+        so it isn't checked here; a Usenet file counts like any other."""
         if self.s.audio_choice != "open" or not job.listed:
             return False
         file_key = self.store.resolve(job.alias)
@@ -796,8 +805,10 @@ class Worker(threading.Thread):
             self.audio_counts.audio_started(job.opened)
 
     def _put_waiting(self, job):
-        """The file waits for the person's pick, in memory and in the store (kept across a restart) (cv held)."""
-        put_bounded(self.pickable, job.alias, job, PICKS_ENTRIES)
+        """The job's file waits for the person's pick, in memory and in the store (kept across a restart) (cv held). Kept
+        as a new job of the file (Job.again: its type, id and hints, all a pick needs), never the job itself, whose
+        downloaded texts (fetched) would stay in memory for as long as the file waits."""
+        put_bounded(self.pickable, job.alias, job.again(), PICKS_ENTRIES)
         key = self._row_key(job.alias)
         if key is not None:
             self.store.pickable_put(key, job.type, job.video_id, job.hints)
@@ -999,12 +1010,11 @@ class Worker(threading.Thread):
     def _set_provisional(self, job):
         """A file that waits for the audio route has nothing checked yet; each language but the first gets
         its subtitle that lines up best with the first language's best guess (pipeline.anchored_guess), so its first
-        download is not just the best-named one."""
+        download is not just the best-named one. Job.fetched holds only texts the language check passed
+        (_check_fetched, LanguageSync._wrong_language), so neither the anchor nor a guess is in another language."""
         main = self.s.languages[0] if self.s.languages else None
         guess = ((self.originals.get(job.alias) or {}).get(main) or {}).get("id")
         main_text = next((t for c, t in job.fetched.get(main, []) if c["id"] == guess), None)
-        if main_text is not None and langcheck.refuses(main_text, main):   # never an anchor in another language
-            main_text = None
         if main_text is None:
             if job.fetched:
                 log.info("no anchored guesses %s: the %s guess was not among its downloads", job.label, main)
@@ -1013,7 +1023,6 @@ class Worker(threading.Thread):
         for lang, fetched in job.fetched.items():
             if lang == main:
                 continue
-            fetched = [(c, t) for c, t in fetched if not langcheck.refuses(t, lang)]
             got = pipeline.anchored_guess(main_text, [t for _, t in fetched])
             if got:
                 out[lang] = got["body"]
@@ -1092,7 +1101,7 @@ class Worker(threading.Thread):
             self.forgotten = self.forgotten or forget
             for job in self.queue:
                 if job.audio:
-                    self._put_waiting(job.again())
+                    self._put_waiting(job)
             self.cv.notify_all()
 
     def run(self):
@@ -1194,7 +1203,7 @@ class Worker(threading.Thread):
                         results[job.alias] = results.pop(job.alias)
                     trim_oldest(results, RESULTS_ENTRIES)
                 if unfinished and job.audio:   # last: a store write that fails here leaves the rest done
-                    self._put_waiting(job.again())
+                    self._put_waiting(job)
 
     @contextlib.contextmanager
     def _places(self, job, lane):
@@ -1269,7 +1278,7 @@ class Worker(threading.Thread):
     def _wait_again(self, job):
         """An audio job that ended without its sync: the file waits for the viewer's pick again."""
         with self.cv:
-            self._put_waiting(job.again())
+            self._put_waiting(job)
 
     def _requeue(self, job):
         with self.cv:

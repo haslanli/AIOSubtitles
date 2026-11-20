@@ -972,14 +972,18 @@ class KeptAppTest(unittest.TestCase):
 
     def test_the_refusal_back_off_outlives_a_stopped_app(self):
         # A new App started it again at 15 minutes, so it never doubled past the first steps
+        def pause_ends(safety):   # a refusal during the pause is the same one; the next in a row comes after
+            safety.refused_until = safety.clock()
         token = self.person()
         app = self.pool.app(token)
         self.assertEqual(app.safety.refused(), 900)
+        pause_ends(app.safety)
         self.assertEqual(app.safety.refused(), 1800)              # doubling with each refusal in a row
         self.clock.t += self.settings.worker_idle_s + 1
         self.assertEqual(self.pool.reap(), 1)
         again = self.pool.app(token)
         self.assertIs(again.safety, app.safety)
+        pause_ends(again.safety)
         self.assertEqual(again.safety.refused(), 3600)
         self.pool.stop(token)                                     # a settings save keeps it
         self.assertIs(self.pool.app(token).safety, app.safety)
@@ -988,6 +992,7 @@ class KeptAppTest(unittest.TestCase):
         self.assertIsNot(fresh, app.safety)
         self.assertEqual((fresh.refusals, fresh.backing_off()), (0, False))
         fresh.refused()
+        pause_ends(fresh)
         fresh.read_ok()                                           # the run ended: nothing to keep once it stops
         self.clock.t += self.settings.worker_idle_s + 1
         self.assertEqual(self.pool.reap(), 1)
