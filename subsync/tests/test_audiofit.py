@@ -17,6 +17,7 @@ from helpers import (AUDIO_BETTER, FIXTURES, matroska, Memory, Opener, RangeServ
                      timeline_fit, truth_fit)
 from subsync import audiofit, mp4  # noqa: E402
 from subsync.audiofit import DT, OMAX, AudioFit  # noqa: E402
+from subsync.mkv import NotMatroska  # noqa: E402
 from subsync.mp4 import NoAudioThere, NotMp4, open_index  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -250,6 +251,53 @@ class ShortWindowTest(unittest.TestCase):
             fit.run()
         self.assertTrue([s for s in idx.reads if s > end / 2])
         self.assertFalse([k for k in fit.cache if k[0] > end / 2])        # none of them kept for the file
+
+
+class PrefetchFailureTest(unittest.TestCase):
+    """A window whose read failed while the planned windows were read at once raises in the fit's order
+    without being read again: the same bytes failed the same way, so a window decoded short cost its bytes twice (and a
+    hanging decoder its time-out twice). A read that got no answer may work a moment later and is read once more."""
+
+    LINES = [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}]
+
+    def test_a_window_decoded_short_is_read_once(self):
+        idx = SpeechIndex([(215.0, 217.0)], 6000.0, decode=lambda start, pcm: pcm[:len(pcm) // 2] if start == 200.0
+                          else pcm)
+        fit = AudioFit(idx, self.LINES, vad=LoudVad())
+        fit.prefetch([100.0, 200.0, 300.0], 30.0)
+        fit.read_window(100.0, 30.0)
+        with self.assertRaisesRegex(ReadFailed, "short audio window"):
+            fit.read_window(200.0, 30.0)
+        self.assertEqual(sorted(idx.reads), [100.0, 200.0, 300.0])
+        self.assertEqual(fit.windows_read, 3)
+
+    def test_a_window_with_no_audio_to_decode_is_read_once(self):
+        class Unreadable(SpeechIndex):
+            def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg"):
+                if start == 200.0:
+                    self.reads.append(start)
+                    raise NotMp4("audio samples spread far past their window")
+                return super().window_pcm(start, length, sr, ffmpeg)
+        idx = Unreadable([], 6000.0)
+        fit = AudioFit(idx, self.LINES, vad=LoudVad())
+        fit.prefetch([100.0, 200.0, 300.0], 30.0)
+        with self.assertRaises(NotMp4):
+            fit.read_window(200.0, 30.0)
+        self.assertEqual(sorted(idx.reads), [100.0, 200.0, 300.0])
+
+    def test_a_window_that_got_no_answer_is_read_once_more(self):
+        class Flaky(SpeechIndex):
+            def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg"):
+                if start == 200.0 and 200.0 not in self.reads:
+                    self.reads.append(start)
+                    raise ReadFailed("connection reset", connection=True)
+                return super().window_pcm(start, length, sr, ffmpeg)
+        idx = Flaky([(215.0, 217.0)], 6000.0)
+        fit = AudioFit(idx, self.LINES, vad=LoudVad())
+        fit.prefetch([100.0, 200.0, 300.0], 30.0)
+        w = fit.read_window(200.0, 30.0)
+        self.assertEqual(len(w["onsets"]), 1)
+        self.assertEqual(sorted(idx.reads), [100.0, 200.0, 200.0, 300.0])
 
 
 class WindowEdgeTest(unittest.TestCase):
@@ -687,6 +735,77 @@ class HeldOutPartTest(unittest.TestCase):
                 pooled = truth_fit(truth, starts, extra=12, end_pad=None)[1]
             res = truth_fit(truth, starts, extra=12, end_pad=None)[1]
             self.assertEqual((res["decision"], res.get("why")), (pooled["decision"], pooled.get("why")), seed)
+
+
+class CloseCallReadTest(unittest.TestCase):
+    """The windows a close call adds: counted by what they really cost, and when one of them holds no audio this module
+    can decode, the first verdict stands."""
+
+    @staticmethod
+    def close_call(failing=None, times=1.0, budget=None, rate=1_000_000):
+        """HeldOutPartTest's copy off in one part (a close call: "close to the bar") on a file whose windows each cost
+        `times` their estimate (an MKV's byte range, its Cues sparse), within `budget` bytes; once the close call
+        starts, every window read raises `failing`. Returns (fit, result, the first verdict)."""
+        truth = rhythm(700, 11)
+        end = truth[-1][0] + truth[-1][1] + 30
+        margin, span = 0.03 * end, (end - 0.06 * end) / 8
+        lo, hi = margin + 2.5 * span + 30, margin + 3.5 * span - 45
+        r = random.Random(1)
+        starts = [s - 9.0 + r.gauss(0, 0.03) + (20.0 if lo <= s <= hi else 0.0) for s, _ in truth]
+        rr = random.Random(5)
+        speech = [(s + rr.gauss(0, 0.08), s + d) for s, d in truth]
+
+        class Index:
+            size, audio_bytes = int(rate * end), 0
+
+            def duration(self):
+                return end
+
+            def window_bytes(self, start, length):
+                return times * audiofit.COST * length * rate
+
+        class Fit(timeline_fit(speech)):
+            first = None
+
+            def close_call_again(self, first):
+                self.first = first
+                return super().close_call_again(first)
+
+            def _read_window(self, start, length):
+                if self.first is not None and failing is not None:
+                    raise failing
+                self.index.audio_bytes += self.cost(start, length)
+                return super()._read_window(start, length)
+        lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, (_, d) in zip(starts, truth)]
+        fit = Fit(Index(), lines, vad=object(), better=AUDIO_BETTER, extra=12,
+                  budget=None if budget is None else budget * audiofit.COST * 30.0 * rate)
+        res = fit.run()
+        return fit, res, fit.first
+
+    def test_a_close_call_window_without_audio_to_decode_keeps_the_first_verdict(self):
+        # NotMp4 ("audio samples spread far past their window") or NotMatroska ("no cluster position") from a
+        # close call's window left the audio fit: the first verdict was lost and the job failed, at every pick
+        for error in (NotMp4("audio samples spread far past their window"), NotMatroska("no cluster position")):
+            with self.subTest(error=type(error).__name__):
+                _, res, first = self.close_call(failing=error)
+                self.assertEqual(first["decision"], "keep_original")
+                self.assertEqual(res, dict(first, close_call={"why": "close to the bar", "windows": 0,
+                                                              "stopped": "audio unreadable"}))
+
+    def test_a_read_that_fails_in_a_close_call_still_ends_the_job(self):
+        # A read that fails during the audio sync ends the job; the file waits for another pick
+        with self.assertRaisesRegex(ReadFailed, "short audio window"):
+            self.close_call(failing=ReadFailed("short audio window (1 of 2 bytes)"))
+
+    def test_the_close_calls_windows_are_counted_by_what_they_cost(self):
+        # Cut to the budget by their estimate, the close call's windows on a file whose windows cost three
+        # times that were read until the budget stopped the second judgement, which was then thrown away (8 windows)
+        fit, res, first = self.close_call(times=3.0, budget=60)
+        self.assertEqual(first["decision"], "keep_original")
+        self.assertNotIn("stopped", res["close_call"])
+        self.assertGreater(res["close_call"]["windows"], 0)
+        self.assertEqual(res["close_call"]["first"]["decision"], "keep_original")    # judged again on all of them
+        self.assertLessEqual(fit.index.audio_bytes, fit.budget)
 
 
 class SpeechlessWindowTest(unittest.TestCase):

@@ -262,6 +262,7 @@ class AudioFit:
             self.file_lock = index.__dict__.setdefault("audio_prefetch_lock", threading.Lock())
         except AttributeError:
             self.cache, self.file_lock = {}, threading.Lock()
+        self.failed = {}            # this fit's windows whose read failed in prefetch, by key: the error (read_window)
         self.windows_read = 0
         self.audio_s = 0.0
         self._lock = threading.Lock()
@@ -301,8 +302,15 @@ class AudioFit:
         return (round(start, 2), round(length, 2), round(self.lead, 3), self.track)
 
     def read_window(self, start, length):
+        """The window at `start`, read once per file (kept on its index). A window whose read failed in prefetch
+        raises that error here, in the fit's order, without being read again: the same bytes would fail the same way
+. Only a read that got no answer (ReadFailed.connection) is read once more. AudioBudget when the read
+        would pass the audio budget."""
         key = self._key(start, length)
         if key not in self.cache:
+            failed = self.failed.pop(key, None)
+            if failed is not None and not (isinstance(failed, ReadFailed) and failed.connection):
+                raise failed
             if self.budget and getattr(self.index, "audio_bytes", 0) + self.cost(start, length) > self.budget:
                 raise AudioBudget()
             self.cache[key] = self._read_window(start, length)
@@ -311,11 +319,12 @@ class AudioFit:
     def prefetch(self, starts, length):
         """The planned windows not read yet, up to PARALLEL_READS at once (12 Angry Men: 14 windows one after another
         took 27 s from the pick to the first verdict, past the pick's 14 s wait). Only as many as the audio budget
-        allows; a window whose read fails is left for read_window, which reads it again in the fit's order and raises
-        there. The same windows and bytes as reading them one by one. The windows read are kept on the file's index,
-        and that is what the next subtitle or language of the file reuses. The pipeline runs one audio fit at a time
-        (the worker's audio_lock); the file's lock is only a guard for a caller that runs two fits of one file at once,
-        which then don't read a window twice here (read_window itself takes no lock)."""
+        allows; a window whose read fails is kept with its error, which read_window raises in the fit's order (a read
+        that got no answer is read once more there). When every read works, the same windows and bytes as reading them
+        one by one; when one fails, the windows planned after it were read too. The windows read are kept on the file's
+        index, and that is what the next subtitle or language of the file reuses. The pipeline runs one audio fit at a
+        time (the worker's audio_lock); the file's lock is only a guard for a caller that runs two fits of one file at
+        once, which then don't read a window twice here (read_window itself takes no lock)."""
         with self.file_lock:
             self._prefetch(starts, length)
 
@@ -339,8 +348,8 @@ class AudioFit:
                 except (Refused, Stopped):   # the host refused, or the guard stopped the job: no further read
                     pool.shutdown(wait=False, cancel_futures=True)
                     raise
-                except Exception:   # left for the ordered read (read_window) to read again and raise
-                    pass
+                except Exception as e:      # raised in the fit's order, by read_window
+                    self.failed[key] = e
 
     def _read_window(self, start, length):
         """A window's speech: its 10 ms frames' mask, the onsets (moved `lead` earlier) and ends of its speech runs, and
@@ -563,8 +572,24 @@ class AudioFit:
             out.append(round((best[0] + W + best[1]) / 2 - W / 2, 2))
         return out
 
+    def within_budget(self, starts):
+        """The first of the windows at `starts` whose reads, one after another, fit what is left of the audio budget,
+        each counted by what it really costs (cost(), as prefetch counts them)."""
+        if not self.budget:
+            return list(starts)
+        spent, out = getattr(self.index, "audio_bytes", 0), []
+        for start in starts:
+            spent += self.cost(start, self.W)
+            if spent > self.budget:
+                break
+            out.append(start)
+        return out
+
     def close_call_again(self, first):
-        """A close call judged again with up to `extra` more windows, as many as the audio budget leaves."""
+        """A close call judged again with up to `extra` more windows, as many as the audio budget leaves (the held-out
+        ones first). The first verdict stands when the budget stops the second judgement, or when one of its windows
+        holds no audio this module can decode (NotMatroska); a read that fails (ReadFailed) ends the job, as
+        in the first judgement."""
         why = self.close_call(first) if self.extra else None
         if not why:
             return first
@@ -578,18 +603,18 @@ class AudioFit:
             check_more += self.beside(a, b, n_check - len(check_more), read + fit_more + check_more, margin,
                                       D - margin)
         check_more += self.gaps(read + fit_more + check_more, n_check - len(check_more), margin, D - margin)
-        more = check_more + fit_more
-        if self.budget and self.rate():
-            left = self.budget - getattr(self.index, "audio_bytes", 0)
-            more = more[:max(0, int(left // (COST * self.W * self.rate())))]
-        if not more:
-            return dict(first, close_call={"why": why, "windows": 0})
         before = self.windows_read
         try:
+            more = self.within_budget(check_more + fit_more)
+            if not more:
+                return dict(first, close_call={"why": why, "windows": 0})
             second = self._run(sorted(plan["fit"] + [x for x in fit_more if x in more]),
                                sorted(plan["check"] + [x for x in check_more if x in more]))
         except AudioBudget:
             return dict(first, close_call={"why": why, "windows": self.windows_read - before, "stopped": "audio budget"})
+        except NotMatroska:     # NotMp4 too (a window past the audio's end is NoAudioThere, a window without speech)
+            return dict(first, close_call={"why": why, "windows": self.windows_read - before,
+                                           "stopped": "audio unreadable"})
         second["close_call"] = {"why": why, "windows": self.windows_read - before,
                                 "first": {"decision": first["decision"], "why": first.get("why"),
                                           "gate_new": first.get("gate_new")}}
