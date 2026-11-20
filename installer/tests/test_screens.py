@@ -137,6 +137,14 @@ class Samples(unittest.TestCase):
     def texts(self, name):
         return Tree(samples.every_state()[name][0]).texts
 
+    def test_the_samples_are_built_once_and_read_only(self):
+        # each call rendered every screen again (about 70 calls a run); kept, they must not be changed
+        states = samples.every_state()
+        self.assertTrue(samples.every_state() is states, 'every screen was rendered again')
+        with self.assertRaises(TypeError):
+            states['start'] = ('', frozenset())
+        self.assertTrue(all(isinstance(values, frozenset) for _, values in states.values()))
+
     def test_no_docker_is_docker_problems_stop(self):
         with mock.patch.object(dockerenv.shutil, 'which', lambda name: None):
             problem, fix = dockerenv.docker_problem()

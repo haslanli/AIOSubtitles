@@ -37,19 +37,24 @@ def wizard_tree():
     return ast.Module(body=body, type_ignores=[])
 
 
+def asked_by_name():
+    """The key of every question asked by its name: the first argument of each ask call that is written out."""
+    return {node.args[0].value for node in ast.walk(wizard_tree())
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ASKS
+            and node.args and isinstance(node.args[0], ast.Constant)}
+
+
 class Questions(unittest.TestCase):
     def test_every_question_asked_has_an_explanation(self):
-        asked = set()
-        for node in ast.walk(wizard_tree()):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ASKS \
-                    and node.args and isinstance(node.args[0], ast.Constant):
-                asked.add(node.args[0].value)
+        asked = asked_by_name()
         self.assertTrue(asked)
         self.assertLessEqual(asked, set(explain.QUESTIONS) | set(explain.SETTINGS))   # a limit: its setting's text
 
     def test_every_explanation_is_of_a_question_the_wizard_asks(self):
-        constants = {node.value for node in ast.walk(wizard_tree()) if isinstance(node, ast.Constant)}
-        self.assertLessEqual(set(explain.QUESTIONS), constants)
+        # asked, not only named: every key is also a string outside the ask calls (labels, the page's fields), so any
+        # string in installer/ let a question nobody asks any more keep its explanation
+        asked = asked_by_name() | set(web.PERSONAL_KEYS + web.HOST_KEYS)    # the optional keys, by engine.optional_key
+        self.assertLessEqual(set(explain.QUESTIONS), asked)
 
     def test_a_question_without_an_explanation_is_refused(self):
         with self.assertRaises(KeyError):
@@ -276,12 +281,7 @@ class Documents(unittest.TestCase):
         self.assertEqual([value for value, _ in plan.AUDIO_ANSWERS], ['no', 'pick', 'open'])   # the answers it names
 
     def test_the_answers_example_has_every_key_setup_reads_from_an_answers_file(self):
-        asked = set()
-        for node in ast.walk(wizard_tree()):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ASKS \
-                    and node.args and isinstance(node.args[0], ast.Constant):
-                asked.add(node.args[0].value)
-        asked |= set(web.PERSONAL_KEYS + web.HOST_KEYS)            # the optional keys, asked by engine.optional_key
+        asked = asked_by_name() | set(web.PERSONAL_KEYS + web.HOST_KEYS)   # the optional keys, by engine.optional_key
         asked |= {lim.setting for lim in limits.personal(audio=False, usenet=True) + limits.hosting(True, True)}
         engine_source = (REPO / 'installer' / 'engine.py').read_text()
         self.assertIn("if 'SUBSYNC_PUBLIC_INVITE' in self.answers:", engine_source)   # read, not asked

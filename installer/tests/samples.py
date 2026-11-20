@@ -1,8 +1,10 @@
 """Every screen and state of the setup page with made-up values, for the tests and the screen checks. The rows are the
-engine's own words with sample values. Returns {name: (html, the values put in)}: the values are the only words a
-screen may show besides the approved ones."""
+engine's own words with sample values. every_state() returns {name: (html, the values put in)}: the values are the only
+words a screen may show besides the approved ones."""
+import functools
 import io
 import json
+import types
 import urllib.error
 
 from installer import dockerenv, engine, hosting, limits, plan, screens, update
@@ -39,11 +41,13 @@ def aios_error(address, call, answer):
         return e
 
 
+@functools.cache
 def every_state():
+    """Built once (rendering every screen takes a while, and the tests ask for it again and again), so read only."""
     out = {}
 
     def add(name, html, *values):
-        out[name] = (html, set(values))
+        out[name] = (html, frozenset(values))
 
     found = [('ok', 'Docker and Docker Compose work', None), ('ok', '38 GB of disk space free', None)]
     add('start', screens.start())
@@ -300,4 +304,4 @@ def every_state():
         *host_stays)
     add('ended', screens.ended())
     add('stopped-unexpectedly', screens.working(screens.TITLE, [], False, stop=screens.UNEXPECTED))   # web.App.handle
-    return out
+    return types.MappingProxyType(out)
