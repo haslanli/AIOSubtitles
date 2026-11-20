@@ -3,15 +3,48 @@
 import contextlib
 import io
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, engine, update, web, where, wizard
+from installer import dockerenv, engine, ui, update, web, where, wizard
 from installer.tests.test_flow import FlowFixture
 from installer.ui import Stop
 
 REPO = Path(__file__).resolve().parent.parent.parent
+
+
+class NotSetUpHere(unittest.TestCase):
+    """--status, --uninstall and --update in a folder where nothing is set up: their plain stop, and nothing asked of
+    Docker or AIOStreams, nothing written."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state = Path(tmp.name) / 'state'
+        never = AssertionError('nothing is set up here: nothing to ask')
+        for p in (mock.patch.object(engine, 'STATE', self.state), mock.patch.object(engine, 'PLACE', None),
+                  mock.patch.object(dockerenv, 'run', side_effect=never),
+                  mock.patch.object(engine.Aios, 'call', side_effect=never),
+                  mock.patch.object(ui, 'COLOR', False), mock.patch.dict(os.environ)):
+            p.start()
+            self.addCleanup(p.stop)
+        os.environ.pop('AIOSUBTITLES_IN_IMAGE', None)
+
+    def test_each_command_stops_with_its_words(self):
+        # No test reached these stops; without them --update went on to Docker's errors
+        for argv, words in ((['--status'], ['subsync is not set up here yet.', 'Run ./setup']),
+                            (['--uninstall', '--yes'], ['subsync is not set up here.']),
+                            (['--update'], ['subsync is not set up here yet.', 'Run ./setup'])):
+            with self.subTest(argv=argv):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = wizard.main(argv)
+                self.assertEqual(code, 1)
+                self.assertEqual(out.getvalue().split('\n')[1:-2], [f'  ✗  {words[0]}'] + [f'      {line}' for line in
+                                                                                             words[1:]])
+                self.assertFalse(self.state.exists())
 
 
 class CommandLine(FlowFixture):

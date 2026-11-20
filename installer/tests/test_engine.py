@@ -1465,6 +1465,20 @@ class ClosingWords(Offline):
                          'synced copies offered: 0; subtitles checked: 2 (1 original kept, 1 other); read today: '
                          '4.2 MB')
 
+    def test_the_status_says_when_subsync_backs_off_after_a_refused_read(self):
+        # The row, and the key of subsync's /status it comes from, were in no test
+        self.install()
+        backing_off = ('warn', 'backing off after a refused read (it waits before reading again)', None)
+        for answer, rows_after in ((True, [backing_off]), (False, []), (None, [])):
+            with self.subTest(backing_off=answer):
+                st = {'subtitle_requests': 12, 'queue': 0, 'bytes_today': 0, 'store': {'results': {}}}
+                if answer is not None:
+                    st['backing_off'] = answer
+                with mock.patch.object(engine, 'subsync_status', lambda: st):
+                    rows = engine.Engine({}).status_parts()[0]
+                self.assertEqual([row[0] for row in rows[:2]], ['ok', 'ok'])        # the container, the requests
+                self.assertEqual(rows[2:], rows_after)
+
 
 class Removal(Offline):
     """./setup --uninstall and --restore on an AIOStreams that saves configs only for a signed-in account, Docker failing

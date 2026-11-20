@@ -1828,8 +1828,8 @@ class Engine:
             if self.databases_back(old['image'], copy):
                 raise Stop(message)
         else:
-            dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
-            if self.wait_healthy() and self.databases_ok():
+            up = dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)[0] == 0
+            if up and self.wait_healthy() and self.databases_ok():
                 raise Stop(message)
             if self.databases_back(old['image'], copy):
                 raise Stop(message + update.WITH_DATABASES)
@@ -1837,13 +1837,15 @@ class Engine:
 
     def databases_back(self, image, folder):
         """The databases of a copy in `folder` put back into the service's volume by `image`, with the service
-        stopped, then started again. True when it answers."""
+        stopped (never under a running one: nothing is put back when it doesn't stop), then started again. True when
+        it answers."""
         folder = Path(folder)
         files = {name: (folder / name).read_bytes() for name in sorted(plain_databases(folder))}
-        dockerenv.compose(STATE, 'stop', timeout=120)
+        if dockerenv.compose(STATE, 'stop', timeout=120)[0] != 0:
+            return False
         good, _ = dockerenv.restore_databases(image, data_volume(self.s), files)
-        dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)
-        return good and self.wait_healthy() and self.databases_ok()
+        up = dockerenv.compose(STATE, 'up', '-d', '--remove-orphans', timeout=300)[0] == 0
+        return good and up and self.wait_healthy() and self.databases_ok()
 
     def databases_ok(self):
         """Whether the running service reads its databases (/health answers without them): its read-only status

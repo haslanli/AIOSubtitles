@@ -51,11 +51,16 @@ class EngineUpdate(unittest.TestCase):
         self.running = None
         self.foreign = []
         self.public_ok = [True, True]                # the route's own check, before and after the switch
+        self.compose_fails = {}                     # (command, image): how many of those calls Compose refuses next
+        self.waited = []                            # the images the engine waited on to answer
 
         def compose(state, *args, **kw):
             text = (state / 'compose.yaml').read_text()
             image = text.split('    image: ')[1].split('\n')[0]
             self.events.append((args[0], image))
+            if self.compose_fails.get((args[0], image)):
+                self.compose_fails[(args[0], image)] -= 1
+                return 1, '', 'Error response from daemon: the daemon is busy'
             if args[0] == 'up':
                 self.running = image
             if args[0] == 'stop':
@@ -95,6 +100,10 @@ class EngineUpdate(unittest.TestCase):
 
         def route_check(e, out=None):
             return self.public_ok.pop(0) if self.public_ok else True
+
+        def wait_healthy(e, seconds=90):
+            self.waited.append(self.running)
+            return dockerenv.container_state(engine.CONTAINER).split()[-1:] == ['healthy']
         for p in (mock.patch.object(engine, 'STATE', self.state), mock.patch.object(engine, 'PLACE', place()),
                   mock.patch.object(dockerenv, 'compose', compose), mock.patch.object(dockerenv, 'run', run),
                   mock.patch.object(dockerenv, 'exec_in', exec_in),
@@ -103,9 +112,7 @@ class EngineUpdate(unittest.TestCase):
                   mock.patch.object(dockerenv, 'restore_databases', restore),
                   mock.patch.object(dockerenv, 'foreign',
                                     lambda project, container, install_id, unlabelled=(): self.foreign),
-                  mock.patch.object(engine.Engine, 'wait_healthy',
-                                    lambda e, seconds=90: dockerenv.container_state(engine.CONTAINER).split()[-1:]
-                                    == ['healthy']),
+                  mock.patch.object(engine.Engine, 'wait_healthy', wait_healthy),
                   mock.patch.object(engine.Engine, 'route_check', route_check),
                   mock.patch.object(engine, 'setup_version', lambda: '1.4.0')):
             p.start()
@@ -416,6 +423,37 @@ class EngineUpdate(unittest.TestCase):
                 self.assertEqual(self.running, NEW)
                 s = engine.load_settings()
                 self.assertEqual((s['version'], s['previous']['version']), ('1.4.0', '1.3.0'))
+
+    def test_nothing_is_put_back_under_a_service_that_didnt_stop(self):
+        # `compose stop` failing was not looked at, and the copy went into the volume of the running service
+        self.rollback_with_its_copy()
+        self.compose_fails = {('stop', OLD): 1, ('stop', NEW): 1}
+        with self.assertRaises(Stop) as caught:
+            engine.Engine({}, page=True).rollback(restore=True)
+        self.assertEqual(caught.exception.message, update.STILL_DOWN.format(old='1.4.0', container=engine.CONTAINER))
+        self.assertEqual([ev for ev in self.events if ev[0] in ('stop', 'restore', 'up')], [('stop', OLD), ('stop', NEW)])
+        self.assertEqual(self.running, NEW)                                     # it ran on, as it was
+        self.assertEqual(self.waited, [])
+
+    def test_a_start_compose_refuses_is_not_waited_on(self):
+        # A failed `compose up` was followed by the whole wait for an answer (90 seconds)
+        for fails, message, waited in ((1, update.ROLLED_BACK.format(new='1.4.0', old='1.3.0') + update.WITH_DATABASES,
+                                        [NEW, OLD]),
+                                       (2, update.STILL_DOWN.format(old='1.3.0', container=engine.CONTAINER), [NEW])):
+            with self.subTest(fails=fails):
+                if self.state.exists():
+                    import shutil
+                    shutil.rmtree(self.state)
+                self.events.clear()
+                self.waited.clear()
+                self.install()
+                self.answers[NEW] = False
+                self.compose_fails = {('up', OLD): fails}          # the old version's start, then its start on the copy
+                with self.assertRaises(Stop) as caught:
+                    engine.Engine({}, page=True).update()
+                self.assertEqual(caught.exception.message, message)
+                self.assertEqual(self.waited, waited)                       # never after a start Compose refused
+                self.assertIn('restore', self.kinds())                          # the copy is tried when the start fails
 
     def test_neither_version_answering_says_so(self):
         self.install()
