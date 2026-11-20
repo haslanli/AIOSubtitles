@@ -2116,6 +2116,26 @@ class EntryCodeTest(AddonFixture):
         self.assertIn(self.ALIAS, self.worker.pickable)                  # still waiting for the owner's pick
         self.assertEqual((dict(self.worker.jobs), dict(self.worker.picked_early)), ({}, {}))
 
+    def test_a_head_gives_the_gets_status_for_an_address_the_get_refuses(self):
+        # A HEAD of a list or an entry answered 200 before the checks its GET makes, so an entry address made
+        # up without the key, or a list of an id that names no title, read as existing while its GET was "not found"
+        def status(method, path):
+            data = exchange(self.port, f"{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+            return int(data.split(b" ", 2)[1])
+        coded, unknown = token(self.ALIAS, "k3y"), "name:Film.2024.1080p.WEB.mkv|4521234567"
+        refused = [f"/{route}/{tok}/eng.srt" for route in ("pick", "pending", "original")
+                   for tok in (token(self.ALIAS), token(unknown), token(self.ALIAS, "other"), "AAAA")]
+        refused += [f"/k3y/subtitles/movie/{'t' * 300}.json", "/k3y/subtitles/movie/tt1%0A.json",
+                    "/k3y/subtitles/movie/tt1%2F2.json"]
+        for path in refused:
+            with self.subTest(path=path):
+                self.assertEqual((status("HEAD", path), status("GET", path)), (404, 404))
+        for path in (f"/pick/{coded}/eng.srt", f"/original/{coded}/eng.srt", "/k3y/subtitles/movie/tt9.json"):
+            with self.subTest(path=path):
+                self.assertEqual(status("HEAD", path), 200)
+        self.assertIn(self.ALIAS, self.worker.pickable)                  # nothing picked, queued or asked
+        self.assertEqual((dict(self.worker.jobs), self.app.subtitle_requests), ({}, 0))
+
     def test_the_texts_name_the_entries_as_open(self):
         rule = dict(explain.RULES)["Links and keys stay private"]
         self.assertIn("The routes that make subsync work (its subtitle lists and status) answer only under a private key "

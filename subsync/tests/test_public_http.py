@@ -59,6 +59,29 @@ class PublicManifestTest(ServerHarness, unittest.TestCase):
         unknown = head(f"/u/{new_token()}/subtitles/movie/tt1/filename=a.mkv&videoSize=5.json")[0]
         self.assertTrue(unknown.startswith(b"HTTP/1.1 404 "), unknown)   # a link nobody signed up with, as a GET
 
+    def test_a_head_of_an_address_its_get_refuses_is_not_found_and_starts_nothing(self):
+        # A HEAD answered 200 before the checks its GET makes (an id that names no title, an entry token that
+        # names no file), where the GET is "not found"
+        self.start(SUBSYNC_RECHECK_HOURS="24")
+        _, _, _, _, token = self.sign_up()
+        read_key = self.users.read_key(token)
+        port = self.server.server_address[1]
+
+        def status(method, path):
+            data = exchange(port, f"{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+            return int(data.split(b" ", 2)[1])
+        refused = (f"/u/{token}/subtitles/movie/{'t' * 300}.json", f"/u/{token}/subtitles/movie/tt1%0A.json",
+                   f"/r/{read_key}/pick/A/eng.srt", f"/r/{read_key}/pending/_w/eng.srt",
+                   f"/r/{read_key}/original/A/eng.srt")
+        for path in refused:
+            with self.subTest(path=path):
+                self.assertEqual(status("HEAD", path), 404)
+        self.assertIsNone(self.pool.live_app(token))                    # no service of theirs started
+        self.assertEqual(self.service.checker.next, {})                 # nor their daily check
+        for path in refused:
+            with self.subTest(path=path):
+                self.assertEqual(status("GET", path), 404)              # as the GET answers
+
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
 class PublicHttpTest(ServerHarness, unittest.TestCase):

@@ -27,7 +27,8 @@ GET  /notice.srt                               public mode: what the person must
      found something only they can fix; listed as one "AIOSubtitles: action needed" entry after the others
 GET  /health, /status
 HEAD any of these: the GET's headers without its body; the subtitle list and the pick, pending and "(original)" entries
-     answer 200 with their content type only, and do nothing (no job, pick, wait or download)
+     answer 200 with their content type only, and do nothing (no job, pick, wait or download); 404 where their
+     GET is "not found" before any work
 
 With SUBSYNC_ADDON_KEY set, the manifest, the subtitles route and /status answer only under /<key>/ (the manifest URL
 AIOStreams is given carries it); /file, /health and the entries the subtitle lists name (/pick, /pending, /original)
@@ -53,7 +54,7 @@ from .langs import name as lang_name
 from .sources import parse_extras
 from .subs import apply_recipe, format_of, parse, to_srt
 from .version import VERSION
-from .worker import Job
+from .worker import Job, put_bounded
 
 log = logging.getLogger("subsync.addon")
 
@@ -117,16 +118,30 @@ def is_entry(path):
     return path == NOTICE_PATH or any(route.match(path) for route in ENTRY_ROUTES)
 
 
-def head_type(path):
-    """The content type a HEAD of `path` is answered with, headers only, when `path` is a subtitle list or a
-    pick, pending or "(original)" entry: their GETs queue jobs, start the audio route, wait and download, which a link
-    checker or a proxy asking for the headers only must never set off. None for any other path, whose HEAD is its GET
-    without the body."""
-    if SUB_ROUTE.match(path):
-        return "application/json; charset=utf-8"
-    if any(route.match(path) for route in (PENDING_ROUTE, PICK_ROUTE, ORIGINAL_ROUTE)):
-        return "application/x-subrip; charset=utf-8"
-    return None
+def video_id(raw):
+    """A subtitle route's Stremio id as its path carries it, decoded; None for one that names no title (MAX_VIDEO_ID)."""
+    vid = urllib.parse.unquote(raw)
+    return None if len(vid) > MAX_VIDEO_ID or not vid.isprintable() or "/" in vid else vid
+
+
+def head_answer(path, key=""):
+    """How a HEAD of `path` is answered without its GET's work, when `path` is a subtitle list or a pick,
+    pending or "(original)" entry: their GETs queue jobs, start the audio route, wait and download, which a link checker
+    or a proxy asking for the headers only must never set off. (200, the content type), or (404, None) where the GET
+    answers "not found" before any work, by the same cheap checks: an id that names no title, an entry address
+    subsync didn't list (alias_of, under SUBSYNC_ADDON_KEY `key`). None for any other path, whose HEAD is its GET without
+    the body."""
+    m = SUB_ROUTE.match(path)
+    if m:
+        return (200, "application/json; charset=utf-8") if video_id(m.group(2)) is not None else (404, None)
+    m = next(filter(None, (route.match(path) for route in (PENDING_ROUTE, PICK_ROUTE, ORIGINAL_ROUTE))), None)
+    if m is None:
+        return None
+    try:
+        alias_of(m.group(1), key)
+    except ValueError:
+        return 404, None
+    return 200, "application/x-subrip; charset=utf-8"
 
 
 CODE_CHARS = 16   # an entry's code: the first 96 bits of an HMAC-SHA256, in base64url
@@ -201,10 +216,8 @@ class App:
         original = self.worker.original_text(result, recipe)
         text = apply_recipe(original, recipe) if original is not None else None
         if text is not None:
-            with self.texts_lock:
-                self.texts[key] = (now, text)
-                while len(self.texts) > srclimits.TEXT_KEEP_ENTRIES:
-                    self.texts.pop(next(iter(self.texts)))
+            with self.texts_lock:   # one rebuilt again goes last, never first (put_bounded)
+                put_bounded(self.texts, key, (now, text), srclimits.TEXT_KEEP_ENTRIES)
         return text
 
     def action(self):
@@ -482,9 +495,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, as_srt(body), "application/x-subrip; charset=utf-8",
                           {"Cache-Control": "no-store", SERVED: served, "Access-Control-Expose-Headers": SERVED})
 
-    def _headers_only(self, ctype):
-        """A HEAD answered without its GET's work (head_type): 200 with the content type, and no Content-Length, which
-        in a HEAD's answer must be its GET's, and no body was made to measure."""
+    def _headers_only(self, code, ctype):
+        """A HEAD answered without its GET's work (head_answer): 200 with the content type, and no Content-Length, which
+        in a HEAD's answer must be its GET's, and no body was made to measure; else the GET's "not found"."""
+        if code != 200:
+            return self._send(code, b"")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -521,9 +536,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, "ok", "text/plain")
             if not keyed and (path in ("/manifest.json", "/status") or path.startswith("/subtitles/")):
                 return self._send(404, b"")
-            head = head_type(path) if self.command == "HEAD" else None
+            head = head_answer(path, app.s.addon_key) if self.command == "HEAD" else None
             if head:
-                return self._headers_only(head)
+                return self._headers_only(*head)
             if path == "/manifest.json":
                 return self._json(manifest(app.s), cache="max-age=3600")
             if path == "/status":
@@ -536,8 +551,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "bytes_today": app.store.day_count("read")})
             m = SUB_ROUTE.match(path)
             if m:
-                vid = urllib.parse.unquote(m.group(2))
-                if len(vid) > MAX_VIDEO_ID or not vid.isprintable() or "/" in vid:
+                vid = video_id(m.group(2))
+                if vid is None:
                     return self._send(404, b"")
                 app.subtitle_requests += 1
                 app.last_subtitle_request = int(time.time())

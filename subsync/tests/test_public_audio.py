@@ -561,6 +561,43 @@ class CopyFromTheStoreTest(Base):
         self.assertIsNone(app.text_of(best))
         self.assertEqual(app.ready_copy("name:a.mkv|1000", "eng"), (yours, SYNCED))
 
+    def test_a_copy_rebuilt_again_is_kept_as_the_newest(self):
+        # The rebuilt copies kept an hour, at most TEXT_KEEP_ENTRIES: one rebuilt again after its hour kept
+        # its first place, so the next new copy dropped it at once and its next download fetched the original again
+        import types
+        from unittest import mock
+        from subsync import addon, srclimits
+
+        class Recipes:
+            keep_texts = False
+
+            def recipe(self, key):
+                return {"of": key}
+
+            def get(self, key):
+                return {"key": key}
+
+        downloads = []
+
+        class Originals:
+            def original_text(self, result, recipe):
+                downloads.append(result["key"])
+                return f"text of {result['key']}"
+
+        clock = types.SimpleNamespace(t=1000.0)
+        app = addon.App(self.settings(), Recipes(), Originals(), Safety())
+        with mock.patch.object(addon, "time", types.SimpleNamespace(time=lambda: clock.t)), \
+                mock.patch.object(addon, "apply_recipe", lambda original, recipe: original):
+            for n in range(srclimits.TEXT_KEEP_ENTRIES):
+                app.text_of(f"k{n}")
+            clock.t += srclimits.TEXT_KEEP_S + 1
+            self.assertEqual(app.text_of("k0"), "text of k0")          # its hour is over: rebuilt
+            app.text_of("new")                                         # one more: the oldest goes, not k0
+            self.assertEqual(app.text_of("k0"), "text of k0")
+        self.assertEqual(downloads.count("k0"), 2)
+        self.assertEqual(len(app.texts), srclimits.TEXT_KEEP_ENTRIES)
+        self.assertNotIn("k1", app.texts)
+
 
 class OriginalEntryPublicTest(Base):
     """The "(original)" entry in public mode: its address names only the file; its download

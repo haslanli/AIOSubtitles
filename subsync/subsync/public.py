@@ -20,7 +20,7 @@ import time
 import urllib.parse
 
 from . import pages, ui
-from .addon import App, Handler, Server, head_type, is_entry, manifest
+from .addon import App, Handler, Server, head_answer, is_entry, manifest
 from .aiosconfig import MAX_LANGUAGES, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
@@ -593,12 +593,13 @@ class PublicHandler(Handler):
 
     def _person(self, token, rest):
         """A request of a person's own service (their subtitle lists, and their entries), answered by their App. A HEAD
-        of a list or an entry (head_type) is answered from their record alone: neither their service nor their daily
+        of a list or an entry (head_answer) is answered from their record alone: neither their service nor their daily
         check starts for it."""
         svc = self.service
-        head = head_type(rest) if self.command == "HEAD" else None
+        # a person's entries carry no code (user_settings: no SUBSYNC_ADDON_KEY), their read key guards them
+        head = head_answer(rest) if self.command == "HEAD" else None
         if head:
-            return self._not_found() if svc.users.open(token) is None else self._headers_only(head)
+            return self._not_found() if svc.users.open(token) is None else self._headers_only(*head)
         app = svc.pool.app(token)
         if app is None:
             return self._not_found()
