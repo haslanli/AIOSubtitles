@@ -1181,6 +1181,22 @@ class OptionalKeys(Offline):
         e.choices()
         self.assertEqual(e.keys['TMDB_KEY'], 'tmdb-key-1')
 
+    def test_a_step_refused_after_the_box_leaves_the_saved_key(self):
+        # The key went from the engine at once, so a step refused at a later answer had removed it already
+        self.install(SUBDL_KEY='subdl-key-1')
+        e = self.page_engine({'SUBDL_KEY': '', 'PUBLIC_ADDRESS': f'{PUBLIC}/sub sync'})
+        with self.assertRaises(engine.Problem) as caught:
+            e.choices()
+        self.assertEqual(caught.exception.field, 'PUBLIC_ADDRESS')
+        self.assertEqual(e.keys['SUBDL_KEY'], 'subdl-key-1')
+        # a public instance's choices: its box ticked, then a TMDB key that TMDB refuses
+        self.tmdb_answer = False
+        e = engine.Engine({'SUBDL_KEY': '', 'TMDB_KEY': 'tmdb-key-x'}, page=True)
+        with self.assertRaises(engine.Problem) as caught:
+            e.host_choices()
+        self.assertEqual(caught.exception.field, 'TMDB_KEY')
+        self.assertEqual(e.keys['SUBDL_KEY'], 'subdl-key-1')
+
 
 class TmdbKeyCheck(Offline):
     """A new TMDB key is checked with TMDB once, with one request (as the site's settings page checks a

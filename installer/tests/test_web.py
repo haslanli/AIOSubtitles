@@ -510,6 +510,30 @@ class Personal(BackgroundWork, FlowFixture):
         self.assertEqual((keys['TMDB_KEY'], env['SUBSYNC_TMDB_KEY']), ('tmdb-key-1', 'tmdb-key-1'))
         self.assertFalse(any('subdl-key-1' in page or 'tmdb-key-1' in page for page in self.b.pages))
 
+    def test_a_key_ticked_for_removal_in_a_refused_step_stays_once_the_box_is_unticked(self):
+        # The step took the key out at once, before a later answer was refused: the page asked again without
+        # the box, and the next Continue, the box unticked, went on without the key, which the install left out
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no', SUBDL_KEY='subdl-key-1'))
+        self.b.post('answers', {})
+        self.b.get('machine')
+        self.b.follow('machine', {'go': 'next'})
+        self.b.follow('aios', {'go': 'next'})
+        self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+        form = {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': f'{PUBLIC}/sub sync', 'REMOVE_SUBDL_KEY': 'yes', 'go': 'next'}
+        status, _, text = self.b.post('choices', form)
+        self.assertEqual(status, 200)
+        self.assertIn('<p class="field-error" id="public_address-error">Leave out the spaces.</p>', text)
+        self.assertIn('name="REMOVE_SUBDL_KEY"', text)                  # still saved: its box is offered again
+        del form['REMOVE_SUBDL_KEY']
+        _, _, text = self.b.follow('choices', dict(form, PUBLIC_ADDRESS=f'{PUBLIC}/subsync'))
+        self.assertIn('Data a day in total', text)
+        self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        keys, env = engine.read_kv(self.state / 'secrets.env'), engine.read_kv(self.state / 'subsync.env')
+        self.assertEqual((keys['SUBDL_KEY'], env['SUBSYNC_SUBDL_KEY']), ('subdl-key-1', 'subdl-key-1'))
+
     def test_the_config_step_calls_the_link_an_install_link(self):
         # the box said "Stremio link" while its explanation, the alias errors and the public pages say "install link"
         self.walk_to_config()

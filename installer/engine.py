@@ -15,6 +15,7 @@ AIOStreams, each shown first and saved only after a yes:
      config with no debrid service other than Real-Debrid gets only the Usenet config.
 It doesn't install or change AIOStreams itself or AIOMetadata.
 """
+import functools
 import json
 import os
 import re
@@ -494,6 +495,22 @@ class Rows:
 
 # ------------------------------------------------------------------------------------------- the steps
 
+def keys_kept_unless_done(step):
+    """A step that may change the keys (an optional key typed, or the saved one removed) keeps the change only when it
+    goes through: refused at a later answer, it leaves them as they were, so the page asks again with the saved key and
+    its "Remove the saved key" box, and an answer changed back keeps the key."""
+    @functools.wraps(step)
+    def run(self, *args, **kwargs):
+        before = dict(self.keys)
+        try:
+            return step(self, *args, **kwargs)
+        except BaseException:
+            self.keys.clear()
+            self.keys.update(before)
+            raise
+    return run
+
+
 class Engine:
     def __init__(self, answers=None, page=False, out=None, yes=True):
         """`answers`: the page's, or the answers file's lines (None: no file given). `yes`: in a terminal, nothing is
@@ -722,6 +739,7 @@ class Engine:
                        page_fix=NO_DEBRID_WAY_OUT_PAGE)
 
     # 4 -------------------------------------------------------------------------------------------------------
+    @keys_kept_unless_done
     def choices(self):
         self.show_step('choices')
         prev_langs = ', '.join(plan.names_of_codes(self.prev.get('languages', []))) or None
@@ -1423,6 +1441,7 @@ class Engine:
         if not self.secret:
             self.secret = hosting.new_secret()
 
+    @keys_kept_unless_done
     def host_choices(self):
         self.show_step('hostchoices', 'host')
         for key in ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY'):
