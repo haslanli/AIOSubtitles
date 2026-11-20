@@ -291,6 +291,49 @@ class OwnFirstPassTest(Base):
         self.app(d).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
         self.assertEqual(len(d.jobs), 0)
 
+    def test_not_again_while_you_wait_though_someone_elses_audio_sync_judged_only_their_languages(self):
+        # Someone else's audio sync judged their languages only (English), so for you with English and Spanish
+        # the file isn't judged for every language: every subtitle request queued another first pass (a link resolve,
+        # an index read, a counted file, the guess's downloads) while you already waited for your own pick, which is
+        # the only thing that can judge your Spanish
+        self.read_lately(False)
+        self.store.judged_put(self.FILE, ["eng"], self.settings().rule_id)
+        self.store.put(self.FILE, "a" * 64, "eng", 0, "keep_original", "below the bar", route="audio")
+        b = self.worker(Limits(who="b" * 16), settings=self.settings(SUBSYNC_LANGUAGES="eng,spa"))
+        app = self.app(b)
+        app.subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual([(j.alias, j.audio) for j in b.jobs.values()], [(ALIAS, False)])   # your own first pass
+        b.jobs.clear()
+        b.queue.clear()
+        b.originals[ALIAS] = dict(ORIGINALS)
+        b._needs_pick(job())                                       # it found no track: the file waits for your pick
+        for _ in range(3):
+            app.subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual(len(b.jobs), 0)
+        self.assertTrue(b.waits_for_pick(ALIAS))
+
+    def test_a_language_your_list_has_no_subtitle_of_waits_for_no_verdict_of_the_audio_route(self):
+        # The audio route judges only languages that have a subtitle to fit, so one your list has none of
+        # never gets its verdict: once your audio sync was done, every subtitle request queued the file again (a
+        # listing, your subtitle list, the extra sources; a full first pass for a file without a torrent)
+        self.read_lately(False)
+        self.store.judged_put(self.FILE, ["eng", "hun"], self.settings().rule_id)
+        self.store.put(self.FILE, "a" * 64, "eng", 0, "keep_original", "below the bar", route="audio")
+        b = self.worker(Limits(who="b" * 16), settings=self.settings(SUBSYNC_LANGUAGES="eng,hun"))
+        b.originals[ALIAS] = dict(ORIGINALS, hun=None)          # your list for the file: no Hungarian subtitle
+        app = self.app(b)
+        for _ in range(3):
+            app.subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual(len(b.jobs), 0)
+        # with a Hungarian subtitle in it, the audio route still has to judge it: your own first pass
+        b.originals[ALIAS] = dict(ORIGINALS, hun={"url": "https://a-personal-addon.test/A-SECRET/2.srt", "id": "a-2"})
+        app.subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual([(j.alias, j.audio) for j in b.jobs.values()], [(ALIAS, False)])
+        # while your list isn't known, every language of yours counts
+        c = self.worker(Limits(who="c" * 16), settings=self.settings(SUBSYNC_LANGUAGES="eng,hun"))
+        self.app(c).subtitles("movie", "tt9", "filename=b.mp4&videoSize=5")
+        self.assertEqual([(j.alias, j.audio) for j in c.jobs.values()], [(ALIAS, False)])
+
 
 # --------------------------------------------------------------- a pick starts only when it can, and has room
 
@@ -489,6 +532,34 @@ class CopyFromTheStoreTest(Base):
         self.assertEqual([s["label"] for s in subs], ["English (synced)"])
         self.assertEqual(len(w.jobs), 0)                    # answered from the store: no job, nothing read
         self.assertEqual(app.text_of(key), SYNCED)
+
+    def test_a_pick_serves_the_pass_your_job_published_when_the_stores_best_isnt_in_your_list(self):
+        # The store's best copy (last_good) was made from a subtitle only another person's list has, so it
+        # can't be rebuilt for you; the pass your own job published was never tried, and the pick served the original
+        import hashlib
+        import tempfile
+        from subsync.addon import App
+        folder = tempfile.mkdtemp(dir=self.dir)
+        with open(os.path.join(folder, "orig.srt"), "w", encoding="utf-8") as f:
+            f.write(SRT)
+        srv = RangeServer(folder)
+        self.addCleanup(srv.close)
+        store = closed_after(self, Store(os.path.join(self.dir, "public"), keep_texts=False))
+        theirs = SRT.replace("00:00:0", "00:00:1")         # another release's timing, in someone else's list only
+        best = store.put(self.FILE, hashlib.sha256(theirs.encode()).hexdigest(), "eng", 0, "synced", body=SYNCED,
+                         fmt="srt", candidate_id="only-theirs", original=theirs)
+        yours = store.put(self.FILE, hashlib.sha256(SRT.encode()).hexdigest(), "eng", 1, "synced", body=SYNCED,
+                          fmt="srt", candidate_id="c1", original=SRT)
+        self.assertEqual(store.last_good(self.FILE, "eng")["key"], best)
+        store.alias("name:a.mkv|1000", self.FILE)
+        listing = Listing(subtitles=[{"id": "c1", "url": srv.url("orig.srt"), "lang": "eng"}])
+        w = Worker(self.settings(), store, listing, Safety(), limits=Limits(who="b" * 16))
+        self.workers.append(w)
+        w.remember(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1000}))
+        w.done["name:a.mkv|1000"] = {"eng": yours}          # your job's pass, published
+        app = App(w.s, store, w, Safety())
+        self.assertIsNone(app.text_of(best))
+        self.assertEqual(app.ready_copy("name:a.mkv|1000", "eng"), (yours, SYNCED))
 
 
 class OriginalEntryPublicTest(Base):

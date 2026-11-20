@@ -261,11 +261,17 @@ class App:
 
     def ready_copy(self, alias, lang):
         """The synced copy a pick or pending entry serves for a file and language now: the store's best (also after a
-        restart), else, while best fit still judges, the pass the file's job published; (key, text), or None."""
+        restart), else, while best fit still judges, the pass the file's job published, which is also tried when the
+        store's best can't be served to this person (public mode: made from a subtitle only someone else's list has,
+); (key, text), or None."""
         file_key = self.store.resolve(alias)
         good = self.store.last_good(file_key, lang) if file_key else None
-        key = good["key"] if good else self.worker.published(alias, lang)
+        key = good["key"] if good else None
         text = self.text_of(key)
+        if text is None:
+            published = self.worker.published(alias, lang)
+            if published != key:
+                key, text = published, self.text_of(published)
         return None if text is None else (key, text)
 
     def subtitles(self, type_, video_id, extras):
@@ -318,6 +324,13 @@ class App:
         file_key = self.worker.file_of(job.aliases, job.hints.get("videoHash"))
         detail = self.store.file_detail(file_key) if file_key else None
         return (detail or {}).get("reference") is False
+
+    def _to_fit(self, alias, langs):
+        """Of `langs`, those this person's subtitle list for the file has a subtitle of (all of them while that list
+        isn't known): the audio route gives a verdict to those only, so waiting for one on another would queue the
+        file again on every request."""
+        originals = self.worker.known_originals(alias)
+        return langs if originals is None else [lang for lang in langs if originals.get(lang)]
 
     def kept_choice(self, alias, lang):
         """The kept original of a file and language: (True, candidate id or None) when the file's judging chose
@@ -376,14 +389,16 @@ class App:
             judged = self.store.judged_all(file_key, self.s.languages, now_rule, now - REPROCESS_S) if recent else None
             no_track = detail.get("reference") is False
             # this person's languages only the audio route can judge here: all of them on a file with no track of its
-            # own, else those whose subtitles a first pass found too long for its only track
+            # own, else those whose subtitles a first pass found too long for its only track; it gives a
+            # verdict only to those it has a subtitle to fit (_to_fit)
             audio_langs = self.s.languages if no_track else self.worker.left_to_audio(detail)
             if judged is False and not (no_track and self.s.audio_route and self.s.audio_choice == "off"):
                 # read lately, but not for every language asked here (another person's, in public mode); for a
-                # person whose choice is off, a file with no track can't gain from another read
-                recent = False
+                # person whose choice is off, a file with no track can't gain from another read; nor while
+                # this person waits for their own pick, which alone can judge what their first pass left
+                recent = self.worker.waits_for_pick(job.alias)
             elif recent and self.s.audio_choice != "off" and audio_langs and not self.worker.waits_for_pick(job.alias) \
-                    and not self.store.audio_judged(file_key, audio_langs):
+                    and not self.store.audio_judged(file_key, self._to_fit(job.alias, audio_langs)):
                 # Such a file, read lately for someone else and not judged by the audio route yet: the waiting
                 # file is each person's own, so this person gets their own first pass (an index read) and can pick it,
                 # or open it; never someone whose choice is off
