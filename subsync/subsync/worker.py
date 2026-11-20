@@ -1131,7 +1131,7 @@ class Worker(threading.Thread):
         """A job of the lane, from its file's claim and its places to the handling of how it ended."""
         # an audio job that ends without its sync (stopped before it read, the day's data or its cap ran out, a read
         # failed or was refused, anything else went wrong): its file waits for another pick, as the pick promised
-        unfinished = False
+        unfinished = requeued = False
         try:
             # the file's claim: never two workers on the same file under the same name at once (one under another name
             # is known by its listed row: the torrent file's claim, process)
@@ -1165,7 +1165,7 @@ class Worker(threading.Thread):
             if isinstance(e, BudgetSpent):
                 job.budget_until = (time.time() // DAY + 1) * DAY
             job.not_before = time.time() + self.s.retry_stopped_s
-            self._requeue(job)
+            requeued = self._requeue(job)
         except Refused as e:
             # most likely a per-account limit: every read waits (from when the refusal was seen, _refused); this file
             # backs off 1 h / 6 h / 24 h for this viewer, but a Usenet file in its audio sync doesn't (only a
@@ -1194,9 +1194,13 @@ class Worker(threading.Thread):
                     self.current_audio = None
                 else:
                     self.current = None
-                self.done.setdefault(job.alias, {})
-                for lang in self.s.languages:
-                    self.done[job.alias].setdefault(lang, None)
+                if not requeued:
+                    # the job is over: every wait for it ends, with None for a language it published nothing for. One
+                    # queued again isn't: no wait holds for it while it is put off (_working), and one during its retry
+                    # waits for what the retry publishes, so it gets no such placeholder (as _submit drops them)
+                    self.done.setdefault(job.alias, {})
+                    for lang in self.s.languages:
+                        self.done[job.alias].setdefault(lang, None)
                 self.cv.notify_all()
                 for results in (self.done, self.judged, self.originals):
                     if job.alias in results:   # this file's are the newest now
@@ -1281,10 +1285,20 @@ class Worker(threading.Thread):
             self._put_waiting(job)
 
     def _requeue(self, job):
+        """A job stopped by the back-off or the day's budget, queued again for its retry (job.not_before). Returns
+        whether it is: not beside a job of the file queued meanwhile, nor on a worker that has stopped (stop()), whose
+        queue never runs again: there an audio job's file waits for another pick, as stop() leaves the audio jobs it
+        finds queued, and a first pass is dropped (the file's next request queues it on the next worker)."""
         with self.cv:
-            if job.alias not in self.jobs:
-                self.jobs[job.alias] = job
-                self.queue.append(job)
+            if self.stop_flag:
+                if job.audio:
+                    self._put_waiting(job)
+                return False
+            if job.alias in self.jobs:
+                return False
+            self.jobs[job.alias] = job
+            self.queue.append(job)
+            return True
 
     def vad(self):
         with self.vad_lock:

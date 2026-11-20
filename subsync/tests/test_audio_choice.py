@@ -13,7 +13,7 @@ from helpers import (closed_after, Counts, FakeDebrid, FakeUsenet, FIXTURES, for
                      wait_until)
 from subsync import sources
 from subsync import worker as worker_mod
-from subsync.reader import ReadFailed, Refused
+from subsync.reader import ReadFailed, Refused, Stopped
 from subsync.settings import Settings
 from subsync.store import Store
 from subsync.worker import Job, Safety, StoreAudioCounts, Worker, audio_places
@@ -618,6 +618,28 @@ class QueueTest(Base):
         w.submit(Job("movie", "tt1", self.hints))
         self.assertEqual(w.published(self.alias, "eng"), "k1")
 
+    def test_a_job_queued_again_after_a_stop_is_waited_for_when_its_retry_runs(self):
+        # The stopped run published its "nothing" placeholders for the job it had just queued again (the
+        # back-off, the day's budget), so once the retry ran, a pending entry's wait and a listing's wait ended at once
+        w = self.worker(Limits())
+        job = Job("movie", "tt1", self.hints)
+        w.submit(job)
+
+        def stopped(j):
+            raise Stopped(worker_mod.BACKING_OFF)
+        w.process = stopped
+        w._run(w._next("main"), "main")
+        self.assertIs(w.jobs.get(self.alias), job)          # queued again, put off
+        t0 = time.time()
+        self.assertEqual(w.wait_for(self.alias, "eng", 2.0), (None, None))   # no wait holds for it meanwhile
+        self.assertLess(time.time() - t0, 0.5)
+        job.not_before = 0
+        self.assertIs(w._next("main"), job)                 # due: the retry runs
+        t0 = time.time()
+        self.assertEqual(w.wait_for(self.alias, "eng", 0.3), (None, None))
+        self.assertIsNone(w.wait_for_file(self.alias, 0.3))
+        self.assertGreaterEqual(time.time() - t0, 0.5)      # both waited for the retry's first pass
+
     def test_a_wait_lasts_its_timeout_when_the_wall_clock_steps_back(self):
         """The waits time out on the monotonic clock, so a step of the wall clock (NTP) never holds a request
         past what it may wait."""
@@ -713,6 +735,26 @@ class AudioEndingTest(Base):
         w.audio_turn = StopsWhileWaiting(w)
         w._loop("audio")
         self.assertTrue(w.waits_for_pick(self.alias))
+
+    def test_a_job_stopped_by_a_pause_after_its_worker_stopped_isnt_queued_on_it(self):
+        # The worker stops (Pool.stop: a settings save, a Refresh, the daily check) while the audio sync runs,
+        # then the sync stops at the refusal back-off: it went back on the stopped worker's queue, which never runs
+        # again, and the file no longer waited for a pick; a first pass is dropped there (its next request queues it)
+        for audio in (True, False):
+            with self.subTest(audio=audio):
+                self.store.db.execute("DELETE FROM pickable")
+                w = self.picked(self.worker(Limits())) if audio else self.worker(Limits())
+                if not audio:
+                    w.submit(Job("movie", "tt1", self.hints))
+
+                def stopped(job, w=w):
+                    w.stop()
+                    raise Stopped(worker_mod.BACKING_OFF)
+                w.process = stopped
+                w._loop("audio" if audio else "main")
+                self.assertEqual((w.jobs, w.queue), ({}, []))
+                self.assertEqual(w.waits_for_pick(self.alias), audio)
+                self.assertEqual(self.worker(Limits()).waits_for_pick(self.alias), audio)   # its row: the next worker
 
     def test_an_audio_job_whose_read_fails_backs_off_and_waits_and_a_pick_meanwhile_reads_nothing(self):
         w = self.picked(self.worker(Limits()))

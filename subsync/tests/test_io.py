@@ -1225,22 +1225,24 @@ def run_once(w, job, lane="main", within=RUN_ONCE_S):
     another lane's), fails the test instead of leaving it waiting for ever."""
     if w.submit(job) is None:
         raise AssertionError(f"{job.label} wasn't queued")
-    real, ran = w.process, []
+    real, real_next, ran = w.process, w._next, []
 
     def process(j):
         ran.append(j)
-        try:
-            real(j)
-        finally:
-            w.stop_flag = True
-    w.process = process
+        real(j)
+
+    def one_job(lane):
+        # the loop ends once a job ran, without stop(): the job's end is handled as on a running worker (a stopped
+        # worker queues nothing again)
+        return None if ran else real_next(lane)
+    w.process, w._next = process, one_job
     timer = threading.Timer(within, w.stop)
     timer.start()
     try:
         w._loop(lane)
     finally:
         timer.cancel()
-        w.process, w.stop_flag = real, False
+        w.process, w._next, w.stop_flag = real, real_next, False
     if not ran:
         raise AssertionError(f"{job.label} didn't start within {within:g} s")
 
