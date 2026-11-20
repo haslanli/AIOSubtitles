@@ -23,7 +23,7 @@ import urllib.request
 import zipfile
 
 from . import digits, net, realdebrid, srclimits
-from .aiosconfig import UNREACHABLE, USENET_READABLE, AiosApi, AiosError
+from .aiosconfig import MAX_ANSWER, UNREACHABLE, USENET_READABLE, AiosApi, AiosError
 from .langs import lang3
 from .version import user_agent
 
@@ -80,7 +80,7 @@ def _get_json(url, timeout):
     req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                "Connection": "close"})
     with realdebrid.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read(16 * 1024 * 1024))
+        return json.loads(r.read(MAX_ANSWER))
 
 
 def row_hints(stream):

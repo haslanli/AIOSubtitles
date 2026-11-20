@@ -374,6 +374,52 @@ class EveryFailureIsAnAiosErrorTest(ClientCase):
                 call()
             self.assertIn("Can't reach", e.exception.message)
 
+    def test_an_address_without_a_scheme(self):
+        # Urllib refuses it (ValueError) as the request is made, which was outside the client's try
+        api = AiosApi("aios.example", timeout=2)
+        for call in (api.status, lambda: api.alias_config_id("fam"), lambda: api.get_config(UUID, "pw")):
+            with self.assertRaises(AiosError) as e:
+                call()
+            self.assertEqual(e.exception.code, aiosconfig.UNREACHABLE)
+            self.assertIn("Can't reach AIOStreams at aios.example", e.exception.message)
+
+    def test_an_answer_nested_too_deep_to_decode(self):
+        # json.loads raises RecursionError, not ValueError, for JSON nested deeper than it decodes
+        deep = b"[" * 200_000
+        self.stand.routes[("GET", "/api/v1/status")] = answer(200, deep)
+        with self.assertRaises(AiosError) as e:
+            self.api().status()
+        self.assertEqual(e.exception.code, aiosconfig.UNREADABLE)
+        for name, call, method in self.calls(self.api()):
+            with self.subTest(call=name):
+                self.stand.routes[(method, "/api/v1/user")] = answer(400, deep)
+                with self.assertRaises(AiosError):
+                    call()
+        self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = answer(400, deep)
+        with self.assertRaises(AiosError) as e:
+            self.api().alias_config_id("fam")
+        self.assertEqual(e.exception.code, aiosconfig.ALIAS_NO_CONFIG)
+        self.assertIsNone(aiosconfig._error_code(deep))
+
+    def test_an_addon_route_of_another_shape(self):
+        # An addon route's answer is a JSON object ({} for one that isn't JSON); a list was handed back as it
+        # was, and ./setup's .get("streams") on it raised AttributeError
+        base, path = f"{self.stand.url}/stremio/{UUID}/E", "/stream/movie/tt0816692.json"
+        route = ("GET", f"/stremio/{UUID}/E/stream/movie/tt0816692.json")
+        self.stand.routes[route] = answer(200, [{"name": "a row"}])
+        with self.assertRaises(AiosError) as e:
+            self.api().addon_get(base, path)
+        self.assertEqual(e.exception.code, BAD_ANSWER)
+        for body, read in (({"streams": [{"name": "a row"}]}, {"streams": [{"name": "a row"}]}),
+                           (b"<html>ok</html>", {})):
+            with self.subTest(body=body):
+                self.stand.routes[route] = answer(200, body)
+                self.assertEqual(self.api().addon_get(base, path), read)
+        self.stand.routes[route] = answer(502, b"<html>down</html>")
+        with self.assertRaises(AiosError) as e:
+            self.api().addon_get(base, path)
+        self.assertEqual((e.exception.code, e.exception.message), (502, "AIOStreams answered HTTP 502 for stream."))
+
     def test_a_retry_after_that_is_no_ascii_number(self):
         self.stand.routes[("GET", "/api/v1/status")] = answer(429, {}, **{"Retry-After": "²"})
         waits = []
@@ -440,6 +486,26 @@ class ErrorKindsTest(ClientCase):
                 self.assertIn(words, e.exception.message)
                 self.assertIs(aiosconfig.needs_sign_in(e.exception), kind == aiosconfig.SIGN_IN)
                 self.assertIs(aiosconfig.is_limited(e.exception), kind == aiosconfig.LIMITING)
+
+    def test_a_too_many_requests_answer_is_a_limit_whatever_its_code(self):
+        # The HTTP status says it; a 429 whose JSON names another code, in words without "too many", was read
+        # as no kind at all
+        self.stand.routes[("PUT", "/api/v1/user")] = answer(
+            429, {"error": {"code": "TOO_MANY_REQUESTS", "message": "Slow down"}}, **{"Retry-After": "3600"})
+        with no_sleep([]), self.assertRaises(AiosError) as e:
+            self.api().save_config(UUID, "pw", CONFIG)
+        self.assertEqual((e.exception.code, e.exception.kind, e.exception.message),
+                         ("TOO_MANY_REQUESTS", aiosconfig.LIMITING, f"Saving the config: {aiosconfig.LIMITED}"))
+        self.assertTrue(aiosconfig.is_limited(e.exception))
+
+    def test_a_request_to_real_debrid_has_a_code_of_its_own(self):
+        # It was the one error aiosconfig makes itself without a code; stopped before any connection
+        api = AiosApi("https://real-debrid.com", timeout=2)
+        for call in (api.status, lambda: api.alias_config_id("fam"), lambda: api.get_config(UUID, "pw")):
+            with self.assertLogs("subsync.realdebrid", "WARNING"), self.assertRaises(AiosError) as e:
+                call()
+            self.assertEqual(e.exception.code, aiosconfig.REAL_DEBRID)
+            self.assertIsNone(e.exception.kind)
 
 
 GARBLED = {"cut short": b'{"success": true, "data": {"vers', "not UTF-8": b'{"success": true, "x": "\xff"}'}
@@ -663,6 +729,16 @@ class SignupCallersTest(ClientCase):
                     call()
                 self.assertEqual(e.exception.message, f"{step}: your AIOStreams is limiting requests from "
                                                       "AIOSubtitles right now. Try again in a few minutes.")
+
+    def test_a_too_many_requests_answer_is_said_as_a_limit_whatever_its_code(self):
+        # The page told a limit by AIOStreams' own code or a bare 429 only; another code quoted its words
+        self.stand.routes[("GET", "/api/v1/status")] = answer(200, {"success": True, "data": {"version": "2.37.0"}})
+        self.stand.routes[("GET", "/api/v1/user")] = answer(
+            429, {"error": {"code": "TOO_MANY_REQUESTS", "message": "Slow down"}}, **{"Retry-After": "3600"})
+        with no_sleep([]), self.assertRaises(self.signup.SignupError) as e:
+            self.signup._read_viewer(self.public(), UUID, "pw")
+        self.assertEqual(e.exception.message, "Reading your AIOStreams config: your AIOStreams is limiting requests "
+                                              "from AIOSubtitles right now. Try again in a few minutes.")
 
     def test_a_garbled_answer_is_not_said_to_be_unreachable(self):
         # It answered, so the person's network isn't the problem, and no field is marked

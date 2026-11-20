@@ -26,7 +26,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from installer import docs, dockerenv, hosting, limits, plan, screens, ui, update, where
+from installer import aios, docs, dockerenv, hosting, limits, plan, screens, ui, update, where
 from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the client through here)
 from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
@@ -724,7 +724,7 @@ class Engine:
                 try:
                     uuid = self.aios.alias_config_id(alias)
                 except AiosError as e:
-                    return False, {'ALIAS_UNKNOWN': ALIAS_UNKNOWN, 'ALIAS_NO_CONFIG': ALIAS_NO_CONFIG}.get(
+                    return False, {aios.ALIAS_UNKNOWN: ALIAS_UNKNOWN, aios.ALIAS_NO_CONFIG: ALIAS_NO_CONFIG}.get(
                         e.code, e.message + (f' {e.fix}' if e.fix else '')), value
             else:
                 uuid = plan.config_id_from(value)

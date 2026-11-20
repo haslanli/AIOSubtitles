@@ -27,6 +27,11 @@ def _say_wait(seconds):
 
 
 SUBSYNC_PRESET_NAME = 'subsync'
+# How long AIOStreams waits for the addons this module adds, in ms as a config writes it. subsync answers a
+# subtitle list from what it has (with pending entries on, after at most SUBSYNC_PENDING_WAIT_MS, 1 s by default), so
+# one that doesn't answer holds the viewer's subtitle list back 2 s at most; OpenSubtitles gets AIOStreams' own default
+SUBSYNC_ADDON_TIMEOUT_MS = 2000
+OPENSUBTITLES_TIMEOUT_MS = 7000
 
 # AIOStreams preset types that give subtitles (v2.37.0). A custom addon gives subtitles when its resources say so.
 SUBTITLE_PRESETS = {'opensubtitles', 'opensubtitles-v3-plus', 'subsource', 'subdl', 'subhero', 'aiosubtitle'}
@@ -214,14 +219,15 @@ def with_defaults(preset, metadata):
 def subsync_preset(config, manifest_url, metadata=None, name=SUBSYNC_PRESET_NAME):
     return with_defaults({'type': 'custom', 'instanceId': free_instance_id(config, 'ssy'), 'enabled': True,
                           'options': {'name': name, 'manifestUrl': manifest_url,
-                                      'resources': ['subtitles'], 'timeout': 2000}}, metadata)
+                                      'resources': ['subtitles'], 'timeout': SUBSYNC_ADDON_TIMEOUT_MS}}, metadata)
 
 
 def opensubtitles_preset(config, metadata=None):
     """Stremio's official OpenSubtitles (v3): no account, no language setting (it lists every language). The
     community OpenSubtitles V3+ answered in 16-23 s on 2026-11-09, past AIOStreams' 7 s default."""
     return with_defaults({'type': 'opensubtitles', 'instanceId': free_instance_id(config, 'ost'), 'enabled': True,
-                          'options': {'name': 'OpenSubtitles', 'timeout': 7000, 'resources': ['subtitles']}}, metadata)
+                          'options': {'name': 'OpenSubtitles', 'timeout': OPENSUBTITLES_TIMEOUT_MS,
+                                      'resources': ['subtitles']}}, metadata)
 
 
 def _before_other_subtitles(presets, preset):
@@ -462,7 +468,7 @@ TRIES = 6                    # tries at a call AIOStreams asks to slow down
 SLOW_DOWN_WAIT = 6           # the wait for a "too many requests" that names none (stock AIOStreams: a 5-second window)
 RETRY_WAIT_CAP = 60          # the longest wait asked for that is waited out; a longer one is reported
 PUBLIC_RETRY_WAIT_CAP = 5    # the public sign-up's (a person is waiting on the page)
-MAX_ANSWER = 16 * 1024 * 1024   # the largest answer read (as sources.py's read of a config)
+MAX_ANSWER = 16 * 1024 * 1024   # the largest AIOStreams answer read (a config, a stream or subtitle listing)
 MAX_REFUSAL = 64 * 1024      # the most of an alias lookup's refusal read
 ERROR_EXCERPT = 300          # bytes of an error answer that isn't JSON kept as its message
 READ_SIZE = 64 * 1024        # an answer is read this much at a time, at most
@@ -474,17 +480,20 @@ UNREADABLE = 'UNREADABLE'    # AiosError.code: an answer that came but isn't who
 UNREACHABLE = 'UNREACHABLE'  # AiosError.code: no answer at all (a name not found, a connection refused or timed out, a
                              # request the address rules stop): "Can't reach AIOStreams at …"
 NOT_AIOSTREAMS = 'NOT_AIOSTREAMS'   # AiosError.code: something answered the status call, but not as AIOStreams does
+REAL_DEBRID = 'REAL_DEBRID'  # AiosError.code: a request to Real-Debrid, stopped before it was sent
+ALIAS_UNKNOWN = 'ALIAS_UNKNOWN'      # AiosError.code: this AIOStreams doesn't know an alias (alias_config_id)
+ALIAS_NO_CONFIG = 'ALIAS_NO_CONFIG'  # AiosError.code: its answer for an alias holds no config ID on this AIOStreams
 # A "too many requests" of any call but making a config: AIOStreams' short limit (5 calls in 5 seconds)
 LIMITED = 'AIOStreams is limiting requests from this machine; try again in a few minutes.'
 
 
 class AiosError(Exception):
     """`code`: AIOStreams' own error code (or the HTTP status of a refusal without one), or aiosconfig's for the errors
-    it finds itself (UNREACHABLE, NOT_AIOSTREAMS, BAD_ANSWER, UNREADABLE, ALIAS_UNKNOWN, ALIAS_NO_CONFIG). `kind`: what
-    an AIOStreams refusal means as aiosconfig read it (_reading; None for any other error). Callers decide by these two,
-    never by the message's words, which may quote AIOStreams. `detail`: AIOStreams' own words for a refusal,
-    when it gave some (shown by the public sign-up for a refused config). `reason`: the message without the step
-    it names, for the public pages, which name their own."""
+    it finds itself (UNREACHABLE, NOT_AIOSTREAMS, BAD_ANSWER, UNREADABLE, REAL_DEBRID, ALIAS_UNKNOWN, ALIAS_NO_CONFIG).
+    `kind`: what an AIOStreams refusal means as aiosconfig read it (_reading; None for any other error). Callers decide
+    by these two, never by the message's words, which may quote AIOStreams. `detail`: AIOStreams' own words
+    for a refusal, when it gave some (shown by the public sign-up for a refused config). `reason`: the message
+    without the step it names, for the public pages, which name their own."""
 
     def __init__(self, message, fix=None, code=None, detail=None, reason=None, kind=None):
         super().__init__(message)
@@ -496,26 +505,28 @@ ALIAS_REDIRECTS = (301, 302, 303, 307, 308)
 # AIOStreams' codes for a config ID and password that open no config: a wrong password, or a config that is gone
 WRONG_PASSWORD_CODES = ('USER_INVALID_DETAILS', 'USER_INVALID_PASSWORD', 'USER_NOT_FOUND')
 
-# What an AIOStreams refusal means (AiosError.kind), read once from its code and its own words: for the sentence the
-# error gets (_plain) and for the callers that act on it (needs_sign_in, is_limited)
+# What an AIOStreams refusal means (AiosError.kind), read once from its code, its own words and its HTTP status: for
+# the sentence the error gets (_plain) and for the callers that act on it (needs_sign_in, is_limited)
 NO_CONFIG = 'NO_CONFIG'              # the config ID and password open no config: a wrong password, or a config gone
 CONFIG_REFUSED = 'CONFIG_REFUSED'    # AIOStreams refused the config itself (its reason: AiosError.detail)
 SIGN_IN = 'SIGN_IN'                  # it makes and saves configs only for a signed-in account
 LIMITING = 'LIMITING'                # it is limiting requests from this machine
 
 
-def _reading(code, message):
-    """The kind of an AIOStreams refusal, from its code (`code`) and its own words (`message`), or None: a wrong
-    password or a refused config by its code alone, whatever the words; a sign-in or a limit by its code or its
-    words."""
+def _reading(code, message, status=None):
+    """The kind of an AIOStreams refusal, from its code (`code`), its own words (`message`) and its HTTP status, or
+    None: a wrong password or a refused config by its code alone, whatever the words; a limit by its status (429, "too
+    many requests") or its code, whatever the words, else by its words; a sign-in by its code or its words."""
     code, words = str(code or ''), (message or '').lower()
     if code in WRONG_PASSWORD_CODES:
         return NO_CONFIG
     if code == 'USER_INVALID_CONFIG':
         return CONFIG_REFUSED
+    if status == 429 or code == 'RATE_LIMIT_EXCEEDED':
+        return LIMITING
     if code in ('FORBIDDEN', 'UNAUTHORIZED') or 'not allowed' in words:
         return SIGN_IN
-    if code == 'RATE_LIMIT_EXCEEDED' or 'too many' in words:
+    if 'too many' in words:
         return LIMITING
     return None
 
@@ -532,10 +543,10 @@ def is_limited(e):
     return e.kind == LIMITING
 
 
-def _plain(code, message, making=False):
+def _plain(code, message, making=False, status=None):
     """AIOStreams error codes, in plain words. `making`: the call made a config, which AIOStreams limits per hour; its
-    limit on every other call lasts seconds."""
-    kind = _reading(code, message)
+    limit on every other call lasts seconds. `status`: the refusal's HTTP status (_reading)."""
+    kind = _reading(code, message, status)
     if kind == NO_CONFIG:
         return 'That config ID and password don\'t match a config on this AIOStreams.'
     if kind == CONFIG_REFUSED:
@@ -550,10 +561,19 @@ def _plain(code, message, making=False):
     return message or str(code or '') or 'AIOStreams gave an error without a message.'
 
 
+def _loads(data):
+    """json.loads, with an answer nested too deep to decode (RecursionError) refused as JSON it can't read, a
+    ValueError like any other."""
+    try:
+        return json.loads(data)
+    except RecursionError:
+        raise ValueError('JSON nested too deep') from None
+
+
 def _error_code(body):
     """AIOStreams' error code in an answer's body ({"error": {"code": …}}), or None."""
     try:
-        err = json.loads(body).get('error')
+        err = _loads(body).get('error')
     except (ValueError, AttributeError, UnicodeDecodeError):
         return None
     return err.get('code') if isinstance(err, dict) else None
@@ -627,9 +647,10 @@ class AiosApi:
         if auth:
             headers['Authorization'] = 'Basic ' + base64.b64encode(f'{auth[0]}:{auth[1]}'.encode()).decode()
         url = path if path.startswith('http') else self.base + path
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         wait_at_most = self._wait_at_most(timeout)
         try:
+            # made inside the try: urllib refuses an address without a scheme here, with a ValueError
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
             try:
                 answer = realdebrid.urlopen(req, wait_at_most, opener=self.keyed_opener if auth else self.opener)
             except urllib.error.HTTPError as e:
@@ -646,7 +667,7 @@ class AiosApi:
                 return answer.status, payload if raw else self._json(payload), None
             wait = self._asked_wait(answer.headers) if answer.status == 429 else None
             try:
-                return answer.status, json.loads(payload), wait
+                return answer.status, _loads(payload), wait
             except ValueError:
                 return answer.status, {'error': {'code': 'RATE_LIMIT_EXCEEDED' if answer.status == 429 else None,
                                                  'message': payload[:ERROR_EXCERPT].decode('utf-8', 'replace')}}, wait
@@ -664,7 +685,7 @@ class AiosApi:
 
     def _blocked(self):
         return AiosError('Stopped a request to Real-Debrid: AIOSubtitles never uses Real-Debrid.',
-                         'Give the address of your AIOStreams, not of Real-Debrid.')
+                         'Give the address of your AIOStreams, not of Real-Debrid.', code=REAL_DEBRID)
 
     def _unreachable(self, e):
         # http.client's own errors are named by their kind only: some quote the address, whose path can hold a config's
@@ -683,8 +704,8 @@ class AiosApi:
         if payload[:1] not in (b'{', b'['):
             return {}
         try:
-            return json.loads(payload)
-        except ValueError:      # cut short, or not UTF-8
+            return _loads(payload)
+        except ValueError:      # cut short, not UTF-8, or nested too deep
             raise AiosError(f'{self.base} answered, but its answer isn\'t the JSON AIOStreams sends (it may have been '
                             'cut short).',
                             'Try again; if it keeps happening, check the web server or proxy in front of AIOStreams.',
@@ -712,9 +733,9 @@ class AiosApi:
         said, detail = err.get('message'), body.get('detail')
         said = said if isinstance(said, str) else None
         words = said or (detail if isinstance(detail, str) else None)
-        message = _plain(err.get('code'), words, making)
+        message = _plain(err.get('code'), words, making, status)
         return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=said, reason=message,
-                         kind=_reading(err.get('code'), words))
+                         kind=_reading(err.get('code'), words, status))
 
     def _succeeded(self, status, body, doing, ok=(200,), making=False):
         """The answer of a call AIOStreams says succeeded; raises its refusal (_error) otherwise."""
@@ -757,23 +778,23 @@ class AiosApi:
             if found:
                 return found
         elif status == 404 or (status == 400 and _error_code(body) == 'USER_INVALID_DETAILS'):
-            raise AiosError('This AIOStreams doesn\'t know that alias.', code='ALIAS_UNKNOWN')
+            raise AiosError('This AIOStreams doesn\'t know that alias.', code=ALIAS_UNKNOWN)
         elif status == 429:
             raise AiosError(LIMITED, code='RATE_LIMIT_EXCEEDED', kind=LIMITING)
         elif 500 <= status <= 599:
             raise AiosError(f'AIOStreams answered HTTP {status} for the alias link; try again in a few minutes.',
                             code=status)
-        raise AiosError('This AIOStreams gave no config for that alias.', code='ALIAS_NO_CONFIG')
+        raise AiosError('This AIOStreams gave no config for that alias.', code=ALIAS_NO_CONFIG)
 
     def _ask_alias(self, alias):
         """One request for an alias, its redirect never followed: (status, the redirect's target, a refusal's body,
         the answer's headers)."""
         url = f'{self.base}/stremio/u/{urllib.parse.quote(alias, safe="")}/manifest.json'
-        req = urllib.request.Request(url, method='GET', headers={'User-Agent': self.user_agent,
-                                                                 'Accept': 'application/json'})
         wait_at_most = min(self._wait_at_most(), QUICK_TIMEOUT)
         location, body = None, b''
         try:
+            req = urllib.request.Request(url, method='GET', headers={'User-Agent': self.user_agent,
+                                                                     'Accept': 'application/json'})
             with realdebrid.urlopen(req, wait_at_most, opener=net.build_opener(net.NoRedirects())) as r:
                 status, headers = r.status, r.headers
         except urllib.error.HTTPError as e:
@@ -866,7 +887,9 @@ class AiosApi:
     # ------------------------------------------------------------------------------------------- addon routes
 
     def addon_get(self, manifest_base, path, timeout=ADDON_TIMEOUT):
+        """An addon route's JSON object (a manifest, a stream or subtitle listing; {} for an answer that isn't JSON);
+        any other answer is BAD_ANSWER, a refusal has its HTTP status as its code."""
         status, body = self.call('GET', manifest_base + path, timeout=timeout)
         if status != 200:
-            raise AiosError(f'AIOStreams answered HTTP {status} for {path.split("/")[1]}.')
-        return body
+            raise AiosError(f'AIOStreams answered HTTP {status} for {path.split("/")[1]}.', code=status)
+        return self._object(status, body)

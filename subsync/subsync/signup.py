@@ -24,10 +24,11 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, NOT_AIOSTREAMS, PUBLIC_RETRY_WAIT_CAP, UNREACHABLE,
-                         UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link, is_limited,
-                         is_subsync_preset, needs_sign_in, new_key, parse_languages, sync_config, sync_config_problems,
-                         usenet_route, usenet_sync_config, viewer_change, without_builtin_twins, without_subsync)
+from .aiosconfig import (ALIAS_NO_CONFIG, ALIAS_UNKNOWN, BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, NOT_AIOSTREAMS,
+                         PUBLIC_RETRY_WAIT_CAP, UNREACHABLE, UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES, AiosApi,
+                         AiosError, install_link, is_limited, is_subsync_preset, needs_sign_in, new_key,
+                         parse_languages, sync_config, sync_config_problems, usenet_route, usenet_sync_config,
+                         viewer_change, without_builtin_twins, without_subsync)
 from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
@@ -172,9 +173,9 @@ def _config_id(api, uuid, alias):
     try:
         return api.alias_config_id(alias)
     except AiosError as e:
-        if e.code == "ALIAS_UNKNOWN":
+        if e.code == ALIAS_UNKNOWN:
             raise SignupError(UNKNOWN_ALIAS, field="link") from None
-        if e.code == "ALIAS_NO_CONFIG":
+        if e.code == ALIAS_NO_CONFIG:
             raise SignupError(NO_CONFIG_FROM_ALIAS, field="link") from None
         if isinstance(e.code, int):   # its server error (500 to 599): the AIOStreams fails for now, not the link
             raise SignupError(f"{ALIAS_STEP}: your AIOStreams answered with an error (HTTP {e.code}). Try again in a "
@@ -250,7 +251,7 @@ def _plain(e, doing, own_password=False, making=False):
                 "your AIOStreams can be opened from outside your home network.")
     if e.code == UNREADABLE:     # it answered, so it is reached
         return f"{doing}: your AIOStreams answered in a way AIOSubtitles doesn't know. Try again in a few minutes."
-    if e.code in ("RATE_LIMIT_EXCEEDED", 429) or is_limited(e):
+    if is_limited(e):
         if making:
             return (f"{doing}: your AIOStreams limits how many configs one address can make in an hour, and "
                     "AIOSubtitles has made many there lately. Try again in an hour.")
