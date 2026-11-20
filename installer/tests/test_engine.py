@@ -5,11 +5,13 @@ them), the saved AIOStreams reached again by a later ./setup, the last step's ch
 the service, a public instance's port and the one wording of each question, against the stand-in AIOStreams of
 test_flow with Docker stubbed out. Nothing connects beyond 127.0.0.1."""
 import contextlib
+import errno
 import io
 import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -81,6 +83,25 @@ class StateFiles(TmpState):
                          {'SUBSYNC_LANGUAGES': 'eng', 'SUBSYNC_EXTRA_SOURCES': ''})
         engine.write_kv(self.state / 'secrets.env', {'ADDON_KEY': 'k' * 32, 'GONE': None, 'EMPTY': ''}, 'header')
         self.assertEqual(engine.read_kv(self.state / 'secrets.env'), {'ADDON_KEY': 'k' * 32})
+
+    def test_a_compose_file_written_half_way_leaves_the_last_one_as_it_was(self):
+        # It was the one state file written in place; a full disk or a setup stopped while writing it left it
+        # short, and ./setup --uninstall's compose down then stopped on it
+        s = {'image': 'aiosubtitles:1', 'install_id': 'id-1', 'port': 8790, 'bind': '127.0.0.1'}
+        self.state.mkdir()
+        engine.write_compose(s)
+        before = (self.state / 'compose.yaml').read_text()
+
+        def full_disk(path, text, *args, **kwargs):
+            path.open('w').close()                         # opened (so emptied) and nothing written: the disk is full
+            raise OSError(errno.ENOSPC, 'No space left on device')
+        with mock.patch.object(Path, 'write_text', full_disk), self.assertRaises(OSError):
+            engine.write_compose(dict(s, port=8791))
+        self.assertEqual((self.state / 'compose.yaml').read_text(), before)
+        engine.write_compose(dict(s, port=8791))           # the next write takes the place of the one left behind
+        self.assertIn('"127.0.0.1:8791:8790"', (self.state / 'compose.yaml').read_text())
+        self.assertEqual(stat.S_IMODE((self.state / 'compose.yaml').stat().st_mode), 0o644)
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), ['compose.yaml'])
 
     def test_a_number_written_wrong_in_subsync_env_reads_as_its_default_and_the_others_as_written(self):
         # subsync's settings read every number one way and never raise; one line written wrong had every

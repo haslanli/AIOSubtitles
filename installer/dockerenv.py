@@ -114,8 +114,7 @@ def host_urls(c):
     urls += [f"http://{ip}:{c['port']}" for ip in c['ips']]   # works on Linux, not on Docker Desktop
     if c['base_url']:
         urls.append(c['base_url'])
-    seen = []
-    return [u for u in urls if not (u in seen or seen.append(u))]
+    return list(dict.fromkeys(urls))
 
 
 def port_in_use(port, host='0.0.0.0'):

@@ -122,15 +122,21 @@ def host_folder():
     return (PLACE.host_folder if PLACE and PLACE.host_folder else None) or str(STATE.parent)
 
 
+def write_whole(path, text, mode):
+    """`path` written whole or not at all: a temporary file beside it, renamed over it once written, so a full disk or
+    a setup stopped half way leaves the last one as it was, never a short one."""
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_text(text)
+    tmp.chmod(mode)
+    own(tmp)
+    tmp.replace(path)
+
+
 def write_private(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     own(path.parent)
-    tmp = path.with_name(path.name + '.tmp')
-    tmp.write_text(text)
-    tmp.chmod(0o600)
-    own(tmp)
-    tmp.replace(path)
+    write_whole(path, text, 0o600)
 
 
 # What ends a line where a value is written: every line break str.splitlines() knows (plan.parse_env reads the files
@@ -193,8 +199,6 @@ def save_settings(s):
 def backup(config, uuid, label='viewer'):
     path = STATE / 'backups' / f'{label}-{uuid[:8]}-{time.strftime("%Y%m%d-%H%M%S", time.gmtime())}.json'
     write_private(path, json.dumps({'uuid': uuid, 'config': config}, indent=2) + '\n')
-    (STATE / 'backups').chmod(0o700)
-    own(STATE / 'backups')
     return path
 
 
@@ -241,9 +245,7 @@ def compose_for(s):
 
 
 def write_compose(s):
-    path = STATE / 'compose.yaml'
-    path.write_text(compose_for(s))
-    own(path)
+    write_whole(STATE / 'compose.yaml', compose_for(s), 0o644)
 
 
 def bridge():
@@ -619,8 +621,7 @@ class Engine:
         urls += [f'http://{gateway}:{port}' for ip, port in c['published'] if ip in ('0.0.0.0', '::', '') and gateway]
         if c['base_url']:
             urls.append(c['base_url'])
-        seen = []
-        return [u for u in urls if not (u in seen or seen.append(u))]
+        return list(dict.fromkeys(urls))
 
     def _check_aios(self, value):
         """AIOStreams answering at the address typed. One without http:// or https:// is tried with https first unless
