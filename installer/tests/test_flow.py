@@ -69,6 +69,20 @@ def check_argv(cmd):
             raise TypeError(f'expected str, bytes or os.PathLike object, not {type(item).__name__}')
 
 
+def local_only(test):
+    """For the rest of `test`: a connection to anything but this machine fails it, before any lookup or packet leaves
+    the machine."""
+    real = socket.create_connection
+
+    def connect(address, *args, **kwargs):
+        if address[0] not in ('127.0.0.1', 'localhost', '::1'):
+            raise AssertionError(f'a connection to {address[0]} was opened')
+        return real(address, *args, **kwargs)
+    guard = mock.patch('socket.create_connection', connect)
+    guard.start()
+    test.addCleanup(guard.stop)
+
+
 _NEWZ = {'torbox', 'nzbdav', 'altmount', 'stremio_nntp', 'stremthru_newz', 'aiostreams'}
 CAN_USE = {'newznab': _NEWZ, 'nzbhydra': _NEWZ, 'easynews-search': {'easynews'},
            'prowlarr': _NEWZ | {'realdebrid', 'alldebrid', 'premiumize', 'debridlink', 'offcloud', 'easydebrid'}}
@@ -278,20 +292,24 @@ class FakeAios:
 
 
 class AnswersRun:
-    """./setup run as `./setup --answers FILE --yes`, its answers file written in the test's folder (self.tmp); used
-    by FlowFixture, test_hosting's RouteFixture and test_cli."""
+    """./setup run with its output kept, as `./setup --answers FILE --yes` with its answers file written in the test's
+    folder (self.tmp); used by FlowFixture, test_hosting's RouteFixture and test_cli."""
 
     def answers_file(self, answers):
         path = Path(self.tmp.name) / 'answers'
         path.write_text('\n'.join(f'{k}={v}' for k, v in answers.items()) + '\n')
         return str(path)
 
-    def run_setup(self, answers, *extra):
-        """(exit code, what setup printed)."""
+    def run_main(self, *argv):
+        """./setup with these arguments: (exit code, what setup printed)."""
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = wizard.main(['--answers', self.answers_file(answers), '--yes', *extra])
+            code = wizard.main(list(argv))
         return code, out.getvalue()
+
+    def run_setup(self, answers, *extra):
+        """(exit code, what setup printed)."""
+        return self.run_main('--answers', self.answers_file(answers), '--yes', *extra)
 
     def stand_in_tmdb(self):
         """TMDB's key check answered here, so no request leaves this machine: with `self.tmdb_answer` (True accepted,
@@ -1035,15 +1053,7 @@ class Flow(FlowFixture):
 
 class RealDebridGate(unittest.TestCase):
     def setUp(self):
-        real = socket.create_connection
-
-        def local_only(address, *args, **kwargs):   # fails before any lookup or packet leaves this machine
-            if address[0] not in ('127.0.0.1', 'localhost', '::1'):
-                raise AssertionError(f'a connection to {address[0]} was opened')
-            return real(address, *args, **kwargs)
-        guard = mock.patch('socket.create_connection', local_only)
-        guard.start()
-        self.addCleanup(guard.stop)
+        local_only(self)
 
     def test_setup_never_sends_a_request_to_real_debrid(self):
         with self.assertLogs('subsync.realdebrid', 'WARNING'):
@@ -1070,9 +1080,10 @@ class RealDebridGate(unittest.TestCase):
                 engine.Aios(f'http://127.0.0.1:{server.server_address[1]}').call('GET', '/api/v1/status')
 
 
-class Bridge(FlowFixture):
-    """Setup on Docker's bridge network (the image route): AIOStreams reached by joining its network or through the
-    gateway, the machine's ports and address asked of the helper, the guard, the folder's ./setup and file owners."""
+class OnBridgeNetwork:
+    """Mixed in before a FlowFixture: setup on Docker's bridge network (the image route). Its container joins
+    AIOStreams' network (each join in self.joined) and asks the helper for the machine's ports and address (each check
+    in self.probed), which finds port 8790 taken. Not a TestCase, so a module importing it doesn't run tests twice."""
 
     def setUp(self):
         super().setUp()
@@ -1087,6 +1098,11 @@ class Bridge(FlowFixture):
                   mock.patch.object(dockerenv, 'probe', probe)):
             p.start()
             self.addCleanup(p.stop)
+
+
+class Bridge(OnBridgeNetwork, FlowFixture):
+    """Setup on Docker's bridge network (the image route): AIOStreams reached by joining its network or through the
+    gateway, the machine's ports and address asked of the helper, the guard, the folder's ./setup and file owners."""
 
     def container(self, **kw):
         return dict({'name': 'aiostreams', 'image': 'ghcr.io/viren070/aiostreams:latest', 'port': 3000, 'base_url': '',

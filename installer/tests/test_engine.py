@@ -23,7 +23,8 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, docs, engine, hosting, limits, plan, screens, ui, wizard
-from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture, check_argv
+from installer.tests.test_flow import (IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture, OnBridgeNetwork, check_argv,
+                                       local_only)
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
 from subsync import aiosconfig, explain
 
@@ -294,15 +295,10 @@ class Offline(FlowFixture):
 
     def setUp(self):
         super().setUp()
-        real = socket.create_connection
-
-        def local_only(address, *args, **kwargs):
-            if address[0] not in ('127.0.0.1', 'localhost', '::1'):
-                raise AssertionError(f'a connection to {address[0]} was opened')
-            return real(address, *args, **kwargs)
-        for patch in (mock.patch('socket.create_connection', local_only), mock.patch.object(ui, 'COLOR', False)):
-            patch.start()
-            self.addCleanup(patch.stop)
+        local_only(self)
+        colourless = mock.patch.object(ui, 'COLOR', False)
+        colourless.start()
+        self.addCleanup(colourless.stop)
 
     def keys(self):
         return engine.read_kv(self.state / 'secrets.env')
@@ -371,11 +367,9 @@ class StateFlows(Offline):
         self.aios.users[UUID]['password'] = plan.parse_env(text)['AIOS_CONFIG_PASSWORD']    # as --answers reads it
         answers = Path(self.tmp.name) / 'restore-answers'
         answers.write_text(text)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--restore', str(copy), '--answers', str(answers), '--yes'])
-        self.assertEqual(code, 0, out.getvalue())
-        self.assertIn('Restored.', out.getvalue())
+        code, out = self.run_main('--restore', str(copy), '--answers', str(answers), '--yes')
+        self.assertEqual(code, 0, out)
+        self.assertIn('Restored.', out)
         self.assertEqual(self.ours(), [])                                         # the copy from before subsync
 
     def test_text_from_aiostreams_reaches_the_terminal_without_control_characters(self):
@@ -711,22 +705,11 @@ class AiostreamsShapes(Offline):
             self.assertEqual(engine.load_settings()['container'], 'aio-two')      # a re-run keeps the choice
 
 
-class OnBridge(Offline):
-    """Setup on Docker's bridge network (the image route), set up as test_flow.Bridge sets it up."""
+class OnBridge(OnBridgeNetwork, Offline):
+    """Setup on Docker's bridge network (the image route), set up as test_flow.Bridge is."""
 
     def setUp(self):
         super().setUp()
-        self.place = self.place._replace(network='bridge', gateway='172.17.0.1', page_port=8789)
-        self.joined, self.probed = [], []
-
-        def probe(image, checks):
-            self.probed.append((image, list(checks)))
-            return {'lan': '192.168.1.7', 'taken': [f'{h}:{p}' for h, p in checks if p == 8790]}
-        for p in (mock.patch.object(engine, 'PLACE', self.place),
-                  mock.patch.object(dockerenv, 'join', lambda net, c: self.joined.append((net, c)) or True),
-                  mock.patch.object(dockerenv, 'probe', probe)):
-            p.start()
-            self.addCleanup(p.stop)
         self.status = engine.Aios(self.aios.url).status()
 
     def test_a_rerun_with_the_last_address_filled_in_finds_aiostreams_again(self):
@@ -867,10 +850,8 @@ class SavedAiostreams(Offline):
         copy = next((self.state / 'backups').iterdir())
         answers = Path(self.tmp.name) / 'restore-answers'
         answers.write_text(f'AIOS_CONFIG_PASSWORD={PASSWORD}\nRESTORE=yes\n')
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--restore', str(copy), '--answers', str(answers), '--yes'])
-        self.assertEqual(code, 0, out.getvalue())
+        code, out = self.run_main('--restore', str(copy), '--answers', str(answers), '--yes')
+        self.assertEqual(code, 0, out)
         self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
         self.assertEqual(self.ours(), [])                                         # the copy from before subsync
 
@@ -885,15 +866,13 @@ class SavedAiostreams(Offline):
         self.aios.users[UUID]['config']['presets'].append({'type': 'custom', 'options': {'manifestUrl': 'x'}})
         self.joined.clear()                                 # the next ./setup: a new container
         answers = self.answers_file({'AIOS_CONFIG_PASSWORD': PASSWORD, 'RESTORE': 'yes'})
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--restore', str(copy), '--answers', answers, '--yes'])
-        self.assertEqual(code, 0, out.getvalue())
+        code, out = self.run_main('--restore', str(copy), '--answers', answers, '--yes')
+        self.assertEqual(code, 0, out)
         self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
-        self.assertIn('Found AIOStreams 2.37.0 in the container "aiostreams"', out.getvalue())
-        self.assertNotIn('Viewers reach it at', out.getvalue())          # the AIOStreams step's install rows: none
-        self.assertNotIn('Step 2', out.getvalue())
-        self.assertIn('Restored.', out.getvalue())
+        self.assertIn('Found AIOStreams 2.37.0 in the container "aiostreams"', out)
+        self.assertNotIn('Viewers reach it at', out)                     # the AIOStreams step's install rows: none
+        self.assertNotIn('Step 2', out)
+        self.assertIn('Restored.', out)
         self.assertEqual(self.aios.users[UUID]['config'], json.loads(copy.read_text())['config'])
         self.assertEqual(self.ours(), [])                                   # the change since is gone
 
@@ -1001,9 +980,8 @@ class SelfCheck(Offline):
         for flag, method in (('--update', 'update'), ('--rollback', 'rollback')):
             for result, expected in ((True, 0), (False, 3)):
                 with self.subTest(flag=flag, result=result), \
-                        mock.patch.object(engine.Engine, method, lambda e, *a, result=result, **k: result), \
-                        contextlib.redirect_stdout(io.StringIO()):
-                    self.assertEqual(wizard.main([flag]), expected)
+                        mock.patch.object(engine.Engine, method, lambda e, *a, result=result, **k: result):
+                    self.assertEqual(self.run_main(flag)[0], expected)
 
 
 class WaitHealthy(TmpState):
@@ -1209,12 +1187,6 @@ def typing(*answers):
 class TerminalAsks(Offline):
     """In a terminal, ./setup asks what an answers file leaves out, unless --yes is given: ./setup --uninstall asks for
     the config's password, as the README and the password's explanation say."""
-
-    def run_main(self, *argv):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(list(argv))
-        return code, out.getvalue()
 
     def test_uninstall_in_a_terminal_asks_for_the_config_password(self):
         self.install()
@@ -1546,12 +1518,6 @@ class Removal(Offline):
 
     SIGN_IN = {'AIOS_USERNAME': 'admin', 'AIOS_PASSWORD': 'adminpw'}
 
-    def run_main(self, *argv):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(list(argv))
-        return code, out.getvalue()
-
     def test_uninstall_signs_in_when_aiostreams_asks(self):
         # it stopped with "This AIOStreams asks you to sign in before configs can be saved." and never asked
         self.aios.gated = True
@@ -1621,10 +1587,7 @@ class Restore(Offline):
 
     def restore(self, path, **answers):
         answers = self.answers_file(dict({'AIOS_CONFIG_PASSWORD': PASSWORD, 'RESTORE': 'yes'}, **answers))
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--restore', str(path), '--answers', answers, '--yes'])
-        return code, out.getvalue()
+        return self.run_main('--restore', str(path), '--answers', answers, '--yes')
 
     def unchanged(self):
         """The config as it is now, and the copies: what a restore that stops must leave as they are."""
@@ -1718,11 +1681,9 @@ class Restore(Offline):
                          ['--uninstall', '--answers', str(path), '--yes'],
                          ['--restore', str(self.copy), '--answers', str(path), '--yes']):
                 with self.subTest(path=str(path), argv=argv[0]):
-                    out = io.StringIO()
-                    with contextlib.redirect_stdout(out):
-                        code = wizard.main(argv)
-                    self.assertEqual(code, 1, out.getvalue())
-                    self.assertIn(f"✗ Setup can't open {path}. {give}", flat(out.getvalue()))
+                    code, out = self.run_main(*argv)
+                    self.assertEqual(code, 1, out)
+                    self.assertIn(f"✗ Setup can't open {path}. {give}", flat(out))
                     self.assertEqual((self.unchanged(), engine.load_settings()), before)
 
 
@@ -1735,12 +1696,6 @@ class OwnYes(Offline):
         super().setUp()
         self.install()
         self.copy = next(p for p in (self.state / 'backups').iterdir() if p.name.startswith('viewer-'))
-
-    def run_main(self, *argv):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(list(argv))
-        return code, out.getvalue()
 
     def everything(self):
         """What removing or restoring changes: setup's files with the copies, every config on AIOStreams, the service."""
@@ -1811,12 +1766,6 @@ class OwnYes(Offline):
 class Advice(Offline):
     """The way out the terminal gives after an answer refused or not given: by the answers file, and none to give for a
     public instance's removal answered no."""
-
-    def run_main(self, *argv):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(list(argv))
-        return code, out.getvalue()
 
     def test_the_three_ways_out(self):
         self.assertEqual(ui.answers_advice('PUBLIC_ADDRESS', {'PUBLIC_ADDRESS': 'x'}),
@@ -2070,12 +2019,10 @@ class TakeOver(Offline):
             with self.subTest(page=page), self.assertRaises(ui.Stop) as caught:
                 engine.Engine({}, page=page).update()
             self.assertEqual(caught.exception.message, words)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--update'])
+        code, out = self.run_main('--update')
         self.assertEqual(code, 1)
         self.assertIn('✗ This install was made by setup 1.3.0 or before: run ./setup and go through its steps once; '
-                      'your answers and stored copies are kept.', flat(out.getvalue()))
+                      'your answers and stored copies are kept.', flat(out))
         self.assertEqual(engine.load_settings(), self.settings_1_3_0)
         self.assertEqual(self.compose(), COMPOSE_1_3_0)
         self.assertFalse([c for c, _ in self.exec_calls if 'copy-databases' in c])
@@ -2134,12 +2081,10 @@ class TakeOver(Offline):
     def test_the_old_updaters_second_half_says_how_to_finish(self):
         # setup 1.3.0's ./setup --update fetches the new files, then runs their wizard.py with --update-finish COMMIT
         # on this machine's Python; argparse refused the option ("unrecognized arguments")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = wizard.main(['--update-finish', 'f4313df6da78014141458d9e1b16d3b9206c1496'])
+        code, out = self.run_main('--update-finish', 'f4313df6da78014141458d9e1b16d3b9206c1496')
         self.assertEqual(code, 1)
-        self.assertEqual(out.getvalue(), '\n  !  The files are updated. Run ./setup to finish the update: it keeps your '
-                                         'answers.\n\n')
+        self.assertEqual(out, '\n  !  The files are updated. Run ./setup to finish the update: it keeps your '
+                              'answers.\n\n')
         self.assertEqual(engine.load_settings(), self.settings_1_3_0)          # nothing else is done
 
 
