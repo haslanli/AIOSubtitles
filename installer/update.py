@@ -36,7 +36,10 @@ ROLLED_BACK = "Version {new} didn't answer: version {old} is running again"
 WITH_DATABASES = ', with the databases from before the update'
 STILL_DOWN = "Version {old} didn't start again either. Its log: docker logs {container}"
 KEPT = 'Version {version} is kept for a rollback: ./setup --rollback.'
-OLD_IMAGES = 'Older images: docker image rm {image} frees about 1 GB.'
+# an AIOSubtitles image's size in GB, as the words round it (screens.DISK_GB counts it twice: the image and the one
+# kept for a rollback)
+IMAGE_GB = 1
+OLD_IMAGES = f'Older images: docker image rm {{image}} frees about {IMAGE_GB} GB.'
 NO_ROLLBACK = 'There is no earlier version to go back to.'
 ROLLBACK = 'Roll back to version {version}'
 ROLLBACK_HEADING = 'Rollback'

@@ -100,6 +100,10 @@ ALIAS_NO_CONFIG = ("Setup couldn't get the config from that alias link. Paste th
 
 # ------------------------------------------------------------------------------------------- state files
 
+# setup's files in state/ for the install: the settings, the keys, subsync's settings and the compose file
+STATE_FILES = ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml')
+
+
 def read_kv(path):
     """The non-empty values of a KEY=value file setup wrote (state/secrets.env), read as plan.parse_env reads every
     env and answers file."""
@@ -188,6 +192,12 @@ def env_settings():
     """subsync's settings as state/subsync.env starts it, for the questions that state one (explain.setup_help); a
     number or an on/off setting written wrong there reads as its default (Settings.written_wrong)."""
     return Settings(env_values())
+
+
+def remove_state_files():
+    """What state/ holds for the install, deleted once it is removed (both routes); state/backups/ stays."""
+    for name in STATE_FILES:
+        (STATE / name).unlink(missing_ok=True)
 
 
 def load_settings():
@@ -336,10 +346,27 @@ def new_install_id():
 
 def image_handle(image):
     """How messages name an image to remove: its short ID (a pinned name is one long word that no page can wrap), or
-    the name when Docker doesn't know it."""
+    the name when Docker doesn't know it; no image, nothing asked."""
+    if not image:
+        return image
     code, out, _ = dockerenv.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', image])
     found = out.strip().split(':')[-1] if code == 0 else ''
     return found[:12] if re.fullmatch(r'[0-9a-f]{64}', found) else image
+
+
+def installed_image(s):
+    """The image the install saved in `s` (state/settings.json) runs: the one recorded, or for an install setup 1.3.0
+    or before made, which recorded none, the one it built, named by its version (as its own removal named it); None
+    when neither is known."""
+    if s.get('image'):
+        return s['image']
+    return f"aiosubtitles/subsync:{s['version']}" if s.get('version') else None
+
+
+def image_stays(s):
+    """The what-stays line for the image of the install saved in `s`, as a list: empty when the image can't be named."""
+    image = installed_image(s)
+    return [f'the subsync image (about {update.IMAGE_GB} GB): docker image rm {image_handle(image)}'] if image else []
 
 
 def short(uuid):
@@ -1666,10 +1693,9 @@ class Engine:
             self.take_down()
         if s.get('cache_before'):
             self.out.note('AIOStreams\' subtitle cache setting for subsync stays; it does nothing without subsync.')
-        for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
-            (STATE / name).unlink(missing_ok=True)
+        remove_state_files()
         self.out.ok('Done.')
-        self.stays = [f"the subsync image (about 1 GB): docker image rm {image_handle(s.get('image'))}"]
+        self.stays = image_stays(s)
         if s.get('public_kind') == 'path':
             self.stays.append(f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server")
         self.stays.append(f'this folder, {host_folder()}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)')
@@ -1689,16 +1715,15 @@ class Engine:
         if (STATE / 'compose.yaml').exists():
             guard(s.get('install_id'), unlabelled_own(s))
             self.take_down()
-        for name in ('settings.json', 'secrets.env', 'subsync.env', 'compose.yaml'):
-            (STATE / name).unlink(missing_ok=True)
+        remove_state_files()
         self.out.ok('Done.')
         folder = f'this folder, {host_folder()}'
         # a public instance's state/backups/ holds the databases' copies made before updates, never a config's
         if any(real_folder(path) for path in (STATE / 'backups').glob('databases-*')):
             folder += ", with the database copies made before updates in state/backups/, which hold everyone's records"
-        self.stays = [f"the subsync image (about 1 GB): docker image rm {image_handle(s.get('image'))}",
-                      f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server",
-                      folder]
+        self.stays = image_stays(s) + [
+            f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server",
+            folder]
         self.say_what_stays()
 
     def take_down(self):
@@ -1834,7 +1859,7 @@ class Engine:
         """A checked copy of the service's databases, out of its container, the newest three kept. Returns its folder."""
         self.out.working(update.COPYING)
         stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
-        inside = f'/data/before-update-{stamp}'
+        inside = f'{plan.DATA}/before-update-{stamp}'
         code, out, err = dockerenv.exec_in(CONTAINER, ['python', '-m', 'subsync.hostcmd', 'copy-databases', inside],
                                            timeout=600)
         backups = STATE / 'backups'

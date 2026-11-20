@@ -60,6 +60,15 @@ def refusal(config):
     return None
 
 
+def as_subprocess_takes(cmd):
+    """A command's argv as subprocess takes it, for the stand-ins of dockerenv.run: an item that isn't a str, bytes or a
+    path (None, say) raises the TypeError subprocess raises, which dockerenv.run doesn't catch."""
+    for item in cmd:
+        if not isinstance(item, (str, bytes, os.PathLike)):
+            raise TypeError(f'expected str, bytes or os.PathLike object, not {type(item).__name__}')
+    return cmd
+
+
 _NEWZ = {'torbox', 'nzbdav', 'altmount', 'stremio_nntp', 'stremthru_newz', 'aiostreams'}
 CAN_USE = {'newznab': _NEWZ, 'nzbhydra': _NEWZ, 'easynews-search': {'easynews'},
            'prowlarr': _NEWZ | {'realdebrid', 'alldebrid', 'premiumize', 'debridlink', 'offcloud', 'easydebrid'}}
@@ -338,7 +347,7 @@ class FlowFixture(AnswersRun, unittest.TestCase):
             mock.patch.object(dockerenv, 'lan_address', lambda: '192.168.1.5'),
             mock.patch.object(dockerenv, 'container_state', lambda n: 'running healthy'),
             mock.patch.object(dockerenv, 'compose', self._compose),
-            mock.patch.object(dockerenv, 'run', lambda *a, **k: (0, '', '')),
+            mock.patch.object(dockerenv, 'run', lambda cmd, *a, **k: as_subprocess_takes(cmd) and (0, '', '')),
             mock.patch.object(dockerenv, 'exec_in', exec_in),
             mock.patch.object(engine.Aios, 'call', self._call_public_health(engine.Aios.call, self.aios)),
         ):
@@ -1169,6 +1178,10 @@ class ImageNames(FlowFixture):
 
     def test_an_image_docker_doesnt_know_keeps_its_name(self):
         self.assertEqual(engine.image_handle(IMAGE), IMAGE)
+
+    def test_no_image_asks_docker_nothing(self):
+        # None went into Docker's argv (a TypeError that dockerenv.run doesn't catch)
+        self.assertIsNone(engine.image_handle(None))
 
 
 class Fixtures(unittest.TestCase):

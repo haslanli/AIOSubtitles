@@ -23,7 +23,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, docs, engine, hosting, limits, plan, screens, ui, wizard
-from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture
+from installer.tests.test_flow import IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture, as_subprocess_takes
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
 from subsync import aiosconfig, explain
 
@@ -1811,6 +1811,7 @@ class TakeOver(Offline):
 
     def run_docker(self, cmd, timeout=60, stdin=None):
         """Docker's listings with each item's install label, and its volume commands."""
+        as_subprocess_takes(cmd)
         kind = {('docker', 'ps'): 'container', ('docker', 'volume'): 'volume', ('docker', 'network'): 'network'}.get(
             tuple(cmd[:2]))
         if kind and cmd[2] in ('-a', 'ls'):
@@ -1977,6 +1978,10 @@ class TakeOver(Offline):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.docker, {})
         self.assertEqual(self.volume_calls, [])
+        # Its settings record no image; what stays names the one setup 1.3.0 built, as 1.3.0's removal did
+        # (it was image_handle(None): a TypeError from Docker's argv after everything was removed)
+        self.assertIn('• the subsync image (about 1 GB): docker image rm aiosubtitles/subsync:1.3.0\n', out)
+        self.assertIn('• this folder, /home/me/aiosubtitles, with copies of your config in state/backups/', flat(out))
 
     def test_a_public_instance_keeps_its_volume_without_the_tick_and_removes_it_with_it(self):
         settings = {'route': 'host', 'installed': '2026-11-13', 'install_id': 'id-1', 'external_volume': KEPT_VOLUME,
