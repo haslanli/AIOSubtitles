@@ -1079,6 +1079,24 @@ class StepResults(TmpState):
         e.host_limits()
         self.assertEqual(set(e.limit_values), {lim.setting for lim in limits.hosting(False, False)})
 
+    def test_a_public_instances_hand_set_audio_limit_is_kept(self):
+        # 3 GB (which subsync reads) was refused on every re-run: "Type 0.5, 1, 2 or 4 (GB per file)."
+        self.state.mkdir()
+        (self.state / 'subsync.env').write_text('SUBSYNC_PUBLIC=on\nSUBSYNC_AUDIO_ROUTE=on\nSUBSYNC_AUDIO_BUDGET_GB=3\n')
+        for page in (True, False):                             # the page, and ./setup --yes
+            with self.subTest(page=page), contextlib.redirect_stdout(io.StringIO()):
+                e = engine.Engine({}, page=page)
+                e.host_audio = True
+                e.host_limits()
+                self.assertEqual(e.limit_values[limits.AUDIO.setting], '3')
+        # a value set by hand is kept as it is, not opened up: another one is still one of the four
+        e = engine.Engine({limits.AUDIO.setting: '5'}, page=True)
+        e.host_audio = True
+        with self.assertRaises(engine.Problem) as caught:
+            e.host_limits()
+        self.assertEqual((caught.exception.field, caught.exception.message),
+                         (limits.AUDIO.setting, limits.NOT_AN_AUDIO_LIMIT))
+
 
 class HostPort(TmpState):
     """A public instance's port: its own on a re-run, never a personal install's; checked unless this install's

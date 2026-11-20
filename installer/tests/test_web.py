@@ -347,6 +347,45 @@ class Personal(BackgroundWork, FlowFixture):
         status, headers, _ = self.b.post('check', {'go': 'next'})
         self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/done'))
 
+    def check_that_stops(self, *patches, test_read=False):
+        """The done page after a check (or with `test_read`, the test read) that stops on an error setup doesn't know;
+        the error's details go to the terminal, as on every such stop."""
+        self.walk_to_review()
+        self.b.post('review', {'CONFIRM': 'yes'})
+        self.b.settle('install')
+        terminal = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            stack.enter_context(contextlib.redirect_stderr(terminal))
+            self.b.follow('install', {'go': 'next'})
+            _, _, text = self.b.settle('check')
+            if test_read:
+                self.b.post('check', {'TEST_READ': 'yes'})
+                _, _, text = self.b.settle('check')
+        self.assertIn(screens.UNEXPECTED[0], text)
+        self.assertIn('Traceback', terminal.getvalue())
+        _, _, text = self.b.follow('check', {'go': 'next'})
+        return text
+
+    def test_a_check_stopped_by_an_error_is_never_done(self):
+        # The check had set "good" before AIOStreams' listing came back as a JSON array (a list has no .get):
+        # the check page showed the stop, and the done page then said "Done", with no warnings
+        real = engine.Aios.addon_get
+
+        def listing_as_an_array(aios, base, path, *args, **kwargs):
+            return [] if path.startswith('/stream/') else real(aios, base, path, *args, **kwargs)
+        text = self.check_that_stops(mock.patch.object(engine.Aios, 'addon_get', listing_as_an_array))
+        self.assertIn('<h1>Installed, with warnings</h1>', text)
+        self.assertNotIn('<h1>Done</h1>', text)
+
+    def test_a_test_read_stopped_by_an_error_is_never_done(self):
+        # A crashed test read left read_good unset, read as a pass
+        self.selftest = dict(self.selftest, container=4)           # an answer test_read can't word (no .upper())
+        text = self.check_that_stops(test_read=True)
+        self.assertIn('<h1>Installed, with warnings</h1>', text)
+        self.assertNotIn('<h1>Done</h1>', text)
+
     def test_a_failed_update_can_be_tried_again(self):
         self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
         app = web.App(port=8806)

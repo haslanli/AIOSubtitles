@@ -1535,11 +1535,13 @@ class Engine:
         env = env_values()
         self.limit_values = {}
         for lim in limits.hosting(self.host_usenet, self.host_audio):
-            def check(value, lim=lim):
-                chosen, error = limits.check(lim, value, places=self.places())
+            current = limits.current(lim, env)
+
+            # a value set by hand in subsync.env is kept when given again (the audio limit's, as on the other route)
+            def check(value, lim=lim, current=current):
+                chosen, error = limits.check(lim, value, current=current, places=self.places())
                 return (False, error, value) if error else (True, '', chosen)
-            self.limit_values[lim.setting] = self.ask.text(lim.setting, lim.label, current=limits.current(lim, env),
-                                                           check=check)
+            self.limit_values[lim.setting] = self.ask.text(lim.setting, lim.label, current=current, check=check)
 
     def places(self):
         """The files synced at a time as answered (asked before the audio syncs at a time): its number, or with

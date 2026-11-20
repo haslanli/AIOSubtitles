@@ -424,11 +424,13 @@ class App:
 
     def step_done(self, s, method, form, one):
         e = s.e
+        checks = ('hostcheck',) if s.route == 'host' else ('check', 'check-read')
+        # a check stopped by an error didn't finish: what it found so far isn't a pass
+        good = getattr(e, 'good', False) and not any(step in s.stops for step in checks)
         if s.route == 'host':
-            good, checks = getattr(e, 'good', False), ('hostcheck',)
             title, lines, after = e.host_summary_parts(good)
         else:
-            good, checks = getattr(e, 'good', False) and getattr(e, 'read_good', True), ('check', 'check-read')
+            good = good and getattr(e, 'read_good', True)
             title, lines, after = e.summary_parts(good)
         warnings = [] if good else [row for step in checks for row in s.live(step) if row[0] in ('warn', 'bad')]
         self.finish_in(DONE_S)
