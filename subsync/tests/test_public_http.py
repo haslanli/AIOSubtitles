@@ -355,6 +355,15 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         self.assertEqual(answers(data), [400])
         self.assertIn(b"\r\nConnection: close\r\n", data)
 
+    def test_a_form_without_its_length_is_refused_and_closes_the_connection(self):
+        # A POST without Content-Length (411) had no test
+        port = self.server.server_address[1]
+        hidden = b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        data = exchange(port, b"POST /signup HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                              b"Accept: text/html\r\n\r\nlink=&password=x" + hidden)
+        self.assertEqual(answers(data), [411])                 # and closed: what followed is never read
+        self.assertIn(b"The form arrived without its length.", data)
+
     def test_a_405_names_the_methods_the_address_takes(self):
         # RFC 9110 asks a 405 to name them (Allow); none was named
         _, _, _, _, token = self.sign_up()

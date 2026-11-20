@@ -2374,7 +2374,8 @@ class ConnectionTest(AddonCase):
         # reads the other length (or the dropped one) forwards a body subsync took for the next request
         hidden = b"GET /status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
         n = len(hidden)
-        for head in (b"Content-Length: 0\r\nContent-Length: %d" % n, b"Content-Length: %d\r\nContent-Length: %d" % (n, n),
+        for head in (b"Content-Length: 0\r\nContent-Length: %d" % n,
+                     b"Content-Length: %d\r\nContent-Length: %d" % (n, n),
                      b"Transfer-Encoding: \r\nTransfer-Encoding: chunked", b"Content-Length : %d" % n,
                      b"Content-Length\t: %d\r\nX-After: 1" % n, b"Content-Length: 1_0"):
             with self.subTest(head=head):
@@ -2385,8 +2386,8 @@ class ConnectionTest(AddonCase):
         from subsync.addon import Handler
         with mock.patch.object(Handler, "do_GET", lambda h: h._send(200, h.read_body(3))):
             # a route that reads the body it was given still closes such a connection: the rest may be a request
-            data = exchange(self.port, b"GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\n"
-                                       b"abc" + hidden)
+            data = exchange(self.port, b"GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n"
+                                       b"Content-Length: 3\r\n\r\nabc" + hidden)
         self.assertEqual(answers(data), [200])
         self.assertIn(b"\r\nConnection: close\r\n", data)
 

@@ -1419,6 +1419,27 @@ class OtherAudioTrackTest(unittest.TestCase):
         fit = self.fit([s - 9.0 + r.gauss(0, 0.15) for s, _ in self.truth], follows=0)   # the default is the right one
         self.assertEqual((fit["decision"], fit.get("audio_track")), ("synced", None))
 
+    def test_when_every_track_keeps_the_original_the_first_answer_names_the_other(self):
+        # The answer when both tracks tried keep the original had no test: the first track's, with the
+        # windows of both and the other track's own reason
+        from subsync import audiofit
+
+        class Keeps:
+            def __init__(self, index, lines, track=None, **kw):
+                self.track = track
+
+            def run(self):
+                return {"decision": "keep_original", "why": f"no fit on track {self.track}", "windows": 3,
+                        "audio_s": 30.0}
+
+        class Index:
+            def audio_tracks(self):
+                return [{"index": 0, "language": "eng", "default": True},
+                        {"index": 1, "language": "jpn", "default": False}]
+        self.assertEqual(audiofit.fit_tracks(Index(), [], fit_class=Keeps),
+                         {"decision": "keep_original", "why": "no fit on track None", "windows": 6, "audio_s": 60.0,
+                          "other_track": {"index": 1, "language": "jpn", "why": "no fit on track 1"}})
+
 
 class AudioBudgetTest(unittest.TestCase):
     """A file's audio windows fit its audio budget (default 1 GB): on a high-bitrate file the windows get shorter;

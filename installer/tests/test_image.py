@@ -29,8 +29,8 @@ def instruction(text, start):
 
 
 def copied(path, source):
-    """Whether a COPY `source` (a file, a folder, or a pattern whose * stays within one folder, as Docker's do) takes the
-    file at `path`, both relative to the repository."""
+    """Whether a COPY `source` (a file, a folder, or a pattern whose * stays within one folder, as Docker's do) takes
+    the file at `path`, both relative to the repository."""
     source = source.rstrip('/')
     if (REPO / source).is_dir():
         return path.startswith(source + '/')

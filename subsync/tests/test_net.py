@@ -162,6 +162,34 @@ class GateTest(unittest.TestCase):
         finally:
             server.close()
 
+    def test_an_address_that_refuses_gives_way_to_the_next_checked_one(self):
+        # The fall-back to the lookup's next checked address, and the last error when none answers, had no
+        # test
+        server = Server()
+        try:
+            net.configure(public_only=True, resolver=resolver_answering("93.184.216.34", "93.184.216.35"))
+            real, tried = socket.create_connection, []
+
+            def second_answers(address, *a, **k):
+                tried.append(address[0])
+                if address[0] == "93.184.216.34":
+                    raise ConnectionRefusedError("refused")
+                return real(("127.0.0.1", server.port), *a, **k)
+            real_public = net.is_public_ip
+            with unittest.mock.patch("socket.create_connection", second_answers), \
+                    unittest.mock.patch.object(net, "is_public_ip", lambda ip: ip == "127.0.0.1" or real_public(ip)):
+                with realdebrid.urlopen(f"http://two.test:{server.port}/x", timeout=5) as r:
+                    self.assertEqual(r.read(), b"ok")
+            self.assertEqual((tried, server.requests), (["93.184.216.34", "93.184.216.35"], ["/x"]))
+
+            def none_answers(address, *a, **k):
+                raise (ConnectionRefusedError if address[0].endswith(".34") else TimeoutError)(address[0])
+            with unittest.mock.patch("socket.create_connection", none_answers), self.assertRaises(TimeoutError) as e:
+                net._guarded_create_connection(("two.test", 443), 5)
+            self.assertEqual(str(e.exception), "93.184.216.35")          # the last address's error
+        finally:
+            server.close()
+
     def test_a_connection_that_lands_on_a_private_address_is_refused(self):
         server = Server()
         try:

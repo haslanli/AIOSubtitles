@@ -218,6 +218,23 @@ class EsdsTest(unittest.TestCase):
                 self.assertEqual(mp4._audio_specific_config(self.entry(flags)), b"\x02\x04\x02")
 
 
+class SampleTextTest(unittest.TestCase):
+    """A text sample's text ((5): WebVTT samples had no test): tx3g a 16-bit length then UTF-8; wvtt the
+    payloads of its cue boxes, an empty cue (vtte) giving none."""
+
+    def test_webvtt_cues_give_their_payloads(self):
+        sample = (box(b"vttc", box(b"sttg", b"line:90%") + box(b"payl", b"Hello there.")) + box(b"vtte", b"")
+                  + box(b"vttc", box(b"iden", b"2") + box(b"payl", "Général Kenobi.".encode())))
+        self.assertEqual(mp4.sample_text(b"wvtt", sample), "Hello there.\nGénéral Kenobi.")
+        self.assertIsNone(mp4.sample_text(b"wvtt", box(b"vtte", b"")))
+        self.assertIsNone(mp4.sample_text(b"wvtt", b""))
+
+    def test_tx3g_reads_its_length_and_nothing_past_it(self):
+        self.assertEqual(mp4.sample_text(b"tx3g", struct.pack(">H", 2) + b"Hi" + b"styl..."), "Hi")
+        self.assertIsNone(mp4.sample_text(b"tx3g", b"\x00"))
+        self.assertIsNone(mp4.sample_text(b"stpp", b"<tt/>"))
+
+
 class WindowTest(unittest.TestCase):
     """An audio window's samples are streamed into the decoder as their bytes pass, never read whole
     into memory with the video between them; a window whose samples spread far past its share of the file is not

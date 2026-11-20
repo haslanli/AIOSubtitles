@@ -1155,6 +1155,67 @@ class ListenTest(unittest.TestCase):
                 entry.main_public(s)
         self.assertEqual(serve.call_args.args, (service.return_value, 8791, "127.0.0.1"))
 
+    def test_public_mode_stops_on_sigterm_and_keeps_house_every_round(self):
+        # main_public's SIGTERM handler and its housekeeping thread never ran in a test (the self-hosted
+        # stop has test_service's StopTest)
+        import signal
+        import types
+        from unittest import mock
+        from subsync import __main__ as entry, net, public, users
+        from subsync.settings import Settings
+        handlers, threads, events = {}, [], []
+
+        class Server:
+            def serve_forever(self):
+                events.append("serving")
+                handlers[signal.SIGTERM](signal.SIGTERM, None)      # docker stop
+
+            def shutdown(self):
+                events.append("shut down")
+
+        class Thread:
+            def __init__(self, target, daemon=False, name=None):
+                self.target, self.daemon, self.name = target, daemon, name
+                threads.append(self)
+
+            def start(self):
+                if self.name != "subsync-housekeeping":           # the stop's shutdown, here at once
+                    self.target()
+        s = Settings({"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY})
+        with mock.patch.object(net, "configure"), mock.patch.object(entry, "public_store") as store, \
+                mock.patch.object(users, "Users"), mock.patch.object(public, "Pool") as pool, \
+                mock.patch.object(public, "PublicService"), \
+                mock.patch.object(public, "serve_public", return_value=Server()), \
+                mock.patch.object(entry, "threading", types.SimpleNamespace(Thread=Thread)), \
+                mock.patch("signal.signal", lambda sig, handler: handlers.__setitem__(sig, handler)), \
+                self.assertLogs("subsync", "INFO"):
+            entry.main_public(s)
+        pool.return_value.close.assert_called_once_with()               # every person's worker stops
+        self.assertEqual(events, ["serving", "shut down"])
+        self.assertTrue(all(t.daemon for t in threads))
+        keeper = [t for t in threads if t.name == "subsync-housekeeping"]
+        self.assertEqual(len(keeper), 1)
+        sleeps, rounds = [], []
+
+        class Done(Exception):
+            pass
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 2:
+                raise Done
+
+        def housekeeping_round(*args):
+            rounds.append(args)
+            return args[-1]
+        clock = iter((100.0, 160.0))
+        with mock.patch.object(entry, "time", types.SimpleNamespace(sleep=sleep, monotonic=lambda: next(clock))), \
+                mock.patch.object(entry, "housekeeping_round", housekeeping_round), self.assertRaises(Done):
+            keeper[0].target()
+        self.assertEqual(sleeps, [entry.HOUSEKEEPING_EVERY_S] * 3)      # a round every HOUSEKEEPING_EVERY_S
+        pool, store = pool.return_value, store.return_value
+        self.assertEqual(rounds, [(pool, store, float("-inf"), 100.0), (pool, store, 100.0, 160.0)])
+
 
 class StartupTest(unittest.TestCase):
     def run_main(self, env):

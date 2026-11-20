@@ -316,6 +316,32 @@ class UsageTest(TempDirTest):
         self.assertEqual(db.execute("SELECT COUNT(*) FROM usenet_usage").fetchone()[0], 0)
         db.close()
 
+    def test_a_persons_gate_counts_and_stops_their_own_day_only(self):
+        # The gate Pool._build gives a person's worker counts through public.UserUsenetCounts, which no
+        # test listed through
+        from subsync.public import UserLimits
+        now = [1_000_000.0]
+        users = closed_after(self, self.users(now))
+        store = closed_after(self, Store(self.dir))
+        s = Settings({"SUBSYNC_DATA": self.dir})
+        a, b = "a" * 43, "b" * 43
+        users.create(a, {"x": 1})
+        users.create(b, {"x": 1})
+        gates = {}
+        for token in (a, b):
+            limits = UserLimits(s, users, token)
+            gates[token] = worker_mod.UsenetGate(store, 2, limits.usenet_counts(), who=limits.who)
+        self.assertEqual([gates[a].take(f"name:{n}.mkv|1") for n in "xyz"], [True, True, False])   # a's two a day
+        self.assertEqual(users.usenet_usage(a), {"listings": 2, "stopped": False})
+        self.assertEqual(users.usenet_usage(b), {"listings": 0, "stopped": False})
+        with self.assertLogs("subsync.worker", "INFO"):
+            gates[b].stop("the indexer's daily limit")
+        self.assertEqual(users.usenet_usage(b), {"listings": 0, "stopped": True})
+        self.assertFalse(gates[b].may_take("name:x.mkv|1"))
+        self.assertEqual(users.usenet_usage(a), {"listings": 2, "stopped": False})     # a's day as it was
+        now[0] += 86400
+        self.assertTrue(gates[a].take("name:z.mkv|1") and gates[b].take("name:z.mkv|1"))   # a new UTC day
+
     def test_the_old_image_still_writes_its_usage(self):
         # the way back is the old image: its usage insert names no columns, so the usage table keeps its four, in the
         # order that insert gives them: a person's usage it writes is read back as such (the row, never
@@ -846,6 +872,23 @@ class PublicUsenetTest(TempDirTest):
             self.signup.rebuild(self.s, record, result.token, self.faulty_creates(1)(INSTANCE, 10), PASSWORD,
                                 force=True)
         self.assertEqual(list(self.fake.configs), [uuid])
+
+    def test_the_daily_rebuild_of_a_config_now_usenet_only_drops_its_sync_config(self):
+        # Rebuild's branch for a config whose only service left reads Usenet had no test
+        uuid, result = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
+        record = self.users.open(result.token)
+        sync = (record["sync_uuid"], record["sync_link"], record["sync_password"])
+        self.fake.configs[uuid]["config"] = setup_of([ENGINE], [NEWZNAB, SUBS])    # TorBox removed: Usenet only now
+        api = self.api(INSTANCE, 10)
+        self.assertIs(self.signup.rebuild(self.s, record, result.token, api, PASSWORD), True)
+        self.assertEqual(record["drop"], [sync])                       # the caller removes it once the record is saved
+        self.assertNotIn("sync_uuid", record)
+        self.assertIn(record["usenet_uuid"], self.fake.configs)
+        self.assertIsNone(self.signup.rebuild(self.s, record, result.token, api, PASSWORD))   # nothing changed since
+        self.assertEqual(record["drop"], [])
+        record["store_only"] = True                                    # a record for stored copies only, before
+        self.assertIs(self.signup.rebuild(self.s, record, result.token, api, PASSWORD), True)
+        self.assertNotIn("store_only", record)                         # its Usenet config reads now
 
     def test_usenet_stays_off_unless_ticked_and_allowed(self):
         v = setup_of([TORBOX, NZBDAV], [TORRENTIO, NEWZNAB, SUBS])

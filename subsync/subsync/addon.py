@@ -124,7 +124,7 @@ def is_entry(path):
 
 
 def video_id(raw):
-    """A subtitle route's Stremio id as its path carries it, decoded; None for one that names no title (MAX_VIDEO_ID)."""
+    """A subtitle route's Stremio id as its path carries it, decoded; None for one naming no title (MAX_VIDEO_ID)."""
     vid = urllib.parse.unquote(raw)
     return None if len(vid) > MAX_VIDEO_ID or not vid.isprintable() or "/" in vid else vid
 
@@ -134,8 +134,8 @@ def head_answer(path, key=""):
     pending or "(original)" entry: their GETs queue jobs, start the audio route, wait and download, which a link checker
     or a proxy asking for the headers only must never set off. (200, the content type), or (404, None) where the GET
     answers "not found" before any work, by the same cheap checks: an id that names no title, an entry address
-    subsync didn't list (alias_of, under SUBSYNC_ADDON_KEY `key`). None for any other path, whose HEAD is its GET without
-    the body."""
+    subsync didn't list (alias_of, under SUBSYNC_ADDON_KEY `key`). None for any other path, whose HEAD is its GET
+    without the body."""
     m = SUB_ROUTE.match(path)
     if m:
         return (200, "application/json; charset=utf-8") if video_id(m.group(2)) is not None else (404, None)
