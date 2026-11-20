@@ -10,9 +10,10 @@ its own address, and nothing inline. Passwords and keys typed in stay in this pr
 sent back in a page. The work of each step is installer/engine.py; long work (installing, checking, updating) runs in
 the background once (an install that stopped is tried again on the person's word, and one whose answers changed after
 it runs again), and its page shows the progress again every screens.REFRESH_S seconds until it is done (the script
-fetches the page; without it the page loads itself again); meanwhile the steps before it lead to its page. An error
-setup doesn't know is a stop on the page with its way out, its details only in the terminal. The page stops when setup
-is done, after 60 minutes without a request under its key, or with Ctrl-C.
+fetches the page; without it the page loads itself again); meanwhile every other address leads to its page, the start
+page and the page after setup's actions too. One request at a time works on the page's state. An error setup doesn't
+know is a stop on the page with its way out, its details only in the terminal. The page stops when setup is done (or
+removed), after 60 minutes without a request under its key, or with Ctrl-C; never while work runs.
 """
 import os
 import re
@@ -87,7 +88,6 @@ class Session:
         self.read_good = True               # the test read's result (none done: nothing against the install)
         self.jobs = {}
         self.lock = threading.Lock()
-        self.busy = threading.Lock()        # one request at a time works on the engine (a double click on Save waits)
 
     @property
     def ids(self):
@@ -166,7 +166,8 @@ class Session:
                 del self.jobs[step]
 
     def running(self, step):
-        return step in self.jobs and self.jobs[step]['running']
+        job = self.jobs.get(step)       # read once: a job thread may let it go meanwhile (again), the page's stop asks too
+        return bool(job and job['running'])
 
     def working(self):
         """The step whose background work runs now (the test read is the check's), or None."""
@@ -177,8 +178,9 @@ class Session:
 
     def live(self, step):
         """The rows of a step, while its work runs too."""
-        if self.running(step):
-            return [tuple(r) for r in self.e.out.rows[self.jobs[step]['start']:]]
+        job = self.jobs.get(step)
+        if job and job['running']:
+            return [tuple(r) for r in self.e.out.rows[job['start']:]]
         return self.rows.get(step, [])
 
 
@@ -189,10 +191,13 @@ class App:
         self.bind, self.public_port = bind, public_port      # the machine's port for the page, when it differs
         self.last = time.monotonic()
         self.finished = threading.Event()
-        self.finishing = None
+        self.finishing = None        # when the page stops, once setup is done or removed
         self.session = None
-        self.after = None            # the page after setup's own engine and work (updating, removing)
-        self.after_lock = threading.Lock()
+        self.after = None            # the page after setup's own engine and work (updating)
+        self.removed = None          # the last removal's page, for a second Remove sent meanwhile (a double click)
+        # one request at a time works on the page's state: what one starts, the next sees running (a double click on
+        # Save, Remove or Update waits, then finds it done or running)
+        self.busy = threading.Lock()
 
     # ------------------------------------------------------------------------------------- HTTP
     def handle(self, method, path, headers, body):
@@ -245,6 +250,22 @@ class App:
 
     # ------------------------------------------------------------------------------------- the routes
     def route(self, method, name, form):
+        with self.busy:
+            if method == 'POST':
+                self.finishing = None   # the person acts again: the page stops only after the next done or removed page
+            # while work runs, every other address leads to its page: no answer changes under it, and nothing else (a
+            # removal, an update, another run through the steps) starts next to it
+            working = self.working()
+            if working and name != working:
+                return self.go(working)
+            return self.dispatch(method, name, form)
+
+    def working(self):
+        """The address of the work running now (a step's, or an update's), or None."""
+        s, after = self.session, self.after
+        return (s and s.working()) or ('updating' if after and after.running('update') else None)
+
+    def dispatch(self, method, name, form):
         one = {k: v[-1] for k, v in form.items()}
         if name == '':
             prev = engine.load_settings()
@@ -259,16 +280,11 @@ class App:
         s = self.session
         if not s or name not in s.ids + ('done',):
             return self.page(screens.ended(), 404)
-        with s.busy:
-            # while a step's work runs, the steps before it lead to its page: their answers can't change under the work
-            working = s.working()
-            if working and name in s.ids and s.ids.index(name) < s.ids.index(working):
-                return self.go(working)
-            # a step before its turn goes back to the first one not done
-            for earlier in s.ids[:s.ids.index(name) if name in s.ids else len(s.ids)]:
-                if earlier not in s.done:
-                    return self.go(earlier)
-            return getattr(self, f'step_{name}')(s, method, form, one)
+        # a step before its turn goes back to the first one not done
+        for earlier in s.ids[:s.ids.index(name) if name in s.ids else len(s.ids)]:
+            if earlier not in s.done:
+                return self.go(earlier)
+        return getattr(self, f'step_{name}')(s, method, form, one)
 
     # ------------------------------------------------------------------------------------- both routes
     def step_machine(self, s, method, form, one):
@@ -566,6 +582,8 @@ class App:
             return self.go('')
         e = engine.Engine({k: v for k, v in one.items() if k in ('AIOS_CONFIG_PASSWORD', 'REMOVE_OPENSUBTITLES',
                                                                     'REMOVE', *SIGN_IN)}, page=True)
+        if not e.prev and self.removed:     # removed meanwhile: a second Remove (a double click) waited for it
+            return self.page(self.removed)
         host = e.prev.get('route') == 'host'
         heading = screens.REMOVING['host' if host else 'yourself']
         if not host and 'REMOVE_OPENSUBTITLES' not in one:
@@ -581,7 +599,8 @@ class App:
             return self.page(screens.working(heading, [tuple(r) for r in e.out.rows], False,
                                              stop=(s.message, getattr(s, 'page_fix', s.fix))))
         self.finish_in(DONE_S)
-        return self.page(screens.removed(heading, [tuple(r) for r in e.out.rows], getattr(e, 'stays', [])))
+        self.removed = screens.removed(heading, [tuple(r) for r in e.out.rows], e.stays)
+        return self.page(self.removed)
 
     def after_update(self, method, one):
         if method == 'POST':
@@ -595,13 +614,10 @@ class App:
         return self.go('updating')
 
     def start_after(self, work):
-        """An update or a rollback, `work(engine)`, in a Session of its own: never while one runs (again after one
-        that failed)."""
-        with self.after_lock:
-            if self.after and self.after.running('update'):
-                return
-            after = self.after = Session(engine.load_settings().get('route') or 'yourself', {})
-            after.start_job('update', lambda: work(after.e))
+        """An update or a rollback, `work(engine)`, in a Session of its own: never while work runs (route), so again
+        after one that failed."""
+        after = self.after = Session(engine.load_settings().get('route') or 'yourself', {})
+        after.start_job('update', lambda: work(after.e))
 
     def after_updating(self, method, one):
         if not self.after:
@@ -612,10 +628,15 @@ class App:
 
     # ------------------------------------------------------------------------------------- stopping
     def finish_in(self, seconds):
+        """Setup is done (or removed): the page stops `seconds` from now, unless the person acts again first (route)."""
         if self.finishing is None:
             self.finishing = time.monotonic() + seconds
 
     def should_stop(self):
+        """Once that time has passed, or idle_s after the last request under the key; never while work runs (its thread
+        would end with setup's process)."""
+        if self.working():
+            return False
         now = time.monotonic()
         return (self.finishing is not None and now >= self.finishing) or now - self.last > self.idle_s
 

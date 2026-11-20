@@ -885,6 +885,67 @@ class Personal(BackgroundWork, FlowFixture):
             self.b.settle('install')
         self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_LANGUAGES'], 'eng,rus')
 
+    def test_while_the_install_runs_the_start_page_and_the_actions_after_setup_lead_to_its_page(self):
+        # They were answered before any look at the work running: the wordmark's start page (the page after
+        # setup on a re-run) offered Remove, Update and Change your answers, which removed subsync under the running
+        # install or replaced its session, and the start page's Continue started a second run of the steps
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        release = threading.Event()
+        self.addCleanup(release.set)
+        install, removals = engine.Engine.install, []
+        self.b.post('answers', {})
+        self.b.get('machine')
+        self.b.follow('machine', {'go': 'next'})
+        self.b.follow('aios', {'go': 'next'})
+        self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+        self.b.follow('choices', {'LANGUAGES': ['eng', 'spa'], 'PUBLIC_ADDRESS': f'{PUBLIC}/subsync', 'go': 'next'})
+        self.b.follow('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', 'go': 'next'})
+        session = self.app.session
+        with mock.patch.object(engine.Engine, 'install', lambda e: (release.wait(10), install(e))), \
+                mock.patch.object(engine.Engine, 'remove', lambda e: removals.append(e)), \
+                mock.patch.object(engine.Engine, 'update', lambda e: removals.append(e)):
+            self.b.post('review', {'CONFIRM': 'yes'})
+            self.assertEqual(session.working(), 'install')
+            for method, step, form in (('GET', '', None), ('POST', '', {'ROUTE': 'host'}), ('GET', 'updating', None),
+                                       ('POST', 'remove', {'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}),
+                                       ('POST', 'update', {}), ('POST', 'rollback', {}), ('POST', 'answers', {}),
+                                       ('GET', 'done', None)):
+                with self.subTest(method=method, step=step):
+                    status, headers, _ = self.b.request(method, f'/{self.app.key}/{step}', form=form)
+                    self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/install'))
+            self.assertIs(self.app.session, session)                    # its session, and nothing else ran
+            self.assertIsNone(self.app.after)
+            self.assertEqual(removals, [])
+            release.set()
+            _, _, text = self.b.settle('install')
+        self.assertIn('subsync is running (it restarts by itself after a reboot)', text)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_LANGUAGES'], 'eng,spa')
+        self.assertIn('AIOSubtitles · subsync status', self.b.get('')[2])         # once it is done, the page after setup
+
+    def test_while_an_update_runs_the_other_actions_and_the_steps_lead_to_its_page(self):
+        # Remove and Change your answers ran next to an update, and a session's Save could install under it
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.b.post('answers', {})                                      # a session, left at its first step
+        session, removals = self.app.session, []
+        with mock.patch.object(engine.Engine, 'update', lambda e: release.wait(10)), \
+                mock.patch.object(engine.Engine, 'remove', lambda e: removals.append(e)):
+            status, headers, _ = self.b.post('update', {})
+            self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/updating'))
+            for method, step, form in (('GET', '', None), ('GET', 'machine', None), ('POST', 'answers', {}),
+                                       ('POST', 'remove', {'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}),
+                                       ('POST', 'rollback', {})):
+                with self.subTest(method=method, step=step):
+                    status, headers, _ = self.b.request(method, f'/{self.app.key}/{step}', form=form)
+                    self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/updating'))
+            self.assertIs(self.app.session, session)
+            self.assertEqual(removals, [])
+            release.set()
+            self.b.settle('updating')
+        self.assertTrue((self.state / 'settings.json').exists())
+
     def test_an_unexpected_error_in_the_background_is_a_stop_on_the_page(self):
         # the install page showed an empty step whose Continue did nothing; the reason was only in the terminal
         self.walk_to_review()
@@ -1567,6 +1628,58 @@ class Removing(BackgroundWork, FlowFixture):
         presets = self.aios.users[UUID]['config']['presets']
         self.assertEqual([p['type'] for p in presets if p.get('instanceId') == added], ['opensubtitles'])
         self.assertEqual([p['type'] for p in presets], ['zilean', 'newznab', 'opensubtitles'])
+
+    def test_two_removals_sent_at_once_remove_once(self):
+        # A double click on Remove subsync ran two removals at once: one wrote the config's backup under the
+        # same name as the other and died on it, and its "Something unexpected went wrong" was the page shown last
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        get_config, remove, removals = engine.Aios.get_config, engine.Engine.remove, []
+
+        def saves():                                            # the saves of the config your apps use
+            return len([m for m, who, _ in self.aios.log if m == 'PUT' and who == UUID])
+        saved = saves()
+
+        def slow(aios, *args):
+            time.sleep(0.3)
+            return get_config(aios, *args)
+        answers = []
+        with mock.patch.object(engine.Aios, 'get_config', slow), \
+                mock.patch.object(engine.Engine, 'remove', lambda e: (removals.append(e), remove(e))):
+            posts = [threading.Thread(target=lambda: answers.append(self.remove(REMOVE_OPENSUBTITLES='yes')))
+                     for _ in range(2)]
+            for post in posts:
+                post.start()
+            for post in posts:
+                post.join(30)
+        self.assertEqual(len(removals), 1)
+        self.assertEqual(len(answers), 2)
+        for text in answers:                                    # the second waited, and got the removal's page
+            self.assertIn('These stay, in case you set it up again', text)
+            self.assertNotIn(screens.UNEXPECTED[0], text)
+        self.assertFalse((self.state / 'settings.json').exists())
+        self.assertEqual(saves() - saved, 1)                   # the config saved once
+
+    def test_the_page_stays_up_while_work_started_after_a_removal_runs(self):
+        # The 60 seconds after the removed (or done) page ran on whatever was started meanwhile: the page
+        # offers setting it up again, and the process ended under the install or update it started
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        app = self.b.app
+        self.assertIn('These stay, in case you set it up again', self.remove(REMOVE_OPENSUBTITLES='yes'))
+        self.assertIsNotNone(app.finishing)
+        status, headers, _ = self.b.post('', {'ROUTE': 'yourself'})            # the wordmark, then set it up again
+        self.assertEqual((status, headers.get('Location')), (303, f'/{app.key}/machine'))
+        self.assertIsNone(app.finishing)                                         # acting again: not finished
+        app.finish_in(0)                                                         # as if the done page came meanwhile
+        self.assertTrue(app.should_stop())
+        release = threading.Event()
+        self.addCleanup(release.set)
+        app.session.start_job('install', lambda: release.wait(10))
+        self.assertFalse(app.should_stop())                                      # never while work runs
+        release.set()
+        deadline = time.monotonic() + 10
+        while app.session.running('install') and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(app.should_stop())
 
     def test_a_failed_container_removal_keeps_setups_files_and_says_what_docker_said(self):
         # it said "Removed the subsync container" and deleted setup's files while the container kept running
