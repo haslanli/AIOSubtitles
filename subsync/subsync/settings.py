@@ -78,8 +78,9 @@ def _cpu_limit(cpu_max, cfs_dir):
 
 
 def available_cpus(cpu_max=None, cfs_dir=None, processors=None):
-    """The processors this process may use: the ones it may run on, within the container's limit, at least 1."""
-    n = (processors or os.process_cpu_count)() or 1
+    """The processors this process may use: the ones it may run on, within the container's limit, at least 1. Setup's
+    tests also run on Python 3.12 (README), which has only os.cpu_count."""
+    n = (processors or getattr(os, "process_cpu_count", os.cpu_count))() or 1
     try:
         quota, period = _cpu_limit(cpu_max or CPU_MAX_FILE, cfs_dir or CFS_DIR)
         if quota not in ("max", "-1"):

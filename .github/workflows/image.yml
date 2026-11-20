@@ -35,7 +35,6 @@ jobs:
         run: python3 -m unittest discover -s installer/tests -t .
       - name: Version rules
         env:
-          EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
         run: |
@@ -50,10 +49,11 @@ jobs:
               if [ "$REF_NAME" != "v$version" ] && ! [[ "$REF_NAME" =~ ^v${version//./\\.}-rc\.[0-9]+$ ]]; then
                 echo "::error::The tag doesn't match VERSION ($version)"; exit 1
               fi ;;
-            refs/heads/main)
-              # the image is built from subsync/ and installer/: a change there needs a new VERSION and its release tag
-              if [ "$EVENT" = push ] && git rev-parse -q --verify "refs/tags/v$version" > /dev/null \
-                 && ! git diff --quiet "v$version" HEAD -- subsync/ installer/ .dockerignore; then
+            refs/heads/main | refs/pull/*)
+              # the image is built from subsync/ and installer/ and carries NOTICE.md and LICENSE: a change there needs
+              # a new VERSION and its release tag, checked on a pull request too (its merge would fail it on main)
+              if git rev-parse -q --verify "refs/tags/v$version" > /dev/null \
+                 && ! git diff --quiet "v$version" HEAD -- subsync/ installer/ .dockerignore NOTICE.md LICENSE; then
                 echo "::error::The image's files changed since v$version: raise VERSION"; exit 1
               fi ;;
           esac
@@ -150,31 +150,36 @@ jobs:
             org.opencontainers.image.title=AIOSubtitles
             org.opencontainers.image.description=AIOSubtitles: synced subtitles for AIOStreams
             org.opencontainers.image.licenses=AGPL-3.0-or-later
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          version: v0.39.0
-          driver: docker
-      - name: Check buildx against its published sums
+      # buildx is downloaded and checked before anything runs it (setup-buildx-action would run the one it fetches
+      # first); the set-up after it then uses it, with no version of its own to fetch
+      - name: Install buildx, checked against its published sums
         env:   # buildx v0.39.0's own checksums.txt, equal to GitHub's digests of the release files
           BUILDX_AMD64: 5fb31a097304fbf6dd4038649a0decf32c2b9510e4047acd7d68b9d700c46194
           BUILDX_ARM64: 722cdcdfdd6f3fb943fa1ba75102d057feb18ba72aab93b1b0a8cf2b2b48a25f
         run: |
           set -euo pipefail
           case "$RUNNER_ARCH" in
-            X64) want="$BUILDX_AMD64" ;;
-            ARM64) want="$BUILDX_ARM64" ;;
+            X64) arch=amd64; want="$BUILDX_AMD64" ;;
+            ARM64) arch=arm64; want="$BUILDX_ARM64" ;;
             *) echo "::error::No published buildx sum for $RUNNER_ARCH"; exit 1 ;;
           esac
-          bin="$(docker info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "buildx"}}{{.Path}}{{end}}{{end}}')"
-          [ -n "$bin" ] || { echo "::error::Docker has no buildx plugin"; exit 1; }
-          got="$(sha256sum "$bin" | cut -d ' ' -f 1)"
-          [ "$got" = "$want" ] || { echo "::error::$bin is not buildx v0.39.0 as published (sha256 $got)"; exit 1; }
+          file="$RUNNER_TEMP/buildx-v0.39.0.linux-$arch"
+          url="https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-$arch"
+          curl -fsSL --retry 3 -o "$file" "$url" || { echo "::error::Couldn't download buildx v0.39.0"; exit 1; }
+          got="$(sha256sum "$file" | cut -d ' ' -f 1)"
+          [ "$got" = "$want" ] || { echo "::error::$file is not buildx v0.39.0 as published (sha256 $got)"; exit 1; }
+          bin="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins/docker-buildx"
+          mkdir -p "${bin%/*}"
+          install -m 755 "$file" "$bin"
           echo "$bin: buildx v0.39.0 as published"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: docker
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: A published version never changes
         if: startsWith(github.ref, 'refs/tags/v')
         env:

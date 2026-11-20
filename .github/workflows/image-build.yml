@@ -40,26 +40,31 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
         run: echo "image=ghcr.io/${OWNER,,}/aiosubtitles" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          version: v0.39.0
-          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
-      - name: Check buildx against its published sums
+      # buildx is downloaded and checked before anything runs it (setup-buildx-action would run the one it fetches
+      # first); the set-up after it then uses it, with no version of its own to fetch
+      - name: Install buildx, checked against its published sums
         env:   # buildx v0.39.0's own checksums.txt, equal to GitHub's digests of the release files
           BUILDX_AMD64: 5fb31a097304fbf6dd4038649a0decf32c2b9510e4047acd7d68b9d700c46194
           BUILDX_ARM64: 722cdcdfdd6f3fb943fa1ba75102d057feb18ba72aab93b1b0a8cf2b2b48a25f
         run: |
           set -euo pipefail
           case "$RUNNER_ARCH" in
-            X64) want="$BUILDX_AMD64" ;;
-            ARM64) want="$BUILDX_ARM64" ;;
+            X64) arch=amd64; want="$BUILDX_AMD64" ;;
+            ARM64) arch=arm64; want="$BUILDX_ARM64" ;;
             *) echo "::error::No published buildx sum for $RUNNER_ARCH"; exit 1 ;;
           esac
-          bin="$(docker info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "buildx"}}{{.Path}}{{end}}{{end}}')"
-          [ -n "$bin" ] || { echo "::error::Docker has no buildx plugin"; exit 1; }
-          got="$(sha256sum "$bin" | cut -d ' ' -f 1)"
-          [ "$got" = "$want" ] || { echo "::error::$bin is not buildx v0.39.0 as published (sha256 $got)"; exit 1; }
+          file="$RUNNER_TEMP/buildx-v0.39.0.linux-$arch"
+          url="https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-$arch"
+          curl -fsSL --retry 3 -o "$file" "$url" || { echo "::error::Couldn't download buildx v0.39.0"; exit 1; }
+          got="$(sha256sum "$file" | cut -d ' ' -f 1)"
+          [ "$got" = "$want" ] || { echo "::error::$file is not buildx v0.39.0 as published (sha256 $got)"; exit 1; }
+          bin="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins/docker-buildx"
+          mkdir -p "${bin%/*}"
+          install -m 755 "$file" "$bin"
           echo "$bin: buildx v0.39.0 as published"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
 
       # -- build and test ----------------------------------------------------------------------------------------
       - name: Build and test

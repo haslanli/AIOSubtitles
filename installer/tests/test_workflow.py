@@ -11,8 +11,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from subsync import ui
+from subsync import settings, ui
 
 ROOT =Path(__file__).resolve().parents[2]
 FLOWS = ROOT / '.github' / 'workflows'
@@ -193,18 +194,25 @@ class WorkflowRules(unittest.TestCase):
             self.assertNotIn('upload-artifact', text)
 
     def test_pinned_tools(self):
-        self.assertIn('version: v0.39.0', self.build)
-        sums = set()
+        sums, installs = set(), set()
         for name, text in self.files.items():
-            steps = text.split('      - uses: docker/setup-buildx-action@')[1:]
-            self.assertTrue(steps, name)
-            for step in steps:     # each buildx set-up is followed at once by the check of its binary
-                after = step.split('\n      - ', 1)[1]
-                self.assertTrue(after.startswith('name: Check buildx against its published sums\n'), name)
-                found = re.findall(r'^          BUILDX_(AMD64|ARM64): ([0-9a-f]{64})$', after.split('\n      - ', 1)[0], re.M)
+            steps = text.split('\n      - ')
+            setups = [i for i, step in enumerate(steps) if step.startswith('uses: docker/setup-buildx-action@')]
+            self.assertTrue(setups, name)
+            for i in setups:
+                # Each buildx set-up comes right after the step that downloads buildx v0.39.0 and checks it
+                # (the check came after the set-up, which had run the binary by then), and fetches none of its own
+                install = steps[i - 1]
+                self.assertTrue(install.startswith('name: Install buildx, checked against its published sums\n'), name)
+                self.assertIn('url="https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-'
+                              '$arch"', install)
+                self.assertNotRegex(steps[i], r'\n\s+version:', name)
+                found = re.findall(r'^          BUILDX_(AMD64|ARM64): ([0-9a-f]{64})$', install, re.M)
                 self.assertEqual([arch for arch, _ in found], ['AMD64', 'ARM64'], name)
                 sums.add(tuple(found))
+                installs.add(install)
         self.assertEqual(len(sums), 1, sums)                     # the same sums wherever buildx is set up
+        self.assertEqual(len(installs), 1)                       # and the same step: one copy can't drift
         self.assertRegex(self.build, r'image=moby/buildkit:v[\d.]+@sha256:[0-9a-f]{64}')
         self.assertRegex(self.build, r'buildkit-syft-scanner:[\d.]+@sha256:[0-9a-f]{64}')
         for text in self.files.values():
@@ -230,6 +238,16 @@ class WorkflowRules(unittest.TestCase):
 
     def test_the_version_rule_covers_every_input_of_the_image(self):
         self.assertIn('! git diff --quiet "v$version" HEAD -- subsync/ installer/ .dockerignore', self.main)
+        # NOTICE.md and LICENSE, which the image carries, were left out: every file or folder the Dockerfile
+        # copies from the repository (VERSION is the version itself) is in the rule, and nothing else but .dockerignore
+        rule = re.search(r'! git diff --quiet "v\$version" HEAD -- (.+); then', self.main).group(1).split()
+        copied = set()
+        for line in (ROOT / 'subsync' / 'Dockerfile').read_text(encoding='utf-8').splitlines():
+            words = line.split()
+            if words[:1] == ['COPY'] and not any(w.startswith('--from=') for w in words):
+                copied |= {w.split('/')[0] + ('/' if '/' in w else '') for w in words[1:-1] if not w.startswith('--')}
+        self.assertEqual(copied, {'subsync/', 'installer/', 'VERSION', 'NOTICE.md', 'LICENSE'})
+        self.assertEqual(sorted(copied - {'VERSION'} | {'.dockerignore'}), sorted(rule))
 
     def test_the_start_check_loads_the_typefaces_the_pages_use(self):
         # the check keeps its own list of the files, as a check independent of the image's code; it names the same ones
@@ -299,43 +317,163 @@ class StartCheckGreps(unittest.TestCase):
                         self.assertNotRegex(line, r'\|\s*grep\s+(-\w+\s+)*-\w*q', name)
 
 
+class ChecksJobPython(unittest.TestCase):
+    """The checks job runs this suite on the runner's own python3, Python 3.12 on ubuntu-24.04 (the oldest the README
+    names for these tests): what setup builds must not need what Python 3.13 added."""
+
+    def test_setups_settings_count_processors_without_process_cpu_count(self):
+        # Settings (every Engine builds them) counted processors with os.process_cpu_count, new in 3.13, so on
+        # the runner every test that built an Engine stopped with AttributeError, and nothing was published
+        self.assertIn('    runs-on: ubuntu-24.04\n', blocks(read('image.yml'), 'jobs')['checks'])
+        real = os.__dict__.pop('process_cpu_count', None)
+        try:
+            with mock.patch.object(os, 'cpu_count', lambda: 3), \
+                    mock.patch.object(settings, 'CPU_MAX_FILE', '/nonexistent/cpu.max'), \
+                    mock.patch.object(settings, 'CFS_DIR', '/nonexistent'):
+                self.assertEqual(settings.available_cpus(), 3)
+                self.assertEqual(settings.Settings({}).syncs_at_once, 3)            # SUBSYNC_SYNCS_AT_ONCE=auto
+        finally:
+            if real is not None:
+                os.process_cpu_count = real
+
+
+@unittest.skipUnless(shutil.which('bash') and shutil.which('git'), 'needs bash and git')
+class VersionRules(unittest.TestCase):
+    """The checks job's version rules, run in bash on a throwaway repository whose v1.2.0 tag is the last release (real
+    git; nothing leaves this machine)."""
+
+    def setUp(self):
+        step = read('image.yml').split('- name: Version rules', 1)[1].split('\n  test:', 1)[0]
+        self.script = run_scripts(step)[0]
+        self.repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo)
+        self.git('init', '-q')
+        for name in ('VERSION', 'NOTICE.md', 'LICENSE', 'README.md', '.dockerignore', 'subsync/run.py',
+                     'installer/setup.py'):
+            self.change(name, '1.2.0\n' if name == 'VERSION' else 'first\n')
+        self.git('tag', 'v1.2.0')
+
+    def git(self, *args):
+        """git with none of the developer's own git settings (commit signing, hooks, ...)."""
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+        subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'init.defaultBranch=main',
+                        *args], cwd=self.repo, check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=60,
+                       env=env)
+
+    def change(self, name, text='changed\n'):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding='utf-8')
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', name)
+
+    def rules(self, ref, ref_name=''):
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', REF=ref, REF_NAME=ref_name)
+        done = subprocess.run(['bash', '-c', self.script], cwd=self.repo, capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL, env=env)
+        return done.returncode, done.stdout.strip().splitlines()[-1:]
+
+    RAISE = (1, ["::error::The image's files changed since v1.2.0: raise VERSION"])
+
+    def test_a_change_to_the_image_needs_a_new_version_on_a_pull_request_too(self):
+        # A pull request was never checked, so its merge then failed main's run and blocked every publish
+        for name in ('subsync/run.py', 'installer/setup.py', '.dockerignore'):
+            with self.subTest(name=name):
+                self.change(name, f'{name} changed\n')
+                self.assertEqual(self.rules('refs/heads/main'), self.RAISE)
+                self.assertEqual(self.rules('refs/pull/7/merge'), self.RAISE)
+
+    def test_the_notices_the_image_carries_count_as_its_files(self):
+        # The image carries NOTICE.md and LICENSE (/opt/aiosubtitles/licences/), so a change there is a change
+        # of the image
+        for name in ('NOTICE.md', 'LICENSE'):
+            with self.subTest(name=name):
+                self.change(name, f'{name} changed\n')
+                self.assertEqual(self.rules('refs/pull/7/merge'), self.RAISE)
+                self.assertEqual(self.rules('refs/heads/main'), self.RAISE)
+
+    def test_other_files_and_a_new_version_pass(self):
+        self.change('README.md')
+        self.assertEqual(self.rules('refs/pull/7/merge'), (0, ['VERSION 1.2.0']))
+        self.change('subsync/run.py')
+        self.change('VERSION', '1.3.0\n')                    # no release tag of it yet
+        self.assertEqual(self.rules('refs/pull/7/merge'), (0, ['VERSION 1.3.0']))
+        self.assertEqual(self.rules('refs/heads/main'), (0, ['VERSION 1.3.0']))
+
+    def test_a_tag_is_v_and_the_version_or_its_release_candidate(self):
+        self.change('subsync/run.py')                         # a tag is checked by its name only
+        self.assertEqual(self.rules('refs/tags/v1.2.0', 'v1.2.0'), (0, ['VERSION 1.2.0']))
+        self.assertEqual(self.rules('refs/tags/v1.2.0-rc.1', 'v1.2.0-rc.1'), (0, ['VERSION 1.2.0']))
+        self.assertEqual(self.rules('refs/tags/v1.2.1', 'v1.2.1'),
+                         (1, ["::error::The tag doesn't match VERSION (1.2.0)"]))
+        self.change('VERSION', '1.2\n')
+        self.assertEqual(self.rules('refs/heads/main'), (1, ['::error::VERSION must be three numbers, like 1.3.0']))
+
+
 class BuildxSumCheck(unittest.TestCase):
-    """The step that checks the buildx binary docker uses against v0.39.0's published sums, run in bash with a
-    stand-in for docker that names a file of ours."""
+    """The step that downloads buildx v0.39.0 and installs it as Docker's plugin only when it has the published sums,
+    run in bash with a stand-in for curl that writes a file of ours."""
 
     def setUp(self):
         if not (shutil.which('bash') and shutil.which('sha256sum')):
             self.skipTest('needs bash and sha256sum')
-        step = read('image-build.yml').split('- name: Check buildx against its published sums', 1)[1]
+        step = read('image-build.yml').split('- name: Install buildx, checked against its published sums', 1)[1]
         self.script = run_scripts(step.split('\n      - ', 1)[0])[0]
-        folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, folder)
-        self.bin = os.path.join(folder, 'docker-buildx')
-        Path(self.bin).write_bytes(b'buildx as published')
-        self.sum = subprocess.run(['sha256sum', self.bin], capture_output=True, text=True, check=True,
+        self.folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.folder)
+        (self.folder / 'temp').mkdir()
+        self.release = self.folder / 'release'
+        self.release.write_bytes(b'buildx as published')
+        self.sum = subprocess.run(['sha256sum', str(self.release)], capture_output=True, text=True, check=True,
                                   stdin=subprocess.DEVNULL).stdout.split()[0]
+        self.plugin = self.folder / 'config' / 'cli-plugins' / 'docker-buildx'
 
-    def check(self, arch, amd64, arm64, plugin=None):
-        docker = 'docker() { printf "%s\\n" "$PLUGIN"; }'
-        done = subprocess.run(['bash', '-c', docker + '\n' + self.script], capture_output=True, text=True, timeout=60,
-                              stdin=subprocess.DEVNULL,
-                              env=dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), RUNNER_ARCH=arch,
-                                       BUILDX_AMD64=amd64, BUILDX_ARM64=arm64,
-                                       PLUGIN=self.bin if plugin is None else plugin))
+    def install(self, arch, amd64, arm64, download=True, config=True):
+        """(exit code, last line); curl's stand-in notes the address asked for, then writes the release where -o says
+        (or fails as curl does)."""
+        curl = ('curl() { local out=; while [ $# -gt 1 ]; do [ "$1" = -o ] && out="$2"; shift; done; '
+                'printf "%s" "$1" > "$RUNNER_TEMP/asked"; [ "$DOWNLOAD" = yes ] || return 22; cp "$RELEASE" "$out"; }')
+        env = dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), RUNNER_ARCH=arch, RUNNER_TEMP=str(self.folder / 'temp'),
+                   HOME=str(self.folder), BUILDX_AMD64=amd64, BUILDX_ARM64=arm64, RELEASE=str(self.release),
+                   DOWNLOAD='yes' if download else 'no')
+        if config:
+            env['DOCKER_CONFIG'] = str(self.folder / 'config')
+        done = subprocess.run(['bash', '-c', curl + '\n' + self.script], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL, env=env)
         return done.returncode, done.stdout.strip().splitlines()[-1:]
 
-    def test_the_published_binary_passes(self):
-        self.assertEqual(self.check('X64', self.sum, '0' * 64), (0, [f'{self.bin}: buildx v0.39.0 as published']))
-        self.assertEqual(self.check('ARM64', '0' * 64, self.sum), (0, [f'{self.bin}: buildx v0.39.0 as published']))
+    def asked(self):
+        return (self.folder / 'temp' / 'asked').read_text()
 
-    def test_any_other_binary_stops_the_job(self):
-        code, out = self.check('X64', '0' * 64, self.sum)       # the arm64 sum on an amd64 runner
+    def test_the_published_binary_is_installed_as_dockers_plugin(self):
+        release = 'https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-'
+        self.assertEqual(self.install('X64', self.sum, '0' * 64), (0, [f'{self.plugin}: buildx v0.39.0 as published']))
+        self.assertEqual(self.asked(), release + 'amd64')
+        self.assertEqual(self.plugin.read_bytes(), b'buildx as published')
+        self.assertEqual(self.plugin.stat().st_mode & 0o777, 0o755)
+        self.plugin.unlink()
+        self.assertEqual(self.install('ARM64', '0' * 64, self.sum), (0, [f'{self.plugin}: buildx v0.39.0 as published']))
+        self.assertEqual(self.asked(), release + 'arm64')
+        self.assertEqual(self.plugin.read_bytes(), b'buildx as published')
+        default = self.folder / '.docker' / 'cli-plugins' / 'docker-buildx'      # Docker's own folder without DOCKER_CONFIG
+        self.assertEqual(self.install('X64', self.sum, '0' * 64, config=False),
+                         (0, [f'{default}: buildx v0.39.0 as published']))
+        self.assertEqual(default.read_bytes(), b'buildx as published')
+
+    def test_any_other_binary_stops_the_job_and_is_never_installed(self):
+        code, out = self.install('X64', '0' * 64, self.sum)       # the arm64 sum on an amd64 runner
         self.assertEqual(code, 1)
-        self.assertEqual(out, [f'::error::{self.bin} is not buildx v0.39.0 as published (sha256 {self.sum})'])
+        file = self.folder / 'temp' / 'buildx-v0.39.0.linux-amd64'
+        self.assertEqual(out, [f'::error::{file} is not buildx v0.39.0 as published (sha256 {self.sum})'])
+        self.assertFalse(self.plugin.exists())
 
-    def test_an_unknown_runner_or_no_plugin_stops_the_job(self):
-        self.assertEqual(self.check('X86', self.sum, self.sum), (1, ['::error::No published buildx sum for X86']))
-        self.assertEqual(self.check('X64', self.sum, self.sum, plugin=''), (1, ['::error::Docker has no buildx plugin']))
+    def test_an_unknown_runner_or_no_download_stops_the_job(self):
+        self.assertEqual(self.install('X86', self.sum, self.sum), (1, ['::error::No published buildx sum for X86']))
+        self.assertEqual(self.install('X64', self.sum, self.sum, download=False),
+                         (1, ["::error::Couldn't download buildx v0.39.0"]))
+        self.assertFalse(self.plugin.exists())
 
 
 if __name__ == '__main__':
