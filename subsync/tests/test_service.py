@@ -2243,6 +2243,22 @@ class AddonKeyTest(AddonCase):
         code, body, _ = http(self.base + "/%6B3y/manifest.json")              # over HTTP too
         self.assertEqual((code, json.loads(body)["resources"]), (200, ["subtitles"]))
 
+    def test_a_base_path_is_compared_as_the_address_carries_it_decoded(self):
+        # A base path with an accent (./setup takes an address like https://example.org/ü) or a space arrives
+        # percent-encoded and was never taken off, so every keyed route answered "not found"
+        for base, segment in (("/ü", "%C3%BC"), ("/sub sync", "sub%20sync"), ("/sub%20sync", "sub%20sync"),
+                              ("/subsync", "subsync"), ("/subsync", "%73ubsync"), ("/a/b", "a/b"), ("/a/b", "a/%62")):
+            with self.subTest(base=base, segment=segment):
+                app = App(Settings({"SUBSYNC_DATA": self.s.data, "SUBSYNC_ADDON_KEY": "k3y",
+                                    "SUBSYNC_BASE_PATH": base}), self.store, self.worker, Safety())
+                self.assertEqual(app.route(f"/{segment}/k3y/manifest.json"), ("/manifest.json", True))
+                self.assertEqual(app.route(f"/{segment}/"), ("/", False))
+                self.assertEqual(app.route(f"/{segment}"), ("/", False))
+                self.assertEqual(app.route(f"/{segment}x/k3y/manifest.json"), (f"/{segment}x/k3y/manifest.json", False))
+                self.assertEqual(app.route("/k3y/manifest.json"), ("/manifest.json", True))   # without it, as before
+        code, body, _ = http(self.base + "/%73ubsync/k3y/manifest.json")       # over HTTP too
+        self.assertEqual((code, json.loads(body)["resources"]), (200, ["subtitles"]))
+
     def test_no_key_keeps_the_old_routes(self):
         app = App(Settings({"SUBSYNC_DATA": self.s.data}), self.store, self.worker, Safety())
         self.assertEqual(app.route("/manifest.json"), ("/manifest.json", True))
@@ -2350,6 +2366,28 @@ class ConnectionTest(AddonCase):
         chunked = b"%x\r\n" % len(hidden) + hidden + b"\r\n0\r\n\r\n"
         data = exchange(self.port, b"GET /health HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" + chunked)
         self.assertEqual(answers(data), [200])
+
+    def test_a_body_a_front_end_may_frame_otherwise_closes_the_connection(self):
+        # Only the first Content-Length was read and an empty Transfer-Encoding counted as none, and a header
+        # line with a space before its colon is dropped by the parser with every header after it: a front end that
+        # reads the other length (or the dropped one) forwards a body subsync took for the next request
+        hidden = b"GET /status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        n = len(hidden)
+        for head in (b"Content-Length: 0\r\nContent-Length: %d" % n, b"Content-Length: %d\r\nContent-Length: %d" % (n, n),
+                     b"Transfer-Encoding: \r\nTransfer-Encoding: chunked", b"Content-Length : %d" % n,
+                     b"Content-Length\t: %d\r\nX-After: 1" % n, b"Content-Length: 1_0"):
+            with self.subTest(head=head):
+                data = exchange(self.port, b"GET /health HTTP/1.1\r\nHost: x\r\n" + head + b"\r\n\r\n" + hidden)
+                self.assertEqual(answers(data), [200])
+                self.assertIn(b"\r\nConnection: close\r\n", data)
+                self.assertNotIn(b'"store"', data)
+        from subsync.addon import Handler
+        with mock.patch.object(Handler, "do_GET", lambda h: h._send(200, h.read_body(3))):
+            # a route that reads the body it was given still closes such a connection: the rest may be a request
+            data = exchange(self.port, b"GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\n"
+                                       b"abc" + hidden)
+        self.assertEqual(answers(data), [200])
+        self.assertIn(b"\r\nConnection: close\r\n", data)
 
     def test_a_request_without_a_body_keeps_the_connection(self):
         conn = HTTPConnection("127.0.0.1", self.port, timeout=5)

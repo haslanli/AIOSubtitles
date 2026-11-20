@@ -49,7 +49,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import explain, origlang, srclimits
+from . import digits, explain, origlang, srclimits
 from .langs import name as lang_name
 from .sources import parse_extras
 from .subs import apply_recipe, format_of, parse, to_srt
@@ -240,11 +240,14 @@ class App:
                 f"2\n00:00:09,500 --> 00:00:16,000\n{explain.PUBLIC_TEXTS['notice_where']}\n")
 
     def route(self, path):
-        """(path without the base path and key, keyed) for a request path. The key is compared as the address carries
-        it, decoded, so a key with a space or an accent matches too."""
+        """(path without the base path and key, keyed) for a request path. Both are compared as the address carries
+        them, decoded, so a key or a base path with a space or an accent matches too."""
         base = self.s.base_path
-        if base and (path == base or path.startswith(base + "/")):
-            path = path[len(base):] or "/"
+        if base and path.startswith("/"):
+            want = [urllib.parse.unquote(part) for part in base[1:].split("/")]
+            parts = path[1:].split("/", len(want))
+            if [urllib.parse.unquote(part) for part in parts[:len(want)]] == want:
+                path = "/" + "/".join(parts[len(want):])
         key = self.s.addon_key
         if key:
             first, sep, rest = path[1:].partition("/")
@@ -450,25 +453,32 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 30           # an idle kept-open connection gives its thread (public mode: its slot) back after this long
     app = None
     body_unread = False    # the request declared a body no route has read (parse_request)
+    framing_unclear = False   # its body's end may be read otherwise by a front end (parse_request)
 
     def log_message(self, *a):  # no access log: URLs may carry file names
         pass
 
     def parse_request(self):
         """http.server's parsing, noting whether the request declares a body: one a route doesn't read would stay on a
-        kept-open connection and be read as the next request (another one hidden in it, run as if a proxy sent it)."""
-        self.body_unread = False
+        kept-open connection and be read as the next request (another one hidden in it, run as if a proxy sent it).
+        Also whether its framing is unclear: a Transfer-Encoding, even empty (http.server follows none), more
+        than one Content-Length or one that isn't a number, or a header line the parser dropped with every header after
+        it (whitespace before its colon); a front end may read such a body's end otherwise, so the connection closes
+        after the answer even when a route reads the body."""
+        self.body_unread = self.framing_unclear = False
         if not super().parse_request():
             return False
-        length = (self.headers.get("Content-Length") or "0").strip()
-        self.body_unread = bool(self.headers.get("Transfer-Encoding")) or length != "0"
+        lengths = [digits.whole(value.strip()) for value in self.headers.get_all("Content-Length") or ()]
+        self.framing_unclear = (bool(self.headers.defects) or "Transfer-Encoding" in self.headers
+                                or len(lengths) > 1 or None in lengths)
+        self.body_unread = self.framing_unclear or any(lengths)
         return True
 
     def read_body(self, length):
-        """The request's body, `length` bytes as its Content-Length says. A body that also declares a Transfer-Encoding
-        (which http.server can't follow) still closes the connection after the answer."""
+        """The request's body, `length` bytes as its Content-Length says. A body whose framing is unclear
+        (parse_request) still closes the connection after the answer."""
         raw = self.rfile.read(length)
-        self.body_unread = bool(self.headers.get("Transfer-Encoding"))
+        self.body_unread = self.framing_unclear
         return raw
 
     def end_headers(self):

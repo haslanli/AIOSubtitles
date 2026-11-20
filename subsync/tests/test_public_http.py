@@ -346,6 +346,13 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         data = exchange(port, b"POST /signup HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
                         b"Content-Length: %d\r\n\r\n" % len(body) + body + hidden)
         self.assertEqual(answers(data), [400, 200])
+        # But not when its length is given twice: the form read by the first, a front end may have sent the
+        # rest as part of it
+        data = exchange(port, b"POST /signup HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                        b"Content-Length: %d\r\nContent-Length: %d\r\n\r\n" % (len(body), len(body) + len(hidden))
+                        + body + hidden)
+        self.assertEqual(answers(data), [400])
+        self.assertIn(b"\r\nConnection: close\r\n", data)
 
     def test_a_request_that_trickles_in_is_cut_off(self):
         # The timeout bounds each wait, not the request: a byte at a time held a connection, and one of
