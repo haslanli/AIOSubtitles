@@ -258,6 +258,9 @@ class EngineUpdate(unittest.TestCase):
                                     for r in e.out.rows))
                 newest = sorted((self.state / 'backups').glob('databases-*'))[-1]
                 self.assertEqual(stat.S_IMODE(os.stat(newest).st_mode), 0o700)
+                # Each copy private too (everyone's records on a public instance), whatever docker cp gave it
+                self.assertEqual({name: stat.S_IMODE(os.stat(newest / name).st_mode) for name in dockerenv.DATABASES},
+                                 dict.fromkeys(dockerenv.DATABASES, 0o600))
 
     def test_a_failed_copy_stops_before_anything_changes(self):
         self.install()
@@ -512,12 +515,17 @@ class EngineUpdate(unittest.TestCase):
         outside = Path(self.tmp.name) / 'docker.sock'
         outside.write_text('not to be touched')
         outside.chmod(0o644)
+        # The folder link pointed at the test's own folder, and that folder's mode was compared with itself;
+        # this one's mode is one setup never gives
+        elsewhere = Path(self.tmp.name) / 'elsewhere'
+        elsewhere.mkdir()
+        elsewhere.chmod(0o751)
 
         def cp(dest):
             dest.mkdir(parents=True)
             (dest / 'users.sqlite3').symlink_to(outside)
             (dest / 'subsync.sqlite3').write_bytes(b'store before')
-            (dest / 'extra').symlink_to(outside.parent)
+            (dest / 'extra').symlink_to(elsewhere)
             return 0, '', ''
         owned = []
         with self.copying(cp), mock.patch.object(engine.os, 'geteuid', lambda: 0), \
@@ -527,8 +535,9 @@ class EngineUpdate(unittest.TestCase):
         copy = next((self.state / 'backups').glob('databases-*'))
         self.assertEqual(sorted(p.name for p in copy.iterdir()), ['subsync.sqlite3'])   # the links are gone
         self.assertEqual([path for path, link in owned if link], [])
-        self.assertNotIn(outside, [path.resolve() for path, _ in owned])
-        self.assertEqual(stat.S_IMODE(outside.parent.stat().st_mode), stat.S_IMODE(Path(self.tmp.name).stat().st_mode))
+        # resolved on both sides: the temporary folder may itself be under a link (macOS's /var is /private/var)
+        self.assertFalse({outside.resolve(), elsewhere.resolve()} & {path.resolve() for path, _ in owned})
+        self.assertEqual(stat.S_IMODE(elsewhere.stat().st_mode), 0o751)
 
     def test_a_copy_that_is_a_link_is_refused(self):
         self.install()
