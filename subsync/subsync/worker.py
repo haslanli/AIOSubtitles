@@ -1802,10 +1802,10 @@ class Worker(threading.Thread):
 
     def _finish(self, job, lang, key, deferred):
         """A language's judging ended: published as final, or kept in `deferred` while it waits for the audio route (a
-        first pass left it there, LanguageSync._to_audio, with the route on; with anchored guesses or without,
-): _sync_all publishes it once the anchored guesses are set, unless the audio job a pick queued
-        meanwhile is to judge it. The audio route's own verdict replaces the language's anchored guess (served or kept
-        as the original)."""
+        first pass with the route on left it there, LanguageSync._to_audio, whether or not anchored guesses were made:
+). _sync_all publishes a deferred one once the anchored guesses are set, unless the audio job a pick
+        queued meanwhile is to judge it. The audio route's own verdict replaces the language's anchored guess (served
+        or kept as the original)."""
         if not job.audio and lang in job.to_audio and self.s.audio_choice != "off":
             deferred[lang] = key
             return
@@ -2162,13 +2162,13 @@ class LanguageSync:
     (the viewer's first, then those made for this release, then the rest: Worker._try_order); the rank recorded with
     each result stays the viewer's. Without best fit the judging stops at the first that passes, within
     SUBSYNC_MAX_TRIES, and the last good result stored is offered; with it every try is judged, alass on at most
-    SUBSYNC_MAX_TRIES of them (none once one fits as it is or by one shift, with the fast path), and the best fits are
-    offered (SUBSYNC_MAIN_ALTERNATIVES). With SUBSYNC_FAST_PATH on, the tries are downloaded at once and each original
-    is checked first (a gate, no alass), so an in-sync original is listed within seconds; re-timing runs only when none
-    is in sync. With SUBSYNC_LIST_IN_SYNC on, an original further down the list that is in sync as it is gets listed as
-    an unchanged "(synced)" copy, so the viewer can tell which one fits this file; the first one needs no copy. With the
-    audio route off, a language only it can judge (the file's only track too small for its subtitles) stores nothing,
-    so turning the route on later syncs it (a file with no track: Worker._originals_only).
+    SUBSYNC_MAX_TRIES of them (none once one fits as it is or by a main-rule shift, with the fast path), and the best
+    fits are offered (SUBSYNC_MAIN_ALTERNATIVES). With SUBSYNC_FAST_PATH on, the tries are downloaded at once and each
+    original is checked first (a gate, no alass), so an in-sync original is listed within seconds; re-timing runs only
+    when none is in sync. With SUBSYNC_LIST_IN_SYNC on, an original further down the list that is in sync as it is gets
+    listed as an unchanged "(synced)" copy, so the viewer can tell which one fits this file; the first one needs no
+    copy. With the audio route off, a language only it can judge (the file's only track too small for its subtitles)
+    stores nothing, so turning the route on later syncs it (a file with no track: Worker._originals_only).
 
     The state the steps share is the language's: its tries, the downloads' texts and those the language check refused,
     the passes so far and the fits made. Everything is read, stored, downloaded and published through the worker, as
