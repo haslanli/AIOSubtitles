@@ -501,6 +501,29 @@ class SignupTest(SignupHarness, unittest.TestCase):
         self.assertIsNotNone(self.users.open(result.token))     # nothing deleted: the person can try again
         self.assertEqual(set(self.fake.configs), set(before))
 
+    def test_delete_says_when_it_is_certain_before_it_removes_anything(self):
+        # The router stopped the person's service, forgetting them, before a mistyped password deleted nothing
+        uuid, result = self.run_signup(viewer())
+        sync_uuid = self.users.open(result.token)["sync_uuid"]
+        seen = []
+
+        def confirmed():
+            seen.append((sync_uuid in self.fake.configs, self.users.open(result.token) is not None))
+        with self.assertRaises(self.signup.SignupError):
+            self.signup.delete(self.s, self.users, result.token, {"password": "wrong"}, api_factory=self.api,
+                               on_confirmed=confirmed)
+        self.assertEqual(seen, [])                                # a mistyped password: not certain
+        for form in ({"password": PASSWORD}, {}):                # the password accepted, or none typed
+            with self.subTest(password=bool(form)):
+                if not form:
+                    uuid, result = self.run_signup(viewer())
+                    sync_uuid = self.users.open(result.token)["sync_uuid"]
+                seen.clear()
+                self.signup.delete(self.s, self.users, result.token, form, api_factory=self.api,
+                                   on_confirmed=confirmed)
+                self.assertEqual(seen, [(True, True)])            # once, before anything is removed
+                self.assertIsNone(self.users.open(result.token))
+
     def test_the_record_is_written_before_the_main_config_changes(self):
         from unittest import mock
         uuid = self.fake.add(viewer(), PASSWORD)

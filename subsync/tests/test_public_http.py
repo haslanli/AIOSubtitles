@@ -432,6 +432,25 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         get.assert_not_called()
         self.assertEqual(http(self.base + "/health")[:2], (200, b"ok"))
 
+    def test_a_delete_with_a_mistyped_password_leaves_the_persons_service_as_it_was(self):
+        # Their App was stopped with forget before the password was checked: a mistyped one deleted nothing
+        # ("Nothing was deleted"), yet their queued picks, the files the copies in their lists need and their refusal
+        # back-off were dropped, and the job running stored nothing
+        _, _, _, _, token = self.sign_up()
+        self.assertEqual(http(f"{self.base}/u/{token}/subtitles/movie/tt1.json")[0], 200)   # their App
+        app, uid = self.pool.live_app(token), self.users.user_id(token)
+        code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="delete", password="not-the-password"))
+        self.assertEqual(code, 400)
+        self.assertIn(b"Nothing was deleted", body)
+        self.assertIs(self.pool.live_app(token), app)
+        self.assertFalse(app.worker.forgotten or app.worker.stop_flag)
+        self.assertIn(uid, self.pool.safeties)
+        code, _, _ = http(f"{self.base}/u/{token}/configure", form(action="delete", password=PASSWORD))
+        self.assertEqual(code, 200)
+        self.assertTrue(app.worker.forgotten)
+        self.assertIsNone(self.pool.live_app(token))
+        self.assertNotIn(uid, self.pool.safeties)
+
     def test_a_request_during_the_delete_leaves_nothing_serving(self):
         # The delete's AIOStreams calls take seconds; a subtitle request then made the person's App again,
         # and it went on serving the deleted link

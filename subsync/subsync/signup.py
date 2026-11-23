@@ -849,10 +849,12 @@ def set_audio(users, token, choice, settings):
     return choice
 
 
-def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
+def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT, on_confirmed=None):
     """Removes the sync config and the Usenet config from the person's AIOStreams, with their password also AIOSubtitles
     from their own config, then their record and usage. Under the record's lock, so a refresh or the daily check can't
-    make a config for a record being deleted; once the password is accepted, the record is always deleted."""
+    make a config for a record being deleted; once the password is accepted, the record is always deleted.
+    `on_confirmed`: called under the lock once the delete is certain (a typed password accepted), before anything is
+    removed: a mistyped password, which deletes nothing, leaves the person's service as it was."""
     with _locked_record(users, token, "This link isn't signed up (any more): there is nothing to delete.") as record:
         api = api_factory(record["instance"], timeout)
         outcome = {"sync_removed": False, "addon_removed": False}
@@ -866,6 +868,8 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
                     raise SignupError(f"{UNKNOWN_ANSWER}. Nothing was deleted.") from None
                 raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True)
                                   + " Nothing was deleted.", field=_field_of(e)) from None
+        if on_confirmed is not None:
+            on_confirmed()
         removed = True
         for kind in ("sync", "usenet"):          # no sync config for stored copies only or Usenet only
             if record.get(f"{kind}_uuid"):

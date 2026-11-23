@@ -699,19 +699,19 @@ class PublicHandler(Handler):
                 return self._html(200, pages.delete_confirm_page(stored=store_only(record), settings=svc.s),
                                   personal=True)
             if action == "delete":
-                svc.pool.stop(token, forget=True)
-                svc.checker.forget(token)
-                try:
+                def forget():                 # their service stops, and writes nothing more of theirs (Pool.stop)
+                    svc.pool.stop(token, forget=True)
+                    svc.checker.forget(token)
+                try:                          # forgotten once the delete is certain, not before the password is
                     outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
-                                     api_factory=svc.api_factory, timeout=svc.timeout)
+                                     api_factory=svc.api_factory, timeout=svc.timeout, on_confirmed=forget)
                 except SignupError as e:      # back to the delete step, not the settings page
                     return self._html(e.code, pages.delete_confirm_page(
                         error=e.message, field="delete" if e.field == "password" else e.field,
                         stored=store_only(record), settings=svc.s), personal=True)
                 # a request while it took (its AIOStreams calls) may have opened the record and made an App again: it
                 # stops now that the record is gone (Pool.app opens a record again after a stop, and finds none)
-                svc.pool.stop(token, forget=True)
-                svc.checker.forget(token)
+                forget()
                 # then their own rows in the shared store: their waiting files and original subtitles
                 svc.store.drop_rows_of(svc.users.rows_key(token))
                 return self._html(200, pages.deleted_page(outcome, svc.s), personal=True)
