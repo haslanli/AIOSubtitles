@@ -12,7 +12,8 @@ AIOStreams, each shown first and saved only after a yes:
   1. your config gets one more subtitle source, subsync (a backup copy is saved first);
   2. a second config, made from yours, that subsync uses to find files (no Usenet, no Real-Debrid, nothing in the
      background), and with Usenet on a third, the Usenet config, with only your Usenet searches and services; a
-     config with no debrid service other than Real-Debrid gets only the Usenet config.
+     config with no debrid service other than Real-Debrid gets only the Usenet config, with its subtitle sources too
+.
 It doesn't install or change AIOStreams itself or AIOMetadata.
 """
 import functools
@@ -1024,8 +1025,8 @@ class Engine:
         self.manifest_url = f'{internal}/{key}/manifest.json'
 
     def plan_changes(self):
-        """What saving would change in the two configs, as (heading, [(sign, line)], note) sections, a note's paragraphs
-        on lines of their own. Changes nothing."""
+        """What saving would change in the configs (yours, and each of subsync's it makes, updates or deletes), as
+        (heading, [(sign, line)], note) sections, a note's paragraphs on lines of their own. Changes nothing."""
         self.addon_urls()
         metadata = {p['ID']: p for p in aios_settings(self.status).get('presets') or []
                     if isinstance(p, dict) and 'ID' in p}
@@ -1045,11 +1046,19 @@ class Engine:
                              'a copy of yours without Real-Debrid, Usenet and subsync, with nothing running in the '
                              'background, so subsync can find the file you are watching. It never appears in your '
                              'apps.'))
+        elif self.keys.get('SYNC_UUID'):        # saving deletes it (drop_config), shown before the yes
+            sections.append(("subsync's own config (deleted)", [], 'not needed any more: with no debrid service '
+                             'subsync may read, it finds files through its Usenet config only.'))
         if self.usenet:
+            # without its own config, subsync has only the Usenet config, with the subtitle sources too
+            holds = ('only your Usenet searches and services, with nothing running in the background, so subsync can '
+                     'find a file you play from Usenet when your debrid service doesn\'t have it.' if self.has_sync
+                     else 'only your Usenet searches, Usenet services and subtitle sources, with nothing running in '
+                     'the background, so subsync can find the files you play from Usenet.')
             sections.append(("subsync's Usenet config " + ('(update)' if self.usenet_exists else '(new)'), [],
-                             'only your Usenet searches and services, with nothing running in the background, so subsync '
-                             'can find a file you play from Usenet when your debrid service doesn\'t have it. It never '
-                             'appears in your apps.'))
+                             holds + ' It never appears in your apps.'))
+        elif self.keys.get('USENET_UUID'):
+            sections.append(("subsync's Usenet config (deleted)", [], 'not needed any more, since Usenet is off.'))
         return sections
 
     def review_and_save(self):

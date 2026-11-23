@@ -1155,10 +1155,15 @@ class PagesTest(unittest.TestCase):
         def done(**kw):
             return result(changes=[], languages=["eng"], **kw)
         made = pages.result_page(done(usenet=True))
-        self.assertIn("Usenet is on: AIOSubtitles made a second config", made)
+        self.assertIn("Usenet is on: AIOSubtitles made a second config on your AIOStreams with only your Usenet "
+                      "searches and services.", made)
         self.assertIn("Made AIOSubtitles&#x27; own config", made)
         only = pages.result_page(done(usenet=True, sync_made=False))
         self.assertNotIn("Made AIOSubtitles&#x27; own config", only)
+        # It spoke of "a second config" with only Usenet in it; it is the only one, with the subtitle sources
+        self.assertIn("Usenet is on: AIOSubtitles made its own config on your AIOStreams with only your Usenet "
+                      "searches, Usenet services and subtitle sources.", only)
+        self.assertNotIn("second config", only)
         why = pages.result_page(done(usenet_why="nntp"))
         self.assertIn("Usenet stays off: your AIOStreams has no Usenet service", why)
         self.assertEqual(explain.USENET_WHY["none"], explain.USENET_WHY["nntp"])

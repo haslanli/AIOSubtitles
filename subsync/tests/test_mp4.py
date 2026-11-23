@@ -98,6 +98,26 @@ class FragmentedTest(unittest.TestCase):
         with self.assertRaisesRegex(NotMp4, "fragmented MP4"):
             open_index(Memory(data))
 
+    def test_a_format_neither_module_reads_is_told_apart_from_a_damaged_index(self):
+        # An AVI or a fragmented MP4 (mvex in the movie box, or a moof before it) was answered as a damaged
+        # index is, so the worker read it again after 1, 6 and 24 hours; its format can't change (mp4.OtherFormat)
+        data = fixture("tiny.mp4")
+        mvex = box(b"mvex", box(b"trex", bytes(24)))
+        after_ftyp = top(data, b"ftyp")[1]
+        for name, other in (
+                ("AVI", b"RIFF" + (8184).to_bytes(4, "little") + b"AVI LIST" + bytes(8176)),
+                ("mvex", rebuilt(data, lambda kind, payload, parent: payload + mvex if kind == b"moov" else payload)),
+                ("moof", data[:after_ftyp] + box(b"moof", bytes(8)) + data[after_ftyp:])):
+            with self.subTest(name), self.assertRaises(mp4.OtherFormat):
+                open_index(Memory(other))
+        bad = bytearray(fixture("tiny-fast.mp4"))
+        q, _ = track(bytes(bad), b"tx3g")[b"stts"]
+        struct.pack_into(">I", bad, q + 4, struct.unpack_from(">I", bad, q + 4)[0] + 3)   # a table past its box
+        for name, damaged in (("MP4", bytes(bad)), ("Matroska", bytes.fromhex("1a45dfa3") + bytes(60))):
+            with self.subTest(damaged=name), self.assertRaises(mp4.NotMatroska) as caught:
+                open_index(Memory(damaged))
+            self.assertNotIsInstance(caught.exception, mp4.OtherFormat)
+
 
 class MovieBoxBoundTest(unittest.TestCase):
     """A movie box larger than MAX_MOOV was "not readable", tried again after 1, 6 and 24 hours; it ends as an

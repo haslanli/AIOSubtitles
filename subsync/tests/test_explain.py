@@ -25,13 +25,13 @@ def settings_read_by_the_code():
 # approved as written though longer than 125 words (a setting or question) or 160 (a fixed rule), each with its approved
 # word count, which is its own cap: the Usenet box's explanation, the audio limit's and the word check's with the
 # sentences added to them, the daily data limit's and the rule on what is kept with
-# its deletion sentence
+# its deletion sentence and the 7 days of each person's original subtitles
 APPROVED_LONG = {
     "USENET": 140,
     "SUBSYNC_AUDIO_BUDGET_GB": 133,
     "SUBSYNC_TEXT_PAIRING": 143,
     "SUBSYNC_USER_DAILY_MB": 144,
-    "Public mode: what is kept, and for how long": 171,
+    "Public mode: what is kept, and for how long": 215,
 }
 
 
@@ -96,7 +96,7 @@ class ExplainTest(unittest.TestCase):
         for name, text in self.texts():
             texts.setdefault(name, []).append(text)
         self.assertEqual(word_cap("USENET"), 140)
-        self.assertEqual(word_cap("Public mode: what is kept, and for how long"), 171)
+        self.assertEqual(word_cap("Public mode: what is kept, and for how long"), 215)     # 171 before
         self.assertEqual(word_cap("SUBSYNC_AUDIO_AT_ONCE"), 125)
         self.assertEqual(word_cap("AUDIO"), 125)
         self.assertEqual(word_cap("Real-Debrid is never used"), 160)
@@ -110,12 +110,31 @@ class ExplainTest(unittest.TestCase):
                 self.assertEqual(count, cap)          # the approved text itself: one word more fails the check above
 
     def test_the_read_failure_rule(self):
-        # The owner's approved words
+        # The owner's approved words, with a Usenet file's waits
         self.assertEqual(dict(explain.RULES)["A file that can't be reached is tried again later"],
                          "A file that can't be reached on its first read is tried once more 10 seconds later; if it "
-                         "still fails, it waits 10 minutes, then 1, 6 and 24 hours, and then isn't read again.")
+                         "still fails, it waits 10 minutes, then 1, 6 and 24 hours, and then isn't read again. A "
+                         "Usenet file gets no second try: nothing more is looked for on Usenet until 00:00 UTC, and "
+                         "the file waits 1, 6 and 24 hours.")
         self.assertIn("A file's first read is then tried once more 10 seconds later, and a failed file is tried again "
-                      "10 minutes, 1, 6 and 24 hours later", explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
+                      "10 minutes, 1, 6 and 24 hours later (a Usenet file: no second try, then 1, 6 and 24 hours).",
+                      explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
+
+    def test_the_password_rule_names_the_box_that_adds_aiosubtitles(self):
+        # "if you leave the box checked" read as the keep-password box, named just before it; and two box
+        # explanations said "Unchecked" where the others say "Ticked" and "Unticked"
+        rule = dict(explain.RULES)["Public mode: your AIOStreams password is used once, unless you choose to keep it"]
+        self.assertIn("; with Usenet on, a second one for Usenet only) and, if you leave \"Add AIOSubtitles to my "
+                      "AIOStreams config\" ticked, to add AIOSubtitles to your own config. Without that separate "
+                      "config,", rule)
+        self.assertNotIn("the box checked", rule)
+        self.assertIn(" Recommended. Unticked, nothing in your own config changes and you add the link yourself as a "
+                      "custom addon.", explain.PUBLIC_FIELDS["add_addon"])
+        self.assertIn(" until it is back. Unticked, your config keeps them and nothing is removed. ",
+                      explain.PUBLIC_FIELDS["clean_up"])
+        for text in [text for _, text in explain.RULES] + list(explain.PUBLIC_FIELDS.values()):
+            self.assertNotIn("nchecked", text)
+            self.assertNotIn("box checked", text)
 
     def test_the_original_entry_and_the_language_check_rules(self):
         # The approved words
@@ -160,15 +179,16 @@ class ExplainTest(unittest.TestCase):
 
     def test_the_sync_configs_texts_name_the_usenet_only_install(self):
         # "Required: subsync doesn't start without it", yet with Real-Debrid as the only debrid service and Usenet on,
-        # ./setup leaves the sync config out and subsync lists every file through the Usenet config
+        # ./setup leaves the sync config out and subsync lists every file through the Usenet config, which
+        # then holds the subtitle sources too (aiosconfig.usenet_sync_config's `subtitles`)
         self.assertIn(" Required on your own install, except where Real-Debrid is your only debrid service and Usenet "
                       "is on: then ./setup makes no such config and leaves this empty. ",
                       explain.SETTINGS["SUBSYNC_SOURCE_MANIFEST"][1])
         self.assertTrue(explain.SETTINGS["SUBSYNC_SOURCE_PASSWORD"][1].endswith(
             " Required whenever SUBSYNC_SOURCE_MANIFEST is. Keep it private."))
         self.assertIn(" subsync lists through it only when your debrid service doesn't have the file you play, and for "
-                      "every file when Real-Debrid is your only debrid service. ",
-                      explain.SETTINGS["SUBSYNC_USENET_MANIFEST"][1])
+                      "every file when Real-Debrid is your only debrid service; then it also holds your subtitle "
+                      "sources. Keep it private.", explain.SETTINGS["SUBSYNC_USENET_MANIFEST"][1])
         for name in ("SUBSYNC_SOURCE_MANIFEST", "SUBSYNC_SOURCE_PASSWORD"):
             with self.subTest(name=name):
                 self.assertNotIn("doesn't start without it", explain.SETTINGS[name][1])
@@ -197,9 +217,12 @@ class ExplainTest(unittest.TestCase):
         self.assertIn(": the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and "
                       "its password (with Usenet on, its Usenet config's too), their languages and their answer for "
                       "files with no subtitles of their own, their own TMDB key if they added one, and when their "
-                      "AIOStreams was last checked, plus how much was read for them each day. Your AIOStreams password "
-                      "is kept only if you tick \"Keep my password\", in the same encrypted record, until you untick "
-                      "it. ", rules["Public mode: what is kept, and for how long"])
+                      "AIOStreams was last checked, plus how much was read for them each day. For up to 7 days after "
+                      "someone plays a file, the original subtitles listed for it in their languages are kept too "
+                      "(and, while it waits for their pick, its title, name and size), under a key that only their "
+                      "personal link leads to. Your AIOStreams password is kept only if you tick \"Keep my "
+                      "password\", in the same encrypted record, until you untick it. ",
+                      rules["Public mode: what is kept, and for how long"])
 
     def test_no_text_says_the_password_is_never_kept(self):
         # Every text of this module, the README's rules and the public pages' texts alike
@@ -371,8 +394,8 @@ class LimitsTest(unittest.TestCase):
                 ("SUBSYNC_READ_TIMEOUT_S", "How long one read of a file may wait for an answer, in seconds, before it "
                  "counts as failed; a read that keeps going counts as failed too once it has taken this long plus one "
                  "second for every 64 KB it asked for. A file's first read is then tried once more 10 seconds later, "
-                 "and a failed file is tried again 10 minutes, 1, 6 and 24 hours later. Recommended: 60. Shorter: slow "
-                 "services fail more often."),
+                 "and a failed file is tried again 10 minutes, 1, 6 and 24 hours later (a Usenet file: no second try, "
+                 "then 1, 6 and 24 hours). Recommended: 60. Shorter: slow services fail more often."),
                 ("SUBSYNC_TEXT_PAIRING", "A copy whose words disagree with its timing isn't offered. Chinese and "
                  "Japanese, written without spaces between words, are paired by timing alone, and nothing more is read "
                  "for them.")):
@@ -393,13 +416,14 @@ class Group2Test(unittest.TestCase):
     """The texts of cycle 1's vis3-explain-2, word for word."""
 
     def test_aiosubtitles_own_config_never_has_usenet(self):
-        # it said "without Usenet unless you turn it on"; with Usenet on a second config is made
+        # it said "without Usenet unless you turn it on"; with Usenet on a second config is made;
+        # the box that adds AIOSubtitles is named, not "the box"
         self.assertEqual(explain.PUBLIC_TEXTS["made_config"], "Made AIOSubtitles' own config on your AIOStreams, "
                          "without Real-Debrid, Usenet or automatic fallback to other sources.")
         self.assertIn(" to make a separate config for AIOSubtitles on your AIOStreams (without Real-Debrid, Usenet, "
                       "AIOSubtitles itself or anything that starts work in the background, so opening a file opens "
-                      "only that file; with Usenet on, a second one for Usenet only) and, if you leave the box "
-                      "checked, to add AIOSubtitles to your own config. ",
+                      "only that file; with Usenet on, a second one for Usenet only) and, if you leave \"Add "
+                      "AIOSubtitles to my AIOStreams config\" ticked, to add AIOSubtitles to your own config. ",
                       dict(explain.RULES)["Public mode: your AIOStreams password is used once, unless you choose to "
                                           "keep it"])
         self.assertEqual(explain.PUBLIC_PASSWORD_TEXT,
@@ -674,6 +698,20 @@ class Round4Test(unittest.TestCase):
                           relgate.MEDIAN_MS, explain.SETTINGS["SUBSYNC_SNAP_WITHIN"][0]),
                          (0.6, 1.0, 0.9, 200, 100, "0.95"))                  # the numbers it gives are the check's
 
+    def test_the_rule_on_what_is_kept_names_the_original_subtitles_kept_7_days(self):
+        # The host's list of what is kept left out what the privacy page lists: each person's
+        # original subtitles, and a waiting file's title, name and size, kept up to 7 days (store.KEEP_PICKABLE_S)
+        from subsync.store import DAY, KEEP_PICKABLE_S
+        self.assertEqual(KEEP_PICKABLE_S, 7 * DAY)
+        self.assertIn(" plus how much was read for them each day. For up to 7 days after someone plays a file, the "
+                      "original subtitles listed for it in their languages are kept too (and, while it waits for their "
+                      "pick, its title, name and size), under a key that only their personal link leads to. Your "
+                      "AIOStreams password is kept only if you tick \"Keep my password\", ",
+                      dict(explain.RULES)["Public mode: what is kept, and for how long"])
+        self.assertIn("For up to 7 days after you play a file, the original subtitles listed for it in your languages "
+                      "are kept too (and, while it waits for your pick, its title, name and size), under a key that "
+                      "only your personal link leads to.", dict(explain.PRIVACY_PARTS)["What is stored"])
+
     def test_a_public_record_is_deleted_as_its_setting_says_and_backups_may_keep_it(self):
         # with: it said 180 days whatever SUBSYNC_USER_KEEP_DAYS said, and left out the host's backups
         rule = dict(explain.RULES)["Public mode: what is kept, and for how long"]
@@ -740,6 +778,20 @@ class NumbersTest(unittest.TestCase):
                       dict(explain.RULES)["A file that can't be reached is tried again later"])
         self.assertIn(f"tried once more {READ_RETRY_S} seconds later, and a failed file is tried again {first // 60} "
                       f"minutes, {later} later", explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
+
+    def test_a_usenet_file_that_cant_be_reached(self):
+        # Both texts gave debrid's waits only; a Usenet file gets no second try (worker: `not job.usenet`),
+        # Usenet stops until 00:00 UTC, and the file waits REFUSED_BACKOFF_S
+        from subsync.store import REFUSED_BACKOFF_S
+        *firsts, last = (h // 3600 for h in REFUSED_BACKOFF_S)
+        waits = ", ".join(str(h) for h in firsts) + f" and {last} hours"
+        self.assertEqual(waits, "1, 6 and 24 hours")
+        self.assertTrue(dict(explain.RULES)["A file that can't be reached is tried again later"].endswith(
+            "and then isn't read again. A Usenet file gets no second try: nothing more is looked for on Usenet until "
+            f"00:00 UTC, and the file waits {waits}."))
+        self.assertIn("A file's first read is then tried once more 10 seconds later, and a failed file is tried again "
+                      f"10 minutes, 1, 6 and 24 hours later (a Usenet file: no second try, then {waits}). Recommended: "
+                      "60.", explain.SETTINGS["SUBSYNC_READ_TIMEOUT_S"][1])
 
     def test_a_refused_file(self):
         from subsync.store import REFUSED_BACKOFF_S

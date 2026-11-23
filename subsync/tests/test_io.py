@@ -1540,10 +1540,11 @@ class BreaksOff:
 
 
 class UnreadableFileTest(unittest.TestCase):
-    """A file subsync can't use: one neither Matroska nor MP4 (an AVI, a TS, a damaged head) keeps its originals and
-    backs off an hour, 6 and 24 hours (the worker's handling was untested); a first pass that fails once the
-    index is read (damage the parsers let through, met when its fields are used) backs off as a read that failed
-    (it was read again on every request). Neither is read again meanwhile, and the log holds no link."""
+    """A file subsync can't use: one neither Matroska nor MP4 (an AVI, a TS) keeps its originals and is never read
+    again, since its format can't change (it was read again after 1, 6 and 24 hours), while one whose index is
+    damaged backs off an hour, 6 and 24 hours (the worker's handling was untested); a first pass that fails
+    once the index is read (damage the parsers let through, met when its fields are used) backs off as a read that
+    failed (it was read again on every request). None is read again meanwhile, and the log holds no link."""
 
     def setUp(self):
         watch_the_log(self)
@@ -1579,7 +1580,7 @@ class UnreadableFileTest(unittest.TestCase):
         self.aios.name = name
         return Job("movie", "tt1", {"filename": name, "videoSize": os.path.getsize(os.path.join(self.dir, name))})
 
-    def test_a_file_neither_matroska_nor_mp4_keeps_its_originals_and_backs_off(self):
+    def test_a_file_neither_matroska_nor_mp4_keeps_its_originals_and_is_never_read_again(self):
         w = self.worker()
         job = self.job("clip.avi")
         with self.assertLogs("subsync.worker", "INFO") as logs:
@@ -1587,8 +1588,8 @@ class UnreadableFileTest(unittest.TestCase):
         self.assertIn("file not readable as Matroska or MP4 movie/tt1", "\n".join(logs.output))
         refused = self.store.db.execute("SELECT fails, retry_at FROM files WHERE file_key=?",
                                         (job.alias + "|refused",)).fetchone()
-        self.assertEqual(refused[0], 1)                          # under the refusal back-off: an hour first
-        self.assertAlmostEqual(refused[1], time.time() + REFUSED_BACKOFF_S[0], delta=60)
+        self.assertEqual(refused, (1, float("inf")))             # never again, from the first read
+        self.assertEqual(self.store.file_retry(job.alias), float("inf"))
         self.assertTrue(w._file_blocked(job.alias))
         self.assertIsNone(self.store.resolve(job.alias))         # nothing of it stored as read
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
@@ -1597,6 +1598,36 @@ class UnreadableFileTest(unittest.TestCase):
         read, lists = len(self.srv.log), self.aios.lists
         run_once(w, self.job("clip.avi"))                        # asked again within the hour
         self.assertEqual((len(self.srv.log), self.aios.lists), (read, lists))   # nothing read, no list
+        later = time.time() + sum(REFUSED_BACKOFF_S) + 3600     # past every wait a damaged index gets
+        self.store.clock = lambda: later
+        self.assertTrue(w._file_blocked(job.alias))
+        run_once(w, self.job("clip.avi"))
+        self.assertEqual((len(self.srv.log), self.aios.lists), (read, lists))   # still nothing read, no list
+
+    def test_a_file_whose_index_is_damaged_backs_off_an_hour_6_and_24_hours(self):
+        # Unlike a format, a damaged index is tried again (the file may be served whole another time)
+        with open(os.path.join(self.dir, "damaged.mkv"), "wb") as f:
+            f.write(bytes.fromhex("1a45dfa3") + bytes(8188))
+        w = self.worker()
+        job = self.job("damaged.mkv")
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            run_once(w, job)
+        self.assertIn("file not readable as Matroska or MP4 movie/tt1", "\n".join(logs.output))
+        refused = self.store.db.execute("SELECT fails, retry_at FROM files WHERE file_key=?",
+                                        (job.alias + "|refused",)).fetchone()
+        self.assertEqual(refused[0], 1)                          # under the refusal back-off: an hour first
+        self.assertAlmostEqual(refused[1], time.time() + REFUSED_BACKOFF_S[0], delta=60)
+        self.assertTrue(w._file_blocked(job.alias))
+        read, lists = len(self.srv.log), self.aios.lists
+        run_once(w, self.job("damaged.mkv"))                     # asked again within the hour
+        self.assertEqual((len(self.srv.log), self.aios.lists), (read, lists))   # nothing read, no list
+        later = refused[1] + 1                                   # the hour has passed: read once more
+        self.store.clock = lambda: later
+        self.assertFalse(w._file_blocked(job.alias))
+        run_once(w, self.job("damaged.mkv"))
+        self.assertGreater(len(self.srv.log), read)
+        self.assertEqual(self.store.db.execute("SELECT fails FROM files WHERE file_key=?",
+                                               (job.alias + "|refused",)).fetchone(), (2,))
 
     def test_a_first_pass_that_fails_once_the_index_is_read_backs_off(self):
         from subsync.store import READ_FAILED_BACKOFF_S

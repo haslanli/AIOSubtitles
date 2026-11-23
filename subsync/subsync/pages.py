@@ -242,7 +242,7 @@ def result_page(result, settings=None):
     stored = result.store_only
     done = [texts["made_config"]] if result.sync_made and not stored else []
     if result.usenet:
-        done.append(texts["usenet_made"])
+        done.append(texts["usenet_made" if result.sync_made else "usenet_only_made"])
     if result.added:
         # the change lines are written for ./setup's review (aiosconfig.viewer_change): here each is its own sentence
         # under one item

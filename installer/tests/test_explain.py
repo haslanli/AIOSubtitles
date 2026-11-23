@@ -72,12 +72,14 @@ class QuestionTexts(unittest.TestCase):
                          "file, keep that file private.")
 
     def test_the_confirm_text(self):
-        # it said removing and restoring "also ask": they asked CONFIRM itself
+        # it said removing and restoring "also ask": they asked CONFIRM itself; it named neither the Usenet
+        # config nor the configs saving deletes when no longer used
         self.assertEqual(explain.QUESTIONS['CONFIRM'][1],
-                         "Saves the changes shown here: subsync added to your config (after a backup copy) and "
-                         "subsync's own config created or updated. Until then nothing is changed: go back to change an "
-                         "answer, or leave and run ./setup again any time. Removing subsync and restoring a saved copy "
-                         "ask their own questions before they change anything.")
+                         "Saves the changes shown here: subsync added to your config (after a backup copy), and "
+                         "subsync's own config and its Usenet config created, updated or, when no longer used, "
+                         "deleted. Until then nothing is changed: go back to change an answer, or leave and run "
+                         "./setup again any time. Removing subsync and restoring a saved copy ask their own questions "
+                         "before they change anything.")
         self.assertEqual(explain.QUESTIONS['CONFIRM'][0], 'yes')
 
     def test_removing_and_restoring_ask_their_own_yes(self):

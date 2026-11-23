@@ -64,7 +64,8 @@ RULES = [
      "shows the format."),
     ("A file that can't be reached is tried again later",
      "A file that can't be reached on its first read is tried once more 10 seconds later; if it still fails, it waits "
-     "10 minutes, then 1, 6 and 24 hours, and then isn't read again."),
+     "10 minutes, then 1, 6 and 24 hours, and then isn't read again. A Usenet file gets no second try: nothing more is "
+     "looked for on Usenet until 00:00 UTC, and the file waits 1, 6 and 24 hours."),
     ("A copy is offered only after it passes the check",
      "Each synced copy is checked against the file itself before it is offered: at least 60 % of its lines must pair "
      "with lines of the file's own subtitle track (start within a second of one), at least 90 % of those must start "
@@ -109,8 +110,8 @@ RULES = [
      "unless you tick the box that lets it keep the password: then it is kept encrypted in your record, never in a "
      "log, until you untick it. It needs it to read your config, to make a separate config for AIOSubtitles on your "
      "AIOStreams (without Real-Debrid, Usenet, AIOSubtitles itself or anything that starts work in the background, so "
-     "opening a file opens only that file; with Usenet on, a second one for Usenet only) and, if you leave the box "
-     "checked, to add AIOSubtitles to your own config. "
+     "opening a file opens only that file; with Usenet on, a second one for Usenet only) and, if you leave \"Add "
+     "AIOSubtitles to my AIOStreams config\" ticked, to add AIOSubtitles to your own config. "
      "Without that separate config, a file that failed to open could make your AIOStreams move on to another source, "
      "Real-Debrid or a Usenet download among them."),
     ("Public mode: your AIOStreams is checked while you use it",
@@ -159,11 +160,14 @@ RULES = [
      "address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password (with "
      "Usenet on, its Usenet config's too), their languages and their answer for files with no subtitles of their own, "
      "their own TMDB key if they added one, and when their AIOStreams was last checked, plus how much was read for "
-     "them each day. Your AIOStreams password is kept only if you tick \"Keep my password\", in the same encrypted "
-     "record, until you untick it. For each synced subtitle only its new timing (never its text), with the names and "
-     "sizes of the files it fits, is shared and kept 180 days after last use, without who played them; logs name the "
-     "titles synced, never who asked. Your record is deleted when you delete it on your settings page, or 180 days "
-     "after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may hold it longer."),
+     "them each day. For up to 7 days after someone plays a file, the original subtitles listed for it in their "
+     "languages are kept too (and, while it waits for their pick, its title, name and size), under a key that only "
+     "their personal link leads to. Your AIOStreams password is kept only if you tick \"Keep my password\", in the "
+     "same encrypted record, until you untick it. For each synced subtitle only its new timing (never its text), with "
+     "the names and sizes of the files it fits, is shared and kept 180 days after last use, without who played them; "
+     "logs name the titles synced, never who asked. Your record is deleted when you delete it on your settings page, "
+     "or 180 days after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may hold it "
+     "longer."),
     ("Public mode: the timing is shared, not the subtitles",
      "When someone already synced a subtitle for the file you play, AIOSubtitles reuses that work: it keeps only how "
      "the subtitle was re-timed, never its text. Your copy is made from the original subtitle, downloaded again for you "
@@ -334,10 +338,10 @@ QUESTIONS = {
         "keep that file private."),
     "CONFIRM": (
         "yes",
-        "Saves the changes shown here: subsync added to your config (after a backup copy) and subsync's own config "
-        "created or updated. Until then nothing is changed: go back to change an answer, or leave and run ./setup "
-        "again any time. Removing subsync and restoring a saved copy ask their own questions before they change "
-        "anything."),
+        "Saves the changes shown here: subsync added to your config (after a backup copy), and subsync's own config "
+        "and its Usenet config created, updated or, when no longer used, deleted. Until then nothing is changed: go "
+        "back to change an answer, or leave and run ./setup again any time. Removing subsync and restoring a saved "
+        "copy ask their own questions before they change anything."),
     "TEST_READ": (
         "no",
         "A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as "
@@ -449,7 +453,7 @@ GROUPS = [
             "The link of subsync's Usenet config, a second config ./setup makes from yours when you turn Usenet on, "
             "with only your Usenet searches and services and nothing that works in the background. subsync lists "
             "through it only when your debrid service doesn't have the file you play, and for every file when "
-            "Real-Debrid is your only debrid service. Keep it private."),
+            "Real-Debrid is your only debrid service; then it also holds your subtitle sources. Keep it private."),
         "SUBSYNC_USENET_PASSWORD": (
             "",
             "The password of that config: random, made by ./setup, never yours, used as SUBSYNC_SOURCE_PASSWORD is. "
@@ -539,7 +543,8 @@ GROUPS = [
             "How long one read of a file may wait for an answer, in seconds, before it counts as failed; a read that "
             "keeps going counts as failed too once it has taken this long plus one second for every 64 KB it asked "
             "for. A file's first read is then tried once more 10 seconds later, and a failed file is tried again 10 "
-            "minutes, 1, 6 and 24 hours later. Recommended: 60. Shorter: slow services fail more often."),
+            "minutes, 1, 6 and 24 hours later (a Usenet file: no second try, then 1, 6 and 24 hours). Recommended: 60. "
+            "Shorter: slow services fail more often."),
         "SUBSYNC_SIZE_SLACK_MB": (
             "5.5",
             "How far a file's listed size may be from its real size and still be taken for the same file, in MB; "
@@ -1077,14 +1082,14 @@ PUBLIC_FIELDS = {
         "next file you play."),
     "add_addon": (
         "Adds AIOSubtitles to your AIOStreams config, before your other subtitle sources, so your apps show its "
-        "synced subtitles first (many apps show only a few per language). Recommended. Unchecked, nothing in your own "
+        "synced subtitles first (many apps show only a few per language). Recommended. Unticked, nothing in your own "
         "config changes and you add the link yourself as a custom addon."),
     # "{names}": the addons this instance takes out (clean_up_help)
     "clean_up": (
         "Takes out of your AIOStreams config the subtitle addons AIOSubtitles now searches itself: {names}. You then "
         "get their subtitles once, through AIOSubtitles: synced where one fits, the original otherwise, instead of the "
         "same ones twice. Your other subtitle addons stay. The cost: "
-        "while AIOSubtitles is down, these subtitles are missing too, until it is back. Unchecked, your config keeps "
+        "while AIOSubtitles is down, these subtitles are missing too, until it is back. Unticked, your config keeps "
         "them and nothing is removed. It works only together with adding AIOSubtitles; to undo it, add the addons "
         "again on AIOStreams' configure page."),
     "usenet": USENET_TEXT,      # the installer question's text, with the instance's number (usenet_help)
@@ -1320,6 +1325,9 @@ PUBLIC_TEXTS = {
     # Usenet
     "usenet_made": ("Usenet is on: AIOSubtitles made a second config on your AIOStreams with only your Usenet searches "
                     "and services."),
+    # with no debrid service AIOSubtitles may read, the Usenet config is its only one, with the subtitle sources too
+    "usenet_only_made": ("Usenet is on: AIOSubtitles made its own config on your AIOStreams with only your Usenet "
+                         "searches, Usenet services and subtitle sources."),
     "usenet_paused": ("Usenet is paused until 00:00 UTC: your indexer or Usenet service answered with an error, so "
                       "AIOSubtitles stopped asking it today. Nothing else is affected."),
     "languages_chosen": "Languages: {names}.",

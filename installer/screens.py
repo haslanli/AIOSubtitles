@@ -140,6 +140,7 @@ INSTALLER_WORDS = (
     # the audio route's answers
     *[answer for _, answer in plan.AUDIO_ANSWERS],
     "subsync's Usenet config (new)", "subsync's Usenet config (update)",
+    "subsync's Usenet config (deleted)", "subsync's own config (deleted)",
     "subsync's Usenet config answers (no search made, to spare your indexer's daily calls)",
     "subsync's Usenet config doesn't answer. Run ./setup again, or send the output of ./setup --status with a bug report.",
 )

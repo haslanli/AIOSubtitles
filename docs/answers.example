@@ -129,9 +129,10 @@ AIOS_USERNAME=
 # that file private.
 AIOS_PASSWORD=
 
-# Saves the changes shown here: subsync added to your config (after a backup copy) and subsync's own config created
-# or updated. Until then nothing is changed: go back to change an answer, or leave and run ./setup again any time.
-# Removing subsync and restoring a saved copy ask their own questions before they change anything.
+# Saves the changes shown here: subsync added to your config (after a backup copy), and subsync's own config and its
+# Usenet config created, updated or, when no longer used, deleted. Until then nothing is changed: go back to change
+# an answer, or leave and run ./setup again any time. Removing subsync and restoring a saved copy ask their own
+# questions before they change anything.
 CONFIRM=yes
 
 # A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as it

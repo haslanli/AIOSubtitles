@@ -99,12 +99,14 @@ class Install(unittest.TestCase):
 
 class WhatItChanges(unittest.TestCase):
     def test_subsyncs_config_never_has_usenet(self):
-        # it said "without Usenet unless you turn it on"; Usenet always gets the third config
+        # it said "without Usenet unless you turn it on"; Usenet always gets the third config; a config whose
+        # only debrid service is Real-Debrid gets only that one, which then holds the subtitle sources too
         self.assertIn("- **A second config for subsync.** It is made from yours, without Real-Debrid, Usenet and "
                       'subsync, and nothing runs in it in the background. subsync uses it to find the file you are '
                       "watching. It never appears in your apps. With Usenet on, a third one, subsync's Usenet config, "
                       'holds only your Usenet searches and services (see [Fixed rules](#fixed-rules)); a config whose '
-                      'only debrid service is Real-Debrid gets only this one.', section('What it changes'))
+                      'only debrid service is Real-Debrid gets only this one, with your subtitle sources in it too.',
+                      section('What it changes'))
 
 
 class WhatSubsyncReads(unittest.TestCase):

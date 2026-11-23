@@ -42,6 +42,12 @@ class Personal(FlowFixture):
         self.assertEqual(env['SUBSYNC_USENET_PASSWORD'], keys['USENET_PASSWORD'])
         self.assertIn("subsync's Usenet config (new)", out)
         self.assertIn("subsync's Usenet config answers", out)
+        review = ' '.join(out.split('Your AIOStreams configs')[1].split('Save these')[0].split())
+        # with a debrid service, the Usenet config holds only Usenet (the words for this case stay)
+        self.assertIn("subsync's Usenet config (new) only your Usenet searches and services, with nothing running in "
+                      "the background, so subsync can find a file you play from Usenet when your debrid service "
+                      "doesn't have it. It never appears in your apps.", review)
+        self.assertNotIn('(deleted)', review)
         # the self-test searches no indexer: the Usenet config is asked for its manifest only (the check
         # looked for /stremio/<id>/stream, but the config's encrypted password always comes between the two)
         asked = [p for m, p, _ in self.aios.log if m == 'GET' and p.startswith(f"/stremio/{keys['USENET_UUID']}/")]
@@ -53,6 +59,12 @@ class Personal(FlowFixture):
         # a re-run with Usenet off: its config is removed, its lines go
         code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'USENET': 'no', 'TEST_READ': 'no'})
         self.assertEqual(code, 0, out)
+        # The review shows the deletion before the yes, not only "Deleted ..." after it
+        review = ' '.join(out.split('Your AIOStreams configs')[1].split('Save these')[0].split())
+        self.assertIn("subsync's own config (update) a copy of yours", review)
+        self.assertIn("It never appears in your apps. subsync's Usenet config (deleted) not needed any more, since "
+                      "Usenet is off.", review)
+        self.assertIn("Deleted subsync's Usenet config", out)
         self.assertNotIn(keys['USENET_UUID'], self.aios.users)
         self.assertNotIn('USENET_UUID', self.keys())
         env = self.env()
@@ -168,8 +180,35 @@ class Personal(FlowFixture):
         self.assertNotIn('SUBSYNC_SOURCE_MANIFEST', env)
         usenet = self.aios.users[keys['USENET_UUID']]['config']
         self.assertEqual([p['type'] for p in usenet['presets']], ['newznab', 'opensubtitles'])   # with its subtitles
-        self.assertNotIn("subsync's own config", out.split('Your AIOStreams configs')[1].split('Save these')[0])
+        review = ' '.join(out.split('Your AIOStreams configs')[1].split('Save these')[0].split())
+        self.assertNotIn("subsync's own config", review)
+        # The only config subsync has, with the subtitle sources too
+        self.assertIn("subsync's Usenet config (new) only your Usenet searches, Usenet services and subtitle sources, "
+                      "with nothing running in the background, so subsync can find the files you play from Usenet. It "
+                      "never appears in your apps.", review)
+        self.assertNotIn("when your debrid service doesn't have it", review)
         self.assertFalse([c for c in self.exec_calls if 'subsync.selftest' in c[0]])     # no test read of Usenet
+
+    def test_a_config_left_without_a_debrid_service_deletes_subsyncs_own_config(self):
+        # Saving deleted subsync's own config without the review showing it (only "Deleted ..." after the yes)
+        self.viewer([TORBOX, ENGINE], [ZILEAN, NEWZNAB, SUBS])
+        code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        sync = self.keys()['SYNC_UUID']
+        self.viewer([ENGINE], [NEWZNAB, SUBS])                          # TorBox gone: Usenet only
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+        self.assertEqual(code, 0, out)
+        review = ' '.join(out.split('Your AIOStreams configs')[1].split('Save these')[0].split())
+        self.assertIn("subsync's own config (deleted) not needed any more: with no debrid service subsync may read, it "
+                      "finds files through its Usenet config only. subsync's Usenet config (update) only your Usenet "
+                      "searches, Usenet services and subtitle sources, with nothing running in the background, so "
+                      "subsync can find the files you play from Usenet. It never appears in your apps.", review)
+        self.assertIn("Deleted subsync's own config", out)
+        self.assertNotIn(sync, self.aios.users)
+        self.assertNotIn('SYNC_UUID', self.keys())
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})   # nothing left to delete
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('(deleted)', out)
 
     def test_status_names_the_usenet_config_as_the_page_does(self):
         # A Usenet-only install's ./setup --status said "subsync's config: (none)" and never named the config

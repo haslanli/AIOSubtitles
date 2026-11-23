@@ -30,11 +30,12 @@ others.
 
 Lifetimes: synced/in_sync rows live 180 days after last served; keep_original is retried after 30 days
 (or when ALGO_VERSION changes, which changes the key), and a kept_original row goes after 30 days unless the file is
-judged again; a file that couldn't be read backs off 10 min / 1 h / 6 h / 24 h, a refused one (and one neither
-MKV nor MP4, or a Usenet file) 1 h / 6 h / 24 h, then it stops. Those are failures in a row, each back-off counting its
-own: a read of the file that succeeds clears them. A file's names and details (aliases, files) go once nobody asked
-for it for 180 days and no result of it is left, and its marks (its read failures, its byte cap) 180 days after the last
-request they met, so a file still asked for is never read again.
+judged again; a file that couldn't be read backs off 10 min / 1 h / 6 h / 24 h, a refused one (and one whose
+index is damaged, or a Usenet file) 1 h / 6 h / 24 h, then it stops; one neither MKV nor MP4 stops at once.
+Those are failures in a row, each back-off counting its own: a read of the file that succeeds clears them. A file's
+names and details (aliases, files) go once nobody asked for it for 180 days and no result of it is left, and its marks
+(its read failures, its byte cap) 180 days after the last request they met, so a file still asked for is never read
+again.
 
 In public mode the rows of one person alone (their waiting files, their original subtitles and the refusals of their
 reads) are keyed "p:<their rows key>:<hash>" (worker.Worker._person_key), so Delete removes them (drop_rows_of,
@@ -65,8 +66,10 @@ DAY = 86400
 KEEP_SERVED_S = 180 * DAY
 RETRY_KEEP_ORIGINAL_S = 30 * DAY
 READ_FAILED_BACKOFF_S = (600, 3600, 6 * 3600, 24 * 3600)   # a file that couldn't be read
-# a refused file, one neither MKV nor MP4, and a Usenet file whose first read failed: an hour first, as before
+# a refused file, one whose index is damaged, and a Usenet file whose first read failed: an hour first, as before
 REFUSED_BACKOFF_S = (3600, 6 * 3600, 24 * 3600)
+# a file of a format subsync doesn't read (mp4.OtherFormat): no wait, since its format can't change
+NEVER_AGAIN = ()
 KEEP_PICKABLE_S = 7 * DAY
 JUDGED_FOR_S = DAY            # a file judged for every language asked within this long is not read again
 # the files row that counts a file hint's failures under REFUSED_BACKOFF_S (and other waits than READ_FAILED_BACKOFF_S):
@@ -448,8 +451,9 @@ class Store:
 
     def file_failed(self, alias, backoff=READ_FAILED_BACKOFF_S):
         """A read failure for a file (by alias, since a file that can't be read has no hash): the waits of `backoff`
-        in turn (10 min / 1 h / 6 h / 24 h; REFUSED_BACKOFF_S 1 h / 6 h / 24 h), then never again. They count failures
-        in a row (file_ok clears them), each back-off its own. Returns the retry time, or None when it stops."""
+        in turn (10 min / 1 h / 6 h / 24 h; REFUSED_BACKOFF_S 1 h / 6 h / 24 h; NEVER_AGAIN none), then never again.
+        They count failures in a row (file_ok clears them), each back-off its own. Returns the retry time, or None when
+        it stops."""
         key = alias if backoff == READ_FAILED_BACKOFF_S else alias + OTHER_BACKOFF_SUFFIX
         now = self.clock()
         with self.lock:

@@ -29,11 +29,11 @@ from .bounded import put_bounded, trim_oldest
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .mkv import NotMatroska
-from .mp4 import open_index
+from .mp4 import OtherFormat, open_index
 from .reader import MAX_RE_RESOLVE, CapReached, IndexTooLarge, RangeReader, ReadFailed, Refused, Stopped
 from .settings import GB, MB
 from .sources import bt_alias, expected_size, fetch_subtitle, plausible_size, same_hash
-from .store import DAY, JUDGED_FOR_S, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, result_key
+from .store import DAY, JUDGED_FOR_S, NEVER_AGAIN, READ_FAILED_BACKOFF_S, REFUSED_BACKOFF_S, result_key
 from .subs import NO_DIALOGUE, decode, fingerprint, is_ass, parse, recognised
 
 log = logging.getLogger("subsync.worker")
@@ -1461,7 +1461,8 @@ class Worker(threading.Thread):
                 break
             except NotMatroska as e:
                 log.info("file not readable as Matroska or MP4 %s (%s): original kept", job.label, e)
-                self.store.file_failed(job.alias, REFUSED_BACKOFF_S)
+                # a format can't change, so such a file is never read again; a damaged index backs off
+                self.store.file_failed(job.alias, NEVER_AGAIN if isinstance(e, OtherFormat) else REFUSED_BACKOFF_S)
                 return
             except Refused:
                 if job.usenet and not job.audio:

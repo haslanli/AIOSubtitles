@@ -43,6 +43,11 @@ class NotMp4(NotMatroska):
     """Not an MP4 this module can read (kept under NotMatroska so callers treat both the same way)."""
 
 
+class OtherFormat(NotMp4):
+    """A file of a format neither module reads: neither Matroska nor MP4, or a fragmented MP4. Its first bytes show it
+    and can't change, so the worker never reads it again, where a damaged index backs off."""
+
+
 class NoAudioThere(NotMp4):
     """No sample of the audio track covers the asked time (an audio window past the end of the file's audio)."""
 
@@ -160,7 +165,7 @@ class Mp4Index:
                 self.moov_at, self.moov_size = pos, size
                 return self
             if kind == b"moof":
-                raise NotMp4("fragmented MP4")
+                raise OtherFormat("fragmented MP4")
             pos += size
         raise NotMp4("no moov")
 
@@ -219,7 +224,7 @@ class Mp4Index:
                 if t:
                     self.tracks.append(t)
             elif kind == b"mvex":   # the mark of a fragmented file: its samples are in moof boxes, not read here
-                raise NotMp4("fragmented MP4")
+                raise OtherFormat("fragmented MP4")
 
     def _trak(self, b, p, e):
         """A track's facts; its sample tables only as where they are ("tables": {key: _span}), for read_cues."""
@@ -570,8 +575,8 @@ def _adts(asc, frame_len):
 
 
 def open_index(reader):
-    """The index for a file, chosen by its first bytes: Matroska, else MP4. Raises NotMatroska for anything else, and for
-    a file whose index is damaged (mkv.DAMAGED)."""
+    """The index for a file, chosen by its first bytes: Matroska, else MP4. Raises OtherFormat for anything else, and
+    NotMatroska for a file whose index is damaged (mkv.DAMAGED)."""
     head = reader.get(0, HEAD_BYTES)
     try:
         is_mkv = vint(head, 0, strip=False)[0] == EBML
@@ -584,4 +589,4 @@ def open_index(reader):
             return Mp4Index(reader).read_head(head).read_cues()
     except DAMAGED as e:
         raise NotMatroska(f"damaged index ({str(e) or type(e).__name__})") from None
-    raise NotMatroska("neither Matroska nor MP4")
+    raise OtherFormat("neither Matroska nor MP4")

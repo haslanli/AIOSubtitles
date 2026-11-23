@@ -137,7 +137,18 @@ def every_state():
                       'in the background, so subsync can find a file you play from Usenet when your debrid service '
                       "doesn't have it. It never appears in your apps.")
     add('review-usenet', screens.review(sections + [usenet_section]), *words, usenet_section[2])
-    add('review-usenet-only', screens.review([sections[0], usenet_section]), *words, usenet_section[2])
+    # its only config, with the subtitle sources too
+    usenet_only = ("subsync's Usenet config (new)", [], 'only your Usenet searches, Usenet services and subtitle '
+                   'sources, with nothing running in the background, so subsync can find the files you play from '
+                   'Usenet. It never appears in your apps.')
+    add('review-usenet-only', screens.review([sections[0], usenet_only]), *words, usenet_only[2])
+    # a config of subsync's that saving deletes, shown before the yes: the headings are approved words
+    deleted = [("subsync's own config (deleted)", [], 'not needed any more: with no debrid service subsync may read, '
+                'it finds files through its Usenet config only.'),
+               ("subsync's Usenet config (deleted)", [], 'not needed any more, since Usenet is off.')]
+    add('review-deleted', screens.review([sections[0], deleted[0], usenet_only]), *words[:3], words[-1],
+        deleted[0][2], usenet_only[2])
+    add('review-usenet-deleted', screens.review(sections + [deleted[1]]), *words, deleted[1][2])
     usenet_checks = [('ok', f'Your apps can reach subsync at {PUBLIC}/subsync', None),
                                      ('ok', 'AIOStreams asks subsync for subtitles', None),
                                      ('ok', "subsync's Usenet config answers (no search made, to spare your indexer's "
