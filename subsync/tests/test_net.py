@@ -237,6 +237,12 @@ class GateTest(unittest.TestCase):
         for url in ("file:///etc/passwd", "ftp://ftp.test/x", "data:text/plain,hello"):
             with self.subTest(url=url):
                 refused(self, lambda: realdebrid.urlopen(url, timeout=5))
+        # any opener of the gate too: realdebrid.urlopen checks the scheme before its opener, so only this reaches the
+        # opener's own refusal (_OtherSchemes) in public mode; its ftp address is this machine's, so a
+        # refusal that broke would reach nothing else
+        for url in ("file:///etc/passwd", "ftp://127.0.0.1:9/x", "data:text/plain,hello"):
+            with self.subTest(opener=url):
+                refused(self, lambda: net.build_opener().open(url, timeout=5))
 
     def test_other_schemes_are_refused_off_public_mode_too(self):
         # A subtitle listed as file:///proc/self/environ by a third-party addon was read from this machine's

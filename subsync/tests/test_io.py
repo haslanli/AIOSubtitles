@@ -13,14 +13,14 @@ import sys
 import tempfile
 import threading
 import time
-import tracemalloc
 import types
 import unittest
 import urllib.error
 from unittest import mock
 
 from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_track, RangeServer,
-                     realistic, rules, srt_of, start_server, stop_server, TempDir, translated, watch_the_log)
+                     realistic, rules, srt_of, start_server, stop_server, TempDir, traced_memory, translated,
+                     watch_the_log)
 from subsync import imageref, mkv, mp4, pipeline, realdebrid, selftest, sources
 from subsync.addon import App
 from subsync.mkv import MkvIndex, NotMatroska, oshash, pipe_until
@@ -2316,11 +2316,8 @@ class ReplyCheckTest(unittest.TestCase):
         # Its pieces and their join were held together: twice the read (128 MiB for a 64 MiB moov)
         n = 8 << 20
         r = RangeReader("http://127.0.0.1:9/f.mp4", "t", opener=lambda request, timeout: Reply(0, n))
-        tracemalloc.start()
-        try:
+        with traced_memory() as traced:
             data = r.get(0, n)
-            peak = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
+            peak = traced()[1]
         self.assertEqual(len(data), n)
         self.assertLess(peak, n * 1.25)

@@ -5,12 +5,11 @@ are served from memory."""
 import struct
 import sys
 import time
-import tracemalloc
 import unittest
 from array import array
 from unittest import mock
 
-from helpers import fixture, have, Memory, Opener  # noqa: E402
+from helpers import fixture, have, Memory, Opener, traced_memory  # noqa: E402
 from subsync import mp4  # noqa: E402
 from subsync.mp4 import NotMp4, open_index  # noqa: E402
 from subsync.reader import IndexTooLarge, RangeReader  # noqa: E402
@@ -156,15 +155,12 @@ class TableMemoryTest(unittest.TestCase):
 
     def opened(self, data):
         """(the index, or the NotMp4 opening it raised; the most memory taken while opening it)"""
-        tracemalloc.start()
-        try:
+        with traced_memory() as traced:
             try:
                 got = open_index(Memory(data))
             except NotMp4 as e:
                 got = e
-            return got, tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
+            return got, traced()[1]
 
     def test_large_tables_take_about_their_own_size(self):
         n = 1_000_000                                                    # 4 MB of table in a movie box of about 4 MB

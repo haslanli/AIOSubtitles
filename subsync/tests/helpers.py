@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import tracemalloc
 import types
 import unittest
 import urllib.error
@@ -219,6 +220,26 @@ class TempDir:
 
 def have(tool):
     return shutil.which(tool) is not None
+
+
+@contextlib.contextmanager
+def traced_memory():
+    """The memory Python takes while the block runs (tracemalloc): yields a function that gives (what is traced now,
+    the peak) since the block began. Tracing may be on already (-X tracemalloc, as a ResourceWarning suggests): then the
+    block's own memory is still what is measured, and tracing stays on afterwards for the run's later warnings; it is
+    stopped only when the block started it."""
+    started = not tracemalloc.is_tracing()
+    if started:
+        tracemalloc.start()
+        base = 0
+    else:
+        tracemalloc.reset_peak()
+        base = tracemalloc.get_traced_memory()[0]
+    try:
+        yield lambda: tuple(n - base for n in tracemalloc.get_traced_memory())
+    finally:
+        if started:
+            tracemalloc.stop()
 
 
 OCR_MODELS = ("latin_rec.onnx", "eslav_rec.onnx")     # the PP-OCRv5 models the image build adds (Dockerfile)

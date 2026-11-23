@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import tracemalloc
 import types
 import unittest
 import urllib.request
@@ -19,9 +20,10 @@ from unittest import mock
 
 import helpers
 import imagesubs as I
-from helpers import (BACKLOG, FIXTURES, have, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS,
-                     ocr_models_in, PASSWORD, RangeServer, REALDEBRID, RecheckHarness, ServerHarness, SignupHarness, SOURCE, SourcesHarness,
-                     start_server, stop_server, TempDir, TORBOX, TORRENTIO, wait_until, watch_the_log)
+from helpers import (BACKLOG, FIXTURES, have, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS, ocr_models_in,
+                     PASSWORD, RangeServer, REALDEBRID, RecheckHarness, ServerHarness, SignupHarness, SOURCE,
+                     SourcesHarness, start_server, stop_server, TempDir, TORBOX, TORRENTIO, traced_memory, wait_until,
+                     watch_the_log)
 from subsync import net
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -276,6 +278,40 @@ class ImageBuildTest(unittest.TestCase):
                 self.assertEqual(out.returncode, code, out.stderr)
                 self.assertIn("Ran 2 tests", out.stderr)
                 self.assertIn(summary, out.stderr)
+
+
+class TracedMemoryTest(unittest.TestCase):
+    """traced_memory measures the block's own memory whether or not tracing was on as it began, and stops
+    tracing only when it started it. The memory tests started and stopped it themselves: under -X tracemalloc they
+    measured everything traced since the run began, and turned tracing off for the rest of the run."""
+
+    @staticmethod
+    def block():
+        """(held, peak) as traced_memory gives them for a block that takes and keeps 2 MB."""
+        with traced_memory() as traced:
+            kept = bytearray(2_000_000)
+            held, peak = traced()
+        del kept
+        return held, peak
+
+    def test_with_tracing_on_the_block_alone_is_measured_and_tracing_stays_on(self):
+        if not tracemalloc.is_tracing():
+            tracemalloc.start()
+            self.addCleanup(tracemalloc.stop)
+        before = bytearray(5_000_000)                     # held from before the block
+        held, peak = self.block()
+        self.assertTrue(tracemalloc.is_tracing())
+        self.assertGreaterEqual(held, 2_000_000)
+        self.assertLess(peak, 3_000_000)                  # the block's 2 MB, not the 5 MB from before
+        del before
+
+    def test_with_tracing_off_it_is_on_for_the_block_only(self):
+        if tracemalloc.is_tracing():
+            self.skipTest("tracing is on for the whole run (-X tracemalloc)")
+        held, peak = self.block()
+        self.assertFalse(tracemalloc.is_tracing())
+        self.assertGreaterEqual(held, 2_000_000)
+        self.assertLess(peak, 3_000_000)
 
 
 class WatchTheLogTest(unittest.TestCase):

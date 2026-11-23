@@ -9,7 +9,6 @@ import sqlite3
 import sys
 import threading
 import time
-import tracemalloc
 import types
 import unittest
 import urllib.error
@@ -22,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only,  # noqa: E402
-                     RangeServer, start_server, stop_server, TempDir, watch_the_log)
+                     RangeServer, start_server, stop_server, TempDir, traced_memory, watch_the_log)
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import App, file_id, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -2548,15 +2547,12 @@ class FetchSubtitleTest(unittest.TestCase):
 
     def peak(self, body):
         """(what fetching `body` gave, in short: its size or the error; the most memory Python held meanwhile)."""
-        tracemalloc.start()
-        try:
+        with traced_memory() as traced:
             try:
                 got = f"{len(self.fetch(body))} bytes"
             except Exception as e:
                 got = f"{type(e).__name__}: {e}"
-            return got, tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
+            return got, traced()[1]
 
     @staticmethod
     def zipped(data, method, declared=None):

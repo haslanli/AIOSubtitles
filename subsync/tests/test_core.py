@@ -6,7 +6,7 @@ import struct
 import time
 import unittest
 
-from helpers import AUDIO_BETTER, FakeIndex, realistic, rhythm, rules, timeline_fit
+from helpers import AUDIO_BETTER, FakeIndex, realistic, rhythm, rules, timeline_fit, traced_memory
 from subsync import choose, imageref, langs, pipeline, refine, shift, subs
 from subsync import relgate as relgate_mod
 from subsync.addon import as_srt
@@ -1036,19 +1036,15 @@ class StartWindowTest(unittest.TestCase):
     def test_a_long_or_dense_track_takes_little_memory(self):
         # every pair at once: 1,700 x 8,000 starts peaked at ~220 MiB; a crafted track of 20,000 cues within five
         # minutes against 1,000 lines at ~380 MiB. Blocked: a few arrays of PAIRS_AT_ONCE (2^20) differences at most
-        import tracemalloc
         rng = random.Random(9)
         long_ = (sorted(rng.uniform(0, 7200) for _ in range(8000)), sorted(rng.uniform(0, 7200) for _ in range(1700)))
         dense = (sorted(rng.uniform(900, 1400) for _ in range(1000)),
                  sorted([rng.uniform(1000, 1300) for _ in range(20000)] + [7000.0]))
         for name, (cand, ref) in (("long", long_), ("dense", dense)):
             with self.subTest(track=name):
-                tracemalloc.start()
-                try:
+                with traced_memory() as traced:
                     self.assertIsNotNone(shift._window(cand, ref, 120.0))
-                    peak = tracemalloc.get_traced_memory()[1]
-                finally:
-                    tracemalloc.stop()
+                    peak = traced()[1]
                 self.assertLess(peak, 32 * 2 ** 20)
 
 

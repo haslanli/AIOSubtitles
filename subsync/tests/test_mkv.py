@@ -13,13 +13,12 @@ import subprocess
 import sys
 import threading
 import time
-import tracemalloc
 import unittest
 import zlib
 from array import array
 from unittest import mock
 
-from helpers import el, fixture, FIXTURES, have, matroska, Memory, Opener, text_track  # noqa: E402
+from helpers import el, fixture, FIXTURES, have, matroska, Memory, Opener, text_track, traced_memory  # noqa: E402
 from subsync import mkv, mp4  # noqa: E402
 from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash  # noqa: E402
 from subsync.mp4 import Mp4Index, open_index  # noqa: E402
@@ -432,12 +431,9 @@ class CuePointsTest(unittest.TestCase):
 
     def test_a_video_tracks_cue_points_hold_no_memory_each(self):
         index = self.indexed(100_000, 2)
-        tracemalloc.start()
-        try:
+        with traced_memory() as traced:
             index.read_cues()
-            held, _ = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+            held, _ = traced()
         self.assertEqual(index.track_cues, {})
         self.assertLess(held, 1_000_000)                    # 100,000 tuples and floats would be over 10 MB
 
