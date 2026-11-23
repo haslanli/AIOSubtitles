@@ -1,7 +1,8 @@
 """The parts AIOSubtitles' pages are built from, and the parts the installer reuses.
 
-Each part is a small function that returns HTML. Every value is escaped here; no part writes a style attribute (the
-security header allows only static/app.css). The look is in static/app.css, the few moments that move in
+Each part is a small function that returns HTML. Every value is escaped here; what a part takes as HTML (`attrs`,
+`body_attrs`, `extra`, the `*_html` parameters) its caller built from escaped parts. No part writes a style attribute
+(the security header allows only static/app.css). The look is in static/app.css, the few moments that move in
 static/app.js, and the words come from the caller (explain.py and pages.py hold the approved texts).
 """
 import functools
@@ -148,12 +149,12 @@ def top(contact, start="/", privacy=True):
 # ------------------------------------------------------------------------------------------- buttons
 
 def button(label, kind="primary", type="button", attrs="", arrow=False):
-    return (f"<button class=\"btn {kind}\" type=\"{type}\"{(' ' + attrs) if attrs else ''}>{e(label)}"
+    return (f"<button class=\"btn {e(kind)}\" type=\"{e(type)}\"{(' ' + attrs) if attrs else ''}>{e(label)}"
             f"{ARROW if arrow else ''}</button>")
 
 
 def link_button(label, href, kind="primary", attrs="", arrow=False):
-    return (f"<a class=\"btn {kind}\" href=\"{e(href)}\"{(' ' + attrs) if attrs else ''}>{e(label)}"
+    return (f"<a class=\"btn {e(kind)}\" href=\"{e(href)}\"{(' ' + attrs) if attrs else ''}>{e(label)}"
             f"{ARROW if arrow else ''}</a>")
 
 
@@ -177,8 +178,9 @@ def field(id, label, help_text, name=None, kind="text", mono=False, error=None, 
     help_id = f"{id}-help"
     error_id = f"{id}-error" if error and not error_ref else error_ref
     classes = "input" + (" mono" if mono else "") + (" code" if code else "")
-    box = (f"<input class=\"{classes}\" id=\"{e(id)}\" name=\"{e(name or id)}\" type=\"{kind}\" "
-           f"aria-describedby=\"{described(error_id, help_id)}\"" + (" aria-invalid=\"true\"" if error or error_ref else "")
+    box = (f"<input class=\"{classes}\" id=\"{e(id)}\" name=\"{e(name or id)}\" type=\"{e(kind)}\" "
+           f"aria-describedby=\"{e(described(error_id, help_id))}\""
+           + (" aria-invalid=\"true\"" if error or error_ref else "")
            + (f" {attrs}" if attrs else "") + ">")
     if reveal:
         show, hide = e(SHOW + label), e(HIDE + label)
@@ -217,12 +219,14 @@ ORDINALS = ("First", "Second", "Third", "Fourth")
 REMOVE = "Remove: "   # a slot's remove button is named this and its language (the script names it again on a change)
 
 
-def language_slots(languages, chosen, limit, labelled_by, help_id, error_id=None, name="lang"):
+def language_slots(languages, chosen, limit, labelled_by, help_id, error_id=None, name="lang", marked=False):
     """The language slots: one select per place, "First" to the limit, each listing every language
     ("None" after the first). The page shows every slot; the script shows the filled ones and "Add language" up to the
     limit (`data-max-languages`), greys out a language already chosen in another slot, and names each remove button
     by its slot's language (after the words in `data-remove-label`). `languages`: (name, code) pairs. A record holding
-    more languages than the limit (a lowered limit) shows all of them."""
+    more languages than the limit (a lowered limit) shows all of them. `marked`: the slots come with the hidden
+    lang_ui field, by which signup.form_languages tells the public pages' form from an older one of typed names (the
+    installer's form has no older one)."""
     chosen = [c for c in dict.fromkeys(chosen) if any(c == code for _, code in languages)]
     count = max(limit, len(chosen))
     rows = []
@@ -239,8 +243,9 @@ def language_slots(languages, chosen, limit, labelled_by, help_id, error_id=None
         rows.append(f"<div class=\"slot\" data-slot><label for=\"{e(name)}-{i + 1}\">{e(label)}</label><div class=\"sel\">"
                     f"<select id=\"{e(name)}-{i + 1}\" name=\"{e(name)}\"{'' if current else ' class=\"empty\"'}>{options}"
                     f"</select>{CHEVRON}</div>{remove}</div>")
-    return (f"<input type=\"hidden\" name=\"lang_ui\" value=\"1\"><div class=\"slots\" id=\"languages\" role=\"group\" "
-            f"aria-labelledby=\"{e(labelled_by)}\" aria-describedby=\"{described(error_id, help_id)}\" "
+    return (("<input type=\"hidden\" name=\"lang_ui\" value=\"1\">" if marked else "")
+            + f"<div class=\"slots\" id=\"languages\" role=\"group\" "
+            f"aria-labelledby=\"{e(labelled_by)}\" aria-describedby=\"{e(described(error_id, help_id))}\" "
             f"data-max-languages=\"{int(limit)}\" data-remove-label=\"{e(REMOVE)}\">{''.join(rows)}</div>"
             f"<button class=\"btn secondary add\" type=\"button\" data-add hidden>{PLUS}Add language</button>")
 
@@ -251,10 +256,11 @@ def note(kind, text=None, title=None, role=None, id=None, focus=False, extra="")
     """A note after an action: done (ok), a warning (warn) or a problem: one surface, a mark, the words. `extra`: more
     HTML the caller built from escaped parts (a second paragraph, a list, a problem's link)."""
     icon = TICK if kind == "ok" else MARK
-    attrs = (f" role=\"{role}\"" if role else "") + (f" id=\"{e(id)}\"" if id else "") + (" tabindex=\"-1\"" if focus else "")
+    attrs = ((f" role=\"{e(role)}\"" if role else "") + (f" id=\"{e(id)}\"" if id else "")
+             + (" tabindex=\"-1\"" if focus else ""))
     head = f"<b>{e(title)}</b>" if title else ""
     words = f"<p>{e(text)}</p>" if text else ""
-    return f"<div class=\"note {kind}\"{attrs}>{icon}<div>{head}{words}{extra}</div></div>"
+    return f"<div class=\"note {e(kind)}\"{attrs}>{icon}<div>{head}{words}{extra}</div></div>"
 
 
 def problem_summary(error, title, field=None, extra=""):
@@ -365,7 +371,8 @@ def number_field(id, label, value, help_text=None, unit=None, keypad="numeric", 
     the value, under the label, as field() shows it."""
     error_html, attrs = _limit_error(id, error, help_text)
     return (f"<div class=\"limit field\"><label for=\"{e(id)}\">{e(label)}</label>{error_html}<div class=\"num"
-            f"{' has-unit' if unit else ''}\"><input id=\"{e(id)}\" name=\"{e(id)}\" type=\"text\" inputmode=\"{keypad}\" "
+            f"{' has-unit' if unit else ''}\"><input id=\"{e(id)}\" name=\"{e(id)}\" type=\"text\" "
+            f"inputmode=\"{e(keypad)}\" "
             f"value=\"{e(value)}\" autocomplete=\"off\" spellcheck=\"false\"{attrs}>"
             + (f"<span class=\"unit\">{e(unit)}</span>" if unit else "") + "</div>"
             + (f"<p class=\"help\" id=\"{e(id)}-help\">{e(help_text)}</p>" if help_text else "") + "</div>")
@@ -384,18 +391,24 @@ def segmented(name, label, options, value, help_text=None, unit=None, error=None
             + (f"<p class=\"help\" id=\"{e(name)}-help\">{e(help_text)}</p>" if help_text else "") + "</div>")
 
 
+def _marked_list(tag, cls, marks, rows):
+    """A list whose rows are (kind, text, more): each marked by its kind's (icon, spoken name) in `marks`, `more` an
+    optional line under the text (check_rows, progress_list)."""
+    out = []
+    for kind, text, more in rows:
+        icon, spoken = marks[kind]
+        out.append(f"<li class=\"{e(kind)}\"><span class=\"ic\" role=\"img\" aria-label=\"{e(spoken)}\">{icon}</span>"
+                   f"<span class=\"tx\">{e(text)}" + (f"<span class=\"more\">{e(more)}</span>" if more else "")
+                   + "</span></li>")
+    return f"<{tag} class=\"{cls}\">" + "".join(out) + f"</{tag}>"
+
+
 CHECK_MARKS = {"ok": (TICK_BOLD, "Done"), "warn": (MARK, "Warning"), "bad": (CROSS_BOLD, "Problem")}
 
 
 def check_rows(rows):
     """Check rows: (kind, text, more) with kind ok, warn or bad; `more` an optional line under the text."""
-    out = []
-    for kind, text, more in rows:
-        icon, spoken = CHECK_MARKS[kind]
-        out.append(f"<li class=\"{kind}\"><span class=\"ic\" role=\"img\" aria-label=\"{spoken}\">{icon}</span>"
-                   f"<span class=\"tx\">{e(text)}" + (f"<span class=\"more\">{e(more)}</span>" if more else "")
-                   + "</span></li>")
-    return "<ul class=\"checks\">" + "".join(out) + "</ul>"
+    return _marked_list("ul", "checks", CHECK_MARKS, rows)
 
 
 PROGRESS_MARKS = {"done": (TICK_BOLD, "Done"), "now": ("", "Working"), "next": ("", "Waiting")}
@@ -404,13 +417,7 @@ PROGRESS_MARKS = {"done": (TICK_BOLD, "Done"), "now": ("", "Working"), "next": (
 def progress_list(rows):
     """The install's progress: (state, text, more) with state done, now or next; `more` an optional line under the
     text, as in check_rows."""
-    out = []
-    for state, text, more in rows:
-        icon, spoken = PROGRESS_MARKS[state]
-        out.append(f"<li class=\"{state}\"><span class=\"ic\" role=\"img\" aria-label=\"{spoken}\">{icon}</span>"
-                   f"<span class=\"tx\">{e(text)}" + (f"<span class=\"more\">{e(more)}</span>" if more else "")
-                   + "</span></li>")
-    return "<ol class=\"progress\">" + "".join(out) + "</ol>"
+    return _marked_list("ol", "progress", PROGRESS_MARKS, rows)
 
 
 def config_changes(sections):

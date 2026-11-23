@@ -1449,6 +1449,36 @@ class PartsTest(unittest.TestCase):
         self.assertEqual(len(tree.all("button")), 1)
         self.assertFalse(Tree(ui.update_panel("Updates", "About.", "Runs.", None, "Update")).all("button"))
 
+    def test_every_value_a_part_writes_is_escaped(self):
+        # A button's kind and type, a box's type and the ids that describe it, a note's kind and role, a number
+        # box's keypad, the language slots' description ids and a marked list's kinds and spoken marks went in as given
+        from subsync import ui
+        q = 'x"><i>'
+        texts = [ui.button("B", kind=q, type=q), ui.link_button("L", "/", kind=q),
+                 ui.field(q, "F", "h.", kind=q, error_ref=q), ui.note(q, "t", role=q),
+                 ui.number_field("n", "N", "1", keypad=q),
+                 ui.language_slots([("English", "eng")], ["eng"], 1, "l", q, error_id=q),
+                 ui._marked_list("ul", "checks", {q: ("", q)}, [(q, "t", None)])]
+        for text in texts:
+            with self.subTest(text=text[:40]):
+                self.assertNotIn(q, text)
+                self.assertIn(ui.e(q), text)
+        box = Tree(ui.field('x"y', "F", "h.", error_ref='a"b')).all("input")[0]
+        self.assertEqual((box["id"], box["aria-describedby"]), ('x"y', 'a"b x"y-help'))   # one attribute each
+
+    def test_only_the_public_pages_language_slots_carry_their_forms_marker(self):
+        # Every slot group wrote the public form's lang_ui field (signup.form_languages tells that form from
+        # an older one by it), so the installer's choices step sent one nothing reads
+        from subsync import pages, ui
+        marker = '<input type="hidden" name="lang_ui" value="1">'
+        self.assertNotIn("lang_ui", ui.language_slots([("English", "eng")], ["eng"], 2, "l", "h", name="LANGUAGES"))
+        slots = ui.language_slots([("English", "eng")], ["eng"], 2, "l", "h")
+        self.assertEqual(ui.language_slots([("English", "eng")], ["eng"], 2, "l", "h", marked=True), marker + slots)
+        s = settings()
+        for page in (pages.signup_page(s), pages.settings_page(s, RECORD, USAGE, LINK, now=0)):
+            self.assertEqual(page.count(marker), 1)
+            self.assertIn("lang_ui", {a.get("name") for a in Tree(page).all("input", type="hidden")})
+
     def test_no_part_writes_a_style_attribute(self):
         from subsync import ui
         parts = [ui.radio_row("w", "a", "A", "a."), ui.step_frame(["A"], 0, "", "S"), ui.number_field("n", "N", "1"),

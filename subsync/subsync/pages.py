@@ -180,7 +180,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None, ticked
                            "<h2 class=\"q\" id=\"languages-q\">Languages</h2>"
                            + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>"
                            + ui.language_slots(LANGUAGE_OPTIONS, order, limit, "languages-q", "languages-help",
-                                               err("languages"))))
+                                               err("languages"), marked=True)))
     usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day),
                         checked=ticked["usenet"]),) if usenet_allowed(settings) else ()
     # With the instance's audio route on, each person answers for files with no subtitles of their own
@@ -464,7 +464,8 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                      (f"<p class=\"field-error\" id=\"languages-error\">{e(lang_error)}</p>" if lang_error else "")
                      + f"<p class=\"help\" id=\"languages-help\">{e(explain.languages_help(settings))}</p>",
                      _form("languages", ui.language_slots(LANGUAGE_OPTIONS, record["languages"], limit, "languages-h",
-                                                          "languages-help", "languages-error" if lang_error else None)
+                                                          "languages-help", "languages-error" if lang_error else None,
+                                                          marked=True)
                            + f"<div class=\"actions\">{ui.button('Save languages', 'primary', type='submit')}</div>"))
     kept = bool(record.get("auto_password"))
     when = days_ago(record.get("synced_at"), now)
