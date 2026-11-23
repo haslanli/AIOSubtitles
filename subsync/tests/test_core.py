@@ -906,8 +906,19 @@ class ClearlyBetterTest(unittest.TestCase):
         before, after = self.gates(styled(self.cues, 6, shift=9.0), half)
         self.assertEqual(clearly_better(before, after, min_span=0.7)[1], "covers too little of the runtime")
 
-    def test_another_films_subtitle_is_never_accepted_at_any_shift(self):
-        # 40 unrelated subtitles, each tried at its best constant shift (what a re-timer would find)
+    def test_another_films_subtitle_is_refused_at_the_shift_the_shift_path_finds(self):
+        # 40 unrelated subtitles, each moved as the one-shift path moves a subtitle (pipeline.shift_sync): by the scale
+        # and offset shift.best_shift finds for it, any offset within MAX_OFFSET_S, the frame-rate scales too
+        for seed in range(40):
+            other = [s for s, _ in rhythm(900, 1000 + seed)]
+            scale, offset, _ = shift.best_shift(other, self.ref)
+            before = relgate(self.ref, other, self.dur, min_span=0.7)
+            after = relgate(self.ref, [c * scale + offset for c in other], self.dur, min_span=0.7)
+            with self.subTest(seed=seed):
+                self.assertFalse(clearly_better(before, after, min_span=0.7)[0])
+
+    def test_another_films_subtitle_is_refused_at_its_closest_shift_within_two_seconds(self):
+        # the same 40, each tried at the 50 ms step within +-2 s of where it is that gives the lowest median error
         accepted = 0
         for seed in range(40):
             other = [s for s, _ in rhythm(900, 1000 + seed)]
