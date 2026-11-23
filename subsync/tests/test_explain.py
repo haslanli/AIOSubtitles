@@ -54,7 +54,7 @@ class ExplainTest(unittest.TestCase):
     def test_every_documented_default_is_the_codes_default(self):
         defaults = vars(Settings({}))
         for name, (default, _) in explain.SETTINGS.items():
-            if default is None or name == "SUBSYNC_VAD_MODEL":   # required (no default), or read outside Settings
+            if default is None:   # required: no default
                 continue
             with self.subTest(name=name):
                 self.assertEqual(vars(Settings({name: default})), defaults)

@@ -112,7 +112,7 @@ class UnreadableWindowTest(unittest.TestCase):
                                            "sys.stdout.buffer.flush(); sys.stdin.buffer.read(); time.sleep(30)"]
             with mock.patch("subsync.mp4.decoder_cmd", lambda *a, **k: hangs), \
                     mock.patch("subsync.mp4.pipe_until", lambda *a, **k: pipe_until(*a, **k, timeout=1.0)):
-                self.assertEqual(idx.window_pcm(20.0, 10.0), b"\x01\x00" * 1000)
+                self.assertEqual(idx.window_pcm(20.0, 10.0, 16000), b"\x01\x00" * 1000)
                 fit = AudioFit(idx, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=LoudVad())
                 with self.assertRaises(ReadFailed):                       # and a fit takes it as a short window
                     fit.read_window(20.0, 10.0)

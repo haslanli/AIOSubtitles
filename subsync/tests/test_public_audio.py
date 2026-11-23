@@ -848,9 +848,9 @@ class DecoderTest(unittest.TestCase):
             return real(*a, **k)
         with mock.patch.object(mkv, "decoder_cmd", spy), mock.patch.object(mp4, "decoder_cmd", spy):
             idx = mkv.MkvIndex(RangeReader(srv.url("tiny.mkv"), "t")).read_head().read_cues()
-            self.assertAlmostEqual(len(idx.window_pcm(30.0, 10.0)) / 2 / 16000, 10.0, delta=0.1)
+            self.assertAlmostEqual(len(idx.window_pcm(30.0, 10.0, 16000)) / 2 / 16000, 10.0, delta=0.1)
             m = mp4.open_index(RangeReader(srv.url("tiny-nosub.mp4"), "t"))
-            self.assertAlmostEqual(len(m.window_pcm(20.0, 10.0)) / 2 / 16000, 10.0, delta=0.1)
+            self.assertAlmostEqual(len(m.window_pcm(20.0, 10.0, 16000)) / 2 / 16000, 10.0, delta=0.1)
         self.assertEqual(made, ["matroska", "aac"])
 
 
@@ -930,7 +930,7 @@ class PoolTest(unittest.TestCase):
         made = []
 
         class FakeVad:
-            def __init__(self):
+            def __init__(self, path=None):
                 made.append(self)
         pool = self.pool()
         a, b = pool.app(self.tokens[0]), pool.app(self.tokens[1])
@@ -938,6 +938,22 @@ class PoolTest(unittest.TestCase):
         with mock.patch.object(vad, "SileroVad", FakeVad):
             self.assertIs(a.worker.vad(), b.worker.vad())
         self.assertEqual(len(made), 1)
+
+    def test_the_speech_detector_takes_its_model_from_the_settings(self):
+        # SUBSYNC_VAD_MODEL was read from the process's environment when the first audio sync made the
+        # detector, never by Settings
+        from unittest import mock
+        from subsync import vad
+        made = []
+
+        class FakeVad:
+            def __init__(self, path=None):
+                made.append(path)
+        with mock.patch.dict(os.environ, {"SUBSYNC_VAD_MODEL": "/elsewhere/vad.onnx"}), \
+                mock.patch.object(vad, "SileroVad", FakeVad):
+            for env in ({}, {"SUBSYNC_VAD_MODEL": "/models/vad.onnx"}):
+                self.pool(**env).vad()
+        self.assertEqual(made, [None, "/models/vad.onnx"])
 
     def test_room_is_what_is_left_of_the_persons_day(self):
         from subsync.public import StoreOnly, UserLimits

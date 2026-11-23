@@ -225,7 +225,7 @@ class MkvTest(unittest.TestCase):
     def test_window_pcm_decodes(self):
         r = RangeReader(self.srv.url("tiny.mkv"), "test")
         idx = MkvIndex(r).read_head().read_cues()
-        pcm = idx.window_pcm(30.0, 10.0)
+        pcm = idx.window_pcm(30.0, 10.0, 16000)
         self.assertAlmostEqual(len(pcm) / 2 / 16000, 10.0, delta=0.1)
 
 
@@ -308,9 +308,9 @@ class Mp4Test(unittest.TestCase):
         for name in ("tiny.mp4", "tiny-nosub.mp4"):
             idx = self.index(name)
             before = idx.r.bytes
-            idx.window_pcm(20.0, 10.0)
+            idx.window_pcm(20.0, 10.0, 16000)
             self.assertLess(idx.r.bytes - before, idx.size // 3)   # what the window's read takes, its margins included
-            pcm = idx.window_pcm(20.0, 40.0)
+            pcm = idx.window_pcm(20.0, 40.0, 16000)
             self.assertAlmostEqual(len(pcm) / 2 / 16000, 40.0, delta=0.1)
             x = array.array("h", pcm[:len(pcm) // 2 * 2])
             onsets, before = [], False          # the fixture's tone is on during each line

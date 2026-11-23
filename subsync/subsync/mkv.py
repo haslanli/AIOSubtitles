@@ -20,12 +20,13 @@ from operator import itemgetter
 
 from .imageref import IMAGE_CODECS
 from .programs import limited
-from .reader import IndexTooLarge, ReadFailed, Refused, Stopped
+from .reader import CHUNK, IndexTooLarge, ReadFailed, Refused, Stopped
 
 AUDIO_BYTES_LOCK = threading.Lock()
 # ffmpeg decodes bytes of files anyone can publish; on Linux each decoder gets its own limits
 FFMPEG_MEMORY_KB = 1024 * 1024    # address space of one decoder (1 GiB; a 30 s window needs a few MB)
 FFMPEG_CPU_S = 120                # processor seconds of one decoder (a window takes well under one)
+DECODE_WAIT_S = 300               # how long a decoder may still run once all its input is in; then it is stopped
 DECODER_SAID = 1024               # bytes of a decoder's error output kept, logged when it fails short
 # the only decoders ffmpeg may open, by its names for them (DTS's is dca, MP3's mp3float): those of the audio
 # codecs Matroska and MP4 files carry. A window's header names every track of the file, and ffmpeg's probing would
@@ -108,6 +109,7 @@ TEXT_INFLATE = 64 * 1024
 IMAGE_INFLATE = 4 * 1024 * 1024
 WORD_READS_AT_ONCE = 4
 MAX_FAILED_IN_A_ROW = 3            # a track's line reads stop after this many failed reads in a row
+STARTS_WITHIN_S = 0.0015           # a cue time this close to a line start asked for is that line's (starts_at)
 
 log = logging.getLogger("subsync.read")
 
@@ -148,7 +150,7 @@ def index_hash(index):
     return oshash(index.size, first, last)
 
 
-def starts_at(times, starts, within=0.0015):
+def starts_at(times, starts, within=STARTS_WITHIN_S):
     """[(start, k)] for each of `starts` that `times` (sorted) holds within `within` seconds, k its place in `times`."""
     found = []
     for s in starts:
@@ -296,7 +298,7 @@ def _read_some(pipe):
     return pipe.read1(65536) if hasattr(pipe, "read1") else pipe.read(65536)
 
 
-def pipe_until(cmd, head, chunks, need, timeout=300):
+def pipe_until(cmd, head, chunks, need, timeout=DECODE_WAIT_S):
     """Run a decoder on head + chunks (an iterator, e.g. RangeReader.stream) and stop feeding it once its output holds
     `need` bytes, or once it ends by itself; the iterator is then closed, which ends its read. Returns the output. An
     error of the iterator (the read failed, or was refused or stopped) is raised, once the decoder is stopped. A decoder
@@ -823,10 +825,11 @@ class MkvIndex:
         a, b = self.byte_range(start, length)
         return b - a
 
-    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024, track=None):
-        """16 kHz mono s16le PCM of [start, start+length) from the default audio track (or audio track `track`), one bounded read. The range runs
-        to the first seek point after the window, which can be far past it on a file with sparse Cues: the read is
-        streamed into the decoder and stops once the window is decoded. Bytes read are added to `audio_bytes`."""
+    def window_pcm(self, start, length, sr, ffmpeg="ffmpeg", chunk=CHUNK, track=None):
+        """Mono s16le PCM at `sr` Hz of [start, start+length) from the default audio track (or audio track `track`),
+        one bounded read. The range runs to the first seek point after the window, which can be far past it on a file
+        with sparse Cues: the read is streamed into the decoder and stops once the window is decoded. Bytes read are
+        added to `audio_bytes`."""
         a, b = self.byte_range(start, length)
         header = self.ebml + UNKNOWN_SIZE_SEGMENT + self.info + self.tracks_raw
         cmd = decoder_cmd(ffmpeg, "matroska", [

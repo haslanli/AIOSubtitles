@@ -157,11 +157,11 @@ class MidWindowFaultTest(unittest.TestCase):
     def test_a_window_whose_read_breaks_off_raises(self):
         r = self.reader(fixture("tiny.mkv"))
         index = MkvIndex(r).read_head().read_cues()
-        self.assertAlmostEqual(len(index.window_pcm(30.0, 10.0)) / 2 / 16000, 10.0, delta=0.1)
+        self.assertAlmostEqual(len(index.window_pcm(30.0, 10.0, 16000)) / 2 / 16000, 10.0, delta=0.1)
         index = MkvIndex(r).read_head().read_cues()
         r.open.reset_after = 1000
         with self.assertRaises(ReadFailed) as caught:
-            index.window_pcm(30.0, 10.0)
+            index.window_pcm(30.0, 10.0, 16000)
         self.assertTrue(caught.exception.connection)
 
 
@@ -177,7 +177,7 @@ class WindowPrerollTest(unittest.TestCase):
         index = open_index(RangeReader("http://127.0.0.1:9/tiny.mkv", "test", opener=Opener(data)))
         for start in (20.0, 20.03, 30.0, 40.0, 45.0):
             with self.subTest(start=start):
-                got = np.frombuffer(index.window_pcm(start, 6.0), np.int16).astype(np.int32)
+                got = np.frombuffer(index.window_pcm(start, 6.0, 16000), np.int16).astype(np.int32)
                 # the same seconds of the whole file, decoded from its start and cut at `start` (-ss after the input)
                 whole = subprocess.run(
                     ["ffmpeg", "-nostdin", "-v", "error", "-i", os.path.join(FIXTURES, "tiny.mkv"), "-ss",

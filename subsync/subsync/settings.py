@@ -292,6 +292,7 @@ class Settings:
         self.size_slack = int(read.number("SUBSYNC_SIZE_SLACK_MB", scale=MB))  # listed sizes are rounded to 0.01 GiB
         self.alass = g("SUBSYNC_ALASS")
         self.ffmpeg = g("SUBSYNC_FFMPEG")
+        self.vad_model = g("SUBSYNC_VAD_MODEL")   # the speech model's file; empty: the image's (vad.model_path)
         self.snap = read.switch("SUBSYNC_SNAP")                # per-line snap after alass
         self.snap_within = read.number("SUBSYNC_SNAP_WITHIN")  # a snapped copy's bar for "within 200 ms"
         # the second way to pass: a re-timed copy clearly closer to the release's track than the original

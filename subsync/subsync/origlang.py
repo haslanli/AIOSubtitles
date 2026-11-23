@@ -34,6 +34,7 @@ log = logging.getLogger("subsync.origlang")
 
 USER_AGENT = user_agent("subsync")
 TIMEOUT_S = 5.0
+KEY_CHECK_TIMEOUT_S = 10.0   # the wait for TMDB's answer to a key being checked (check_key)
 MAX_BYTES = 64 * 1024
 DAY = 86400
 NOT_FOUND_S = 7 * DAY        # a found answer is kept with no expiry, unless it holds TMDB's value:
@@ -198,7 +199,7 @@ def rule(rule_id, answer):
     return rule_id
 
 
-def check_key(settings, key, timeout=10.0):
+def check_key(settings, key, timeout=KEY_CHECK_TIMEOUT_S):
     """Whether TMDB takes a key (one request, GET /configuration, through the request gate): True, False, or None when
     TMDB didn't answer. The key is never logged or put in an error."""
     params, auth = _key_in(key)

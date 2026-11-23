@@ -232,7 +232,7 @@ class Pool:
         with self._vad_lock:
             if self._vad is None:
                 from . import vad
-                self._vad = vad.SileroVad()
+                self._vad = vad.SileroVad(self.s.vad_model or None)
             return self._vad
 
     def app(self, token):

@@ -16,7 +16,7 @@ from array import array
 from .mkv import (DAMAGED, EBML, HASH_CHUNK, HEAD_BYTES, WINDOW_MARGIN_S, WORD_READ, LineReads, MkvIndex, NotMatroska,
                   add_audio_bytes, decoder_cmd, index_hash, named_not_dialogue, pipe_until, read_lines, sane_duration,
                   starts_at, vint)
-from .reader import IndexTooLarge
+from .reader import CHUNK, IndexTooLarge
 
 MAX_MOOV = 64 * 1024 * 1024      # a larger movie box is never read (IndexTooLarge)
 # the samples of a track walked one by one (_lines, _sample_offsets) cost a Python object or more each, while a few bytes
@@ -433,8 +433,8 @@ class Mp4Index:
             return 0
         return b - a
 
-    def window_pcm(self, start, length, sr=16000, ffmpeg="ffmpeg", chunk=256 * 1024):
-        """16 kHz mono s16le PCM of [start, start+length) from the first usable audio track. The byte range of the
+    def window_pcm(self, start, length, sr, ffmpeg="ffmpeg", chunk=CHUNK):
+        """Mono s16le PCM at `sr` Hz of [start, start+length) from the first usable audio track. The byte range of the
         samples that cover it (WINDOW_MARGIN_S more on each side) is one bounded read, streamed as MkvIndex's is: each
         sample is cut out as its bytes pass and fed to the decoder, and the read stops once the window is decoded, so an
         interleaved file's video is never held. A range wider than MAX_WINDOW_SPAN times the window's share of the file,

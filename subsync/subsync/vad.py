@@ -1,7 +1,7 @@
 """Silero VAD (MIT, snakers4/silero-vad 6.2.3) on onnxruntime, no torch.
 
-Settings: 512-sample frames at
-16 kHz with 64 samples of context, threshold 0.5 (exit 0.35), min speech 100 ms, min silence 60 ms, no padding.
+Its frames and context, and the speech thresholds and shortest speech and silence it is read with, are the values
+below; no padding, no maximum length.
 """
 import os
 
@@ -10,12 +10,15 @@ import numpy as np
 SR = 16000
 FRAME = 512
 CONTEXT = 64
+THRESHOLD = 0.5        # a frame this likely to be speech, or more, starts speech or keeps it going
+EXIT_GAP = 0.15        # a pause in speech is frames below THRESHOLD - EXIT_GAP (0.35) ...
+EXIT_FLOOR = 0.01      # ... and never below this
+MIN_SPEECH_MS = 100    # speech no longer than this is left out
+MIN_SILENCE_MS = 60    # a shorter pause doesn't end speech
 
 
 def model_path():
-    explicit = os.environ.get("SUBSYNC_VAD_MODEL")
-    if explicit:
-        return explicit
+    """The model installed with the silero_vad package (SUBSYNC_VAD_MODEL names another: Settings.vad_model)."""
     import importlib.util
     spec = importlib.util.find_spec("silero_vad")
     if not spec or not spec.submodule_search_locations:
@@ -49,15 +52,15 @@ class SileroVad:
             out.append(float(prob[0][0]))
         return out
 
-    def speech(self, audio, threshold=0.5, min_speech_ms=100, min_silence_ms=60):
+    def speech(self, audio):
         """Speech segments [(start sample, end sample)], as silero's get_speech_timestamps with no padding and
         no maximum length."""
-        probs = self.probs(audio)
-        return timestamps(probs, len(audio), threshold, min_speech_ms, min_silence_ms)
+        return timestamps(self.probs(audio), len(audio))
 
 
-def timestamps(probs, n_samples, threshold=0.5, min_speech_ms=100, min_silence_ms=60):
-    neg = max(threshold - 0.15, 0.01)
+def timestamps(probs, n_samples, threshold=THRESHOLD, min_speech_ms=MIN_SPEECH_MS, min_silence_ms=MIN_SILENCE_MS):
+    """The speech segments [(start sample, end sample)] of per-frame speech probabilities."""
+    neg = max(threshold - EXIT_GAP, EXIT_FLOOR)
     min_speech = SR * min_speech_ms / 1000
     min_silence = SR * min_silence_ms / 1000
     triggered, temp_end, start = False, 0, 0

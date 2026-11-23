@@ -38,7 +38,7 @@ def main():
 
     def vad_factory():
         from .vad import SileroVad
-        return SileroVad()
+        return SileroVad(s.vad_model or None)
 
     from .extra import make_sources
     from .origlang import make_lookup

@@ -341,7 +341,7 @@ class WindowTest(unittest.TestCase):
     @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
     def test_a_window_is_streamed_and_cut_as_its_bytes_pass(self):
         data = fixture("tiny.mp4")
-        whole = open_index(self.reader(data)).window_pcm(20.0, 10.0)     # its range in one piece
+        whole = open_index(self.reader(data)).window_pcm(20.0, 10.0, 16000)     # its range in one piece
         self.assertAlmostEqual(len(whole) / 2 / 16000, 10.0, delta=0.1)
         r = self.reader(data)
         index = open_index(r)
@@ -350,7 +350,7 @@ class WindowTest(unittest.TestCase):
             raise AssertionError("an audio window read whole into memory")
         r.get = buffered
         before = r.bytes
-        pcm = index.window_pcm(20.0, 10.0, chunk=1000)                   # samples cut across 1,000-byte pieces
+        pcm = index.window_pcm(20.0, 10.0, 16000, chunk=1000)                   # samples cut across 1,000-byte pieces
         self.assertEqual(pcm, whole)
         self.assertEqual(index.audio_bytes, r.bytes - before)
 
@@ -365,7 +365,7 @@ class WindowTest(unittest.TestCase):
                          "chunks": [10, 4, 16, 22], "empty": 0, "media_time": 0}]   # one 3-byte sample per chunk
         echo = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
         with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: echo):
-            self.assertEqual(index.window_pcm(0.0, 4.0, chunk=2), b"AAABBBCCCDDD")   # cut across 2-byte pieces
+            self.assertEqual(index.window_pcm(0.0, 4.0, 16000, chunk=2), b"AAABBBCCCDDD")   # cut across 2-byte pieces
         self.assertEqual(index.audio_bytes, 25 - 4)                                    # from the first stored on
 
     def test_a_windows_cost_is_the_byte_range_it_reads(self):
@@ -384,7 +384,7 @@ class WindowTest(unittest.TestCase):
         self.assertEqual(index.window_bytes(10.0, 4.0), 0)              # no sample there: read as no audio
         echo = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
         with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: echo):
-            index.window_pcm(0.0, 4.0)
+            index.window_pcm(0.0, 4.0, 16000)
         self.assertEqual(index.audio_bytes, index.window_bytes(0.0, 4.0))
         index.tracks = []
         with self.assertRaises(NotMp4):                                 # no audio to decode, as window_pcm says
@@ -409,11 +409,11 @@ class WindowTest(unittest.TestCase):
         with self.assertRaises(NotMp4):
             index.window_bytes(0.0, 1.0)
         with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO), self.assertRaises(NotMp4):
-            index.window_pcm(0.0, 1.0)
+            index.window_pcm(0.0, 1.0, 16000)
         self.assertEqual(index.r.bytes, before)                         # nothing read
         index = self.index_of(bytes(range(200)), b"ac-3", [(i, 1) for i in range(200)], scale=100)   # AAC at 96 kHz
         with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO):
-            self.assertEqual(index.window_pcm(0.0, 2.0), bytes(range(200)))
+            self.assertEqual(index.window_pcm(0.0, 2.0, 16000), bytes(range(200)))
 
     def test_audio_samples_larger_than_their_codecs_frames_are_not_read(self):
         # Nothing bounded a sample's size: an AAC frame over 8,184 bytes got an ADTS header whose
@@ -423,11 +423,11 @@ class WindowTest(unittest.TestCase):
                 index = self.index_of(bytes(size), codec, [(0, size)], scale=1, asc=b"\x02\x03\x02")
                 before = index.r.bytes
                 with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO), self.assertRaises(NotMp4):
-                    index.window_pcm(0.0, 1.0)
+                    index.window_pcm(0.0, 1.0, 16000)
                 self.assertEqual(index.r.bytes, before)
         index = self.index_of(b"\x01" * 8184, b"mp4a", [(0, 8184)], scale=1, asc=b"\x02\x03\x02")   # the largest
         with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO):
-            out = index.window_pcm(0.0, 1.0)
+            out = index.window_pcm(0.0, 1.0, 16000)
         self.assertEqual(out[7:], b"\x01" * 8184)
         self.assertEqual(((out[3] & 3) << 11) | (out[4] << 3) | (out[5] >> 5), 8191)   # ADTS frame_length, header in
 
@@ -438,11 +438,11 @@ class WindowTest(unittest.TestCase):
         data = bytes(n * size)
         index = self.index_of(data, b"ac-3", [((n - 1 - i) * size, size) for i in range(n)], scale=100)
         with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO), self.assertRaises(NotMp4):
-            index.window_pcm(0.0, 2.0)
+            index.window_pcm(0.0, 2.0, 16000)
         self.assertLess(index.audio_bytes, len(data) * 3 // 4)        # stopped early
         forward = self.index_of(data, b"ac-3", [(i * size, size) for i in range(n)], scale=100)   # in their order
         with mock.patch.object(mp4, "decoder_cmd", lambda *a, **k: ECHO):
-            self.assertEqual(len(forward.window_pcm(0.0, 2.0)), len(data))
+            self.assertEqual(len(forward.window_pcm(0.0, 2.0, 16000)), len(data))
 
     def test_a_window_whose_samples_spread_far_past_it_is_not_read(self):
         data = bytearray(fixture("tiny.mp4"))
@@ -454,7 +454,7 @@ class WindowTest(unittest.TestCase):
         index = open_index(r)
         before = r.bytes
         with self.assertRaises(NotMp4):                          # (AudioFit then keeps the original, with the reason)
-            index.window_pcm(0.0, 5.0)
+            index.window_pcm(0.0, 5.0, 16000)
         self.assertEqual(r.bytes, before)                        # nothing read
 
 
