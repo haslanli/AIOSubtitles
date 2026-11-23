@@ -1879,6 +1879,16 @@ class SelfTestTest(unittest.TestCase):
         self.assertEqual(out["error"], "cap")
         self.assertIn("larger than subsync reads", out["detail"])
 
+    def test_an_index_cap_of_0_is_no_cap_as_for_the_worker(self):
+        # SUBSYNC_INDEX_CAP_MB 0 (accepted: "a number from 0") is no cap for the worker's JobGuard, but the
+        # self-test stopped at its first read and said every file's index was larger than subsync reads (0 MB)
+        s = Settings({"SUBSYNC_INDEX_CAP_MB": "0"})
+        self.assertEqual(s.index_cap, 0)
+        out = self.run_selftest(self.srv.url("tiny.mkv"), None, s)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["container"], "mkv")
+        self.assertGreater(out["bytes"], 0)
+
     def test_a_listed_size_off_by_rounding_is_accepted(self):
         real = os.path.getsize(os.path.join(FIXTURES, "tiny.mkv"))
         self.assertTrue(self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({}), size=real + 1000)["ok"])

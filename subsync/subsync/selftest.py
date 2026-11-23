@@ -20,11 +20,14 @@ from .worker import rewrite
 
 
 class CapGuard:
+    """The self-test read's cap, kept as the worker's JobGuard keeps a file's: 0 is no cap, only the parsers' own
+    limits then."""
+
     def __init__(self, cap):
         self.cap, self.used = cap, 0
 
     def before_read(self, length):
-        if self.used + length > self.cap:
+        if self.cap and self.used + length > self.cap:
             raise Stopped("cap reached")
 
     def after_read(self, n, asked=None):
