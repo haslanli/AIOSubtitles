@@ -6,7 +6,8 @@ import struct
 import time
 import unittest
 
-from helpers import AUDIO_BETTER, FakeIndex, realistic, rhythm, rules, timeline_fit, traced_memory
+from helpers import (AUDIO_BETTER, FakeIndex, pgs_left_out, realistic, rhythm, rules, timeline_fit,
+                     traced_memory)
 from subsync import choose, imageref, langs, pipeline, refine, shift, subs
 from subsync import relgate as relgate_mod
 from subsync.addon import as_srt
@@ -1713,25 +1714,13 @@ class AudioPrefetchTest(unittest.TestCase):
         self.assertEqual(len(idx.reads), 3)                    # the fourth would pass the budget: left to read_window
 
 
-def pgs_events(lines):
-    """PGS cue times for lines (start, duration): show and clear, the clear left out when the next line starts at the
-    same moment."""
-    ev = []
-    for k, (s, d) in enumerate(lines):
-        ev.append(s)
-        nxt = lines[k + 1][0] if k + 1 < len(lines) else None
-        if nxt is None or nxt - (s + d) > 0.01:
-            ev.append(s + d)
-    return [(t, 0.0) for t in ev]
-
-
 class ImageRefTest(unittest.TestCase):
     def setUp(self):
         self.lines = rhythm(400, 11)
 
     def test_pgs_with_every_clear_gives_the_line_starts(self):
         lines = realistic(400, 5)       # Blu-ray style: every line has its clear (2-frame gaps, pauses between scenes)
-        ref = imageref.reference({"codec": "S_HDMV/PGS", "cues": pgs_events(lines)})
+        ref = imageref.reference(pgs_left_out(lines))
         self.assertTrue(ref["plausible"])
         got = [round(s, 3) for s, _ in ref["cues"]]
         truth = {round(s, 3) for s, _ in lines}
@@ -1739,7 +1728,7 @@ class ImageRefTest(unittest.TestCase):
         self.assertGreater(len(got) / len(lines), 0.75)                        # 82 % here; 83-95 % on real timings
 
     def test_no_pauses_and_no_short_gaps_means_no_guessing(self):
-        ref = imageref.reference({"codec": "S_HDMV/PGS", "cues": pgs_events(self.lines)})   # nothing pins the labels
+        ref = imageref.reference(pgs_left_out(self.lines))   # nothing pins the labels
         self.assertFalse(ref["plausible"])
 
     def test_left_out_clears_keep_only_sure_starts(self):
@@ -1754,7 +1743,7 @@ class ImageRefTest(unittest.TestCase):
             gap = 0.0 if x < 0.30 else r.uniform(0.04, 0.2) if x < 0.45 else r.uniform(0.25, 1) if x < 0.70 else \
                 r.uniform(1, 8) if x < 0.90 else r.uniform(8, 40)
             t += d + gap
-        ref = imageref.reference({"codec": "S_HDMV/PGS", "cues": pgs_events(lines)})
+        ref = imageref.reference(pgs_left_out(lines))
         truth = {round(s, 3) for s, _ in lines}
         got = [round(s, 3) for s, _ in ref["cues"]]
         self.assertTrue(ref["plausible"])
@@ -1764,7 +1753,7 @@ class ImageRefTest(unittest.TestCase):
     def test_a_display_set_cued_twice_counts_once(self):
         # The labelling takes times within SAME_EVENT_S as one event, but the share of sure starts was divided
         # by every cue, so a track whose Cues list each display set twice lost half its share (and its plausibility)
-        events = pgs_events(realistic(400, 5))
+        events = pgs_left_out(realistic(400, 5))["cues"]
         once = imageref.reference({"codec": "S_HDMV/PGS", "cues": events})
         twice = imageref.reference({"codec": "S_HDMV/PGS", "cues": events + [(t + 0.004, 0.0) for t, _ in events]})
         self.assertTrue(once["plausible"])
@@ -1783,7 +1772,7 @@ class ImageRefTest(unittest.TestCase):
         # track: the 399 lines after its only line are left uncovered; a Blu-ray style track (82 % sure) does pass
         for lines, plausible in ((self.lines, False), (realistic(400, 5), True)):
             text = [{"number": 3, "language": "eng", "codec": "S_TEXT/ASS", "forced": False, "cues": lines}]
-            image = [{"number": 7, "language": "en", "codec": "S_HDMV/PGS", "forced": False, "cues": pgs_events(lines)}]
+            image = [dict(pgs_left_out(lines), language="en")]
             got = pipeline.image_check(text, image)
             self.assertEqual(len(got), 1)
             self.assertEqual((got[0]["plausible"], got[0]["vs_text"]["pass"]), (plausible, plausible))

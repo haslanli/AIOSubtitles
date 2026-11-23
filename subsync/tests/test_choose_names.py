@@ -5,12 +5,8 @@ subtitles last when they are not skipped."""
 import time
 import unittest
 
-from helpers import SourcesHarness  # (first: it puts the package on the import path)
+from helpers import cand, SourcesHarness  # (first: it puts the package on the import path)
 from subsync import choose, extra
-
-
-def cand(cid, release, **kw):
-    return dict({"id": cid, "url": f"http://subs.test/{cid}", "lang": "eng", "release": release}, **kw)
 
 
 class EpisodeTagTest(unittest.TestCase):

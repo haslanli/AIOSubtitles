@@ -1016,6 +1016,17 @@ def pgs_track(lines, number=7, lang="eng"):
     return {"number": number, "language": lang, "codec": "S_HDMV/PGS", "name": "", "forced": False, "cues": ev}
 
 
+def pgs_left_out(lines, number=7, lang="eng"):
+    """An image track showing each line and clearing it, the clear left out where the next line starts at the same
+    moment (a back-to-back line replaces it), as a Blu-ray's PGS track has it."""
+    ev = []
+    for k, (s, d) in enumerate(lines):
+        ev.append((s, 0.0))
+        if k + 1 == len(lines) or lines[k + 1][0] - (s + d) > 0.001:
+            ev.append((s + d, 0.0))
+    return {"number": number, "language": lang, "codec": "S_HDMV/PGS", "name": "", "forced": False, "cues": ev}
+
+
 def srt_of(lines, shift=0.0, jitter=0.0, seed=1):
     """An SRT of the lines, shifted, each start `jitter` (sigma, at most 120 ms) off."""
     r = random.Random(seed)
@@ -1483,6 +1494,12 @@ class LookupServices:
 
     def close(self):
         stop_server(self.srv)
+
+
+# -- a subtitle as the ranking reads it --------------------------------------------------------------------------------
+def cand(cid, release, **kw):
+    """An English subtitle `cid` from a release named `release`, with `kw`'s fields (choose's candidates)."""
+    return dict({"id": cid, "url": f"http://subs.test/{cid}", "lang": "eng", "release": release}, **kw)
 
 
 # -- the built-in subtitle sources: a stand-in that answers like them, and their harness -------------------------------

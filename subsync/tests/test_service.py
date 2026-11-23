@@ -13,16 +13,15 @@ import types
 import unittest
 import urllib.error
 import urllib.parse
-import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads,
-                     HAVE_CRYPTOGRAPHY, local_network_only, NEEDS, RangeServer, start_server, stop_server, TempDir,
-                     traced_memory, watch_the_log)
+from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, FakeIndex,
+                     HAVE_CRYPTOGRAPHY, http, local_network_only, NEEDS, RangeServer, start_server, stop_server,
+                     TempDir, traced_memory, wait_until, watch_the_log)
 from subsync import ALGO_VERSION
 from subsync.addon import App, file_id, serve, token
 from subsync.settings import Settings
@@ -703,24 +702,6 @@ class FakeAios(Aios):
         return []
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):
-        return None
-
-
-def http(url, data=None, headers=None, method=None, follow=True):
-    """One request's answer: (status, body, headers). An error status is an answer like any other, read and then closed
-; with `follow` off, so is a redirect, as a player that doesn't follow it gets it (its Location)."""
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
-    open_ = urllib.request.urlopen if follow else urllib.request.build_opener(NoRedirect).open
-    try:
-        with open_(req, timeout=10) as r:
-            return r.status, r.read(), dict(r.headers)
-    except urllib.error.HTTPError as e:
-        with e:
-            return e.code, e.read(), dict(e.headers)
-
-
 def no_file_server(test):
     """A file server on this machine that holds no file, closed when the test ends: a read of it fails at once (HTTP
     404, not tried again), and its `headers` record each request made of it."""
@@ -754,7 +735,7 @@ class AddonCase(unittest.TestCase):
 
     def get(self, path):
         """A route's answer as a player that doesn't follow redirects gets it: (status, body, headers)."""
-        return http(self.base + path, follow=False)
+        return http(self.base + path)
 
 
 class AddonFixture(AddonCase):
@@ -1752,16 +1733,6 @@ class PickTest(AddonFixture):
         self.assertEqual((len(self.worker.jobs), self.app.subtitle_requests, self.downloads.asked), (0, 0, []))
 
 
-class NoTrack:
-    """A file's index with no subtitle track of its own: nothing to judge against but its speech."""
-
-    def text_tracks(self):
-        return []
-
-    def image_tracks(self):
-        return []
-
-
 class OriginalEntryFixture(AddonCase):
     """A file with English, Spanish and Russian subtitles, each kept as its original by a stub judging that measures it
     as CANDS says, behind the addon's server over a worker that is not started. No tests of its own."""
@@ -1803,7 +1774,7 @@ class OriginalEntryFixture(AddonCase):
     def get(self, url):
         """A link's answer as a player that doesn't follow redirects gets it: a link the app gave out, or one on its
         server."""
-        return http(url.replace("http://subsync:8790", self.base), follow=False)
+        return http(url.replace("http://subsync:8790", self.base))
 
     def listed(self):
         return json.loads(http(self.base + self.URL)[1])["subtitles"]
@@ -1816,18 +1787,12 @@ class OriginalEntryFixture(AddonCase):
     def judge(self, job, langs):
         """The job judges each language's candidates (every one kept), then ends."""
         for lang in langs:
-            self.worker._sync_language(job, NoTrack(), self.FILE, lang, [c for c in self.cands if c["lang"] == lang],
+            self.worker._sync_language(job, FakeIndex(), self.FILE, lang, [c for c in self.cands if c["lang"] == lang],
                                        None, "b.mp4")
         self.store.judged_put(self.FILE, self.s.languages, self.s.rule_id)
         with self.worker.cv:
             self.worker.jobs.clear()
             self.worker.queue.clear()
-
-    def wait_for(self, check, timeout=3.0):
-        t0 = time.monotonic()
-        while not check() and time.monotonic() - t0 < timeout:
-            time.sleep(0.02)
-        return check()
 
 
 class OriginalEntryTest(OriginalEntryFixture):
@@ -1935,7 +1900,7 @@ class OriginalEntryTest(OriginalEntryFixture):
         self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 0.3), (None, "late", None))
         self.assertLess(time.monotonic() - t0, 1.5)
         slow.set()
-        self.assertTrue(self.wait_for(lambda: self.ALIAS in self.worker.lists))
+        self.assertTrue(wait_until(lambda: self.ALIAS in self.worker.lists, timeout=3.0))
         self.worker.aios.subtitles = lambda *a: self.fail("the list kept is used")
         self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 3), (self.texts["e1"], None, None))
 
@@ -1951,7 +1916,7 @@ class OriginalEntryTest(OriginalEntryFixture):
         release.set()
         self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 3), (self.texts["e1"], None, None))
         self.assertEqual(self.downloads.asked.count(url), 1)
-        self.assertTrue(self.wait_for(lambda: not self.worker.fetching))
+        self.assertTrue(wait_until(lambda: not self.worker.fetching, timeout=3.0))
 
 
 class MeasuredPickTest(OriginalEntryFixture):
@@ -1978,8 +1943,8 @@ class MeasuredPickTest(OriginalEntryFixture):
         self.worker._set_originals(self.ALIAS, self.cands, "b.mp4", None)
         self.assertEqual(self.worker.known_originals(self.ALIAS)["eng"]["id"], "e1")    # the name-ranked guess, 30 %
         self.worker.submit(Job("movie", "tt9", dict(self.job.hints)))
-        self.worker._sync_language(self.job, NoTrack(), self.FILE, "eng", [c for c in self.cands if c["lang"] == "eng"],
-                                   None, "b.mp4")
+        self.worker._sync_language(self.job, FakeIndex(), self.FILE, "eng",
+                                   [c for c in self.cands if c["lang"] == "eng"], None, "b.mp4")
         self.store.alias(self.ALIAS, self.FILE)
 
     def pick(self, lang="eng"):

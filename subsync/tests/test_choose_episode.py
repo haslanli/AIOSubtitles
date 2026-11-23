@@ -3,14 +3,10 @@ first guess is chosen (The Bear S01E01: 'The.Bear.S03.COMPLETE...-PGW', another 
 release group alone); a hash or line-count match keeps its place, and a pack of the file's own season keeps its credit."""
 import unittest
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+from helpers import cand  # (first: it puts the package on the import path)
 from subsync import choose
 
 FILE = "The.Bear.S01E01.1080p.WEB.x265-PGW.mkv"
-
-
-def cand(cid, release, **kw):
-    return dict({"id": cid, "url": f"http://subs.test/{cid}", "lang": "eng", "release": release}, **kw)
 
 
 def guess(cands, filename):

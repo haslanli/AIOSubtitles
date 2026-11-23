@@ -18,9 +18,9 @@ import unittest
 import urllib.error
 from unittest import mock
 
-from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_track, RangeServer,
-                     realistic, rules, run_once, srt_of, start_server, stop_server, TempDir, traced_memory, translated,
-                     watch_the_log)
+from helpers import (back_to_back, BETTER, closed_after, FakeIndex, FIXTURES, have, pgs_left_out, pgs_track,
+                     RangeServer, realistic, rules, run_once, srt_of, start_server, stop_server, TempDir, traced_memory,
+                     translated, watch_the_log)
 from subsync import imageref, mkv, mp4, pipeline, realdebrid, selftest, sources
 from subsync.addon import App
 from subsync.mkv import MkvIndex, NotMatroska, oshash, pipe_until
@@ -450,15 +450,6 @@ class ImageRoutePipelineTest(unittest.TestCase):
         r = self.run_one(srt_of(self.ref, shift=2.7), image_ref=False)
         self.assertIsNone(r["route"])
         self.assertEqual(r["outcome"], "keep_original")
-
-
-def pgs_left_out(lines, number=7):
-    ev = []
-    for k, (s, d) in enumerate(lines):
-        ev.append((s, 0.0))
-        if k + 1 == len(lines) or lines[k + 1][0] - (s + d) > 0.001:   # a back-to-back line replaces it: no clear
-            ev.append((s + d, 0.0))
-    return {"number": number, "language": "eng", "codec": "S_HDMV/PGS", "name": "", "forced": False, "cues": ev}
 
 
 class ImageTranslationTest(unittest.TestCase):

@@ -1,6 +1,5 @@
 """Subtitle sources subsync searches itself, besides what the user's AIOStreams lists. A local stand-in
 answers like TheSubtitleDB, Cinemeta + Gestdown, SubDL and Wyzie; no network."""
-import io
 import json
 import shutil
 import tempfile
@@ -9,25 +8,14 @@ import time
 import unittest
 import urllib.error
 import urllib.parse
-import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import closed_after, start_server, stop_server
+from helpers import closed_after, SRT, start_server, stop_server, zipped
 from subsync import choose
 from subsync.extra import ExtraSources
 from subsync.settings import Settings
 from subsync.sources import fetch_subtitle
-
-SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n"
-
-
-def zipped(names):
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        for n in names:
-            z.writestr(n, SRT.replace("Hello", n))
-    return buf.getvalue()
 
 
 class Fake:
