@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import types
+import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -46,20 +47,47 @@ if not IMAGE_BUILD:
 FIXTURES = os.path.join(TESTS, "fixtures")
 LOCAL = ("127.0.0.1", "localhost", "::1")
 _getaddrinfo = socket.getaddrinfo
+REFUSED = []        # the names local_lookup refused that no test has failed for yet (refused_lookups)
 
 
 def local_lookup(host, *args, **kwargs):
-    """socket.getaddrinfo for the whole run: a name of this machine only, else the test fails before any
-    lookup. Every connection looks its host up through it (socket.create_connection, so urllib too, and net's gate,
+    """socket.getaddrinfo for the whole run: a name of this machine only, else the lookup is refused before
+    it is made. Every connection looks its host up through it (socket.create_connection, so urllib too, and net's gate,
     whose resolver is taken from the socket module when the package is imported, just below), so no test reaches
-    another machine, even one that leaves a setting at its default (the extra sources, the original-language lookup)."""
+    another machine, even one that leaves a setting at its default (the extra sources, the original-language lookup).
+    The refusal raises an AssertionError and keeps the name: the code those settings reach catches the error (a source
+    that fails is left out), so the test fails when it ends instead (_run_on_this_machine)."""
     name = host.decode() if isinstance(host, bytes) else host
     if name is not None and name not in LOCAL:
+        REFUSED.append(name)
         raise AssertionError(f"a lookup of {name}: tests reach nothing but this machine")
     return _getaddrinfo(host, *args, **kwargs)
 
 
+def refused_lookups():
+    """The names local_lookup refused since this was last asked, oldest first, and no longer kept. Every test asks it
+    as it ends; a test that has a name refused on purpose asks it itself."""
+    names = REFUSED[:]
+    del REFUSED[:len(names)]       # a name refused meanwhile (another thread) stays for the next ask
+    return names
+
+
+_run = unittest.TestCase.run
+
+
+def _run_on_this_machine(test, result=None):
+    """unittest.TestCase.run for the whole run: the test's first cleanup, so the last to run (after its own), fails it
+    for every name refused since the previous test ended, whether or not the code caught the refusal."""
+    def check():
+        names = refused_lookups()
+        if names:
+            test.fail(f"a lookup of {', '.join(names)}: tests reach nothing but this machine")
+    test.addCleanup(check)
+    return _run(test, result)
+
+
 socket.getaddrinfo = local_lookup
+unittest.TestCase.run = _run_on_this_machine
 
 from subsync import realdebrid, sources  # noqa: E402  (the package from the path set just above)
 from subsync.settings import Settings  # noqa: E402

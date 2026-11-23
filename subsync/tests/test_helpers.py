@@ -484,8 +484,10 @@ class LocalLookupTest(unittest.TestCase):
     def test_another_machine_is_never_looked_up(self):
         self.assertIs(socket.getaddrinfo, local_lookup)
         for host in ("opensubtitles-v3.strem.io", b"query.wikidata.org", "93.184.216.34", "2606:4700:4700::1111"):
-            with self.subTest(host=host), self.assertRaises(AssertionError):
-                socket.getaddrinfo(host, 443)
+            with self.subTest(host=host):
+                with self.assertRaises(AssertionError):
+                    socket.getaddrinfo(host, 443)
+                self.assertEqual(helpers.refused_lookups(), [host.decode() if isinstance(host, bytes) else host])
 
     def test_every_connection_looks_its_host_up_through_it(self):
         # socket.create_connection, so urllib too, takes the socket module's lookup when it connects: a connection to
@@ -508,7 +510,40 @@ class LocalLookupTest(unittest.TestCase):
         self.addCleanup(net.configure, public_only=False)
         with self.assertRaises(AssertionError):
             net.check_host("api.themoviedb.org", 443)
+        self.assertEqual(helpers.refused_lookups(), ["api.themoviedb.org"])
 
+    def test_a_refusal_the_code_catches_still_fails_the_test(self):
+        # The service catches the refusal where it leaves a failing source out (extra.py) or answers without
+        # a language (origlang.py); a test that let a lookup out fails all the same, when it ends. No connection is
+        # opened here: the names are refused at their lookup, before any (the review's runner counts every one)
+        class Caught(unittest.TestCase):
+            def test_a_refusal_caught_and_let_go(self):
+                try:
+                    socket.getaddrinfo("opensubtitles-v3.strem.io", 443)
+                except Exception:                   # as extra.py's "a source that fails is left out"
+                    pass
+
+            def test_a_refusal_of_the_public_gate_caught(self):
+                net.configure(public_only=True)     # its own resolver: the socket module's, as main_public
+                self.addCleanup(net.configure, public_only=False)
+                try:
+                    net.check_host("api.themoviedb.org", 443)
+                except Exception:
+                    pass
+
+            def test_nothing_looked_up(self):
+                pass
+
+        result = unittest.TestResult()
+        unittest.defaultTestLoader.loadTestsFromTestCase(Caught).run(result)
+        self.assertEqual((result.testsRun, result.errors), (3, []))
+        failed = {test._testMethodName: trace for test, trace in result.failures}
+        self.assertEqual(sorted(failed), ["test_a_refusal_caught_and_let_go", "test_a_refusal_of_the_public_gate_caught"])
+        self.assertIn("a lookup of opensubtitles-v3.strem.io: tests reach nothing but this machine",
+                      failed["test_a_refusal_caught_and_let_go"])
+        self.assertIn("a lookup of api.themoviedb.org: tests reach nothing but this machine",
+                      failed["test_a_refusal_of_the_public_gate_caught"])
+        self.assertEqual(helpers.refused_lookups(), [])         # each name fails one test, the one it was refused in
 
 if __name__ == "__main__":
     unittest.main()
