@@ -1648,11 +1648,20 @@ class AudioPrefetchTest(unittest.TestCase):
         lines = [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}]
         fits = [AudioFit(idx, lines, vad=self.Silent()) for _ in range(2)]   # English and Russian, same windows
         starts = [100.0 * k for k in range(1, 9)]
-        ts = [th.Thread(target=f.prefetch, args=(starts, 30.0)) for f in fits]
+        failed = []
+
+        def prefetch(fit):
+            try:
+                fit.prefetch(starts, 30.0)
+            except BaseException as e:          # an error in a thread was lost to threading's hook
+                failed.append(repr(e))
+        ts = [th.Thread(target=prefetch, args=(f,), daemon=True) for f in fits]
         for t in ts:
             t.start()
         for t in ts:
-            t.join()
+            t.join(10)                          # two fits waiting on each other fail, never hang the run
+        self.assertFalse(any(t.is_alive() for t in ts), "a fit still reads after 10 s")
+        self.assertEqual(failed, [])
         self.assertEqual(sorted(idx.reads), starts)
 
     def test_a_failed_read_is_left_to_the_ordered_read(self):

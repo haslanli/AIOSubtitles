@@ -4,6 +4,8 @@ subtitle signal no longer than the windows can read; where a shift change is pla
 lacks) and which lines are left out, held-out windows that no window read for the fit overlaps, each held-out part
 judged, windows without speech, the audio budget while a change is narrowed down, and the record of one segment."""
 import collections
+import hashlib
+import json
 import math
 import random
 import sys
@@ -21,6 +23,30 @@ from subsync.mkv import NotMatroska  # noqa: E402
 from subsync.mp4 import NoAudioThere, NotMp4, open_index  # noqa: E402
 from subsync.reader import RangeReader, ReadFailed  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
+
+# What the audio fit judges by, as one fingerprint (fit_rules), and the RULE_REVISION it has been judged under since it
+# took this form. A change to it must bump RULE_REVISION, so stored verdicts are judged again: pin the new fingerprint
+# here with the new revision (as test_langcheck's CHECK_RULES)
+FIT_RULES = "b8fb1ec304549c74f34236cb1b1e03ab6b060abeb7057742c0f05ea7defe914b"
+FIT_REVISION = 11
+
+
+def fit_rules():
+    """The fingerprint of what the audio fit decides by: how its windows are planned, placed and read, how a window
+    scores an offset and its lines pair with the speech, where a shift change goes, the speech gate, the second way to
+    pass, the close calls and the held-out parts' rule; and what it shares with the one-shift path (its scales, bin and
+    end weight) and relgate (its float margin). Not how many windows are read at once, which changes no verdict."""
+    a = audiofit
+    rules = {"plan": [a.FIT_WINDOWS, a.CHECK_WINDOWS, a.WINDOW_S, a.MARGIN_SHARE, a.MIN_W, a.PLANNED,
+                      a.MIN_WINDOW_LINES, a.PLACE_STEP, a.COST, a.SPARSE_INDEX, a.FULL_WINDOW],
+             "fit": [a.DT, a.SCALE_GAIN, a.OMAX, a.SAME_OFFSET_S, a.EDGE_S, a.PAIR_S, a.SMALL_SHIFT_S, a.FITS_Z,
+                     a.OWN_PEAK_Z, a.OWN_GAIN_Z, a.CUT_ERR_S, a.SPEECH_MIN],
+             "gate": [a.GATE_LINES, a.GATE_MEDIAN_MS, a.WITHIN_MS, a.GATE_WITHIN, a.GATE_MISS, a.GATE_STRICT,
+                      a.GATE_STRICT_ORIGINAL],
+             "better": a.BETTER, "close": [a.CLOSE, a.CLOSE_MATCHED],
+             "parts": [a.PART_REACH, a.PART_LINES, a.PART_WITHIN, a.PART_MEDIAN_MS, a.PART_MANY],
+             "shared": [list(a.SCALES), a.BIN_S, a.END_WEIGHT, a.EPS_S]}
+    return hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
 
 
 class LoudVad:
@@ -920,8 +946,13 @@ class SpeechlessWindowTest(unittest.TestCase):
 
 class RuleRevisionTest(unittest.TestCase):
     def test_verdicts_of_the_old_rules_are_judged_again(self):
-        # the held-out parts, the shift changes, the lines left out and the one-shift path's pairs came in revision 11
+        # the held-out parts, the shift changes, the lines left out and the one-shift path's pairs came in revision 11;
+        # a later change to the fit's rules must bump it, which the rules' fingerprint tells (the bound alone
+        # stayed true whatever the rules became)
         from subsync import RULE_REVISION
+        self.assertEqual(fit_rules(), FIT_RULES, "the audio fit's rules changed: bump RULE_REVISION and pin the new "
+                                                 "fingerprint with it (FIT_RULES, FIT_REVISION)")
+        self.assertGreaterEqual(RULE_REVISION, FIT_REVISION)
         self.assertGreaterEqual(RULE_REVISION, 11)
 
 
