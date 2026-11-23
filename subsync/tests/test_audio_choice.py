@@ -4,6 +4,7 @@ audio route. Plain Python except where marked; no network beyond 127.0.0.1; ever
 import os
 import threading
 import time
+import types
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
@@ -577,8 +578,9 @@ class RouteOffNoTrackTest(Base):
 # ------------------------------------------------------------------------------------- the queue, picks and endings
 
 class FillsMeanwhile(Limits):
-    """A person's limits whose queue is filled by another request of theirs between the answers in `answers` (each
-    may_queue call takes the next; then the queue's real answer)."""
+    """A person's limits that answer may_queue from `answers`, one per call, then as their queue is. [True, False]: room
+    now, and a full queue for a second call, if code ever made one (another request of theirs filled it meanwhile);
+    [False]: full already."""
 
     def __init__(self, answers, **kw):
         super().__init__(**kw)
@@ -612,12 +614,17 @@ class QueueTest(Base):
                     self.assertTrue(self.worker(Limits()).waits_for_pick(self.alias))
 
     def test_a_first_pass_that_finds_the_pick_queues_its_audio_job_or_leaves_the_file_waiting(self):
-        limits = FillsMeanwhile([True, False])
-        w = self.worker(limits)
-        w.picked_early[self.alias] = time.time()            # the entry was downloaded while the index was read
-        self.first_pass(w)
-        queued = self.queued_audio(w) == [(self.alias, True, False)]
-        self.assertTrue(queued or w.waits_for_pick(self.alias))
+        # One or the other, never both nor neither; the "or" this asserted passed with the file left in neither
+        for answers in ([True, False], [False]):   # room (a second look finds the queue full); full already
+            with self.subTest(answers=answers):
+                self.store.db.execute("DELETE FROM pickable")
+                w = self.worker(FillsMeanwhile(answers))
+                w.picked_early[self.alias] = time.time()    # the entry was downloaded while the index was read
+                self.first_pass(w)
+                queued = answers[0]
+                self.assertEqual(self.queued_audio(w), [(self.alias, True, False)] if queued else [])
+                self.assertEqual(w.waits_for_pick(self.alias), not queued)
+                self.assertEqual(self.worker(Limits()).waits_for_pick(self.alias), not queued)    # in the store too
 
     def test_asking_for_the_list_again_says_whether_a_job_is_queued(self):
         w = self.worker(Limits(queue=0))
@@ -693,19 +700,32 @@ class QueueTest(Base):
         def stepping_back():                                # each look at the wall clock is 3 s earlier than the last
             looks.append(1)
             return time.time() - 3 * len(looks)
-        waits = {"wait_for": lambda: w.wait_for(self.alias, "eng", 0.2),
-                 "wait_for_file": lambda: w.wait_for_file(self.alias, 0.2),
-                 "wait_for_originals": lambda: w.wait_for_originals(self.alias, 0.2)}
+        # each wait with what it gives when nothing came:, a wait that raised or ended at once passed as well
+        waits = {"wait_for": (lambda: w.wait_for(self.alias, "eng", 0.2), (None, None)),
+                 "wait_for_file": (lambda: w.wait_for_file(self.alias, 0.2), None),
+                 "wait_for_originals": (lambda: w.wait_for_originals(self.alias, 0.2), None)}
+        clock = types.SimpleNamespace(**dict(vars(time), time=stepping_back))    # only the wall clock steps
         try:
-            with mock.patch.object(worker_mod, "time", mock.Mock(time=stepping_back)):
-                for name, wait in waits.items():
+            with mock.patch.object(worker_mod, "time", clock):
+                for name, (wait, nothing) in waits.items():
                     with self.subTest(wait=name):
+                        outcome = []
+
+                        def timed():
+                            start = time.monotonic()
+                            try:
+                                outcome.append(("gave", wait()))
+                            except BaseException as e:
+                                outcome.append(("raised", repr(e)))
+                            outcome.append(time.monotonic() - start)
                         t0 = time.monotonic()
-                        t = threading.Thread(target=wait, daemon=True)
+                        t = threading.Thread(target=timed, daemon=True)
                         t.start()
                         t.join(2.0)
                         self.assertFalse(t.is_alive())
                         self.assertLess(time.monotonic() - t0, 1.0)
+                        self.assertEqual(outcome[0], ("gave", nothing))
+                        self.assertGreaterEqual(outcome[1], 0.15)           # it waited its 0.2 s
         finally:
             with w.cv:                                      # a wait that outlived its check ends now
                 w.jobs.clear()
