@@ -374,10 +374,8 @@ class AudioFit:
     def _read_window(self, start, length):
         """A window's speech: its 10 ms frames' mask, the onsets (moved `lead` earlier) and ends of its speech runs, and
         `len`, the seconds decoded. The runs are the VAD's speech segments, which keep its own minimum speech and
-        silence (vad.speech). A run under way at the window's first frame has no onset there, and one still running at
-        its last frame no end there: those are the window's edges, not the speech's. Past the end of the file's audio
-        (NoAudioThere) a window without speech; a window decoded short (a read or decoder that stopped early) raises
-        ReadFailed and is never kept."""
+        silence (vad.speech). Past the end of the file's audio (NoAudioThere) a window without speech; a window decoded
+        short (a read or decoder that stopped early) raises ReadFailed and is never kept."""
         try:
             pcm = self.index.window_pcm(start, length, SR, self.ffmpeg, **self.track_arg)
         except NoAudioThere:
@@ -399,8 +397,8 @@ class AudioFit:
             mask[a // fl: b // fl] = True
         edges = np.diff(mask.astype(np.int8), prepend=0, append=0)
         runs = list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))   # [first frame, end frame)
-        onsets = np.array([start + a / 100 - self.lead for a, _ in runs if a > 0])
-        ends = np.array([start + b / 100 for _, b in runs if b < frames])
+        onsets = np.array([start + a / 100 - self.lead for a, _ in runs])
+        ends = np.array([start + b / 100 for _, b in runs])
         return {"start": start, "len": decoded, "mask": mask, "onsets": onsets, "ends": ends}
 
     # -- correlation -------------------------------------------------------------------------------------------
@@ -913,20 +911,18 @@ class AudioFit:
         subtitle's own end lag `lag`, an end within CUT_ERR_S of it counts END_WEIGHT); of equal scores the first.
         Only the k where the lines land in reach of the bracket (lo, hi, oa, ob) under one shift or the other; the
         lines after k that land before the last line under the first shift are a scene the file lacks, left out by the
-        drop step, so they count for no k. Every line is moved by the cut, but only the dialogue lines are scored
-        against the speech, as everywhere else in the fit (signs and songs aren't spoken). None when no k is tried."""
+        drop step, so they count for no k. None when no k is tried."""
         lo, hi, oa, ob = bracket
-        st, en, talk = timeline.starts, timeline.ends, timeline.talk
+        st, en = timeline.starts, timeline.ends
         best_k, best_score = None, -1
         first = bisect.bisect_left(st, lo - self.W - max(oa, ob))
         last = bisect.bisect_right(st, hi + self.W - min(oa, ob))
         for k in range(first, last + 1):
             rest = max(k, bisect.bisect_left(st, st[k - 1] + oa - ob)) if k else 0
-            before, after = talk[:bisect.bisect_left(talk, k)], talk[bisect.bisect_left(talk, rest):]
-            errs = self.onset_errors([st[i] + oa for i in before] + [st[i] + ob for i in after], placing)
+            errs = self.onset_errors([x + oa for x in st[:k]] + [st[i] + ob for i in range(rest, len(st))], placing)
             score = sum(1 for e in errs if e is not None and abs(e) < CUT_ERR_S)
             if lag is not None:     # the line ends too, against the subtitle's own lag (D3)
-                ends = [en[i] + oa for i in before] + [en[i] + ob for i in after]
+                ends = [x + oa for x in en[:k]] + [en[i] + ob for i in range(rest, len(st))]
                 score += END_WEIGHT * sum(1 for e in self.onset_errors(ends, placing, "ends")
                                           if e is not None and abs(e - lag) < CUT_ERR_S)
             if score > best_score:

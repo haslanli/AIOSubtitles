@@ -326,31 +326,6 @@ class PrefetchFailureTest(unittest.TestCase):
         self.assertEqual(sorted(idx.reads), [100.0, 200.0, 200.0, 300.0])
 
 
-class WindowEdgeTest(unittest.TestCase):
-    """A speech run the window's edge cuts (speech under way at its first frame, or still running at its last)
-    has no onset at the window's start nor end at its end: those were the window's edges, and a line starting 0.7 s into
-    a window that opens mid-sentence paired with the first at about -0.9 s instead of none."""
-
-    def test_a_run_cut_by_the_windows_edge_gives_no_onset_or_end_there(self):
-        idx = SpeechIndex([(95.0, 103.0), (110.0, 112.0), (127.0, 135.0)], 6000.0)
-        fit = AudioFit(idx, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=LoudVad(), lead=0.19)
-        w = fit.read_window(100.0, 30.0)
-        np.testing.assert_allclose(w["onsets"], [109.81, 126.81])        # none at 99.81 (100 s, less the lead)
-        np.testing.assert_allclose(w["ends"], [103.0, 112.0])            # none at 130 s
-        self.assertEqual(int(w["mask"].sum()), 300 + 200 + 300)          # the mask keeps the cut runs whole
-        self.assertTrue(w["mask"][0] and w["mask"][-1])
-        starts = AudioFit.onset_errors([100.7, 109.8], [w])             # the first line's speech began at 95 s
-        self.assertEqual((starts[0], round(starts[1], 6)), (None, 0.01))
-        ends = AudioFit.onset_errors([129.2, 112.1], [w], "ends")       # the first line's speech runs on to 135 s
-        self.assertEqual((ends[0], round(ends[1], 6)), (None, -0.1))
-
-    def test_a_window_inside_one_run_has_neither(self):
-        idx = SpeechIndex([(95.0, 140.0)], 6000.0)
-        w = AudioFit(idx, [], vad=LoudVad()).read_window(100.0, 30.0)
-        self.assertTrue(w["mask"].all())
-        self.assertEqual((len(w["onsets"]), len(w["ends"])), (0, 0))
-
-
 def whole_film_corr(w, ssig):
     """The correlation as it was computed before, one FFT of the whole subtitle signal per window (the reference)."""
     v = np.where(w["mask"][::5], 1.0, -1.0)
@@ -662,37 +637,6 @@ class ShiftChangeTest(unittest.TestCase):
         self.assertEqual(len(res["segment_offsets"]), 1)
         self.assertEqual(res["model"]["offset"], round(res["segment_offsets"][0], 2))    # not the overall -291 s
         self.assertAlmostEqual(res["model"]["offset"], 9.0, delta=0.3)
-
-    def test_sign_lines_never_move_the_change(self):
-        # Where the change is placed was scored on sign and song lines too, against speech onsets, though every
-        # other step judges dialogue only; 150 sign lines near the change moved it, and with it the fine shift of the
-        # hundreds of lines after it. The sign lines are still moved with their neighbours.
-        for seed, at, scene in ((11, 1500, 120), (13, 3000, -100)):
-            with self.subTest(seed=seed, at=at, scene=scene):
-                truth, sub, _ = scene_film(at, scene, seed=seed)
-                r = random.Random(5)
-                speech = [(s + r.gauss(0, 0.08), s + d) for s, d in truth]
-                end = truth[-1][0] + truth[-1][1] + 30
-
-                class Index:
-                    def duration(self):
-                        return end
-                lines = [{"s": s, "e": s + d, "text": "x", "kind": "dialogue"} for s, d in sub]
-                rs = random.Random(seed + 7)
-                signs = []
-                for _ in range(150):
-                    s = rs.uniform(at - 100, at + 100)
-                    signs.append({"s": s, "e": s + rs.uniform(1.5, 5.0), "text": "sign", "kind": "sign"})
-                fit = timeline_fit(speech, ends=True)
-                plain = fit(Index(), lines, vad=object(), better=AUDIO_BETTER).run()
-                signed = fit(Index(), lines + signs, vad=object(), better=AUDIO_BETTER).run()
-                self.assertEqual((plain["decision"], signed["decision"]), ("synced", "synced"))
-                self.assertEqual(len(plain["model"]["segments"]), 1)
-                self.assertEqual(signed["lines"][:len(lines)], plain["lines"])
-                shifts = {round(n["s"] - line["s"], 6) for n, line in zip(plain["lines"], lines)}     # the two parts'
-                self.assertEqual(len(shifts), 2)
-                moved = {round(n["s"] - sign["s"], 6) for n, sign in zip(signed["lines"][len(lines):], signs)}
-                self.assertLessEqual(moved, shifts)                     # each sign line moved with its part
 
 
 class FitStepTest(unittest.TestCase):
