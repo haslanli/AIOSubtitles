@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -17,8 +18,8 @@ from unittest import mock
 
 import imagesubs as I
 from helpers import (BACKLOG, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS, PASSWORD, RangeServer, REALDEBRID,
-                     RecheckHarness, ServerHarness, SignupHarness, SOURCE, start_server, stop_server, TempDir, TORBOX,
-                     TORRENTIO, watch_the_log)
+                     RecheckHarness, ServerHarness, SignupHarness, SOURCE, SourcesHarness, start_server, stop_server,
+                     TempDir, TORBOX, TORRENTIO, watch_the_log)
 from subsync import net
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -275,6 +276,18 @@ class LogsTest(unittest.TestCase):
         self.assertIn("ValueError: held by the exception only", logs.lines[1])
         self.left_as_found()
 
+    def test_two_at_once_put_logging_back_whatever_order_they_go_off_in(self):
+        # Each put back the level its own on had found, so of two harnesses closed out of order (a test's
+        # second one closed by a cleanup, after its tearDown closed the first), the second set the root to DEBUG again
+        for first_off in (0, 1):
+            with self.subTest(first_off=first_off):
+                both = [Logs().on(), Logs().on()]
+                logging.getLogger("test.logs").debug("a line for both")
+                both.pop(first_off).off()
+                self.assertEqual(logging.getLogger().level, logging.DEBUG)      # one still on: still every line
+                both[0].off()
+                self.left_as_found()
+
     @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
     def test_each_public_harness_leaves_the_root_logger_as_it_found_it(self):
         # one test on each harness, a TestCase that takes it as its first base as its modules' tests do, each doing what
@@ -318,6 +331,76 @@ class LogsTest(unittest.TestCase):
                 kind("test").run(result)
                 self.assertEqual((result.testsRun, result.errors, result.failures), (1, [], []))
                 self.left_as_found()
+
+
+class HalfwaySetUpTest(unittest.TestCase):
+    """A harness whose set-up fails halfway closes each part it had made, as the installer's does.
+    unittest runs no tearDown after a setUp that failed, and close() took every part for made (a failed start() in a
+    test's body then failed again on the server it never got): the root logger was left at DEBUG with the harness's
+    handler on, the stand-in AIOStreams serving, the data folder on disk, SourcesHarness's patch of
+    socket.create_connection on for every later test."""
+
+    def setUp(self):
+        root = logging.getLogger()
+        self.found = (root.level, list(root.handlers), socket.create_connection)
+
+    def left_as_found(self):
+        root = logging.getLogger()
+        self.assertEqual((root.level, root.handlers, socket.create_connection), self.found)
+
+    def run_failing(self, kind):
+        """`kind`'s one test, run: its one error is the failure of a part of the set-up."""
+        result = unittest.TestResult()
+        case = kind("test")
+        case.run(result)
+        self.assertEqual((result.testsRun, len(result.errors), result.failures), (1, 1, []))
+        self.assertIn("RuntimeError: a later part failed", result.errors[0][1])
+        return case
+
+    def assert_closed(self, *databases):
+        for db in databases:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                db.execute("SELECT 1")
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_a_public_harness_closes_what_it_had_made(self):
+        class Server(ServerHarness, unittest.TestCase):
+            def setUp(case):
+                case.start()
+
+            def test(case):
+                pass
+
+        class InBody(ServerHarness, unittest.TestCase):         # started in the test itself
+            def test(case):
+                case.start()
+
+        class Recheck(RecheckHarness, unittest.TestCase):
+            def test(case):
+                pass
+
+        class Signup(SignupHarness, unittest.TestCase):
+            def test(case):
+                pass
+
+        # the service's pool fails after the store; a public harness's last part, its Logs, fails after the rest
+        for kind, failing in ((Server, "subsync.public.Pool"), (InBody, "subsync.public.Pool"),
+                              (Recheck, "helpers.Logs.on"), (Signup, "helpers.Logs.on")):
+            with self.subTest(harness=kind.__name__):
+                with mock.patch(failing, side_effect=RuntimeError("a later part failed")):
+                    case = self.run_failing(kind)
+                self.left_as_found()
+                self.assertFalse(os.path.exists(case.dir))                       # the data folder
+                self.assertEqual(case.fake.server.socket.fileno(), -1)           # the stand-in AIOStreams
+                self.assert_closed(case.users.db, *([case.store.db] if kind in (Server, InBody) else []))
+
+    def test_the_sources_harness_takes_its_patch_off(self):
+        class Sources(SourcesHarness, unittest.TestCase):
+            def test(case):
+                pass
+        with mock.patch("helpers.FakeSources", side_effect=RuntimeError("a later part failed")):
+            self.run_failing(Sources)
+        self.left_as_found()
 
 
 class LocalLookupTest(unittest.TestCase):

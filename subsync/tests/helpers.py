@@ -8,7 +8,10 @@ image's own copy (see IMAGE_BUILD). It is also the one place that keeps the whol
 
 What more than one module uses lives here, never in a test module: no test module imports another, so none
 runs another's top level or collects its TestCase classes. A harness here is a plain class, never a TestCase: a TestCase
-takes it as its first base and its tearDown closes it; ServerHarness can also be held as a plain object."""
+takes it as its first base and its tearDown (SourcesHarness: its cleanups) closes it; ServerHarness can also be held as
+a plain object. Each harness holds the undoing of each part it makes as soon as the part is made, so a set-up that fails
+halfway leaves nothing behind."""
+import contextlib
 import dataclasses
 import html.parser
 import io
@@ -519,18 +522,25 @@ PASSWORD = "the-viewers-own-Password-1"               # their config's password
 class Logs(logging.Handler):
     """The log lines made while it is on, by any logger, DEBUG and up, each as a formatter writes it, so a logged
     exception's traceback is part of its line. on hangs it on the root logger and sets the root to DEBUG;
-    off takes it off and sets the root's level back (it was left at DEBUG for the rest of the run)."""
+    off() takes it off, and once no Logs is on sets the root's level back to the one the first found, whatever order
+    they go off in (it was left at DEBUG for the rest of the run;: two harnesses closed out of order
+    each put back the level their own on() found, the later one DEBUG)."""
+
+    are_on = []             # the Logs on now, every harness's
+    level_before = None     # the root's level before the first of them
 
     def __init__(self):
         super().__init__(logging.DEBUG)
-        self.lines, self.level_before = [], None
+        self.lines = []
 
     def emit(self, record):
         self.lines.append(self.format(record))
 
     def on(self):
         root = logging.getLogger()
-        self.level_before = root.level
+        if not Logs.are_on:
+            Logs.level_before = root.level
+        Logs.are_on.append(self)
         root.addHandler(self)
         root.setLevel(logging.DEBUG)
         return self
@@ -538,24 +548,43 @@ class Logs(logging.Handler):
     def off(self):
         root = logging.getLogger()
         root.removeHandler(self)
-        root.setLevel(self.level_before)
+        Logs.are_on.remove(self)
+        if not Logs.are_on:
+            root.setLevel(Logs.level_before)
 
 
 class PublicParts:
     """What each public-mode harness starts from (ServerHarness, RecheckHarness, SignupHarness): a data folder, public
     mode's settings (`env` added to them), the people's records, a stand-in AIOStreams that answers for INSTANCE through
-    api(), and the log lines (Logs). start_public() makes them; stop_public() closes them and puts the logging back."""
+    api(), and the log lines (Logs). start_public() makes them, each one's undoing held in `undo` as it is made;
+    stop_public() closes what was made, last made first, and puts the logging back."""
+
+    undo = None     # from start_public() on: the undoing of each part made (contextlib.ExitStack)
 
     def start_public(self, clock=time.time, **env):
         from subsync.users import Users
-        self.tmp = TempDir()
-        self.dir = self.tmp.__enter__()
-        self.env = dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
-                         "SUBSYNC_PUBLIC_BASE": "https://subs.test"}, **env)
-        self.s = Settings(self.env)
-        self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes(), clock=clock)
-        self.fake = FakeAiostreams()
-        self.logs = Logs().on()
+        self.undo = contextlib.ExitStack()
+        with self.undone_on_failure():
+            self.dir = self.undo.enter_context(TempDir())
+            self.env = dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
+                             "SUBSYNC_PUBLIC_BASE": "https://subs.test"}, **env)
+            self.s = Settings(self.env)
+            self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes(), clock=clock)
+            self.undo.callback(self.users.close)
+            self.fake = FakeAiostreams()
+            self.undo.callback(self.fake.close)
+            self.logs = Logs().on()
+            self.undo.callback(self.logs.off)
+
+    @contextlib.contextmanager
+    def undone_on_failure(self):
+        """Holds the making of parts: when one fails, every part made so far is closed, and the failure goes on (unittest
+        runs no tearDown after a setUp that failed)."""
+        try:
+            yield
+        except BaseException:
+            self.stop_public()
+            raise
 
     def api(self, base, timeout):
         """The service's AIOStreams client for `base` (an api_factory), INSTANCE answered by the stand-in."""
@@ -563,10 +592,8 @@ class PublicParts:
         return AiosApi(base.replace(INSTANCE, self.fake.url), timeout=timeout, max_timeout=timeout, retry_wait_cap=5)
 
     def stop_public(self):
-        self.logs.off()
-        self.fake.close()
-        self.users.close()
-        self.tmp.__exit__(None, None, None)
+        if self.undo is not None:
+            self.undo.close()
 
 
 class SignupHarness(PublicParts):
@@ -673,17 +700,19 @@ class ServerHarness(PublicParts):
         from subsync.store import Store
         self.start_public(**dict({"SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
                                   "SUBSYNC_RECHECK_HOURS": "0"}, **env))
-        self.store = Store(self.dir)
-        self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
-        self.service = PublicService(self.s, self.store, self.users, self.pool, api_factory=self.api)
-        self.server = start_server(serve_public(self.service, 0, host="127.0.0.1"))
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        with self.undone_on_failure():
+            self.store = Store(self.dir)
+            self.undo.callback(self.store.close)
+            self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
+            self.undo.callback(self.pool.close)
+            self.service = PublicService(self.s, self.store, self.users, self.pool, api_factory=self.api)
+            self.server = start_server(serve_public(self.service, 0, host="127.0.0.1"))
+            self.undo.callback(stop_server, self.server)
+            self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def close(self):
-        # everything start made is closed here, the store too, not by cleanups: a plain object has none
-        stop_server(self.server)
-        self.pool.close()
-        self.store.close()
+        # everything start made is closed here, the store too, not by cleanups: a plain object has none;
+        # only what was made, last made first: the server, the pool, the store, then public mode's parts
         self.stop_public()
 
     def tearDown(self):
@@ -1524,12 +1553,14 @@ class FakeSources:
 class SourcesHarness:
     """The built-in sources against FakeSources (`fake`), each source's address in `env`; extra() makes them, more
     settings added. A connection to anything but this machine fails the test. As a TestCase's first base: setUp makes
-    it, tearDown closes it."""
+    it, each part closed by a cleanup held as soon as the part is made."""
 
     def setUp(self):
         self.guard = local_network_only()
         self.guard.start()
+        self.addCleanup(self.guard.stop)
         self.fake = FakeSources()
+        self.addCleanup(self.fake.close)
         u = self.fake.url
         self.env = {"SUBSYNC_LANGUAGES": "eng,rus", "SUBSYNC_TSDB_URL": f"{u}/tsdb", "SUBSYNC_CINEMETA_URL": f"{u}/cinemeta",
                     "SUBSYNC_GESTDOWN_URL": f"{u}/gestdown", "SUBSYNC_OSV3_URL": f"{u}/osv3",
@@ -1537,10 +1568,6 @@ class SourcesHarness:
                     "SUBSYNC_SUBDL_DOWNLOAD_URL": f"{u}/subdl-dl", "SUBSYNC_WYZIE_URL": f"{u}/wyzie",
                     "SUBSYNC_SUBSOURCE_URL": f"{u}/subsource"}
         self.clock = Clock()
-
-    def tearDown(self):
-        self.fake.close()
-        self.guard.stop()
 
     def extra(self, clock=None, ledger=None, **env):
         from subsync.extra import ExtraSources

@@ -11,7 +11,7 @@ import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import HAVE_CRYPTOGRAPHY, NEEDS, TempDir, local_network_only, start_server, stop_server  # noqa: E402
+from helpers import HAVE_CRYPTOGRAPHY, KEY, NEEDS, TempDir, local_network_only, start_server, stop_server  # noqa: E402
 from subsync import aiosconfig, net  # noqa: E402
 from subsync.aiosconfig import BAD_ANSWER, AiosApi, AiosError  # noqa: E402
 
@@ -711,7 +711,7 @@ class SignupCallersTest(ClientCase):
         from subsync.users import Users, new_token
         with TempDir() as d:
             s = Settings({"SUBSYNC_DATA": d, "SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://subs.test",
-                          "SUBSYNC_SECRET_KEY": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"})
+                          "SUBSYNC_SECRET_KEY": KEY})
             users = Users(os.path.join(d, "users.sqlite3"), s.secret_bytes())
             try:
                 token = new_token()
