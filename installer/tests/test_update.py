@@ -302,10 +302,11 @@ class EngineUpdate(unittest.TestCase):
         self.assertEqual(self.events, [])
 
     def test_the_newest_or_an_older_setup_changes_nothing(self):
+        # nothing newer is said as done, not as a stop; a setup older than the service is still a stop
         self.install(image=NEW, version='1.4.0')
-        with self.assertRaises(Stop) as caught:
-            engine.Engine({}, page=True).update()
-        self.assertEqual(caught.exception.message, update.NEWEST)
+        e = engine.Engine({}, page=True)
+        self.assertIs(e.update(), True)
+        self.assertEqual(e.out.rows, [['ok', update.NEWEST, None]])
         with mock.patch.object(engine, 'PLACE', place(OLD)), mock.patch.object(engine, 'setup_version', lambda: '1.3.0'), \
                 self.assertRaises(Stop) as caught:
             engine.Engine({}, page=True).update()

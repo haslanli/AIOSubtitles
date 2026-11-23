@@ -11,7 +11,11 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 version=$(cat VERSION)
 old=
-if [ "${1:-}" = --update ]; then
+updating=
+for arg in "$@"; do     # wherever it is given: ./setup --yes --update fetches too
+  if [ "$arg" = --update ]; then updating=1; fi
+done
+if [ -n "$updating" ]; then
   # the words are setup's own (installer/update.py; a test keeps them equal)
   if [ ! -d .git ]; then
     echo "This folder wasn't downloaded with git, so it can't fetch a new version: download the new version, copy this folder's state/ into it, and run ./setup there."

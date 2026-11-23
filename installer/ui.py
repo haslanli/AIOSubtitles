@@ -211,9 +211,9 @@ class Asker:
             if check:
                 good, message, value = check(value)
                 if not good:
-                    warn(message)
-                    if self.yes:
-                        stop(f'{key}: {message}')
+                    if self.yes:        # asked nothing: the stop says it once, with what to change
+                        stop(f'{key}: {message}', answers_advice(key, self.file_keys))
+                    warn(message)       # asked again
                     continue
                 if message:
                     ok(message)

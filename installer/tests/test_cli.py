@@ -10,7 +10,6 @@ from unittest import mock
 
 from installer import dockerenv, engine, ui, update, web, where, wizard
 from installer.tests.test_flow import FlowFixture
-from installer.ui import Stop
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -134,10 +133,16 @@ class CommandLine(FlowFixture):
         self.assertIn('languages: eng, rus', out)
 
     def test_update_and_rollback_from_the_terminal(self):
-        with mock.patch.object(engine.Engine, 'update', side_effect=Stop(update.NEWEST)):
+        # nothing newer is no failure: a ✓ and code 0 (a red ✗ and code 1, as for a real failure); a setup
+        # older than what runs here can't update it, and still says so as a stop
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        with mock.patch.object(ui, 'COLOR', False):
             code, out = self.run_main('--update')
-        self.assertEqual(code, 1)
-        self.assertIn('This is the newest version.', out)
+            self.assertEqual((code, out), (0, '  ✓  This is the newest version.\n'))
+            running = engine.load_settings()['version']
+            with mock.patch.object(engine, 'setup_version', lambda: '0.0.1'):
+                code, out = self.run_main('--update')
+        self.assertEqual((code, out), (1, f"\n  ✗  {update.NEWER_HERE.format(running=running, setup='0.0.1')}\n\n"))
         calls = []
         with mock.patch.object(engine.Engine, 'rollback', lambda e, restore=False: calls.append(restore) or True):
             code, _ = self.run_main('--rollback')
@@ -160,6 +165,26 @@ class CommandLine(FlowFixture):
             wizard.main(['--help'])
         self.assertIn('Set up AIOSubtitles: add subsync (synced subtitles) to your AIOStreams, or host a public '
                       'instance.', ' '.join(out.getvalue().split()))
+
+    def test_help_says_what_uninstall_removes_on_a_public_instance(self):
+        # It named only the personal route, while a public instance loses everyone's records
+        words = "--uninstall take subsync out of your config and remove it; a public instance: remove it with " \
+                "everyone's records"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            wizard.main(['--help'])
+        self.assertIn(words, ' '.join(out.getvalue().split()))
+        self.assertIn(f'./setup {words}', ' '.join(wizard.__doc__.split()))           # the usage list at its top
+
+    def test_restore_databases_alone_says_it_goes_with_rollback(self):
+        # Without --rollback it was dropped without a word, and the setup page opened (or --update ran)
+        for argv in (['--restore-databases'], ['--update', '--restore-databases']):
+            with self.subTest(argv=argv), mock.patch.object(ui, 'COLOR', False), \
+                    mock.patch.object(engine.Engine, 'update', side_effect=AssertionError('no update')):
+                code, out, served = self.serve(*argv)
+                self.assertEqual((code, served), (1, []))
+                self.assertEqual(out, '\n  ✗  --restore-databases works only with --rollback.\n'
+                                      '      Run ./setup --rollback --restore-databases.\n\n')
 
     def test_the_readme_says_what_uninstall_deletes(self):
         # it left out the Usenet config, the stored copies and a public instance's records; and, on a public instance,

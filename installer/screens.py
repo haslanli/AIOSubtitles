@@ -52,8 +52,7 @@ LABELS = {
     'SUBDL_KEY': 'SubDL API key (optional)',
     'WYZIE_KEY': 'Wyzie Subs API key (optional)',
     'TMDB_KEY': 'TMDB API key (optional)',
-    'ADD_OPENSUBTITLES': 'Your config has no subtitle source, so there is nothing to sync yet. Add OpenSubtitles (free, '
-                         'no account needed)?',
+    'ADD_OPENSUBTITLES': 'Your config has no subtitle source. Add OpenSubtitles (free, no account needed)?',
     'PUBLIC_ADDRESS': "subsync's address for your apps",
     'CACHE': "Turn off AIOStreams' 5-minute subtitle cache for subsync?",
     'AIOS_PASSWORD': 'Its password',
@@ -74,7 +73,7 @@ VM_ADDRESS = ("Docker runs in a virtual machine here, so setup can't find this m
               'it, like http://192.168.1.5:8790, and check it from your phone.')
 SIGN_IN_ADMIN = 'AIOStreams sign-in (admin): username'              # AIOS_USERNAME's: for the cache setting,
 SIGN_IN_TO_SAVE = 'AIOStreams sign-in to save configs: username'    # and for an AIOStreams that asks one to save
-CONFIG_PASSWORD = 'Password of your config {config}'                # AIOS_CONFIG_PASSWORD's when removing subsync
+CONFIG_PASSWORD = 'Password of your config {config}'    # AIOS_CONFIG_PASSWORD's when removing subsync or restoring
 RUN_AGAIN = 'Run ./setup again to see its status, update it, change your answers or remove it.'
 ENDED = 'This setup page has ended. Run ./setup again for a new address.'
 CHECK_AGAIN = 'Check again'
@@ -271,8 +270,10 @@ def _back_and_continue(route, step_id, enabled=True):
 
 def start(route='yourself'):
     rows = [ui.radio_row('ROUTE', value, title, text, checked=value == route) for value, title, text in WAYS]
-    what = ('<section class="what" aria-labelledby="need-h">' + ''.join(f'<p>{e(p)}</p>' for p in INTRO)
-            + f'<h2 id="need-h">Before you start</h2>{ui.dots(BEFORE)}</section>')
+    # the list under the introduction in the left column (the form takes the right one), named on its own
+    what = ('<section class="what">' + ''.join(f'<p>{e(p)}</p>' for p in INTRO)
+            + f'<section aria-labelledby="need-h"><h2 id="need-h">Before you start</h2>{ui.dots(BEFORE)}</section>'
+            '</section>')
     form = (f'<form id="ways" method="post">{ui.radio_group(QUESTION, rows)}<div class="go">'
             f'{ui.button("Continue", "primary", type="submit", arrow=True)}</div></form>')
     main = f'<main class="grid"><h1>{e(TITLE)}</h1>{what}{form}<div class="page-end" aria-hidden="true"></div></main>'
@@ -525,8 +526,9 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
     """The page after setup: the status, updates, your answers, removing. `ready`: update.Ready, from comparing this
     setup's version with the service's. `rollback`: (the earlier version, its database copy's name or None) while one
     is recorded. `removing`: what removing does (remove_text). `sign_in`: removing asks AIOStreams' sign-in to save
-    configs, under the lines it wrote before asking (`written`)."""
-    status = (f'<h1>{e(STATUS[route])}</h1><div class="grid12 band">' + ui.check_rows(list(rows))
+    configs, under the lines it wrote before asking (`written`). `problem`: a refused removal (key, message), summed
+    up under the heading as on the steps (the script focuses it), linking to its field in the Remove row."""
+    status = ('<div class="grid12 band">' + ui.check_rows(list(rows))
               + '<dl class="details">' + ''.join(f'<div><dt>{e(label)}</dt><dd>{e(value)}</dd></div>'
                                                  for label, value in details) + '</dl></div>')
     running = update.RUNNING.format(version=running_version)
@@ -556,9 +558,9 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
         error = _error(problem, 'REMOVE')
         box = ui.choice('confirm', DELETE_RECORDS, '', name='REMOVE', value='yes',
                         error_id='confirm-error' if error else None)
-        controls = (ui.choices(box) + (f'<p class="field-error" id="confirm-error">{e(error)}</p>' if error else '')
+        controls = ((f'<p class="field-error" id="confirm-error">{e(error)}</p>' if error else '') + ui.choices(box)
                     + f'<div class="actions">{ui.button(REMOVE_HOST, "danger", type="submit")}</div>')
-        about = REMOVE_HOST_TEXT
+        about, fields = REMOVE_HOST_TEXT, {'REMOVE': 'confirm'}
     else:
         controls = _input('AIOS_CONFIG_PASSWORD', CONFIG_PASSWORD.format(config=config), '', problem,
                           kind='password', reveal=True)
@@ -570,11 +572,16 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
         controls += ('<input type="hidden" name="REMOVE" value="yes">'
                      f'<div class="actions">{ui.button("Remove subsync", "danger", type="submit")}</div>')
         about = removing or remove_text({})
+        fields = _ids('AIOS_CONFIG_PASSWORD', *(('AIOS_USERNAME', 'AIOS_PASSWORD') if sign_in else ()),
+                      *(('REMOVE_OPENSUBTITLES',) if offer_opensubtitles else ()))
     remove = ui.row('rm-h', REMOVING[route], f'<p class="help">{e(about)}</p>',
                     f'<form class="controls" method="post" action="remove">{controls}</form>')
+    summary = _summary(problem, fields)
+    notes = f'<div class="notes">{summary}</div>' if summary else ''      # as the site's settings page has them
     return ui.page(STATUS[route],         # titled by its heading
-                   f'<div class="wrap">{ui.top(explain.CONTACT, start="./", site=False)}<main>{status}'
-                   f'<div class="rows">{panel}{answers}{remove}</div></main></div>', 'settings')
+                   f'<div class="wrap">{ui.top(explain.CONTACT, start="./", site=False)}<main>'
+                   f'<h1>{e(STATUS[route])}</h1>{notes}{status}<div class="rows">{panel}{answers}{remove}</div></main>'
+                   '</div>', 'settings')
 
 
 def working(heading, rows, running, stop=None):

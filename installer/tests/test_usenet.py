@@ -171,6 +171,25 @@ class Personal(FlowFixture):
         self.assertNotIn("subsync's own config", out.split('Your AIOStreams configs')[1].split('Save these')[0])
         self.assertFalse([c for c in self.exec_calls if 'subsync.selftest' in c[0]])     # no test read of Usenet
 
+    def test_status_names_the_usenet_config_as_the_page_does(self):
+        # A Usenet-only install's ./setup --status said "subsync's config: (none)" and never named the config
+        # subsync uses, which the page after setup lists
+        self.viewer([ENGINE], [NEWZNAB, SUBS])
+        code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        usenet = self.keys()['USENET_UUID']
+        code, out = self.run_main('--status')
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"\n  config: {UUID[:8]}…  ·  subsync's config: (none)  ·  subsync's Usenet config: "
+                      f'{usenet[:8]}…\n', out)
+        self.viewer([TORBOX, ENGINE], [ZILEAN, NEWZNAB, SUBS])             # its own config too
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+        self.assertEqual(code, 0, out)
+        keys = self.keys()
+        code, out = self.run_main('--status')
+        self.assertIn(f"\n  config: {UUID[:8]}…  ·  subsync's config: {keys['SYNC_UUID'][:8]}…  ·  subsync's Usenet "
+                      f"config: {keys['USENET_UUID'][:8]}…\n", out)
+
     def test_uninstall_removes_the_usenet_config(self):
         self.viewer([TORBOX, ENGINE], [ZILEAN, NEWZNAB, SUBS])
         code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', TEST_READ='no'))

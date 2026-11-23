@@ -7,7 +7,8 @@ installer/engine.py, this is the command line.
   ./setup --status         is it running, and what has it done
   ./setup --update         update to this setup's version, if it is newer
   ./setup --rollback       back to the version before the last update
-  ./setup --uninstall      take subsync out of your config and remove it
+  ./setup --uninstall      take subsync out of your config and remove it; a public instance: remove it with
+                           everyone's records
   ./setup --restore FILE   put a saved copy of your config back
   ./setup --answers FILE [--yes]   answers from KEY=value lines (see docs/answers.example)
   ./setup --version        this setup's version
@@ -50,7 +51,9 @@ def cmd_status():
     d = dict(details)
     if 'AIOStreams' in d:
         say(f"  AIOStreams: {d['AIOStreams']}  ·  languages: {d['languages']}  ·  audio: {d['audio']}")
-        say(f"  config: {d['config']}  ·  subsync's config: " + d["subsync's config"])
+        # the configs, the Usenet one when there is one, as the page after setup lists them
+        say('  ' + '  ·  '.join(f'{label}: {d[label]}' for label in ('config', "subsync's config",
+                                                                     "subsync's Usenet config") if label in d))
     say(f"  logs: {d['logs']}")
     return 0
 
@@ -62,6 +65,9 @@ NOT_A_COPY = "{file} isn't a saved copy of a config."
 GIVE_A_COPY = ('Give a saved copy from state/backups/, like '
                './setup --restore state/backups/viewer-1a2b3c4d-20261117-120000.json.')
 GIVE_ANSWERS = 'Give an answers file in state/, like ./setup --answers state/answers.txt --yes.'
+# --restore-databases given without --rollback, and the way out
+RESTORE_DATABASES_ALONE = ('--restore-databases works only with --rollback.',
+                           'Run ./setup --rollback --restore-databases.')
 
 
 def saved_copy(path):
@@ -88,12 +94,20 @@ def cmd_restore(args, path):
         e.aios = engine.saved_aios(e.prev)
     else:           # no settings (./setup --uninstall deletes them): AIOStreams found as installing finds it
         e.reach_aios()
-    password = e.ask.text('AIOS_CONFIG_PASSWORD', f'Password of config {short(uuid)}', secret=True)
+    read = {}
+
+    def check_password(value):      # tried at the question, as removing does: a wrong one is asked again
+        try:
+            read['config'], _ = e.aios.get_config(uuid, value)
+        except AiosError as error:
+            return False, error.message, value
+        return True, '', value
+    password = e.ask.text('AIOS_CONFIG_PASSWORD', screens.CONFIG_PASSWORD.format(config=short(uuid)), secret=True,
+                          check=check_password)
     # its own yes, never CONFIRM's: an answers file made for installing never restores anything
     if not e.ask.yesno('RESTORE', f'Put the copy from {Path(path).name} back into config {short(uuid)}?', False):
         stop('Nothing was changed.')
-    current, _ = e.aios.get_config(uuid, password)
-    backup(current, uuid, 'before-restore')
+    backup(read['config'], uuid, 'before-restore')
     e.with_sign_in(lambda: e.aios.save_config(uuid, password, config))    # asks a sign-in AIOStreams wants
     ok('Restored.')
     return 0
@@ -144,7 +158,8 @@ def main(argv=None):
     parser.add_argument('--answers', help='answers from a KEY=value file')
     parser.add_argument('--yes', action='store_true', help='ask nothing: answers file, current values and defaults')
     parser.add_argument('--status', action='store_true', help='is it running, and what has it done')
-    parser.add_argument('--uninstall', action='store_true', help='take subsync out of your config and remove it')
+    parser.add_argument('--uninstall', action='store_true', help="take subsync out of your config and remove it; a "
+                                                                 "public instance: remove it with everyone's records")
     parser.add_argument('--restore', metavar='FILE', help='put a saved copy of your config back')
     parser.add_argument('--update', action='store_true', help="update to this setup's version, if it is newer")
     parser.add_argument('--rollback', action='store_true', help='back to the version before the last update')
@@ -166,6 +181,8 @@ def main(argv=None):
     if os.environ.get('AIOSUBTITLES_IN_IMAGE') and in_image():
         return 1
     try:
+        if args.restore_databases and not args.rollback:
+            stop(*RESTORE_DATABASES_ALONE)
         if args.status:
             return cmd_status()
         if args.restore:

@@ -1825,14 +1825,16 @@ class Engine:
 
     # ------------------------------------------------------------------------------------- updates
     def update(self):
-        """The page's Update, or ./setup --update: the service moves to this setup's own version."""
+        """The page's Update, or ./setup --update: the service moves to this setup's own version. Already on it, it
+        says so and has done what was asked; a setup older than the service stops (only a rollback goes back)."""
         if not self.prev.get('installed'):
             stop('subsync is not set up here yet.', 'Run ./setup')
         if made_before_labels(self.prev):       # its image was built from code since replaced: no switch, no way back
             raise Stop(update.EARLY_INSTALL_PAGE if self.page else update.EARLY_INSTALL)
         ready = update.compare(self.prev, PLACE.image if PLACE else None, setup_version())
         if ready.how == 'newest':
-            raise Stop(update.NEWEST)
+            self.out.ok(update.NEWEST)
+            return True
         if ready.how == 'newer-here':
             raise Stop(update.NEWER_HERE.format(running=self.prev.get('version'), setup=setup_version()))
         return self.switch(PLACE.image, PLACE.local, setup_version())

@@ -1956,6 +1956,28 @@ class Restore(Offline):
         self.assertNotIn('Restored.', out)
         self.assertEqual(self.unchanged(), before)
 
+    def test_the_password_is_asked_as_removing_asks_it_and_tried_at_the_question(self):
+        # It asked "Password of config 1a2b3c4d…";: it tried the password only after "Put the copy …
+        # back?" was answered, so a typo ended the run after the yes
+        current = json.loads(json.dumps(self.aios.users[UUID]['config']))
+        question = f'Put the copy from {self.copy.name} back into config {UUID[:8]}…? [y/n]'
+        with typing('wrong', PASSWORD, 'y') as typed:
+            code, out = self.run_main('--restore', str(self.copy))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(typed.call_count, 3)
+        asked = out.split(question)[0]
+        self.assertEqual(asked.count(f'  Password of your config {UUID[:8]}…\n'), 2)         # asked again at once
+        self.assertIn("don't match", asked)
+        self.assertNotIn('Password of config', out)
+        self.assertIn('Restored.', out)
+        before = [p for p in (self.state / 'backups').iterdir() if p.name.startswith('before-restore-')]
+        self.assertEqual(json.loads(before[0].read_text()), {'uuid': UUID, 'config': current})   # the config it read
+        # with --yes: the stop comes before the yes, and says what to change
+        code, out = self.restore(self.copy, AIOS_CONFIG_PASSWORD='wrong')
+        self.assertEqual(code, 1, out)
+        self.assertNotIn(question, out)
+        self.assertIn('      Change AIOS_CONFIG_PASSWORD in the answers file.\n', out)
+
     def test_answering_no_changes_nothing(self):
         before = self.unchanged()
         code, out = self.restore(self.copy, RESTORE='no')
@@ -2129,6 +2151,26 @@ class Advice(Offline):
                           'file.\n', out)
             code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))   # the line left out: the default refused
             self.assertIn('      Add PUBLIC_ADDRESS=... to the answers file.\n', out)
+
+    def test_a_refused_answer_in_an_unattended_run_says_what_to_change(self):
+        # With --yes, CACHE=maybe printed "! Type y or n." and then "✗ CACHE: Type y or n."
+        # with no way out; the warning is for a terminal, where the question is asked again
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', CACHE='maybe'))
+        self.assertEqual(code, 1, out)
+        self.assertIn('\n  ✗  CACHE: Type y or n.\n      Change CACHE in the answers file.\n', out)
+        self.assertEqual(out.count('Type y or n.'), 1)
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown), self.assertRaises(ui.Stop) as caught:
+            ui.Asker(yes=True).text('CACHE', 'q', current='maybe', check=lambda v: (False, 'Refused.', v))
+        self.assertEqual((caught.exception.message, caught.exception.fix),
+                         ('CACHE: Refused.', 'Give CACHE=... in an answers file: ./setup --answers FILE --yes.'))
+        self.assertNotIn('Refused.', shown.getvalue())
+        # in a terminal it is asked again, under the warning
+        shown = io.StringIO()
+        with typing('y') as typed, contextlib.redirect_stdout(shown):
+            self.assertIs(ui.Asker({'CACHE': 'maybe'}).yesno('CACHE', screens.LABELS['CACHE'], False), True)
+        self.assertEqual(typed.call_count, 1)
+        self.assertEqual(shown.getvalue().count('  !  Type y or n.\n'), 1)
 
     def test_a_missing_answer_says_where_to_give_it(self):
         # it said "Add …=... to the answers file." also when no answers file was given, or the file has that line
@@ -2372,11 +2414,11 @@ class TakeOver(Offline):
         self.assertEqual(engine.load_settings(), self.settings_1_3_0)
         self.assertEqual(self.compose(), COMPOSE_1_3_0)
         self.assertFalse([c for c, _ in self.exec_calls if 'copy-databases' in c])
-        # once taken over, it updates like any other install
+        # once taken over, it updates like any other install: here, nothing newer (no stop)
         self.take_over()
-        with self.assertRaises(ui.Stop) as caught:
-            engine.Engine({}, page=True).update()
-        self.assertEqual(caught.exception.message, 'This is the newest version.')
+        e = engine.Engine({}, page=True)
+        self.assertIs(e.update(), True)
+        self.assertEqual(e.out.rows, [['ok', 'This is the newest version.', None]])
 
     def test_removing_it_takes_its_volume_by_name(self):
         self.take_over()

@@ -119,6 +119,14 @@ class Words(unittest.TestCase):
         self.assertIn('About 4 GB of free disk space.', texts)
         self.assertEqual([text for text in texts if 'Compose' in text], [])
 
+    def test_the_opensubtitles_question_gives_no_reason_that_isnt_true(self):
+        # It said "so there is nothing to sync yet", but subsync also searches sites of its own
+        # (SUBSYNC_EXTRA_SOURCES), as the question's explanation says; the page and the terminal ask the same words
+        words = 'Your config has no subtitle source. Add OpenSubtitles (free, no account needed)?'
+        self.assertEqual(screens.LABELS['ADD_OPENSUBTITLES'], words)
+        self.assertIn(words, Tree(screens.choices(['eng'], 'no', 'http://x', offer_opensubtitles=True)).texts)
+        self.assertNotIn('nothing to sync', ' '.join(screens.INSTALLER_WORDS))
+
     def test_every_limit_label_is_an_approved_word(self):
         # the hosting route's audio-only limits too: the list once left them out
         for lim in limits.personal(audio=True, usenet=True) + limits.hosting(usenet=True, audio=True):
@@ -242,6 +250,15 @@ class Structure(unittest.TestCase):
         html, _ = samples.every_state()['config']
         self.assertIn(htmllib.escape(explain.QUESTIONS['AIOS_CONFIG_ID'][1]), html)
         self.assertIn('aria-describedby="aios_config_password-help"', html)
+
+    def test_before_you_start_names_its_list_alone(self):
+        # The region named "Before you start" began with the introduction; the list stays under it in the left
+        # column, the form keeps the right one
+        intro = ''.join(f'<p>{ui.e(p)}</p>' for p in screens.INTRO)
+        html = screens.start()
+        self.assertIn(f'<section class="what">{intro}<section aria-labelledby="need-h"><h2 id="need-h">Before you '
+                      f'start</h2>{ui.dots(screens.BEFORE)}</section></section><form id="ways"', html)
+        self.assertEqual(html.count('aria-labelledby="need-h"'), 1)
 
     def test_the_page_after_setups_rows_are_the_settings_pages_rows(self):
         # one frame (subsync's ui.row) for the update panel, the rollback, your answers and removing, as on the
@@ -607,7 +624,8 @@ class TerminalOnly(unittest.TestCase):
     shows them; test_web checks the removal pages the page itself serves."""
 
     REMOVING = ('after', 'after-newest', 'after-newer-here', 'after-rollback', 'after-usenet', 'after-sign-in',
-                'after-host', 'after-host-not-ticked', 'removing-failed', 'removed', 'removed-host')
+                'after-wrong-password', 'after-host', 'after-host-not-ticked', 'removing-failed', 'removed',
+                'removed-host')
 
     def test_neither_text_is_on_any_page(self):
         states = samples.every_state()
@@ -833,6 +851,29 @@ class RefusedAnswerSummary(unittest.TestCase):
         # a question the step didn't draw: no link either
         self.assertIn('<p id="problem-message">Refused.</p>', screens.aios([], ask='AIOS_CONTAINER',
                                                                            problem=('AIOS_URL', 'Refused.')))
+
+    def test_a_refused_removal_is_summed_up_at_the_top_of_the_page_after_setup(self):
+        # The error showed only in the Remove row at the bottom of the page, which came back at its top with
+        # nothing focused; a public instance's error came after its box
+        for name, html, field in (
+                ('wrong password', screens.after_setup('yourself', [], [], '1.1.0', None, config='1a2b3c4d…',
+                                                       problem=('AIOS_CONFIG_PASSWORD', 'Refused.')),
+                 'aios_config_password'),
+                ('sign-in refused', screens.after_setup('yourself', [], [], '1.1.0', None, config='1a2b3c4d…',
+                                                        sign_in=True, problem=('AIOS_PASSWORD', 'Refused.')),
+                 'aios_password'),
+                ('box not ticked', screens.after_setup('host', [], [], '1.1.0', None, problem=('REMOVE', 'Refused.')),
+                 'confirm')):
+            with self.subTest(name):
+                top = html.split('<div class="grid12 band">', 1)[0]
+                self.assertRegex(top, r'<main><h1>[^<]+</h1><div class="notes"><div class="note problem" role="alert" '
+                                      r'id="problem" tabindex="-1">')
+                self.assertIn('<b>That didn&#x27;t go through</b><p id="problem-message">'
+                              f'<a href="#{field}">Refused.</a></p>', top)
+                self.assertEqual(html.count(f' id="{field}"'), 1)                   # the link's field is there
+                self.assertIn('>Refused.</p>', html.split('id="problem-message"', 1)[1])        # and its error
+        self.assertLess(html.index('<p class="field-error" id="confirm-error">Refused.</p>'),
+                        html.index('<input type="checkbox" id="confirm"'))       # above its box, as at every field
 
     def test_no_summary_without_a_refused_answer(self):
         for name in ('config', 'choices', 'limits', 'host-limits', 'host-address', 'after-sign-in'):

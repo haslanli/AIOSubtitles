@@ -131,6 +131,16 @@ class SourceSetup(unittest.TestCase):
         self.assertEqual(calls[0], 'build -f subsync/Dockerfile -t aiosubtitles:local-1.5.0 .')
         self.assertTrue(calls[1].endswith('aiosubtitles:local-1.5.0 setup --update'), calls[1])
 
+    def test_update_after_another_option_fetches_the_newer_version_too(self):
+        # Only the first word was looked at, so ./setup --yes --update built the folder's old version, and
+        # setup then said "This is the newest version."
+        self.release('1.5.0')
+        code, out, calls = self.run_setup('--yes', '--update')
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.folder / 'VERSION').read_text().strip(), '1.5.0')
+        self.assertEqual(calls[0], 'build -f subsync/Dockerfile -t aiosubtitles:local-1.5.0 .')
+        self.assertTrue(calls[1].endswith('aiosubtitles:local-1.5.0 setup --yes --update'), calls[1])
+
     def test_a_failed_build_puts_the_folder_back(self):
         self.release('1.5.0')
         before = git(self.folder, 'rev-parse', 'HEAD')

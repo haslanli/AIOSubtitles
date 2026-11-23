@@ -275,6 +275,9 @@ def every_state():
                                             config='1a2b3c4d…', removing=screens.remove_text({'SYNC_UUID': 'x',
                                                                                               'USENET_UUID': 'y'})),
         *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…')
+    add('after-wrong-password', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
+                                                    problem=wrong, config='1a2b3c4d…'),
+        *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…', wrong[1])
     saving = [('warn', 'Saving the config: This AIOStreams asks you to sign in before configs can be saved.', None)]
     add('after-sign-in', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
                                              problem=('AIOS_USERNAME', ''), config='1a2b3c4d…', sign_in=True,
