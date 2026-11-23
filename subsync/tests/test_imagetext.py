@@ -11,7 +11,7 @@ from unittest import mock
 
 import numpy as np
 
-from helpers import FIXTURES, IMAGE_BUILD, rules
+from helpers import FIXTURES, IMAGE_BUILD, ocr_models_in, rules
 import imagesubs as I  # noqa: E402
 from subsync import imagetext, mkv, pipeline, textpair  # noqa: E402
 from subsync.reader import CapReached, ReadFailed, Refused  # noqa: E402
@@ -495,11 +495,7 @@ class ImageWordsPipelineTest(unittest.TestCase):
 
 
 def _models_here():
-    try:
-        import onnxruntime  # noqa: F401
-    except ImportError:
-        return False
-    return all(os.path.exists(os.path.join(imagetext.MODEL_DIR, f)) for f in ("latin_rec.onnx", "eslav_rec.onnx"))
+    return ocr_models_in(imagetext.MODEL_DIR)
 
 
 DOCKERFILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Dockerfile")

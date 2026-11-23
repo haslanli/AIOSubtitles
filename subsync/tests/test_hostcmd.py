@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+import helpers  # first: it puts the package on the import path
 from subsync import hostcmd
 from subsync.settings import Settings
 from subsync.store import Store
@@ -172,14 +172,16 @@ class HostCmdTest(unittest.TestCase):
         # Settings imported lang_list from the worker, so `hostcmd status` (and anything else that only reads
         # settings) loaded the worker, the sync's 20-odd modules and numpy: "Standard library only" above was false
         import subprocess
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         probe = ("import sys\nsys.path.insert(0, sys.argv[1])\nimport subsync.hostcmd\nfrom subsync.settings import "
                  "Settings\nSettings({})\nprint(sorted(m for m in sys.modules if m == 'numpy' or m.startswith("
-                 "('numpy.', 'subsync.worker', 'subsync.pipeline', 'subsync.audiofit'))))")
-        run = subprocess.run([sys.executable, "-I", "-c", probe, root], stdin=subprocess.DEVNULL, capture_output=True,
-                             text=True, timeout=60, env={"PYTHONDONTWRITEBYTECODE": "1"})
+                 "('numpy.', 'subsync.worker', 'subsync.pipeline', 'subsync.audiofit'))))\n"
+                 "print(sys.dont_write_bytecode)")
+        # -I leaves out every PYTHON* variable (PYTHONDONTWRITEBYTECODE too) and the parent's environment is not
+        # passed; -B: no bytecode written into the package folder
+        run = subprocess.run([sys.executable, "-I", "-B", "-c", probe, helpers.SOURCE], stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=60, env={})
         self.assertEqual((run.returncode, run.stderr), (0, ""))
-        self.assertEqual(run.stdout.strip(), "[]")
+        self.assertEqual(run.stdout.splitlines(), ["[]", "True"])
 
 
 if __name__ == "__main__":

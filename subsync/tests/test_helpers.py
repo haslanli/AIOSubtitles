@@ -19,8 +19,8 @@ from unittest import mock
 
 import helpers
 import imagesubs as I
-from helpers import (BACKLOG, FIXTURES, have, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS, PASSWORD,
-                     RangeServer, REALDEBRID, RecheckHarness, ServerHarness, SignupHarness, SOURCE, SourcesHarness,
+from helpers import (BACKLOG, FIXTURES, have, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS,
+                     ocr_models_in, PASSWORD, RangeServer, REALDEBRID, RecheckHarness, ServerHarness, SignupHarness, SOURCE, SourcesHarness,
                      start_server, stop_server, TempDir, TORBOX, TORRENTIO, wait_until, watch_the_log)
 from subsync import net
 
@@ -237,8 +237,10 @@ class ImageBuildTest(unittest.TestCase):
         # laid out as the image is: its folder (WORKDIR /opt/aiosubtitles/subsync) holds the package, and the release's
         # VERSION is beside that folder (/opt/aiosubtitles/VERSION), where the package reads it (version.py)
         self.image = os.path.join(root, "subsync")
+        # the package before the build adds the OCR models: any a machine set up for OcrModelTest keeps in its source
+        # are left out
         shutil.copytree(os.path.join(SOURCE, "subsync"), os.path.join(self.image, "subsync"),
-                        ignore=shutil.ignore_patterns("__pycache__"))
+                        ignore=shutil.ignore_patterns("__pycache__", "*.onnx"))
         shutil.copy(os.path.join(os.path.dirname(SOURCE), "VERSION"), root)
 
     def python(self, image_build, *args):
@@ -259,11 +261,18 @@ class ImageBuildTest(unittest.TestCase):
                                  os.path.realpath(os.path.join(folder, "subsync", "__init__.py")))
 
     def test_the_image_build_fails_without_the_ocr_models(self):
-        # the copy has no models (the source has none): skipped outside the image build, a failure inside it
+        # the copy has no models: a failure inside the image build. Outside it the source's copy is tested: skipped
+        # when the source has none; run when it has them, on a machine set up for OcrModelTest (whether they read
+        # is OcrModelTest's own result in the run)
+        source_has_them = ocr_models_in(os.path.join(SOURCE, "subsync", "ocr"))
         for image_build, code, summary in ((True, 1, "FAILED (failures=2)"), (False, 0, "OK (skipped=2)")):
             with self.subTest(image_build=image_build):
                 out = self.python(image_build, "-m", "unittest", "discover", "-s", TESTS, "-t", TESTS,
                                   "-p", "test_imagetext.py", "-k", "OcrModelTest")
+                if not image_build and source_has_them:
+                    self.assertIn("Ran 2 tests", out.stderr)
+                    self.assertNotIn("skipped", out.stderr)
+                    continue
                 self.assertEqual(out.returncode, code, out.stderr)
                 self.assertIn("Ran 2 tests", out.stderr)
                 self.assertIn(summary, out.stderr)

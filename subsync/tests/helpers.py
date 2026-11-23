@@ -221,6 +221,18 @@ def have(tool):
     return shutil.which(tool) is not None
 
 
+OCR_MODELS = ("latin_rec.onnx", "eslav_rec.onnx")     # the PP-OCRv5 models the image build adds (Dockerfile)
+
+
+def ocr_models_in(folder):
+    """Whether `folder` (a copy's subsync/ocr) holds the OCR models, and onnxruntime is installed to run them."""
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return False
+    return all(os.path.exists(os.path.join(folder, f)) for f in OCR_MODELS)
+
+
 def closed_after(test, resource):
     """`resource` (a Store, the people's records, a database connection), closed when the test ends, so no test leaves
     its database open."""

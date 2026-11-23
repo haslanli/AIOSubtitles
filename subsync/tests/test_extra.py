@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 from helpers import closed_after, start_server, stop_server
 from subsync import choose
@@ -275,7 +276,6 @@ class ExtraSourcesTest(unittest.TestCase):
 
     def test_one_wyzie_language_failing_keeps_the_others(self):
         # Wyzie, asked once per language, dropped every language when one failed (Gestdown keeps the others)
-        from unittest import mock
         ex = self.extra(SUBSYNC_EXTRA_SOURCES="", SUBSYNC_WYZIE_KEY="k2")
         real = ex._get
 
@@ -302,8 +302,10 @@ class PacingTest(unittest.TestCase):
     def setUp(self):
         from subsync import sources
         self.sources = sources
-        self.saved = sources.PACED_HOSTS
-        sources.PACED_HOSTS = ("127.0.0.1",)            # the stand-in plays OpenSubtitles here
+        # the stand-in plays OpenSubtitles here; put back even when the stand-in fails to start
+        paced = mock.patch.object(sources, "PACED_HOSTS", ("127.0.0.1",))
+        paced.start()
+        self.addCleanup(paced.stop)
         self.state = {"now": 0, "max": 0, "hits": {}}
         lock, st = threading.Lock(), self.state
 
@@ -335,29 +337,33 @@ class PacingTest(unittest.TestCase):
                         st["now"] -= 1
 
         self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.addCleanup(stop_server, self.server)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
-    def tearDown(self):
-        self.sources.PACED_HOSTS = self.saved
-        stop_server(self.server)
-
-    def test_at_most_two_at_a_time(self):
+    def test_two_at_a_time(self):
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(8) as p:
             got = list(p.map(lambda i: fetch_subtitle(f"{self.url}/sub/{i}"), range(8)))
         self.assertTrue(all(b"Hello" in g for g in got))
-        self.assertLessEqual(self.state["max"], 2)
+        self.assertEqual(self.state["max"], 2)          # at most two at once, and two do go together
 
     def test_a_429_is_tried_again(self):
+        # the wait is recorded as fetch_subtitle works it out, and still waited
+        waits, real = [], self.sources._wait_429
+
+        def wait_429(err, attempt):
+            waits.append(real(err, attempt))
+            return waits[-1]
         t0 = time.monotonic()
-        self.assertIn(b"Hello", fetch_subtitle(f"{self.url}/busy/1"))
+        with mock.patch.object(self.sources, "_wait_429", wait_429):
+            self.assertIn(b"Hello", fetch_subtitle(f"{self.url}/busy/1"))
         self.assertEqual(self.state["hits"]["/busy/1"], 2)
-        self.assertGreaterEqual(time.monotonic() - t0, 0.9)        # it waited for Retry-After
+        self.assertEqual(waits, [1.5])          # Retry-After asks 1 s; a first try again waits RETRY_STEP_S at least
+        self.assertGreaterEqual(time.monotonic() - t0, 0.9)        # and waited
 
     def test_other_hosts_are_not_paced(self):
-        self.sources.PACED_HOSTS = ("opensubtitles", "strem.io")
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(6) as p:
+        with mock.patch.object(self.sources, "PACED_HOSTS", ("opensubtitles", "strem.io")), ThreadPoolExecutor(6) as p:
             list(p.map(lambda i: fetch_subtitle(f"{self.url}/sub/{i}"), range(6)))
         self.assertGreater(self.state["max"], 2)
 
