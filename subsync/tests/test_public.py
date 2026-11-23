@@ -6,7 +6,7 @@ import os
 import threading
 import unittest
 
-from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, wait_until  # noqa: E402
+from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, run_once, wait_until  # noqa: E402
 from subsync.settings import Settings, available_cpus  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -615,12 +615,10 @@ class WorkerHooksTest(unittest.TestCase):
         job = Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1})
 
         def refused(j):
-            a.stop_flag = True                               # one turn of the loop
             raise Refused("HTTP 429")
         a.process = refused
-        a.submit(job)
         with self.assertLogs("subsync.worker", "WARNING") as logs:
-            a._loop("main")
+            run_once(a, job)            # one turn of the loop; a job that doesn't run fails the test
         self.assertEqual(logs.output, ["WARNING:subsync.worker:refused movie/tt1 (HTTP 429): no reads for 900 s"])
         self.assertTrue(a._file_blocked(job.alias))          # 1 h, then 6 h, 24 h, for this person
         self.assertFalse(self.store.file_blocked(job.alias))
@@ -955,7 +953,7 @@ SYNCED_EN = SRT_EN.replace("00:00:01,000 --> 00:00:02,000", "00:00:01,500 --> 00
 SRT_FR = ("1\n00:00:01,000 --> 00:00:02,000\nBonjour mon ami\n\n2\n00:00:03,000 --> 00:00:04,000\nGénéral Kenobi\n\n"
           "3\n00:00:05,000 --> 00:00:06,000\nVous êtes bien audacieux\n")
 FILE_KEY, ALIAS = "0123456789abcdef-1000", "hash:0123456789abcdef|1000"
-FILE = "videoHash=0123456789abcdef&videoSize=1000"
+QUERY = "videoHash=0123456789abcdef&videoSize=1000"     # the query string of a request for that file
 
 
 class Listing:
@@ -1031,7 +1029,7 @@ class KeptAppTest(unittest.TestCase):
         return token
 
     def listed(self, app):
-        return [e["label"] for e in app.subtitles("movie", "tt1", FILE)]
+        return [e["label"] for e in app.subtitles("movie", "tt1", QUERY)]
 
     def test_stored_copies_only_download_what_they_were_listed(self):
         # Their App was made again for each request, so the download (the player's next request) reached one

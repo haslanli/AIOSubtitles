@@ -939,6 +939,37 @@ def wait_until(check, timeout=5.0):
     return check()
 
 
+RUN_ONCE_S = 60.0   # a job of these tests runs in a second or two: one that hasn't started by then never will
+
+
+def run_once(w, job, lane="main", within=RUN_ONCE_S):
+    """The job through one turn of the worker's lane, in this thread: what _loop does with how it ends (queued again
+    or not), then the loop stops. A job that isn't queued, or that doesn't start within `within` seconds (not due, or
+    another lane's), fails the test instead of leaving it waiting for ever."""
+    if w.submit(job) is None:
+        raise AssertionError(f"{job.label} wasn't queued")
+    real, real_next, ran = w.process, w._next, []
+
+    def process(j):
+        ran.append(j)
+        real(j)
+
+    def one_job(lane):
+        # the loop ends once a job ran, without stop(): the job's end is handled as on a running worker (a stopped
+        # worker queues nothing again)
+        return None if ran else real_next(lane)
+    w.process, w._next = process, one_job
+    timer = threading.Timer(within, w.stop)
+    timer.start()
+    try:
+        w._loop(lane)
+    finally:
+        timer.cancel()
+        w.process, w._next, w.stop_flag = real, real_next, False
+    if not ran:
+        raise AssertionError(f"{job.label} didn't start within {within:g} s")
+
+
 # -- synthetic timings: a release's lines as (start, duration), and subtitles made from them ----------------------------
 def rhythm(n, seed, start=20.0):
     """n release lines: durations 1-4 s, gaps 0.3-3 s."""

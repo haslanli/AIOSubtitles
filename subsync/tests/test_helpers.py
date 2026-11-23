@@ -1,5 +1,6 @@
 """The tests' own stand-ins and set-up (helpers.py, imagesubs.py): what other tests rely on them for."""
 import ast
+import collections
 import http.client
 import http.server
 import json
@@ -86,6 +87,31 @@ class OnePathSetupTest(unittest.TestCase):
                 guards = [i for i, node in enumerate(tree.body) if isinstance(node, ast.If)
                           and ast.unparse(node.test) in ("__name__ == '__main__'", '__name__ == "__main__"')]
                 self.assertIn(guards, ([], [len(tree.body) - 1]))
+
+    @staticmethod
+    def names_bound(target):
+        """The names an assignment's target binds (none for an attribute or an item)."""
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [n for t in target.elts for n in OnePathSetupTest.names_bound(t)]
+        if isinstance(target, ast.Starred):
+            return OnePathSetupTest.names_bound(target.value)
+        return []
+
+    def test_no_module_binds_a_top_level_name_twice(self):
+        # test_public bound FILE twice, a stored file's key and further down a request's query string; its
+        # first tests read the name as they ran, so they stored their file under the query string
+        for name, tree in self.modules(prefix=""):
+            bound = collections.Counter()
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    bound[node.name] += 1
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                        bound.update(self.names_bound(target))
+            with self.subTest(module=name):
+                self.assertEqual([n for n, times in bound.items() if times > 1], [])
 
     def test_a_module_also_runs_from_the_package_folder(self):
         # `python3 -m unittest tests.test_x` in subsync/ (the folder above this one) finds helpers too
