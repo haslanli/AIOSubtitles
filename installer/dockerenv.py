@@ -42,6 +42,9 @@ def docker_problem():
 
 
 def free_gb(path='/'):
+    """The free space, in GB, of the disk `path` is on; None when it can't be read. Inside setup's container the root
+    (the default) is on Docker's own storage, where the images and the service's volume are: on Docker Desktop and
+    Colima the virtual machine's disk, not this machine's."""
     try:
         return shutil.disk_usage(path).free / 1e9
     except OSError:
@@ -132,6 +135,15 @@ def lan_address():
             return s.getsockname()[0]
     except OSError:
         return ''
+
+
+def in_vm():
+    """Whether Docker runs in a virtual machine of its own, as on a Mac: Docker Desktop (its operating system, as
+    `docker info` names it), Colima and the other Lima machines (their names: colima, colima-<profile>, lima-<name>).
+    Docker's host network is then the virtual machine's, so no address setup finds there is this machine's."""
+    code, out, _ = run(['docker', 'info', '--format', '{{.OperatingSystem}}\t{{.Name}}'], timeout=30)
+    system, _, name = out.strip().partition('\t')
+    return code == 0 and (system == 'Docker Desktop' or name == 'colima' or name.startswith(('colima-', 'lima-')))
 
 
 def compose(state_dir, *args, timeout=1800):

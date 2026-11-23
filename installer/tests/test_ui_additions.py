@@ -36,6 +36,14 @@ class UiAdditions(unittest.TestCase):
         ready = ui.update_panel('Updates', 'About.', 'Runs 1.0.0.', 'Ready.', 'Update')
         self.assertIn('<div class="version"><p>Runs 1.0.0.</p><p class="new">Ready.</p></div>', ready)
 
+    def test_a_config_changes_note_keeps_its_paragraphs(self):
+        # The earlier config's sentence is a paragraph of its own under your config's note
+        changes = ui.config_changes([('Your config 1a2b3c4d…', [('+', 'adds subsync')], 'One & two.\nThree <four>.'),
+                                     ("subsync's own config (new)", [], '')])
+        self.assertIn('<li><span class="sign" aria-hidden="true">+</span>adds subsync</li></ul><p>One &amp; two.</p>'
+                      '<p>Three &lt;four&gt;.</p></section>', changes)
+        self.assertIn("<h2>subsync&#x27;s own config (new)</h2><ul></ul></section>", changes)
+
     def test_a_long_address_in_a_check_row_wraps(self):
         # the 16-shape check at 360 x 640: an address in a check row pushed the page sideways
         self.assertRegex(ui.APP_CSS, r'\.checks \.tx\{[^}]*overflow-wrap:anywhere')

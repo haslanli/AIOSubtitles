@@ -175,6 +175,30 @@ class PortInUse(unittest.TestCase):
         self.assertFalse(dockerenv.port_in_use(port, '127.0.0.1'))
 
 
+class InVm(unittest.TestCase):
+    def in_vm(self, answer):
+        docker = FakeDocker([(['docker', 'info'], answer)])
+        with mock.patch.object(dockerenv, 'run', docker):
+            return dockerenv.in_vm(), docker.calls[0][0]
+
+    def test_docker_desktop_and_colima_run_docker_in_a_virtual_machine(self):
+        # There the helper's address was the virtual machine's (192.168.65.3, say), suggested to phones as
+        # subsync's
+        for answer in ('Docker Desktop\tdocker-desktop', 'Ubuntu 24.04.1 LTS\tcolima',
+                       'Ubuntu 24.04.1 LTS\tcolima-work', 'Alpine Linux v3.20\tlima-rancher-desktop'):
+            with self.subTest(answer=answer):
+                found, cmd = self.in_vm((0, answer + '\n', ''))
+                self.assertTrue(found)
+                self.assertEqual(cmd, ['docker', 'info', '--format', '{{.OperatingSystem}}\t{{.Name}}'])
+
+    def test_docker_on_the_machine_itself_or_no_answer_is_no_virtual_machine(self):
+        for answer in ((0, 'Ubuntu 24.04.1 LTS\tmy-server\n', ''),
+                       (0, 'Debian GNU/Linux 12 (bookworm)\tcolimator\n', ''),
+                       (1, '', 'Cannot connect to the Docker daemon'), (0, '', '')):
+            with self.subTest(answer=answer):
+                self.assertFalse(self.in_vm(answer)[0])
+
+
 class OneDefinition(unittest.TestCase):
     """Each name setup's Docker work shares with the compose file it writes, and with subsync, is defined once."""
 

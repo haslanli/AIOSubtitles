@@ -5,6 +5,7 @@ them), the saved AIOStreams reached again by a later ./setup, the last step's ch
 the service, a public instance's port and the one wording of each question, against the stand-in AIOStreams of
 test_flow with Docker stubbed out. Nothing connects beyond 127.0.0.1."""
 import contextlib
+import copy
 import errno
 import io
 import json
@@ -626,14 +627,47 @@ class AiostreamsShapes(Offline):
         s = engine.load_settings()
         self.assertEqual((s['mode'], s['public_kind'], s['bind'], s['port']), ('remote', 'port', '0.0.0.0', 8790))
 
-    def test_an_address_without_a_port_takes_its_schemes(self):
-        for address, port in (('http://192.168.1.5', 80), ('https://192.168.1.5', 443),
-                              ('https://subs.example.com:8443', 8443)):
+    def test_an_http_address_without_a_port_takes_port_80(self):
+        e = self.page_engine({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': 'http://192.168.1.5'})
+        e.choices()
+        self.assertEqual((e.s['public_kind'], e.s['port'], e.s['bind']), ('port', 80, '0.0.0.0'))
+        self.assertIn('ports: ["0.0.0.0:80:8790"]', engine.compose_for(dict(e.s, image=IMAGE, install_id='i')))
+
+    def test_an_https_address_is_always_reached_through_the_web_server(self):
+        # One without a path (a name of its own, or with a port) was taken as subsync's own port: its plain
+        # http published on 0.0.0.0:443 or :8443, where no app's https request can be answered
+        for address in ('https://192.168.1.5', 'https://subsync.example.com', 'https://subs.example.com:8443'):
             with self.subTest(address=address):
                 e = self.page_engine({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': address})
                 e.choices()
-                self.assertEqual((e.s['public_kind'], e.s['port'], e.s['bind']), ('port', port, '0.0.0.0'))
-                self.assertIn(f'ports: ["0.0.0.0:{port}:8790"]', engine.compose_for(dict(e.s, image=IMAGE, install_id='i')))
+                self.assertEqual((e.s['public_kind'], e.s['port'], e.s['bind']), ('path', 8790, '127.0.0.1'))
+                self.assertIn('ports: ["127.0.0.1:8790:8790"]',
+                              engine.compose_for(dict(e.s, image=IMAGE, install_id='i')))
+
+    def test_a_name_of_its_own_gets_the_whole_name_rule(self):
+        # subsync on 127.0.0.1 behind the web server, which sends the whole name to it; the question's
+        # explanation names that form beside the other two
+        self.assertIn("The suggestion sits behind the same web address as AIOStreams, like "
+                      "https://aio.example.com/subsync, which needs one rule in your web server (setup shows it), as "
+                      "does a name of its own, like https://subsync.example.com; on a home network, this machine's own "
+                      "port works, like http://192.168.1.5:8790.", explain.QUESTIONS['PUBLIC_ADDRESS'][1])
+        with mock.patch.object(engine.Engine, 'public_health', lambda e: self.aios.subsync_up):   # the rule then added
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', PUBLIC_ADDRESS='https://subsync.example.com'))
+        self.assertEqual(code, 0, out)
+        env = self.env()
+        self.assertEqual(env['SUBSYNC_PUBLIC_BASE'], 'https://subsync.example.com')
+        self.assertNotIn('SUBSYNC_BASE_PATH', env)
+        self.assertIn('    ports: ["127.0.0.1:8790:8790"]\n', self.compose())
+        self.assertIn('Your web server needs one rule so https://subsync.example.com/... reaches subsync.',
+                      ' '.join(out.split()))
+        for line in ('subsync.example.com {', '    reverse_proxy 127.0.0.1:8790', 'location / {',
+                     'rule: Host(`subsync.example.com`)'):
+            self.assertIn(line, out)
+        self.assertNotIn('//', out.replace('://', ''))
+        code, out = self.again('--uninstall', REMOVE='yes')
+        self.assertEqual(code, 0, out)
+        self.assertIn('the rule in your web server for https://subsync.example.com: remove it there and reload the web '
+                      'server', ' '.join(out.split()))
 
     def test_a_port_in_use_on_every_interface_is_asked_again(self):
         asked = []
@@ -743,7 +777,8 @@ class OnBridge(OnBridgeNetwork, Offline):
             e.check_machine()
             e.find_aios()
         rows = [tuple(r[:2]) for r in e.out.rows]
-        self.assertIn(('warn', 'The container "aiostreams" looks like AIOStreams, but I can\'t reach it from here.'), rows)
+        self.assertIn(('warn', 'The container "aiostreams" looks like AIOStreams, but setup can\'t reach it from '
+                               'here.'), rows)                         # setup's own voice, never "I"
         self.assertIn(('ok', 'AIOStreams 2.37.0 answers there'), rows)
         self.assertEqual(e.s['aios_url'], gateway)
 
@@ -798,6 +833,49 @@ class OnBridge(OnBridgeNetwork, Offline):
             e.public_address()
         self.assertIn('Enter = http://192.168.1.7:8790', out.getvalue())
         self.assertEqual(len(self.lan_lookups()), 1)
+
+
+    def test_with_docker_in_a_virtual_machine_no_address_is_suggested(self):
+        # On Docker Desktop and Colima the helper's address is the virtual machine's (192.168.65.3, say), which
+        # phones and TVs can't reach, while setup's own check of it passed through the virtual machine
+        self.assertEqual(screens.VM_ADDRESS, (
+            "Docker runs in a virtual machine here, so setup can't find this machine's address on your network: type "
+            'it, like http://192.168.1.5:8790, and check it from your phone.'))
+        engine.save_settings({'port': 8790})            # the fixture's container holds it (the helper finds it taken)
+        asked = []
+        with mock.patch.object(dockerenv, 'in_vm', lambda: asked.append(1) or True):
+            e = self.address_engine({})
+            self.assertIsNone(e.address_default())
+            self.assertEqual(e.address_note(), screens.VM_ADDRESS)
+            with self.assertRaises(engine.Problem) as caught:               # the page: asked, nothing filled in
+                e.public_address()
+            self.assertEqual((caught.exception.field, caught.exception.missing), ('PUBLIC_ADDRESS', True))
+            self.assertEqual(self.lan_lookups(), [])                          # the virtual machine's isn't looked up
+            self.assertEqual(len(asked), 1)                                   # once a run
+
+            e = self.address_engine({}, page=False)               # the terminal: the note under the question
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(ui.Stop) as stopped:
+                e.public_address()
+            said = ' '.join(out.getvalue().split())
+            explanation = ' '.join(explain.QUESTIONS['PUBLIC_ADDRESS'][1].split())
+            self.assertIn(f"subsync's address for your apps {explanation} {screens.VM_ADDRESS}", said)
+            self.assertNotIn('Enter =', said)
+            self.assertEqual(stopped.exception.message, '"subsync\'s address for your apps" needs an answer.')
+
+            e = self.address_engine({'PUBLIC_ADDRESS': 'http://192.168.1.5:8790'})     # typed: taken as it is
+            e.public_address()
+            self.assertEqual(e.s['public_base'], 'http://192.168.1.5:8790')
+
+            asked.clear()
+            e = self.address_engine({})
+            e.s['aios_public'] = PUBLIC                                       # not local: no LAN address needed
+            self.assertIsNone(e.address_note())
+            self.assertEqual(e.address_default(), f'{PUBLIC}/subsync')
+            self.assertEqual(asked, [])
+        e = self.address_engine({})                                          # Docker on this machine itself
+        self.assertIsNone(e.address_note())
+        self.assertEqual(e.address_default(), 'http://192.168.1.7:8790')
 
 
 class SavedAiostreams(Offline):
@@ -870,7 +948,7 @@ class SavedAiostreams(Offline):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.joined, [('aio_default', 'c0ffee')])
         self.assertIn('Found AIOStreams 2.37.0 in the container "aiostreams"', out)
-        self.assertNotIn('Viewers reach it at', out)                     # the AIOStreams step's install rows: none
+        self.assertNotIn('Your apps reach it at', out)                   # the AIOStreams step's install rows: none
         self.assertNotIn('Step 2', out)
         self.assertIn('Restored.', out)
         self.assertEqual(self.aios.users[UUID]['config'], json.loads(copy.read_text())['config'])
@@ -1510,6 +1588,70 @@ class ClosingWords(Offline):
                     rows = engine.Engine({}).status_parts()[0]
                 self.assertEqual([row[0] for row in rows[:2]], ['ok', 'ok'])        # the container, the requests
                 self.assertEqual(rows[2:], rows_after)
+
+
+class EarlierConfig(Offline):
+    """A re-run given another config adds subsync to it, and the earlier one keeps its entry. Setup keeps no
+    password for it, so it can't take the entry out: it names that config, in the review and after removing."""
+
+    OTHER = '5e6f7a8b-1234-4abc-8def-0123456789ab'
+    OTHER_PASSWORD = 'other-config-password'
+
+    def test_an_earlier_config_is_named_in_the_review_and_after_removing(self):
+        self.assertEqual(engine.EARLIER_CONFIG, (
+            "Your earlier config {old} still lists subsync. Setup looks after this one from now on, so it won't take "
+            "subsync out of {old}: do that on AIOStreams' configure page if you no longer want it there."))
+        self.assertEqual(engine.EARLIER_CONFIG_STAYS,
+                         "subsync's entry in your earlier config {old}: take it out on AIOStreams' configure page")
+        self.aios.users[self.OTHER] = {'password': self.OTHER_PASSWORD,
+                                       'config': copy.deepcopy(self.aios.users[UUID]['config'])}
+        self.install()
+        self.assertNotIn('earlier_configs', engine.load_settings())
+        code, out = self.again(AIOS_CONFIG_ID=self.OTHER, AIOS_CONFIG_PASSWORD=self.OTHER_PASSWORD)
+        self.assertEqual(code, 0, out)
+        said = ' '.join(out.split())
+        earlier = engine.EARLIER_CONFIG.format(old=f'{UUID[:8]}…')
+        self.assertIn(earlier, said)
+        # under your config's heading and note, before subsync's own config
+        self.assertLess(said.index('A copy of it as it is now is saved first.'), said.index(earlier))
+        self.assertLess(said.index(earlier), said.index("subsync's own config (update)"))
+        self.assertEqual(engine.load_settings()['earlier_configs'], [UUID])         # its ID only
+        self.assertNotIn(PASSWORD, (self.state / 'settings.json').read_text())
+        self.assertTrue(any(p['type'] == 'custom' for p in self.aios.users[UUID]['config']['presets']))  # as it was
+
+        code, out = self.again(AIOS_CONFIG_PASSWORD=self.OTHER_PASSWORD)    # the same config again: nothing to say
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('Your earlier config', out)
+        self.assertEqual(engine.load_settings()['earlier_configs'], [UUID])         # still known
+
+        code, out = self.again(AIOS_CONFIG_ID=UUID, AIOS_CONFIG_PASSWORD=PASSWORD)   # back to the first one
+        self.assertEqual(code, 0, out)
+        said = ' '.join(out.split())
+        self.assertIn('no change (subsync is already in it)', said)
+        self.assertIn(engine.EARLIER_CONFIG.format(old=f'{self.OTHER[:8]}…'), said)
+        self.assertEqual(engine.load_settings()['earlier_configs'], [self.OTHER])
+
+        code, out = self.again('--uninstall', REMOVE='yes')
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"    • subsync's entry in your earlier config {self.OTHER[:8]}…: take it out on AIOStreams' "
+                      "configure page\n", out)
+        self.assertNotIn(f'your earlier config {UUID[:8]}', out)
+        self.assertTrue(any(p['type'] == 'custom' for p in self.aios.users[self.OTHER]['config']['presets']))
+
+    def test_the_page_shows_it_as_a_paragraph_of_its_own(self):
+        self.aios.users[self.OTHER] = {'password': self.OTHER_PASSWORD,
+                                       'config': copy.deepcopy(self.aios.users[UUID]['config'])}
+        self.install()
+        e = engine.Engine({'AIOS_CONFIG_ID': self.OTHER, 'AIOS_CONFIG_PASSWORD': self.OTHER_PASSWORD,
+                           'LANGUAGES': 'English'}, page=True)
+        e.check_machine()
+        e.find_aios()
+        e.read_viewer()
+        e.choices()
+        e.limits()
+        page = screens.review(e.plan_changes())
+        self.assertIn('<p>Nothing else in it changes. A copy of it as it is now is saved first.</p><p>'
+                      + html_escape(engine.EARLIER_CONFIG.format(old=f'{UUID[:8]}…')) + '</p></section>', page)
 
 
 class Removal(Offline):

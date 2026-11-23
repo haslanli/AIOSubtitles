@@ -7,6 +7,7 @@ only when the host chooses it, and then each person chooses on their settings pa
 its limits asked next.
 """
 import http.client
+import re
 import secrets
 import urllib.error
 import urllib.parse
@@ -39,6 +40,10 @@ OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC
          'SUBSYNC_TMDB_PERSONAL') \
     + limits.names(LIMITS)
 _INVITE_LETTERS = 'abcdefghjkmnpqrstuvwxyz23456789'     # no 0/o, 1/l/i: easy to read out and type
+# The invite code's characters: setup writes state/subsync.env's values unquoted, where Docker Compose substitutes $name
+# and cuts a value at " #", so a code with either would reach subsync changed and nobody could sign up with it
+INVITE_CHARACTERS = re.compile(r'[\w .-]*')
+INVITE_REFUSED = 'Letters, digits, spaces, - _ and . only, like k7mp-x4rt-9nwe.'
 
 
 def new_secret():
@@ -48,6 +53,12 @@ def new_secret():
 
 def suggested_invite():
     return '-'.join(''.join(secrets.choice(_INVITE_LETTERS) for _ in range(4)) for _ in range(3))
+
+
+def check_invite(value):
+    """(good, message, value) for the invite code question: letters, digits, spaces, - _ and . only."""
+    code = (value or '').strip()
+    return (True, '', code) if INVITE_CHARACTERS.fullmatch(code) else (False, INVITE_REFUSED, code)
 
 
 def _named(host):

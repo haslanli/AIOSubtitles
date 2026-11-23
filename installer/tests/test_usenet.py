@@ -2,7 +2,7 @@
 re-run that turns it off, uninstall; and the hosting route's question and per-person number."""
 import unittest
 
-from installer import engine, hosting, limits
+from installer import engine, hosting, limits, ui
 from installer.tests.test_flow import PASSWORD, PUBLIC, UUID, FlowFixture
 from subsync import explain
 
@@ -74,6 +74,70 @@ class Personal(FlowFixture):
                       "AIOStreams' proxy for it, or leave Usenet off.", out)
         self.assertNotIn(explain.USENET_WHY['proxy'], out)
         self.assertEqual(self.env()['SUBSYNC_USENET'], 'off')
+
+    def test_every_yes_to_usenet_explains_why_it_stays_off(self):
+        # The note's own list of yes words lacked true and 1, which every yes/no question takes
+        nzbdav = {'id': 'nzbdav', 'enabled': True, 'credentials': {'url': 'http://nzbdav:3000'}}
+        self.viewer([TORBOX, nzbdav], [ZILEAN, dict(NEWZNAB, options={'name': 'Geek', 'services': ['nzbdav']})])
+        for yes in ('true', '1', 'Y', 'on'):
+            with self.subTest(yes=yes):
+                code, out = self.run_setup(dict(self.ANSWERS, USENET=yes, TEST_READ='no'))
+                self.assertEqual(code, 0, out)
+                self.assertIn(explain.SETUP_USENET_WHY['proxy'], out)
+        code, out = self.run_setup(dict(self.ANSWERS, USENET='0', TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn(explain.SETUP_USENET_WHY['proxy'], out)
+
+    def test_one_reading_of_yes_and_no(self):
+        # The page, the terminal and the Usenet note each listed the words
+        for answer, meaning in (('y', True), ('Yes', True), (' on ', True), ('TRUE', True), ('1', True),
+                                ('n', False), ('No', False), ('off', False), ('false', False), ('0', False),
+                                ('', None), (None, None), ('maybe', None), ('2', None)):
+            with self.subTest(answer=answer):
+                self.assertIs(ui.yes_no(answer), meaning)
+                self.assertIs(engine.PageAsk({'X': answer} if answer is not None else {}, None).yesno('X', 'q', None),
+                              meaning)
+
+    def test_a_config_with_a_debrid_service_but_only_usenet_sources_says_so(self):
+        # TorBox with only Usenet stream sources, answered no, was told it had "no debrid service other than
+        # Real-Debrid" and to add one
+        self.assertEqual(engine.NO_STREAM_SOURCE, (
+            "subsync can't work with this config without Usenet: it has no stream source other than Usenet ones."))
+        self.assertEqual(engine.NO_STREAM_SOURCE_WAY_OUT_PAGE, (
+            "Answer yes to the Usenet question, or add a stream source other than a Usenet one (Comet, Torrentio, …) "
+            "on AIOStreams' configure page, then press Continue again."))
+        self.assertEqual(engine.NO_STREAM_SOURCE_WAY_OUT, (
+            "Answer yes to the Usenet question, or add a stream source other than a Usenet one (Comet, Torrentio, …) "
+            "on AIOStreams' configure page, then run ./setup again."))
+        self.viewer([TORBOX, ENGINE], [NEWZNAB, SUBS])
+        code, out = self.run_setup(dict(self.ANSWERS, USENET='no'))
+        self.assertNotEqual(code, 0)
+        said = ' '.join(out.split())
+        self.assertIn(engine.NO_STREAM_SOURCE, said)
+        self.assertIn(engine.NO_STREAM_SOURCE_WAY_OUT, said)
+        self.assertNotIn(engine.NO_USENET, said)
+        self.assertEqual(len(self.aios.users), 1)                         # nothing made
+        e = engine.Engine(dict(self.ANSWERS, AIOS_CONFIG_ID=UUID, USENET='no'), page=True)
+        e.check_machine()
+        e.find_aios()
+        e.read_viewer()
+        with self.assertRaises(ui.Stop) as caught:
+            e.choices()
+        self.assertEqual((caught.exception.message, caught.exception.page_fix),
+                         (engine.NO_STREAM_SOURCE, engine.NO_STREAM_SOURCE_WAY_OUT_PAGE))
+
+    def test_a_usenet_config_gone_from_aiostreams_is_made_again(self):
+        # Its row was the only one to write "Subsync" with a capital
+        self.viewer([TORBOX, ENGINE], [ZILEAN, NEWZNAB, SUBS])
+        code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        old = self.keys()['USENET_UUID']
+        del self.aios.users[old]
+        code, out = self.run_setup({'AIOS_CONFIG_PASSWORD': PASSWORD, 'TEST_READ': 'no'})
+        self.assertEqual(code, 0, out)
+        self.assertIn("subsync's Usenet config is gone from AIOStreams; making a new one.", out)
+        self.assertNotIn('Subsync', out.replace('(Subsync)', ''))
+        self.assertNotEqual(self.keys()['USENET_UUID'], old)
 
     def test_a_usenet_only_config(self):
         self.viewer([ENGINE], [NEWZNAB, SUBS])

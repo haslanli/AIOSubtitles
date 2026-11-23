@@ -91,6 +91,12 @@ def base_path_of(url):
     return urllib.parse.urlsplit(url).path.rstrip('/')
 
 
+def behind_web_server(url):
+    """Whether apps reach subsync at `url` (a checked address, check_public) through the user's web server: an https
+    address, which subsync's plain http can't answer itself, or one with a path. Else it is subsync's own port."""
+    return urllib.parse.urlsplit(url).scheme == 'https' or bool(base_path_of(url))
+
+
 def rewrite_rule(aios_public, aios_internal):
     """Stream links carry AIOStreams' public address; subsync on the same machine reads them over the Docker network."""
     a, b = (aios_public or '').rstrip('/'), (aios_internal or '').rstrip('/')
@@ -204,9 +210,11 @@ def parse_env(text, as_written=False):
     """The KEY=value lines of an env file (an answers file, state/subsync.env, state/secrets.env) as Docker Compose
     reads them: an `export ` before the name and spaces round the = are allowed, a quoted value is the text between
     its quotes as it is, and in an unquoted value a " #" starts a comment. Empty values are included (an empty value
-    is a setting too); comment and other lines are skipped; a $ is never substituted. A value that starts with a quote
-    it doesn't close is kept as written. `as_written`: every quoted value as the line has it (its quotes, and a comment
-    after them), for the lines setup writes back as they were."""
+    is a setting too); comment and other lines are skipped. A $ is kept as written, though Docker Compose substitutes
+    $name in an unquoted or double-quoted value (so the invite code, which setup writes unquoted, takes none:
+    hosting.check_invite). A value that starts with a quote it doesn't close is kept as written. `as_written`: every
+    quoted value as the line has it (its quotes, and a comment after them), for the lines setup writes back as they
+    were."""
     out = {}
     for line in (text or '').splitlines():
         m = ENV_LINE.match(line)
@@ -291,9 +299,17 @@ def compose_yaml(s):
 
 
 def proxy_snippets(public_base, target):
-    """What to add to the user's web server so <public>/subsync/... reaches subsync with the path unchanged."""
-    path = base_path_of(public_base) or '/'
+    """What to add to the user's web server so <public>/subsync/... reaches subsync with the path unchanged; for an
+    address without a path, a name of its own, the whole name (the same form as a public instance's rule,
+    installer/hosting.py)."""
+    path = base_path_of(public_base)
     host = urllib.parse.urlsplit(public_base).hostname
+    if not path:
+        return {
+            'Caddy': [f'{host} {{', f'    reverse_proxy {target}', '}'],
+            'nginx': ['location / {', f'    proxy_pass http://{target};', '}'],
+            'Traefik': [f'rule: Host(`{host}`)', f'service: http://{target}'],
+        }
     return {
         'Caddy': [f'{host} {{', f'    reverse_proxy {path}/* {target}', '    # ... your existing lines stay as they are', '}'],
         'nginx': [f'location {path}/ {{', f'    proxy_pass http://{target};', '}'],

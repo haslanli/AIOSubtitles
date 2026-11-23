@@ -303,7 +303,7 @@ class Personal(YourselfSteps, BackgroundWork, FlowFixture):
         _, _, text = b.get('machine')
         self.assertIn('Docker and Docker Compose work', text)
         _, _, text = b.follow('machine', {'go': 'next'})
-        self.assertIn('Viewers reach it at', text)
+        self.assertIn('Your apps reach it at', text)                     # setup's own voice
         _, _, text = b.follow('aios', {'go': 'next'})
         self.assertIn('Config ID (or paste your install link)', text)
         _, _, text = b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': 'wrong', 'go': 'next'})
@@ -1357,6 +1357,24 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertEqual((env['SUBSYNC_PUBLIC_INVITE'], env['SUBSYNC_MAX_USERS']), ('my-own-code', '150'))
         self.assertFalse(any(env['SUBSYNC_SECRET_KEY'] in page for page in b.pages))     # never on a page
 
+    def test_an_invite_code_compose_would_change_is_refused_on_the_page(self):
+        # The page showed "join$us" as the code while subsync got "join": nobody given it could sign up
+        b = Browser(web.App(port=8820))
+        b.post('', {'ROUTE': 'host'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        b.follow('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': 'gateway', 'go': 'next'})
+        status, _, text = b.post('signups', {'SUBSYNC_PUBLIC_INVITE': 'join$us', 'go': 'next'})
+        self.assertEqual(status, 200)
+        self.assertIn(f'<p class="field-error" id="subsync_public_invite-error">{hosting.INVITE_REFUSED}</p>', text)
+        self.assertRegex(text, r'<input[^>]*name="SUBSYNC_PUBLIC_INVITE"[^>]*value="join\$us"')   # as typed
+        status, headers, _ = b.post('signups', {'SUBSYNC_PUBLIC_INVITE': 'join us', 'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostchoices'))
+        self.assertEqual(b.app.session.e.invite, 'join us')
+        status, headers, _ = b.post('signups', {'SUBSYNC_PUBLIC_INVITE': '', 'go': 'next'})      # emptied: anyone
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostchoices'))
+        self.assertEqual(b.app.session.e.invite, '')
+
     def test_the_choices_page_starts_from_the_switches_subsync_env_has(self):
         # Read as subsync reads them: Yes and 1 are on, a word it doesn't take is its default (off)
         self.state.mkdir(parents=True)
@@ -1553,6 +1571,23 @@ class OnBridge(YourselfSteps, BackgroundWork, FlowFixture):
                                                 'go': 'next'})
         self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/limits'))
         self.assertEqual(b.app.session.e.s['public_base'], 'http://192.168.1.7:8790')
+
+    def test_with_docker_in_a_virtual_machine_your_choices_asks_for_this_machines_address(self):
+        # It filled in the virtual machine's address, which phones can't reach; now the box is empty, with
+        # the note under it
+        self.walk_to_config()
+        b = self.b
+        b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        with mock.patch.object(engine.dockerenv, 'in_vm', lambda: True):
+            _, _, text = b.follow('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+            self.assertRegex(text, r'<input[^>]*name="PUBLIC_ADDRESS"')
+            self.assertNotRegex(text, r'<input[^>]*name="PUBLIC_ADDRESS"[^>]*value=')
+            self.assertNotIn('192.168.1.7', text)
+            self.assertGreater(text.index(screens.VM_ADDRESS), text.index('name="PUBLIC_ADDRESS"'))   # under the field
+            status, headers, _ = b.post('choices', {'LANGUAGES': ['eng'], 'PUBLIC_ADDRESS': 'http://192.168.1.5:8790',
+                                                    'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/limits'))
+        self.assertEqual(b.app.session.e.s['public_base'], 'http://192.168.1.5:8790')
 
     def test_this_machines_network_address_is_looked_up_once(self):
         # Each showing of Your choices without an address, and a Continue with its box emptied, started the

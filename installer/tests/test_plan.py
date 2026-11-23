@@ -468,6 +468,24 @@ class Files(unittest.TestCase):
         self.assertIn('    reverse_proxy /subsync/* 127.0.0.1:8790', s['Caddy'])
         self.assertIn('    proxy_pass http://127.0.0.1:8790;', s['nginx'])
 
+    def test_a_name_of_its_own_sends_the_whole_name(self):
+        # An address without a path gave "reverse_proxy //*", "location // {" and PathPrefix(`//`), which match
+        # nothing; it is the whole name now, as a public instance's rule
+        self.assertEqual(plan.proxy_snippets('https://subsync.example.com', '127.0.0.1:8790'), {
+            'Caddy': ['subsync.example.com {', '    reverse_proxy 127.0.0.1:8790', '}'],
+            'nginx': ['location / {', '    proxy_pass http://127.0.0.1:8790;', '}'],
+            'Traefik': ['rule: Host(`subsync.example.com`)', 'service: http://127.0.0.1:8790']})
+
+    def test_an_https_address_is_reached_through_the_web_server(self):
+        # subsync speaks plain http, so an https address without a path was taken as its own port, on 443
+        for url in ('https://subsync.example.com', 'https://subs.example.com:8443', 'https://192.168.1.5',
+                    'https://a.example.com/subsync', 'http://192.168.1.5/subsync'):
+            with self.subTest(url=url):
+                self.assertTrue(plan.behind_web_server(url))
+        for url in ('http://192.168.1.5:8790', 'http://192.168.1.5', 'http://subs.example.com'):
+            with self.subTest(url=url):
+                self.assertFalse(plan.behind_web_server(url))
+
 
 if __name__ == '__main__':
     unittest.main()

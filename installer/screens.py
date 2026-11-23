@@ -61,12 +61,17 @@ LABELS = {
     'REMOVE_OPENSUBTITLES': 'setup also added OpenSubtitles to your config. Take that out too?',
     'HOST_ADDRESS': 'Web address',
     'SUBSYNC_TRUSTED_PROXY': 'Trusted proxy',
+    'SUBSYNC_PUBLIC_INVITE': 'Invite code',
     'SUBSYNC_SUBSOURCE_KEY': 'SubSource API key (optional)',
     'SUBSYNC_TMDB_PERSONAL': hosting.TMDB_PERSONAL_QUESTION,
     'SUBSYNC_USENET': 'Let people sync Usenet files too?',
     'SUBSYNC_AUDIO_ROUTE': hosting.AUDIO_QUESTION,
 }
 TMDB_FOR_EVERYONE = 'TMDB API key for everyone (optional)'          # TMDB_KEY's label on a public instance
+# under subsync's address question when it needs this machine's LAN address and Docker runs in a virtual machine
+# (Docker Desktop, Colima), where setup can't find it (engine.Engine.address_note)
+VM_ADDRESS = ("Docker runs in a virtual machine here, so setup can't find this machine's address on your network: type "
+              'it, like http://192.168.1.5:8790, and check it from your phone.')
 SIGN_IN_ADMIN = 'AIOStreams sign-in (admin): username'              # AIOS_USERNAME's: for the cache setting,
 SIGN_IN_TO_SAVE = 'AIOStreams sign-in to save configs: username'    # and for an AIOStreams that asks one to save
 CONFIG_PASSWORD = 'Password of your config {config}'                # AIOS_CONFIG_PASSWORD's when removing subsync
@@ -113,6 +118,7 @@ INSTALLER_WORDS = (
     'Save these changes',
     # the questions, as labels and headings (the terminal setup's questions too)
     *LABELS.values(), TMDB_FOR_EVERYONE, SIGN_IN_ADMIN, SIGN_IN_TO_SAVE,
+    VM_ADDRESS,
     'Secret key',
     # the original-language lookup: TMDB's notice and its logo's name
     explain.TMDB_NOTICE, 'TMDB',
@@ -309,13 +315,14 @@ def config(rows, config_id='', problem=None, stop=None):
 
 
 def choices(languages, audio, public_address, problem=None, offer_opensubtitles=False, add_opensubtitles=True,
-            usenet=None, stop=None, saved=(), rows=(), settings=None):
+            usenet=None, stop=None, saved=(), rows=(), settings=None, address_note=None):
     """Your choices: what the step reported (`rows`: why Usenet stays off, a saved key removed), the languages (the
     site's slots), the audio route (`audio`: the answer picked, no, pick or open), Usenet when the config has a
     Usenet service subsync reads through (`usenet` not None), the optional keys (`saved`: those with a saved
-    key), OpenSubtitles when the config has no subtitle source, and subsync's address for your apps. `stop`: a config
-    without a debrid service answered no to Usenet. `settings`: subsync's on this install, whose values the audio and
-    Usenet explanations state. As many language slots as the service takes (MAX_LANGUAGES)."""
+    key), OpenSubtitles when the config has no subtitle source, and subsync's address for your apps, with
+    `address_note` under it (VM_ADDRESS). `stop`: a config without a debrid service answered no to Usenet.
+    `settings`: subsync's on this install, whose values the audio and Usenet explanations state. As many language
+    slots as the service takes (MAX_LANGUAGES)."""
     error = _error(problem, 'LANGUAGES')
     langs = (f'<div class="field"><span class="label" id="languages-l">{e(LABELS["LANGUAGES"])}</span>'
              + (f'<p class="field-error" id="languages-error">{e(error)}</p>' if error else '')
@@ -335,6 +342,8 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
     if offer_opensubtitles:
         body += ui.choices(_choice('ADD_OPENSUBTITLES', LABELS['ADD_OPENSUBTITLES'], add_opensubtitles))
     body += _input('PUBLIC_ADDRESS', LABELS['PUBLIC_ADDRESS'], public_address, problem, kind='url', mono=True)
+    if address_note:
+        body += f'<p class="help">{e(address_note)}</p>'
     fields = _ids('LANGUAGES', 'AUDIO', *(('USENET',) if usenet_box else ()), 'SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY',
                   *(('ADD_OPENSUBTITLES',) if offer_opensubtitles else ()), 'PUBLIC_ADDRESS')
     return step('yourself', 'choices', body, _back_and_continue('yourself', 'choices'), problem=problem, fields=fields)
@@ -461,7 +470,7 @@ def host_address(address='', proxy=hosting.TRUSTED_PROXY, problem=None, stop=Non
 
 def host_signups(invite, problem=None, stop=None):
     """Sign-ups: the invite code, and the secret key as a fixed row of dots: it never reaches the page."""
-    body = (_stop(stop) + _input('SUBSYNC_PUBLIC_INVITE', 'Invite code', invite, problem, mono=True)
+    body = (_stop(stop) + _input('SUBSYNC_PUBLIC_INVITE', LABELS['SUBSYNC_PUBLIC_INVITE'], invite, problem, mono=True)
             + ui.field('secret', 'Secret key', _explanation('SUBSYNC_SECRET_KEY'), name='secret', kind='text', mono=True,
                        attrs=f'value="{SECRET_DOTS}" readonly tabindex="-1" aria-readonly="true"'))
     return step('host', 'signups', body, _back_and_continue('host', 'signups'), problem=problem,

@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import dockerenv, docs, engine, hosting, limits, plan, screens, wizard
+from installer.tests.test_engine import typing
 from installer.tests.test_flow import POLL, AnswersRun
 from subsync import explain, realdebrid
 from subsync.settings import Settings
@@ -40,6 +41,18 @@ class Pieces(unittest.TestCase):
         # The pattern took i, l and o too, the letters the code leaves out, and one random code could miss them
         self.assertEqual(set(hosting._INVITE_LETTERS), set(string.ascii_lowercase + string.digits) - set('01ilo'))
         self.assertRegex(hosting.suggested_invite(), INVITE_CODE)
+
+    def test_an_invite_code_takes_letters_digits_spaces_and_three_signs(self):
+        # Docker Compose substitutes $name in state/subsync.env's unquoted lines and cuts a value at " #", so
+        # "join$us" reached subsync as "join" and "movie night #2" as "movie night": nobody could sign up with them
+        self.assertEqual(hosting.INVITE_REFUSED, 'Letters, digits, spaces, - _ and . only, like k7mp-x4rt-9nwe.')
+        for good in ('k7mp-x4rt-9nwe', 'movie night 2', 'Film_Club.2026', 'Café-Ünï', hosting.suggested_invite(), ''):
+            with self.subTest(good=good):
+                self.assertEqual(hosting.check_invite(good), (True, '', good))
+        self.assertEqual(hosting.check_invite('  spaced out  '), (True, '', 'spaced out'))
+        for bad in ('join$us', '${HOME}', 'movie night #2', 'a#b', '"quoted"', "it's", 'tab\there', 'a/b', 'a;b'):
+            with self.subTest(bad=bad):
+                self.assertEqual(hosting.check_invite(bad), (False, hosting.INVITE_REFUSED, bad))
 
     def test_the_address_must_be_https_and_a_whole_host(self):
         self.assertEqual(hosting.check_address('https://Subs.Example.com/'), (True, '', 'https://subs.example.com'))
@@ -531,6 +544,58 @@ class Route(RouteFixture):
         code, out = self.run_setup({'SUBSYNC_PUBLIC_INVITE': ''})
         self.assertEqual(code, 0, out)                          # the whole run, not only its env lines
         self.assertNotIn('SUBSYNC_PUBLIC_INVITE', engine.read_kv(self.state / 'subsync.env'))
+
+    def test_the_invite_code_is_asked_in_a_terminal_and_shown_at_the_end(self):
+        # A terminal never asked it, and the end said to share "the invite code" without saying it
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        invite = engine.read_kv(self.state / 'subsync.env')['SUBSYNC_PUBLIC_INVITE']
+        self.assertRegex(invite, INVITE_CODE)                                     # the suggested one
+        said = ' '.join(out.replace('│', ' ').split())
+        explanation = ' '.join(explain.SETTINGS['SUBSYNC_PUBLIC_INVITE'][1].split())
+        self.assertIn(f'Invite code {explanation} Enter = {invite} > (default)', said)
+        self.assertIn(f'Share the address and the invite code, {invite}, with the people you want to use it: each of '
+                      'them signs up there with their own AIOStreams link.', said)
+        e = engine.Engine({})
+        e.address, e.invite = ADDRESS, ''                                         # anyone may sign up: no code to give
+        self.assertEqual(e.host_summary_parts(True)[1][1], 'Share the address with the people you want to use it: each '
+                                                           'of them signs up there with their own AIOStreams link.')
+
+    def ask_invite(self, answers, *typed):
+        """The sign-ups step in a terminal without --yes: (the invite code taken, what was printed)."""
+        e = engine.Engine(answers, yes=False)
+        out = io.StringIO()
+        with typing(*typed), contextlib.redirect_stdout(out):
+            e.host_signups()
+        return e.invite, out.getvalue()
+
+    def test_in_a_terminal_enter_takes_the_suggested_code_and_remove_lets_anyone_sign_up(self):
+        invite, out = self.ask_invite({}, '')
+        self.assertRegex(invite, INVITE_CODE)
+        self.assertIn(f'Enter = {invite}', out)
+        self.assertEqual(self.ask_invite({}, 'remove')[0], '')                   # on a first setup too
+        self.assertEqual(self.ask_invite({}, 'Movie Night')[0], 'Movie Night')
+
+    def test_an_invite_code_compose_would_change_is_refused_and_asked_again(self):
+        # From an answers file with --yes setup stops before writing anything; in a terminal it is asked again
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_PUBLIC_INVITE': 'join$us'})
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'SUBSYNC_PUBLIC_INVITE: {hosting.INVITE_REFUSED}', ' '.join(out.split()))
+        self.assertFalse((self.state / 'subsync.env').exists())
+        invite, out = self.ask_invite({'SUBSYNC_PUBLIC_INVITE': 'join$us'}, 'join us')
+        self.assertEqual(invite, 'join us')
+        self.assertIn(hosting.INVITE_REFUSED, out)
+        # a code kept in state/subsync.env with such a character (written by hand) is asked again too
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_PUBLIC_INVITE': 'kept-code'})
+        self.assertEqual(code, 0, out)
+        path = self.state / 'subsync.env'
+        path.write_text(path.read_text().replace('INVITE=kept-code', 'INVITE=movie$night'))
+        code, out = self.run_setup({})
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'SUBSYNC_PUBLIC_INVITE: {hosting.INVITE_REFUSED}', ' '.join(out.split()))
+        invite, out = self.ask_invite({}, '', 'movie night')                      # Enter keeps it: refused, asked again
+        self.assertEqual(invite, 'movie night')
+        self.assertIn('Enter keeps: movie$night; type remove to delete it', out)
 
     def test_a_public_instance_with_the_audio_route(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes',

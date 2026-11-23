@@ -283,9 +283,7 @@ class Documents(unittest.TestCase):
     def test_the_answers_example_has_every_key_setup_reads_from_an_answers_file(self):
         asked = asked_by_name() | set(web.PERSONAL_KEYS + web.HOST_KEYS)   # the optional keys, by engine.optional_key
         asked |= {lim.setting for lim in limits.personal(audio=False, usenet=True) + limits.hosting(True, True)}
-        engine_source = (REPO / 'installer' / 'engine.py').read_text()
-        self.assertIn("if 'SUBSYNC_PUBLIC_INVITE' in self.answers:", engine_source)   # read, not asked
-        asked.add('SUBSYNC_PUBLIC_INVITE')
+        self.assertIn('SUBSYNC_PUBLIC_INVITE', asked_by_name())      # asked like every question
         in_example = {key for _, lines in self.example_parts() for key, _, _ in lines}
         self.assertEqual(in_example, asked)
 

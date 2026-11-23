@@ -107,6 +107,16 @@ def masked(value):
 
 
 REMOVE = 'remove'      # typed at an optional question: no answer is kept (its current one is removed)
+# A yes/no question's answers, typed in a terminal, sent by the page or in an answers file: one reading everywhere in
+# setup (yes_no). The audio question's words (plan.audio_answer, which refuses numbers) and the switches subsync reads
+# in state/subsync.env (plan.ON) are their own.
+YES, NO = ('y', 'yes', 'on', 'true', '1'), ('n', 'no', 'off', 'false', '0')
+
+
+def yes_no(answer):
+    """True for a yes, False for a no, None for anything else (no answer included)."""
+    value = str(answer if answer is not None else '').strip().lower()
+    return True if value in YES else False if value in NO else None
 
 
 def needs_answer(question):
@@ -148,9 +158,10 @@ class Asker:
             stop('Stopped by you.', 'Nothing after this point was changed. Run ./setup again any time.')
 
     def text(self, key, question, *, current=None, default=None, secret=False, optional=False, check=None,
-             shown=None, skip_hint='Enter skips'):
+             shown=None, skip_hint='Enter skips', note=None):
         """One question. `check(value)` returns (good, message, value): a message is shown either way. `shown(value)`:
-        how the current answer and one from the answers file are shown (a secret's: masked)."""
+        how the current answer and one from the answers file are shown (a secret's: masked). `note`: what this machine
+        adds to the question, under its explanation."""
         def show(value):
             return masked(value) if secret else shown(value) if shown else value
         explanation = explain.setup_help(key, self.settings)    # a limit: its setting's text
@@ -158,8 +169,9 @@ class Asker:
         while True:
             say()
             say(f'  {paint("1", question)}')
-            for line in textwrap.wrap(explanation, WIDTH):
-                say(paint('2', f'  {line}'))
+            for text in (explanation, note):
+                for line in textwrap.wrap(text or '', WIDTH):
+                    say(paint('2', f'  {line}'))
             hint = []
             if current:
                 hint.append(f'Enter keeps: {show(current)}')
@@ -227,11 +239,10 @@ class Asker:
 
     def yesno(self, key, question, default):
         def check(answer):
-            if answer.lower() in ('y', 'yes', 'on', 'true', '1'):
-                return True, '', 'yes'
-            if answer.lower() in ('n', 'no', 'off', 'false', '0'):
-                return True, '', 'no'
-            return False, 'Type y or n.', answer
+            chosen = yes_no(answer)
+            if chosen is None:
+                return False, 'Type y or n.', answer
+            return True, '', 'yes' if chosen else 'no'
         return self.text(key, f'{question} [y/n]', default='yes' if default else 'no', check=check) == 'yes'
 
     def pause(self, question):

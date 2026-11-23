@@ -421,13 +421,13 @@ def progress_list(rows):
 
 
 def config_changes(sections):
-    """The list of changes to configs: (heading, [(sign, line)], note) per config; sign "+" or "−". Each heading is
-    one level under the step's own."""
+    """The list of changes to configs: (heading, [(sign, line)], note) per config; sign "+" or "−"; a note's paragraphs
+    on lines of their own. Each heading is one level under the step's own."""
     out = []
     for heading, lines, after in sections:
         items = "".join(f"<li><span class=\"sign\" aria-hidden=\"true\">{e(sign)}</span>{e(line)}</li>" for sign, line in lines)
-        out.append(f"<section><h2>{e(heading)}</h2><ul>{items}</ul>" + (f"<p>{e(after)}</p>" if after else "")
-                   + "</section>")
+        notes = "".join(f"<p>{e(paragraph)}</p>" for paragraph in (after or "").split("\n") if paragraph)
+        out.append(f"<section><h2>{e(heading)}</h2><ul>{items}</ul>{notes}</section>")
     return "<div class=\"changes\">" + "".join(out) + "</div>"
 
 

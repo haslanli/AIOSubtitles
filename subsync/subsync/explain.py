@@ -313,10 +313,11 @@ QUESTIONS = {
     "PUBLIC_ADDRESS": (
         "",
         "The address your apps download synced subtitle files from. The suggestion sits behind the same web address as "
-        "AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (setup shows it); "
-        "on a home network, this machine's own port works, like http://192.168.1.5:8790. It must work from every "
-        "device you watch on, outside your home too if you watch there; otherwise entries show but fail to load. Only "
-        "synced files, the entries subsync lists and a health check are open at that address."),
+        "AIOStreams, like https://aio.example.com/subsync, which needs one rule in your web server (setup shows it), "
+        "as does a name of its own, like https://subsync.example.com; on a home network, this machine's own port "
+        "works, like http://192.168.1.5:8790. It must work from every device you watch on, outside your home too if "
+        "you watch there; otherwise entries show but fail to load. Only synced files, the entries subsync lists and a "
+        "health check are open at that address."),
     "CACHE": (
         "no",
         "AIOStreams keeps every subtitle answer for 5 minutes. Yes turns that off for subsync only, so a copy made "

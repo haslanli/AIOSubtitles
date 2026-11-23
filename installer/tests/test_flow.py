@@ -505,6 +505,21 @@ class Flow(FlowFixture):
         self.assertIn('✓  100 GB of disk space free\n', out)
         self.assertNotIn('needs about', out)
 
+    def test_the_disk_check_measures_dockers_storage_and_never_reads_only_4_gb(self):
+        # It measured the folder's disk, not Docker's storage (on Docker Desktop and Colima a virtual machine's
+        # disk), where the images and the stored copies go;: 3.97 GB free read "Only 4.0 GB ... about 4 GB"
+        measured = []
+
+        def free_gb(path='/'):
+            measured.append(path)
+            return 3.97
+        with mock.patch.object(ui, 'COLOR', False), mock.patch.object(dockerenv, 'free_gb', free_gb):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(measured, ['/'])                     # setup's own root: Docker's storage, inside its container
+        self.assertIn('!  Only 3.9 GB of disk space free: AIOSubtitles needs about 4 GB.', out)
+        self.assertNotIn('4.0 GB', out)
+
     def test_the_review_says_subsyncs_config_has_no_usenet(self):
         # it said "without Usenet unless you turn it on"; Usenet always gets its own config
         code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
@@ -1144,6 +1159,15 @@ class Bridge(OnBridgeNetwork, FlowFixture):
         self.assertFalse(good)
         self.assertEqual(message, engine.CANT_REACH)
         self.assertEqual(tried, ['http://172.17.0.1:3000'])                    # the machine, not setup's container
+        # It sent everyone to "the source route (README)", a name the README never uses, and that route
+        # reaches 127.0.0.1 on Linux only (elsewhere setup runs in a container on a published port, as here)
+        self.assertEqual(engine.CANT_REACH, (
+            "Setup runs in a container, so it can't reach an AIOStreams that only listens on this machine's 127.0.0.1. "
+            "Give its address on your network, or, on Linux, build setup from source (README, Build it from source): "
+            "it then runs on this machine's network."))
+        readme = (Path(engine.__file__).resolve().parent.parent / 'README.md').read_text()
+        self.assertIn('\n### Build it from source\n', readme)
+        self.assertIn("On Linux, setup then runs on this machine's own network", ' '.join(readme.split()))
 
     def test_the_machines_ports_and_address_come_from_the_helper(self):
         self.assertTrue(engine.port_taken(8790, '127.0.0.1'))

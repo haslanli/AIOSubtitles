@@ -17,6 +17,7 @@ It doesn't install or change AIOStreams itself or AIOMetadata.
 """
 import functools
 import json
+import math
 import os
 import re
 import secrets
@@ -48,8 +49,10 @@ GUARD_STOP_VOLUME = ("Setup stopped without changing anything: Docker has a volu
                      "records): if it belongs to another AIOSubtitles, run that one's setup; remove it only once you "
                      "are sure nothing in it is needed.")
 TAKEN_OVER = 'Took over the install an earlier setup (1.3.0 or before) made here; its stored copies are kept.'
+# the source route reaches it on Linux only: there setup runs on this machine's network (./setup's --network host)
 CANT_REACH = ("Setup runs in a container, so it can't reach an AIOStreams that only listens on this machine's "
-              '127.0.0.1. Give its address on your network, or use the source route (README).')
+              '127.0.0.1. Give its address on your network, or, on Linux, build setup from source (README, Build it '
+              "from source): it then runs on this machine's network.")
 STARTING = 'Starting {name}'
 TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'The Matrix'),
                ('movie', 'tt0110912', 'Pulp Fiction')]
@@ -63,6 +66,13 @@ NO_USENET_WAY_OUT_PAGE = ("Answer yes to the Usenet question, or add a debrid se
                           "configure page, then press Continue again.")
 NO_USENET_WAY_OUT = ("Answer yes to the Usenet question, or add a debrid service (TorBox, …) on AIOStreams' configure "
                      "page, then run ./setup again.")
+# The same answer for a config with a debrid service whose stream sources are all Usenet ones
+NO_STREAM_SOURCE = ("subsync can't work with this config without Usenet: it has no stream source other than Usenet "
+                    "ones.")
+NO_STREAM_SOURCE_WAY_OUT_PAGE = ("Answer yes to the Usenet question, or add a stream source other than a Usenet one "
+                                 "(Comet, Torrentio, …) on AIOStreams' configure page, then press Continue again.")
+NO_STREAM_SOURCE_WAY_OUT = ("Answer yes to the Usenet question, or add a stream source other than a Usenet one (Comet, "
+                            "Torrentio, …) on AIOStreams' configure page, then run ./setup again.")
 # A config whose own config for subsync can't work, with no Usenet route either
 NO_DEBRID_WAY_OUT_PAGE = ("Add a debrid service other than Real-Debrid (TorBox, …) on AIOStreams' configure page, "
                           "then press Continue again.")
@@ -80,6 +90,11 @@ WARNED = 'Installed, with warnings'
 WARNED_ABOVE = 'Installed, with warnings (see above)'
 # Docker failing to take the service down: nothing of setup's is deleted, so removing it again finishes the job
 REMOVE_FAILED = "Removing the subsync container failed; setup's files were kept, so removing it again finishes the job."
+# A config an earlier setup gave subsync, after another was chosen: setup keeps no password for it, so it only names it,
+# in the review under your config and after removing, in what stays (Engine.earlier_configs)
+EARLIER_CONFIG = ("Your earlier config {old} still lists subsync. Setup looks after this one from now on, so it won't "
+                  "take subsync out of {old}: do that on AIOStreams' configure page if you no longer want it there.")
+EARLIER_CONFIG_STAYS = "subsync's entry in your earlier config {old}: take it out on AIOStreams' configure page"
 # Setup never turns an installed folder into the other route: it is removed first
 ROUTE_STOPS = {
     'yourself': ("A public instance runs here; setup can't turn it into an install for yourself.",
@@ -392,7 +407,8 @@ class PageAsk:
         self.answers, self.out = answers, out
 
     def text(self, key, question, *, current=None, default=None, secret=False, optional=False, check=None,
-             shown=None, skip_hint=None):
+             shown=None, skip_hint=None, note=None):
+        """ui.Asker.text's question on the page; `note` is the terminal's: the page shows its own under the field."""
         (explain.QUESTIONS.get(key) or explain.SETTINGS[key])    # every question has its one explanation
         given = self.answers.get(key)
         if optional and current and given == '':
@@ -413,12 +429,8 @@ class PageAsk:
         return value
 
     def yesno(self, key, question, default):
-        value = str(self.answers.get(key, '')).strip().lower()
-        if value in ('y', 'yes', 'on', 'true', '1'):
-            return True
-        if value in ('n', 'no', 'off', 'false', '0'):
-            return False
-        return default
+        answer = ui.yes_no(self.answers.get(key))
+        return default if answer is None else answer
 
     def choose(self, key, question, options, current=None):
         values = [v for v, _ in options]
@@ -447,11 +459,12 @@ class Terminal:
             ui.say(f'  {ui.paint("1", heading)}')
             for sign, line in lines:
                 ui.say(f'    {ui.paint("32", sign)} {line}')
-            if lines:
-                ui.note(after)
-            else:
-                for part in textwrap.wrap(after, ui.WIDTH - 2):
-                    ui.say(f'    {part}')
+            for paragraph in after.split('\n'):
+                if lines:
+                    ui.note(paragraph)
+                else:
+                    for part in textwrap.wrap(paragraph, ui.WIDTH - 2):
+                        ui.say(f'    {part}')
 
 
 class Rows:
@@ -545,6 +558,8 @@ class Engine:
         self.ask = PageAsk(self.answers, self.out) if page else Asker(answers, yes=yes, settings=self.env_settings)
         self.prev = load_settings()
         self.keys = read_kv(STATE / 'secrets.env')
+        # the config the last install gave subsync: an earlier one once this run chooses another (earlier_configs)
+        self.last_config = self.keys.get('VIEWER_UUID') if self.prev.get('installed') else None
         self.s = {}            # this run's settings (saved as state/settings.json)
         self.aios = None
         self.status = None
@@ -557,7 +572,7 @@ class Engine:
         self.audio_budget_kept = None       # the audio limit kept while the audio route is off (limits)
         self.tmdb_checked = None            # a new TMDB key TMDB was asked about in this run (check_tmdb_key)
         self.admin = False                  # whether AIOStreams' sign-in is an admin's (sign_in)
-        self.suggested_invite = None        # the invite code suggested on a first setup (host_signups)
+        self.suggested_invite = None        # the invite code suggested on a first setup (known_invite)
         self.secret = None                  # a public instance's secret key (host_signups)
         self.host_usenet = self.host_audio = self.host_tmdb_personal = False      # a public instance's (host_choices)
         self.forget_rule()                  # the web server rule an install step shows (show_rule)
@@ -601,11 +616,12 @@ class Engine:
         self.install_id = self.prev.get('install_id') or self.install_id or new_install_id()
         guard(self.install_id, unlabelled_own(self.prev))
         self.out.ok('Docker and Docker Compose work')
-        free = dockerenv.free_gb(str(STATE.parent))
+        free = dockerenv.free_gb()          # Docker's own storage, where the images and the stored copies go
         if free is None:
             return
-        if free < screens.DISK_GB:          # a warning only: setup goes on
-            self.out.warn(f'Only {free:.1f} GB of disk space free: AIOSubtitles needs about {screens.DISK_GB} GB.')
+        if free < screens.DISK_GB:          # a warning only: setup goes on; rounded down, so never "Only 4.0 GB"
+            self.out.warn(f'Only {math.floor(free * 10) / 10:.1f} GB of disk space free: AIOSubtitles needs about '
+                          f'{screens.DISK_GB} GB.')
         else:
             self.out.ok(f'{free:.0f} GB of disk space free')
 
@@ -624,7 +640,7 @@ class Engine:
                           aios_internal=f"http://{container['name']}:{container['port']}")
         else:
             self.s.update(mode='remote', container=(container or {}).get('name'), networks=[], aios_internal=public)
-        self.out.ok(f'Viewers reach it at {public}')
+        self.out.ok(f'Your apps reach it at {public}')
         if self.s['mode'] == 'network':
             self.out.note(f"subsync will join its Docker network{'s' if len(container['networks']) > 1 else ''}: {', '.join(container['networks'])}")
         elif self.s['mode'] == 'remote':
@@ -658,7 +674,8 @@ class Engine:
                 self.out.ok(f"Found AIOStreams {self.status.get('version', '?')} in the container \"{container['name']}\"")
         if not url:
             if container:
-                self.out.warn(f"The container \"{container['name']}\" looks like AIOStreams, but I can't reach it from here.")
+                self.out.warn(f"The container \"{container['name']}\" looks like AIOStreams, but setup can't reach it "
+                              'from here.')
             url = self.ask.text('AIOS_URL', screens.LABELS['AIOS_URL'], current=self.prev.get('aios_url'),
                                 default=None if (self.prev.get('aios_url') or self.page or bridge())
                                 else plan.AIOS_DEFAULT_URL, check=self._check_aios)
@@ -790,11 +807,13 @@ class Engine:
         self.usenet = False
         if self.usenet_services:
             self.usenet = self.ask.yesno('USENET', screens.LABELS['USENET'], self.prev.get('usenet', False))
-        elif self.answers.get('USENET', '').strip().lower() in ('yes', 'y', 'on') and self.usenet_why:
+        elif ui.yes_no(self.answers.get('USENET')) and self.usenet_why:
             self.out.note(explain.SETUP_USENET_WHY[self.usenet_why])
         if not self.has_sync and not self.usenet:
             if realdebrid.real_debrid_only(self.viewer):
                 raise Stop(realdebrid.REAL_DEBRID_ONLY, RD_WAY_OUT, page_fix=RD_WAY_OUT_PAGE)
+            if realdebrid.debrid_in_use(plan.sync_config(self.viewer)):     # a debrid service, no stream source for it
+                raise Stop(NO_STREAM_SOURCE, NO_STREAM_SOURCE_WAY_OUT, page_fix=NO_STREAM_SOURCE_WAY_OUT_PAGE)
             raise Stop(NO_USENET, NO_USENET_WAY_OUT, page_fix=NO_USENET_WAY_OUT_PAGE)
         self.source_keys()
         self.add_os = False
@@ -893,14 +912,30 @@ class Engine:
         """subsync's address for your apps when there is no answer to keep or given (plan.public_default): it holds this
         machine's LAN address only when AIOStreams' own address is local. That address is looked up only then, and once
         a run (self.lan): on the bridge network the lookup starts a helper container (setup's own container has an
-        address of its own there, which phones can't reach)."""
+        address of its own there, which phones can't reach). None when Docker runs in a virtual machine (address_note):
+        the address found there is the virtual machine's, which phones can't reach either."""
+        if self.address_note():
+            return None
         local = plan.is_local_host(plan.host_of(self.s['aios_public']))
         return plan.public_default(self.s['aios_public'], self.lan if local else '')[1]
+
+    def address_note(self):
+        """The note under subsync's address question when it needs this machine's LAN address (AIOStreams' own address
+        is local) and setup can't find it, as Docker runs in a virtual machine (self.in_vm, looked up only then); None
+        otherwise."""
+        local = plan.is_local_host(plan.host_of(self.s['aios_public']))
+        return screens.VM_ADDRESS if local and self.in_vm else None
 
     @functools.cached_property
     def lan(self):
         """This machine's LAN address, looked up the first time it is needed (address_default)."""
         return lan_address()
+
+    @functools.cached_property
+    def in_vm(self):
+        """Whether Docker runs in a virtual machine (dockerenv.in_vm), looked up the first time it is needed
+        (address_note)."""
+        return dockerenv.in_vm()
 
     def public_address(self):
         prev = self.prev.get('public_base')
@@ -909,11 +944,12 @@ class Engine:
         answered = self.page and str(self.ask.answers.get('PUBLIC_ADDRESS') or '').strip()
         default = None if prev or answered else self.address_default()
         url = self.ask.text('PUBLIC_ADDRESS', screens.LABELS['PUBLIC_ADDRESS'], current=prev, default=default,
-                            check=plan.check_public)
-        kind = 'path' if plan.base_path_of(url) else 'port'
+                            check=plan.check_public, note=self.address_note())
+        # 'path': reached through your web server (plan.behind_web_server), on a path or on a name of its own
+        kind = 'path' if plan.behind_web_server(url) else 'port'
         port = urllib.parse.urlsplit(url).port
         if kind == 'port':
-            port = port or (443 if url.startswith('https') else 80)
+            port = port or 80
             bind = '0.0.0.0'
         else:
             # behind your web server: the last path address's port, never a port address's own (80, say: the one your
@@ -968,7 +1004,8 @@ class Engine:
         self.manifest_url = f'{internal}/{key}/manifest.json'
 
     def plan_changes(self):
-        """What saving would change in the two configs, as (heading, [(sign, line)], note) sections. Changes nothing."""
+        """What saving would change in the two configs, as (heading, [(sign, line)], note) sections, a note's paragraphs
+        on lines of their own. Changes nothing."""
         self.addon_urls()
         metadata = {p['ID']: p for p in aios_settings(self.status).get('presets') or []
                     if isinstance(p, dict) and 'ID' in p}
@@ -978,10 +1015,11 @@ class Engine:
         self.usenet_sync = plan.usenet_sync_config(self.new_viewer, self.manifest_url, subtitles=not self.has_sync) \
             if self.usenet else None
         self.usenet_exists = bool(self.keys.get('USENET_UUID') and self.keys.get('USENET_PASSWORD'))
-        viewer = (f'Your config {short(self.uuid)}', [('+', line) for line in self.changes],
-                  'Nothing else in it changes. A copy of it as it is now is saved first.' if self.changes
-                  else 'no change (subsync is already in it)')
-        sections = [viewer]
+        note = ('Nothing else in it changes. A copy of it as it is now is saved first.' if self.changes
+                else 'no change (subsync is already in it)')
+        if self.last_config and self.last_config != self.uuid:     # another config than the last install's
+            note += '\n' + EARLIER_CONFIG.format(old=short(self.last_config))
+        sections = [(f'Your config {short(self.uuid)}', [('+', line) for line in self.changes], note)]
         if self.has_sync:
             sections.append(("subsync's own config " + ('(update)' if self.sync_exists else '(new)'), [],
                              'a copy of yours without Real-Debrid, Usenet and subsync, with nothing running in the '
@@ -1064,8 +1102,8 @@ class Engine:
             except AiosError as e:
                 if str(e.code) not in WRONG_PASSWORD_CODES:     # else gone: a new one is made
                     raise
-                self.out.warn(f'{name[0].upper()}{name[1:]} is gone from AIOStreams; making a new one.'
-                              if kind == 'USENET' else 'subsync\'s old config is gone from AIOStreams; making a new one.')
+                self.out.warn(f'{name} is gone from AIOStreams; making a new one.' if kind == 'USENET'
+                              else "subsync's old config is gone from AIOStreams; making a new one.")
         password = secrets.token_urlsafe(24)
         uuid, encrypted = self.with_sign_in(lambda: self.aios.create_config(sync, password))
         self.keys.update({uuid_key: uuid, password_key: password})
@@ -1166,8 +1204,17 @@ class Engine:
                       manifest_url=self.manifest_url)
         for kept in ('cache_before', 'added_opensubtitles'):
             self.s.setdefault(kept, self.prev.get(kept))
+        earlier = self.earlier_configs()
+        if earlier:
+            self.s['earlier_configs'] = earlier
         self._deploy('subsync', 'subsync is running (it restarts by itself after a reboot)')
         self.save_viewer()
+
+    def earlier_configs(self):
+        """The configs earlier installs gave subsync, other than this run's, the last one first: their IDs only, never a
+        password (state/settings.json), so setup names them but can't take subsync out of them."""
+        configs = [self.last_config, *self.prev.get('earlier_configs', [])]
+        return list(dict.fromkeys(c for c in configs if c and c != self.uuid))
 
     def _deploy(self, name, running):
         """How both routes' install ends, once this run's settings are in self.s: the image and this install's id
@@ -1490,17 +1537,26 @@ class Engine:
             stop(f'Port {port} on this machine is already in use.')
         self.s.update(route='host', public_base=self.address, port=port, version=setup_version())
 
-    def host_signups(self):
-        """The invite code (suggested on a first setup; emptied, anyone may sign up) and the secret, made once."""
-        self.show_step('signups', 'host')
+    def known_invite(self):
+        """The invite code before this run's answer, as (code, suggested): state/subsync.env's ('' when anyone may sign
+        up), or on a first setup one suggested, made once a run."""
         env = env_values()
-        if 'SUBSYNC_PUBLIC_INVITE' in self.answers:
-            self.invite = (self.answers['SUBSYNC_PUBLIC_INVITE'] or '').strip()
-        elif 'SUBSYNC_PUBLIC_INVITE' in env or self.prev.get('route') == 'host':
-            self.invite = env.get('SUBSYNC_PUBLIC_INVITE', '')
-        else:
-            self.invite = self.suggested_invite or hosting.suggested_invite()
-            self.suggested_invite = self.invite
+        if 'SUBSYNC_PUBLIC_INVITE' in env or self.prev.get('route') == 'host':
+            return env.get('SUBSYNC_PUBLIC_INVITE', ''), False
+        self.suggested_invite = self.suggested_invite or hosting.suggested_invite()
+        return self.suggested_invite, True
+
+    def host_signups(self):
+        """The invite code, asked as every question is (Enter keeps it, or takes the suggested one on a first setup;
+        emptied, anyone may sign up) and refused with a character Compose would change (hosting.check_invite), and the
+        secret, made once."""
+        self.show_step('signups', 'host')
+        code, suggested = self.known_invite()
+        # the page's box shows the suggested code as well, so an emptied box there means anyone, as remove typed does
+        current, default = (None, code) if suggested and not self.page else (code, None)
+        self.invite = self.ask.text('SUBSYNC_PUBLIC_INVITE', screens.LABELS['SUBSYNC_PUBLIC_INVITE'], current=current,
+                                    default=default, optional=True, check=hosting.check_invite)
+        env = env_values()
         self.secret = env.get('SUBSYNC_SECRET_KEY') or self.secret
         self.secret_new = not env.get('SUBSYNC_SECRET_KEY')
         if not self.secret:
@@ -1574,8 +1630,8 @@ class Engine:
 
     def host_summary_parts(self, good):
         lines = [f'AIOSubtitles is running on this machine as a public instance at {self.address}.',
-                 ('Share the address and the invite code with the people you want to use it: each of them signs up '
-                  'there with their own AIOStreams link.') if self.invite else
+                 (f'Share the address and the invite code, {self.invite}, with the people you want to use it: each of '
+                  'them signs up there with their own AIOStreams link.') if self.invite else
                  ('Share the address with the people you want to use it: each of them signs up there with their own '
                   'AIOStreams link.'),
                  'Keep the folder state/ in your backups: it holds the secret key, and without it everyone has to '
@@ -1690,6 +1746,7 @@ class Engine:
         self.stays = image_stays(s)
         if s.get('public_kind') == 'path':
             self.stays.append(f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server")
+        self.stays += [EARLIER_CONFIG_STAYS.format(old=short(old)) for old in s.get('earlier_configs', [])]
         self.stays.append(f'this folder, {host_folder()}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)')
         self.say_what_stays()
 

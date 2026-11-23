@@ -56,9 +56,9 @@ def every_state():
     no_docker = dockerenv.NO_DOCKER
     add('machine-stop', screens.machine('yourself', [], stop=no_docker), *no_docker)
     aios_rows = [('ok', 'Found AIOStreams 2.37.0 in the container "aiostreams"', None),
-                 ('ok', f'Viewers reach it at {PUBLIC}', 'subsync will join its Docker network: aiostreams_default')]
+                 ('ok', f'Your apps reach it at {PUBLIC}', 'subsync will join its Docker network: aiostreams_default')]
     add('aios', screens.aios(aios_rows), *[r[1] for r in aios_rows], aios_rows[1][2])
-    missing = [('warn', 'The container "aiostreams" looks like AIOStreams, but I can\'t reach it from here.', None)]
+    missing = [('warn', 'The container "aiostreams" looks like AIOStreams, but setup can\'t reach it from here.', None)]
     add('aios-missing', screens.aios(missing, ask='AIOS_URL', value='http://127.0.0.1:3000'), missing[0][1],
         'http://127.0.0.1:3000')
     # the address check's problem outside setup's container (engine.Engine._check_aios): the client's words and fix
@@ -91,6 +91,8 @@ def every_state():
         f'{PUBLIC}/subsync', lang_problem[1])
     add('choices-saved-keys', screens.choices(['eng'], 'no', f'{PUBLIC}/subsync', saved={'SUBDL_KEY', 'TMDB_KEY'}),
         f'{PUBLIC}/subsync')
+    # Docker in a virtual machine, AIOStreams' address local: no address suggested, the note under the box
+    add('choices-vm', screens.choices(['eng'], 'no', None, address_note=screens.VM_ADDRESS))
     add('limits', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50'}))
     add('limits-audio', screens.limits('yourself', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.AUDIO.setting: '2'},
                                        audio=True))
@@ -108,6 +110,10 @@ def every_state():
                                                    'you are watching. It never appears in your apps.')]
     words = [w for heading, lines, after in sections for w in [heading, after] + [line for _, line in lines]] + ['+']
     add('review', screens.review(sections), *words)
+    # another config than the last install's: the earlier one named under yours, a paragraph of its own
+    earlier = engine.EARLIER_CONFIG.format(old='9c8d7e6f…')
+    changed = [(sections[0][0], sections[0][1], f'{sections[0][2]}\n{earlier}')] + sections[1:]
+    add('review-earlier-config', screens.review(changed), *words, earlier)
     add('review-sign-in', screens.review(sections, cache=True, sign_in=True), *words)
     asks = [('warn', 'Creating the sync config: This AIOStreams asks you to sign in before configs can be saved.', None)]
     add('review-sign-in-to-save', screens.review(sections, sign_in=True, rows=asks), *words, asks[0][1])
@@ -196,6 +202,8 @@ def every_state():
         'http://subs.example.com', 'gateway', hosting.ADDRESS_REFUSED)
     add('host-signups', screens.host_signups('k7pm-2qra-9xwd'), 'k7pm-2qra-9xwd')
     add('host-signups-stopped', screens.host_signups('k7pm-2qra-9xwd', stop=screens.UNEXPECTED), 'k7pm-2qra-9xwd')
+    refused_invite = ('SUBSYNC_PUBLIC_INVITE', hosting.check_invite('join$us')[1])
+    add('host-signups-problem', screens.host_signups('join$us', problem=refused_invite), 'join$us', refused_invite[1])
     add('host-choices', screens.host_choices())
     add('host-choices-stopped', screens.host_choices(stop=screens.UNEXPECTED))
     add('host-choices-usenet', screens.host_choices(usenet=True))
@@ -224,8 +232,8 @@ def every_state():
                    ('ok', f'The sign-up page loads at {ADDRESS}, with its security headers', None)]
     add('host-check', screens.check('host', host_checks, running=False), *[r[1] for r in host_checks])
     host_lines = [f'AIOSubtitles is running on this machine as a public instance at {ADDRESS}.',
-                  'Share the address and the invite code with the people you want to use it: each of them signs up '
-                  'there with their own AIOStreams link.']
+                  'Share the address and the invite code, k7pm-2qra-9xwd, with the people you want to use it: each of '
+                  'them signs up there with their own AIOStreams link.']
     add('host-done', screens.done('host', 'Done', host_lines, []), 'Done', *host_lines)
     # after setup
     status = [('ok', 'container aiosubtitles-subsync: running healthy', None),

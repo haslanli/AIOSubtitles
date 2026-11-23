@@ -371,7 +371,7 @@ class App:
                                          add_opensubtitles=e.answers.get('ADD_OPENSUBTITLES', 'yes') == 'yes',
                                          usenet=usenet, stop=s.stops.get('choices'),
                                          saved=saved_keys(e, PERSONAL_KEYS), rows=s.rows.get('choices', []),
-                                         settings=e.env_settings))
+                                         settings=e.env_settings, address_note=e.address_note()))
 
     def step_limits(self, s, method, form, one):
         e = s.e
@@ -486,9 +486,9 @@ class App:
             e.answers['SUBSYNC_PUBLIC_INVITE'] = one.get('SUBSYNC_PUBLIC_INVITE', '')
             if s.run('signups', e.host_signups):
                 return self.go('hostchoices')
-        if not hasattr(e, 'invite'):
-            e.host_signups()
-        return self.page(screens.host_signups(e.invite, s.problems.get('signups'), stop=s.stops.get('signups')))
+        # the code as last sent, else the one setup has or suggests (engine.known_invite)
+        invite = e.answers['SUBSYNC_PUBLIC_INVITE'] if 'SUBSYNC_PUBLIC_INVITE' in e.answers else e.known_invite()[0]
+        return self.page(screens.host_signups(invite, s.problems.get('signups'), stop=s.stops.get('signups')))
 
     def step_hostchoices(self, s, method, form, one):
         e = s.e
