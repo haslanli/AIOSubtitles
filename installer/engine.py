@@ -54,6 +54,9 @@ CANT_REACH = ("Setup runs in a container, so it can't reach an AIOStreams that o
               '127.0.0.1. Give its address on your network, or, on Linux, build setup from source (README, Build it '
               "from source): it then runs on this machine's network.")
 STARTING = 'Starting {name}'
+# subsync's own port below 1024 with AIOStreams on the host network (an address with none means 80)
+HOST_NETWORK_PORT = ("subsync runs on this machine's own network here, as AIOStreams does, so it can't use a port below "
+                     '1024. Add a port to the address, like http://{host}:8790.')
 TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'The Matrix'),
                ('movie', 'tt0110912', 'Pulp Fiction')]
 # The stops about the config, each with its way out on the page (where Continue reads the config again:
@@ -90,6 +93,9 @@ WARNED = 'Installed, with warnings'
 WARNED_ABOVE = 'Installed, with warnings (see above)'
 # Docker failing to take the service down: nothing of setup's is deleted, so removing it again finishes the job
 REMOVE_FAILED = "Removing the subsync container failed; setup's files were kept, so removing it again finishes the job."
+# AIOStreams failing to delete one of subsync's configs (AIOStreams' own message under it): the same, for its keys
+DELETE_FAILED = ("Deleting {config} on AIOStreams failed; setup's files were kept, so removing it again finishes the "
+                 'job.')
 # A config an earlier setup gave subsync, after another was chosen: setup keeps no password for it, so it only names it,
 # in the review under your config and after removing, in what stays (Engine.earlier_configs)
 EARLIER_CONFIG = ("Your earlier config {old} still lists subsync. Setup looks after this one from now on, so it won't "
@@ -631,7 +637,7 @@ class Engine:
         container, url = self.reach_aios()
         settings = aios_settings(self.status)
         public = (settings.get('baseUrl') or (container or {}).get('base_url') or url).rstrip('/')
-        self.s.update(aios_url=url, aios_public=public, version=setup_version(), aios_version=self.status.get('version'))
+        self.s.update(aios_url=url, aios_public=public, aios_version=self.status.get('version'))
         if container and container['host_network']:
             self.s.update(mode='host', container=container['name'], networks=[],
                           aios_internal=f"http://127.0.0.1:{container['port']}")
@@ -959,6 +965,9 @@ class Engine:
             bind = '127.0.0.1'
         if self.s['mode'] == 'host':
             bind = None   # host network: subsync listens on the port itself, at SUBSYNC_BIND (install)
+            if kind == 'port' and port < 1024:      # its user may listen there on 1024 and above only
+                host = urllib.parse.urlsplit(url).hostname
+                raise Problem('PUBLIC_ADDRESS', HOST_NETWORK_PORT.format(host=f'[{host}]' if ':' in host else host))
         if self.port_in_use(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0'):
             raise Problem('PUBLIC_ADDRESS', f'Port {port} on this machine is already in use.')
         self.s.update(public_base=url, public_kind=kind, port=port, bind=bind)
@@ -1232,23 +1241,25 @@ class Engine:
         self.write_setup_script()
 
     def own_image(self):
-        """This install's id (kept from the last setup) and the image the service runs: setup's own, pinned. An install
-        setup 1.3.0 or before made is taken over here: it gets an id, and its volume, which Docker can't label, is kept
-        as it is (recorded in state/settings.json, declared external in its compose file) while Docker has it; once it
-        is gone, Compose makes the usual labelled one instead (an external volume must exist). Its container and network
-        are made again with the label when it starts."""
+        """This install's id (kept from the last setup) and the image the service runs: where it is installed, the one
+        it runs, with the last update's record for a rollback (a new version comes only through Update, with its copy
+        of the databases, its check and its rollback: switch); else setup's own, pinned. An install setup 1.3.0 or
+        before made is taken over here: it gets setup's own image and an id, and its volume, which Docker can't label,
+        is kept as it is (recorded in state/settings.json, declared external in its compose file) while Docker has it;
+        once it is gone, Compose makes the usual labelled one instead (an external volume must exist). Its container and
+        network are made again with the label when it starts."""
         self.s['install_id'] = self.prev.get('install_id') or self.install_id or new_install_id()
         kept = data_volume(self.prev) if made_before_labels(self.prev) or self.prev.get('external_volume') else None
         if kept and not volume_gone(kept):
             self.s['external_volume'] = kept
         else:
             self.s.pop('external_volume', None)
-        self.s['version'] = setup_version()
-        if PLACE:
-            self.s.update(image=PLACE.image, local=PLACE.local)
+        if self.prev.get('installed') and self.prev.get('image') and not made_before_labels(self.prev):
+            self.s.update({k: self.prev[k] for k in ('image', 'local', 'version', 'previous') if k in self.prev})
+        elif PLACE:
+            self.s.update(image=PLACE.image, local=PLACE.local, version=setup_version())
         else:
-            self.s.setdefault('image', self.prev.get('image') or f'aiosubtitles:local-{setup_version()}')
-            self.s.setdefault('local', True)
+            self.s.update(image=f'aiosubtitles:local-{setup_version()}', local=True, version=setup_version())
 
     def write_setup_script(self):
         """The image route's folder gets its ./setup."""
@@ -1291,7 +1302,7 @@ class Engine:
         target_host = f'127.0.0.1:{self.s["port"]}'
         self.show_rule(plan.proxy_snippets(self.s['public_base'], target_host),
                        f"Your web server needs one rule so {self.s['public_base']}/... reaches subsync. Add it next to "
-                       'your AIOStreams rule (keep the path as it is; don\'t strip it):',
+                       'your AIOStreams rule (keep the path as it is; don\'t strip it), and reload the web server:',
                        note=(f'Web server running in Docker on AIOStreams\' network: use {plan.SUBSYNC_HOST}:'
                              f'{plan.SUBSYNC_PORT} instead of {target_host}.') if self.s['mode'] == 'network' else None)
         self.ask.pause('Add the rule and reload your web server, then press Enter (or press Enter now and add it later):')
@@ -1419,7 +1430,8 @@ class Engine:
         used = f"{result.get('bytes', 0) / 1e6:.1f} MB in {result.get('requests', 0)} requests"
         if result.get('ok') and result.get('container'):
             tracks = result.get('text_tracks') or []
-            self.out.ok(f"Read {used} ({result['container'].upper()}, {size / 1e9:.1f} GB): the file has "
+            listed = f', {size / 1e9:.1f} GB' if size else ''      # a size no row listed is left out, never "0.0 GB"
+            self.out.ok(f"Read {used} ({result['container'].upper()}{listed}): the file has "
                         f"{len(tracks)} text subtitle track{'s' if len(tracks) != 1 else ''}"
                         + (f" ({', '.join(sorted({t['language'] or '?' for t in tracks}))})" if tracks else '')
                         + (f" and {result['image_tracks']} image one{'s' if result['image_tracks'] != 1 else ''}" if result.get('image_tracks') else ''))
@@ -1529,13 +1541,14 @@ class Engine:
         self.address = self.ask.text('HOST_ADDRESS', screens.LABELS['HOST_ADDRESS'], current=kept,
                                      check=hosting.check_address)
         self.trusted_proxy = self.ask.text('SUBSYNC_TRUSTED_PROXY', screens.LABELS['SUBSYNC_TRUSTED_PROXY'],
-                                           current=env.get('SUBSYNC_TRUSTED_PROXY'), default=hosting.TRUSTED_PROXY)
+                                           current=env.get('SUBSYNC_TRUSTED_PROXY'), default=hosting.TRUSTED_PROXY,
+                                           check=hosting.check_trusted_proxy)
         # a public instance keeps its own port on a re-run; a personal install's (80, say) is never taken over. The port
         # is checked unless this install's own container holds it.
         port = int(self.prev.get('port') or hosting.PORT) if self.prev.get('route') == 'host' else hosting.PORT
         if self.port_in_use(port, '127.0.0.1'):
             stop(f'Port {port} on this machine is already in use.')
-        self.s.update(route='host', public_base=self.address, port=port, version=setup_version())
+        self.s.update(route='host', public_base=self.address, port=port)
 
     def known_invite(self):
         """The invite code before this run's answer, as (code, suggested): state/subsync.env's ('' when anyone may sign
@@ -1729,14 +1742,16 @@ class Engine:
             path = backup(self.viewer, uuid)
             self.with_sign_in(lambda: self.aios.save_config(uuid, password, new))
             self.out.ok(f'Your config no longer lists subsync (copy before: {shown(path)})')
-        for kind, done in (('SYNC', 'Deleted subsync\'s own config'), ('USENET', "Deleted subsync's Usenet config")):
+        for kind, name in (('SYNC', screens.REMOVED_CONFIGS['own']), ('USENET', screens.REMOVED_CONFIGS['usenet'])):
             if keys.get(f'{kind}_UUID'):
                 try:
                     self.with_sign_in(lambda: self.aios.delete_config(keys[f'{kind}_UUID'], keys[f'{kind}_PASSWORD']))
-                    self.out.ok(done)
+                    self.out.ok(f'Deleted {name}')
                 except AiosError as e:
-                    if str(e.code) not in WRONG_PASSWORD_CODES:     # else already gone: an earlier removal deleted it
-                        self.out.warn(e.message)
+                    # already gone: an earlier removal deleted it. Else state/secrets.env, the only record of the
+                    # config's ID and password, is kept, as with Docker failing (take_down)
+                    if str(e.code) not in WRONG_PASSWORD_CODES:
+                        stop(DELETE_FAILED.format(config=name), e.message)
         if (STATE / 'compose.yaml').exists():
             self.take_down()
         if s.get('cache_before'):
@@ -1816,7 +1831,8 @@ class Engine:
             raise Stop(update.NO_ROLLBACK)
         copy = prev.get('databases') if restore else None
         if copy and not real_folder(STATE / 'backups' / copy):
-            raise Stop(update.FAILED.format(reason=f'{copy} is not in state/backups', version=self.prev.get('version')))
+            raise Stop(update.ROLLBACK_FAILED.format(reason=f'{copy} is not in state/backups',
+                                                     version=self.prev.get('version')))
         return self.switch(prev['image'], prev.get('local', False), prev['version'], back=True, restore=copy)
 
     def route_check(self, out=None):
@@ -1833,17 +1849,19 @@ class Engine:
 
     def switch(self, image, local, version, back=False, restore=None):
         """Copy the databases; check `image` while the old version keeps running; switch; check again; put the old
-        version back (with the copy when it needs it) if the new one doesn't answer."""
+        version back (with the copy when it needs it) if the new one doesn't answer. `back`: a rollback, whose stops
+        say so."""
         s = self.s = dict(self.prev)
         old = {'image': s.get('image'), 'local': bool(s.get('local')), 'version': s.get('version')}
+        failed = update.ROLLBACK_FAILED if back else update.FAILED
         guard(s.get('install_id'), unlabelled_own(s))
         held = self.route_check()            # what held before: a check that failed already can't fail the update
         needed = {(s.get('previous') or {}).get('databases'), restore} - {None}     # never pruned: a rollback needs them
-        copy = self.copy_databases(old['version'], keep=needed)
+        copy = self.copy_databases(old['version'], failed, keep=needed)
         self.out.working(update.CHECKING.format(version=version, old=old['version']))
         good, reason = dockerenv.check_image(image, plan.project(), s['install_id'])
         if not good:
-            raise Stop(update.FAILED.format(reason=reason.rstrip('.'), version=old['version']))
+            raise Stop(failed.format(reason=reason.rstrip('.'), version=old['version']))
         self.out.ok(update.CHECKED)
         self.out.working(update.SWITCHING.format(version=version))
         s.update(image=image, local=bool(local), version=version)
@@ -1865,7 +1883,10 @@ class Engine:
         self.out.ok(update.SWITCHED.format(version=version))
         if not back:
             self.out.note(update.KEPT.format(version=old['version']))
-            self.out.note(update.OLD_IMAGES.format(image=image_handle(old['image'])))
+            # the image the last update kept for a rollback, unless it is one in use: never the one kept now
+            earlier = (self.prev.get('previous') or {}).get('image')
+            if earlier and earlier not in (image, old['image']):
+                self.out.note(update.OLD_IMAGES.format(image=image_handle(earlier)))
         return self.route_check(self.out)
 
     def go_back(self, old, copy, new_version, restored=False):
@@ -1906,8 +1927,9 @@ class Engine:
         except ValueError:
             return False
 
-    def copy_databases(self, old_version, keep=()):
-        """A checked copy of the service's databases, out of its container, the newest three kept. Returns its folder."""
+    def copy_databases(self, old_version, failed, keep=()):
+        """A checked copy of the service's databases, out of its container, the newest three kept. Returns its folder.
+        `failed`: the stop when it can't be made, an update's or a rollback's."""
         self.out.working(update.COPYING)
         stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
         inside = f'{plan.DATA}/before-update-{stamp}'
@@ -1927,7 +1949,7 @@ class Engine:
         dockerenv.exec_in(CONTAINER, ['python', '-c', f'import shutil; shutil.rmtree({inside!r}, ignore_errors=True)'])
         if code != 0:
             reason = ((err or out).strip().splitlines() or ['no answer'])[-1]
-            raise Stop(update.FAILED.format(reason=reason.rstrip('.'), version=old_version))
+            raise Stop(failed.format(reason=reason.rstrip('.'), version=old_version))
         databases = plain_databases(dest)
         for path in list(dest.iterdir()):
             if path.name not in databases:

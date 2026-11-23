@@ -5,6 +5,7 @@ only reads settings, loads none of the sync's code (numpy, the worker)."""
 import base64
 import binascii
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -63,6 +64,20 @@ def default_gateway():
         if flags & 0x2 and gateway:          # RTF_GATEWAY
             return socket.inet_ntoa(struct.pack("<L", gateway))
     return None
+
+
+def unknown_proxies(value):
+    """The entries of a SUBSYNC_TRUSTED_PROXY value (comma-separated) that are neither gateway nor an IP address: a
+    request's own address is compared with each entry as written, so a network range or a name never matches. ./setup
+    checks its answer with this too."""
+    unknown = []
+    for entry in (a.strip() for a in value.split(",")):
+        if entry and entry.lower() != "gateway":
+            try:
+                ipaddress.ip_address(entry)
+            except ValueError:
+                unknown.append(entry)
+    return unknown
 
 
 def _cpu_limit(cpu_max, cfs_dir):
@@ -369,6 +384,7 @@ class Settings:
             if proxy and proxy not in trusted:
                 trusted.append(proxy)
         self.trusted_proxy = tuple(trusted)
+        self.unknown_proxies = unknown_proxies(g("SUBSYNC_TRUSTED_PROXY"))
         self.max_connections = read.whole("SUBSYNC_MAX_CONNECTIONS", 1)
         # files worked on at once for everyone (each person's worker takes a place of one shared turn)
         self.syncs_at_once = _places(g("SUBSYNC_SYNCS_AT_ONCE"))
@@ -480,6 +496,9 @@ class Settings:
         if self.public and self.gateway_missing:
             out.append("SUBSYNC_TRUSTED_PROXY says gateway, but this machine has no default gateway to trust: give your "
                        "web server's address instead.")
+        if self.public:
+            out += [f"SUBSYNC_TRUSTED_PROXY must be gateway or IP addresses separated by commas, like 172.18.0.1: "
+                    f"{entry} isn't one." for entry in self.unknown_proxies]
         if not self.public:     # a public instance uses each person's own languages and configs, and no addon key
             out += self._own_conflicts()
         return out

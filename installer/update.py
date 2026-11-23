@@ -26,6 +26,7 @@ NEWEST = 'This is the newest version.'
 NEWER_HERE = ('This machine runs version {running}, newer than this setup ({setup}): from here, only a rollback can be '
               'made.')
 FAILED = "The update didn't go through: {reason}. Version {version} keeps running."
+ROLLBACK_FAILED = "The rollback didn't go through: {reason}. Version {version} keeps running."
 COPY_NOT_A_FOLDER = 'the copy of the databases is not a folder'     # a reason: made by a service tampered with
 SAVED_DATABASES = 'Saved a copy of the databases: {path}'
 COPYING = 'Copying the databases'

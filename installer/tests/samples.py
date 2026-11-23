@@ -168,7 +168,7 @@ def every_state():
         *[r[1] for r in finished], *cache_warnings[0][1:], cache_warnings[1][1])
     personal_rule = plan.proxy_snippets(f'{PUBLIC}/subsync', '127.0.0.1:8790')
     personal_intro = (f'Your web server needs one rule so {PUBLIC}/subsync/... reaches subsync. Add it next to your '
-                      "AIOStreams rule (keep the path as it is; don't strip it):")
+                      "AIOStreams rule (keep the path as it is; don't strip it), and reload the web server:")
     rule_note = ("Web server running in Docker on AIOStreams' network: use aiosubtitles-subsync:8790 instead of "
                  '127.0.0.1:8790.')
     add('install-rule-note', screens.installing('yourself', finished, running=False, rule=personal_rule,

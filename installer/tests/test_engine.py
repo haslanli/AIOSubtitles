@@ -23,7 +23,7 @@ from html import escape as html_escape
 from pathlib import Path
 from unittest import mock
 
-from installer import dockerenv, docs, engine, hosting, limits, plan, screens, ui, wizard
+from installer import dockerenv, docs, engine, hosting, limits, plan, screens, ui, update, wizard
 from installer.tests.test_flow import (IMAGE, PASSWORD, PUBLIC, UUID, FlowFixture, OnBridgeNetwork, check_argv,
                                        local_only)
 from installer.tests.test_usenet import ENGINE, NEWZNAB, SUBS, TORBOX, ZILEAN
@@ -553,6 +553,107 @@ class ConfigRecovery(Offline):
         self.assertFalse((self.state / 'secrets.env').exists())
 
 
+class RemovalStops(Offline):
+    """AIOStreams failing to delete one of subsync's configs stops the removal before anything of this
+    machine's goes, as Docker failing does, so state/secrets.env, the only record of that config's ID and password,
+    stays and removing again finishes the job."""
+
+    def failing_delete(self, failing):
+        """AIOStreams' delete answering 502 for the configs in `failing`, the rest as usual."""
+        real = engine.Aios.delete_config
+
+        def delete(aios, uuid, password):
+            if uuid in failing:
+                raise refused(502, {}, 'Removing the sync config')
+            return real(aios, uuid, password)
+        return mock.patch.object(engine.Aios, 'delete_config', delete)
+
+    def test_a_config_aiostreams_failed_to_delete_keeps_setups_files(self):
+        self.aios.users[UUID]['config'] = {'services': [TORBOX, ENGINE], 'presets': [ZILEAN, NEWZNAB, SUBS]}
+        keys = self.install(USENET='yes')
+        for kind, name in (('SYNC', "subsync's own config"), ('USENET', "subsync's Usenet config")):
+            with self.subTest(kind=kind):
+                config = keys[f'{kind}_UUID']
+                with self.failing_delete({config}):
+                    code, out = self.again('--uninstall', REMOVE='yes')
+                self.assertEqual(code, 1, out)
+                said = flat(out)
+                self.assertIn(f"✗ Deleting {name} on AIOStreams failed; setup's files were kept, so removing it again "
+                              'finishes the job.', said)
+                self.assertIn(refused(502, {}, 'Removing the sync config').message, said)   # AIOStreams' own, under it
+                self.assertNotIn('Done.', said)
+                self.assertIn(config, self.aios.users)
+                self.assertTrue(self.aios.subsync_up)                               # the container wasn't taken down
+                for state_file in engine.STATE_FILES:
+                    self.assertTrue((self.state / state_file).exists(), state_file)
+                self.assertEqual(self.keys()[f'{kind}_UUID'], config)
+        code, out = self.again('--uninstall', REMOVE='yes')                       # AIOStreams answers again
+        self.assertEqual(code, 0, out)
+        self.assertIn('Done.', out)
+        self.assertFalse({keys['SYNC_UUID'], keys['USENET_UUID']} & set(self.aios.users))
+        self.assertFalse((self.state / 'secrets.env').exists())
+
+    def test_on_the_page_the_stop_shows_with_aiostreams_message(self):
+        sync_id = self.install()['SYNC_UUID']
+        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes', 'REMOVE_OPENSUBTITLES': 'no'}, page=True)
+        with self.failing_delete({sync_id}), self.assertRaises(engine.Stop) as caught:
+            e.remove()
+        self.assertEqual((caught.exception.message, caught.exception.page_fix),
+                         (engine.DELETE_FAILED.format(config="subsync's own config"),
+                          refused(502, {}, 'Removing the sync config').message))
+        self.assertTrue((self.state / 'secrets.env').exists())
+
+
+class WebServerRule(Offline):
+    """Only the terminal's pause after the rule said to reload the web server; the page shows the rule's intro
+    alone, so a page user added the rule, went on, and the check said the address doesn't answer."""
+
+    INTRO = (f'Your web server needs one rule so {PUBLIC}/subsync/... reaches subsync. Add it next to your AIOStreams '
+             "rule (keep the path as it is; don't strip it), and reload the web server:")
+
+    def test_on_the_page_the_rules_intro_says_to_reload_the_web_server(self):
+        e = self.page_engine({'LANGUAGES': 'English'})
+        e.choices()
+        e.limits()
+        e.review_and_save()
+        e.install()
+        self.assertEqual(e.rule_intro, self.INTRO)
+        from installer.tests import samples                             # the page's sample shows the same words
+        self.assertIn(self.INTRO, samples.every_state()['install-rule-note'][1])
+
+    def test_and_in_a_terminal(self):
+        code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertIn(self.INTRO, flat(out))
+
+
+class StepsKeepTheVersion(Offline):
+    """Going through the steps again (Change your answers, ./setup --answers) moved the service to setup's own
+    version, with no copy of the databases, no check beside the old one and no way back, and forgot the last update's
+    record even when the version stayed. A new version comes only through Update now."""
+
+    RUNNING = 'ghcr.io/haslanli/aiosubtitles:0.9.0@sha256:' + '1' * 64
+    PREVIOUS = {'image': 'ghcr.io/haslanli/aiosubtitles:0.8.0@sha256:' + '0' * 64, 'version': '0.8.0', 'local': False,
+                'databases': 'databases-20261101-000000'}
+
+    def test_a_rerun_keeps_the_running_version_and_its_rollback(self):
+        self.install()
+        first = engine.load_settings()
+        self.assertEqual((first['image'], first['version']), (IMAGE, engine.setup_version()))   # a first install: setup's
+        engine.save_settings(dict(first, image=self.RUNNING, version='0.9.0', previous=self.PREVIOUS))
+        code, out = self.again(LANGUAGES='English')
+        self.assertEqual(code, 0, out)
+        s = engine.load_settings()
+        self.assertEqual((s['image'], s['local'], s['version'], s['previous']), (self.RUNNING, False, '0.9.0',
+                                                                                  self.PREVIOUS))
+        self.assertEqual(s['languages'], ['eng'])                                   # the answer changed, as asked
+        self.assertIn(f'    image: {self.RUNNING}\n', self.compose())
+        self.assertFalse([cmd for cmd, _ in self.exec_calls if 'copy-databases' in cmd])
+        self.assertEqual(update.compare(s, engine.PLACE.image, engine.setup_version()).how, 'ready')   # Update offers it
+        with mock.patch.object(engine.Engine, 'switch', lambda e, *a, **k: a):
+            self.assertEqual(engine.Engine({}).rollback(), (self.PREVIOUS['image'], False, '0.8.0'))
+
+
 class AiostreamsShapes(Offline):
     """AIOStreams on the host network, elsewhere on the network (a LAN address), and two of them on this machine."""
 
@@ -632,6 +733,35 @@ class AiostreamsShapes(Offline):
         e.choices()
         self.assertEqual((e.s['public_kind'], e.s['port'], e.s['bind']), ('port', 80, '0.0.0.0'))
         self.assertIn('ports: ["0.0.0.0:80:8790"]', engine.compose_for(dict(e.s, image=IMAGE, install_id='i')))
+
+    def test_on_the_host_network_a_port_below_1024_is_refused_at_the_question(self):
+        # subsync, as its own user on this machine's network, can't listen there; setup saved the configs,
+        # replaced the container and waited 90 seconds for nothing
+        host = [self.container(host_network=True, networks=[])]
+        with mock.patch.object(dockerenv, 'aios_containers', lambda: host):
+            for address, shown in (('http://192.168.1.10', '192.168.1.10'), ('http://192.168.1.10:1023', '192.168.1.10'),
+                                   ('http://[fd00::5]', '[fd00::5]')):
+                with self.subTest(address=address):
+                    e = self.page_engine({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': address})
+                    with self.assertRaises(engine.Problem) as caught:
+                        e.choices()
+                    self.assertEqual((caught.exception.field, caught.exception.message), (
+                        'PUBLIC_ADDRESS', "subsync runs on this machine's own network here, as AIOStreams does, so it "
+                                          f"can't use a port below 1024. Add a port to the address, like http://{shown}:8790."))
+            for address in ('http://192.168.1.10:1024', 'http://192.168.1.10:8790', f'{PUBLIC}/subsync'):
+                with self.subTest(address=address):
+                    e = self.page_engine({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': address})
+                    e.choices()
+            users = copy.deepcopy(self.aios.users)
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', PUBLIC_ADDRESS='http://192.168.1.10'))
+        self.assertEqual(code, 1, out)
+        self.assertIn(engine.HOST_NETWORK_PORT.format(host='192.168.1.10'), flat(out))
+        self.assertEqual(self.aios.users, users)                                  # no config saved or made
+        self.assertFalse((self.state / 'compose.yaml').exists())
+        # on Docker's network the port is published, and any port is subsync's to use
+        e = self.page_engine({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': 'http://192.168.1.10'})
+        e.choices()
+        self.assertEqual(e.s['port'], 80)
 
     def test_an_https_address_is_always_reached_through_the_web_server(self):
         # One without a path (a name of its own, or with a port) was taken as subsync's own port: its plain
@@ -1053,6 +1183,20 @@ class SelfCheck(Offline):
                 self.assertEqual(code, expected, out)
                 for line in lines:
                     self.assertIn(flat(line), flat(out))
+
+    def test_a_size_no_row_listed_is_left_out_of_the_test_reads_row(self):
+        # An addon that lists no sizes got "(MKV, 0.0 GB)"
+        for sizes, row in (([0], '✓  Read 0.7 MB in 4 requests (MKV): the file has 1 text subtitle track (eng)'),
+                           ([1_511_641_761], '✓  Read 0.7 MB in 4 requests (MKV, 1.5 GB): the file has 1 text subtitle '
+                                             'track (eng)')):
+            with self.subTest(sizes=sizes):
+                self.aios.sizes = sizes
+                self.exec_calls.clear()
+                code, out = self.run_setup(self.ANSWERS)
+                self.assertEqual(code, 0, out)
+                self.assertIn(flat(row), flat(out))
+                cmd, _ = next(c for c in self.exec_calls if 'subsync.selftest' in c[0])
+                self.assertEqual('--size' in cmd, bool(sizes[0]))
 
     def test_an_update_or_a_rollback_whose_check_fails_ends_with_code_3(self):
         for flag, method in (('--update', 'update'), ('--rollback', 'rollback')):
@@ -2075,6 +2219,7 @@ class TakeOver(Offline):
                       'kept.', flat(out))
         self.assertRegex(s['install_id'], r'^[0-9a-f]{16}$')
         self.assertEqual(s['external_volume'], KEPT_VOLUME)                   # recorded in settings.json
+        self.assertEqual((s['image'], s['version']), (IMAGE, engine.setup_version()))   # setup's own, only here
         compose = self.compose()
         label = f'{{org.aiosubtitles.install: "{s["install_id"]}"}}'
         self.assertIn(f'    labels: {label}\n', compose)                              # the container

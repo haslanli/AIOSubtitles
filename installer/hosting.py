@@ -15,6 +15,7 @@ import urllib.request
 
 from installer import limits, plan
 from subsync import realdebrid
+from subsync.settings import unknown_proxies
 from subsync.version import user_agent
 
 LIMITS = limits.hosting(audio=True)
@@ -34,6 +35,9 @@ NO_ANSWER_NOTES = ('If you just added the web server rule, reload the web server
 # setup's answer to SUBSYNC_TRUSTED_PROXY when none is given: the web server reaches the instance through the port
 # Docker publishes, from its network's gateway
 TRUSTED_PROXY = 'gateway'
+# an answer with an entry subsync never matches (a network range, a name), so the sign-up limit would count every
+# visitor as the web server's one address
+TRUSTED_PROXY_REFUSED = "Type gateway or IP addresses separated by commas, like 172.18.0.1: {entry} isn't one."
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
          'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_KEY',
@@ -59,6 +63,13 @@ def check_invite(value):
     """(good, message, value) for the invite code question: letters, digits, spaces, - _ and . only."""
     code = (value or '').strip()
     return (True, '', code) if INVITE_CHARACTERS.fullmatch(code) else (False, INVITE_REFUSED, code)
+
+
+def check_trusted_proxy(value):
+    """(good, message, value) for the trusted proxy question: gateway or IP addresses, as subsync takes them."""
+    text = (value or '').strip()
+    unknown = unknown_proxies(text)
+    return (False, TRUSTED_PROXY_REFUSED.format(entry=unknown[0]), text) if unknown else (True, '', text)
 
 
 def _named(host):

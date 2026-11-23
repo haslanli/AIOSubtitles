@@ -54,6 +54,18 @@ class Pieces(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertEqual(hosting.check_invite(bad), (False, hosting.INVITE_REFUSED, bad))
 
+    def test_a_trusted_proxy_is_gateway_or_ip_addresses(self):
+        # subsync compares a request's own address with each entry as written, so a range, a name or a typo
+        # never matched, and every visitor counted as the web server's one address for the sign-up limit
+        for good in ('gateway', 'Gateway', '172.18.0.1', 'gateway, 127.0.0.1', '::1', ' 10.0.0.2 ,fd00::1 '):
+            with self.subTest(good=good):
+                self.assertEqual(hosting.check_trusted_proxy(good), (True, '', good.strip()))
+        for bad, entry in (('172.18.0.0/16', '172.18.0.0/16'), ('caddy', 'caddy'), ('gatway', 'gatway'),
+                           ('gateway, caddy', 'caddy'), ('127.0.0.1, 10.0.0.0/8, web', '10.0.0.0/8')):
+            with self.subTest(bad=bad):
+                self.assertEqual(hosting.check_trusted_proxy(bad), (
+                    False, f"Type gateway or IP addresses separated by commas, like 172.18.0.1: {entry} isn't one.", bad))
+
     def test_the_address_must_be_https_and_a_whole_host(self):
         self.assertEqual(hosting.check_address('https://Subs.Example.com/'), (True, '', 'https://subs.example.com'))
         # An address with a user name or password would be written into every person's addon link
@@ -596,6 +608,39 @@ class Route(RouteFixture):
         invite, out = self.ask_invite({}, '', 'movie night')                      # Enter keeps it: refused, asked again
         self.assertEqual(invite, 'movie night')
         self.assertIn('Enter keeps: movie$night; type remove to delete it', out)
+
+    def test_a_trusted_proxy_subsync_would_never_match_is_refused(self):
+        # From an answers file setup stops before writing anything; one written by hand is refused on a re-run
+        refused = "SUBSYNC_TRUSTED_PROXY: Type gateway or IP addresses separated by commas, like 172.18.0.1: {} isn't one."
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': '172.18.0.0/16'})
+        self.assertEqual(code, 1, out)
+        self.assertIn(refused.format('172.18.0.0/16'), ' '.join(out.split()))
+        self.assertFalse((self.state / 'subsync.env').exists())
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': '172.18.0.1'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_TRUSTED_PROXY'], '172.18.0.1')
+        path = self.state / 'subsync.env'
+        path.write_text(path.read_text().replace('PROXY=172.18.0.1', 'PROXY=caddy'))
+        code, out = self.run_setup({})
+        self.assertEqual(code, 1, out)
+        self.assertIn(refused.format('caddy'), ' '.join(out.split()))
+
+    def test_going_through_the_steps_again_keeps_the_running_version_and_its_rollback(self):
+        # The steps moved a public instance to setup's own version with no copy of the databases, no check
+        # beside the old one and no way back, and forgot the last update's record (./setup --rollback had nothing)
+        code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 0, out)
+        running = 'ghcr.io/haslanli/aiosubtitles:0.9.0@sha256:' + '1' * 64
+        previous = {'image': 'ghcr.io/haslanli/aiosubtitles:0.8.0@sha256:' + '0' * 64, 'version': '0.8.0',
+                    'local': False, 'databases': 'databases-20261101-000000'}
+        engine.save_settings(dict(engine.load_settings(), image=running, local=False, version='0.9.0',
+                                  previous=previous))
+        code, out = self.run_setup({'SUBSYNC_MAX_USERS': '120'})
+        self.assertEqual(code, 0, out)
+        s = engine.load_settings()
+        self.assertEqual((s['image'], s['local'], s['version'], s['previous']), (running, False, '0.9.0', previous))
+        self.assertIn(f'    image: {running}\n', (self.state / 'compose.yaml').read_text())
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_MAX_USERS'], '120')     # the answer is
 
     def test_a_public_instance_with_the_audio_route(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'SUBSYNC_AUDIO_ROUTE': 'yes',

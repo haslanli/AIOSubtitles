@@ -2,6 +2,7 @@
 while the old one keeps running; then the switch, checked, and put back when it fails, with the databases from
 before the update when the old version needs them; a rollback on request. Docker is a stand-in that knows which image
 the service runs and whether that one answers."""
+import contextlib
 import json
 import os
 import stat
@@ -154,8 +155,26 @@ class EngineUpdate(unittest.TestCase):
         self.assertIn(('ok', update.CHECKED), rows)
         self.assertIn(('ok', update.SWITCHED.format(version='1.4.0')), rows)
         switched = next(r for r in e.out.rows if r[1] == update.SWITCHED.format(version='1.4.0'))
-        self.assertEqual(switched[2], update.KEPT.format(version='1.3.0') + ' '
-                         + update.OLD_IMAGES.format(image=OLD))                  # under the switch, not the check
+        # under the switch, not the check; a first update keeps every image it had: the old one is the rollback's
+        self.assertEqual(switched[2], update.KEPT.format(version='1.3.0'))
+
+    def test_after_an_update_only_the_image_no_longer_needed_is_named_for_removing(self):
+        # The note named the image just kept for the rollback (on the source route a build that can't be
+        # fetched again); the one no longer needed is the one the last update kept, when neither version uses it
+        older = 'ghcr.io/haslanli/aiosubtitles:1.2.0@sha256:' + '0' * 64
+        for kept, note in ((older, update.KEPT.format(version='1.3.0') + ' ' + update.OLD_IMAGES.format(image=older)),
+                           (OLD, update.KEPT.format(version='1.3.0'))):         # the one 1.3.0 runs on: in use
+            with self.subTest(kept=kept):
+                if self.state.exists():
+                    import shutil
+                    shutil.rmtree(self.state)
+                self.install(previous={'image': kept, 'version': '1.2.0', 'local': False,
+                                       'databases': 'databases-20261101-000000'})
+                e = engine.Engine({}, page=True)
+                self.assertTrue(e.update())
+                switched = next(r for r in e.out.rows if r[1] == update.SWITCHED.format(version='1.4.0'))
+                self.assertEqual(switched[2], note)
+                self.assertEqual(engine.load_settings()['previous']['image'], OLD)     # the rollback's: never named
 
     def test_the_words_are_the_approved_drafts(self):
         self.assertEqual(update.ABOUT, 'Updating saves a copy of the databases, checks the new version while the old '
@@ -374,6 +393,35 @@ class EngineUpdate(unittest.TestCase):
                       (self.state / 'compose.yaml').read_text())
         self.assertEqual(engine.load_settings()['external_volume'], volume)
 
+    def test_a_rollback_that_cant_go_ahead_says_rollback(self):
+        # Its stops said "The update didn't go through"; the reason inside is unchanged
+        self.assertEqual(update.ROLLBACK_FAILED.format(reason='the copy of the databases is not a folder',
+                                                       version='1.4.0'),
+                         "The rollback didn't go through: the copy of the databases is not a folder. Version 1.4.0 "
+                         'keeps running.')
+        self.assertEqual(update.FAILED.format(reason='no answer within 90 seconds', version='1.3.0'),
+                         "The update didn't go through: no answer within 90 seconds. Version 1.3.0 keeps running.")
+
+        def locked(name, cmd, stdin=None, timeout=120):
+            return 1, '', 'database is locked'
+        for case in ('the older version does not start', 'the copy fails'):
+            with self.subTest(case=case):
+                if self.state.exists():
+                    import shutil
+                    shutil.rmtree(self.state)
+                self.events.clear()
+                self.rollback_with_its_copy()
+                self.check_answers = case != 'the older version does not start'
+                with mock.patch.object(dockerenv, 'exec_in', locked) if case == 'the copy fails' \
+                        else contextlib.nullcontext(), self.assertRaises(Stop) as caught:
+                    engine.Engine({}, page=True).rollback(restore=True)
+                reason = 'no answer within 90 seconds' if case == 'the older version does not start' \
+                    else 'database is locked'
+                self.assertEqual(caught.exception.message, update.ROLLBACK_FAILED.format(reason=reason, version='1.4.0'))
+                self.assertNotIn('up', self.kinds())
+                self.assertEqual(self.running, NEW)
+                self.assertEqual(engine.load_settings()['previous']['version'], '1.3.0')    # still there to go back
+
     def test_no_earlier_version_no_rollback(self):
         self.install()
         with self.assertRaises(Stop) as caught:
@@ -480,7 +528,8 @@ class EngineUpdate(unittest.TestCase):
                 with self.assertRaises(Stop) as caught:
                     engine.Engine({}, page=True).rollback(restore=True)
                 self.assertEqual(caught.exception.message,
-                                 update.FAILED.format(reason='databases-x is not in state/backups', version='1.4.0'))
+                                 update.ROLLBACK_FAILED.format(reason='databases-x is not in state/backups',
+                                                               version='1.4.0'))
                 self.assertEqual(self.events, [])
         self.assertTrue(engine.Engine({}, page=True).rollback())               # without the copy it goes ahead
 

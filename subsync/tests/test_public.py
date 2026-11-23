@@ -72,6 +72,19 @@ class PublicSettingsTest(unittest.TestCase):
                 self.assertIn("SUBSYNC_TRUSTED_PROXY", problems[0])
                 self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "gateway"}).conflicts(), [])   # self-hosted: unused
 
+    def test_a_trusted_proxy_that_is_neither_gateway_nor_an_ip_address_stops_public_mode(self):
+        # A request's own address is compared with each entry as written, so a range, a name or a typo never
+        # matched, and every visitor counted as the web server's one address for the sign-up limit
+        s = Settings({"SUBSYNC_TRUSTED_PROXY": "127.0.0.1, 172.18.0.0/16, caddy", "SUBSYNC_PUBLIC": "on"})
+        self.assertEqual(s.conflicts(), [
+            "SUBSYNC_TRUSTED_PROXY must be gateway or IP addresses separated by commas, like 172.18.0.1: 172.18.0.0/16 "
+            "isn't one.",
+            "SUBSYNC_TRUSTED_PROXY must be gateway or IP addresses separated by commas, like 172.18.0.1: caddy isn't "
+            "one."])
+        self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "caddy"}).conflicts(), [])          # self-hosted: unused
+        self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "172.18.0.1, fd00::1", "SUBSYNC_PUBLIC": "on"}).conflicts(),
+                         [])
+
     def test_syncs_at_once(self):
         from unittest import mock
         from subsync import settings as settings_module

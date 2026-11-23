@@ -1375,6 +1375,23 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostchoices'))
         self.assertEqual(b.app.session.e.invite, '')
 
+    def test_a_trusted_proxy_subsync_would_never_match_is_refused_at_its_field(self):
+        # A range or a name was taken, and the sign-up limit then counted every visitor as one address
+        b = Browser(web.App(port=8821))
+        b.post('', {'ROUTE': 'host'})
+        b.get('machine')
+        b.follow('machine', {'go': 'next'})
+        status, _, text = b.post('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': '172.18.0.0/16',
+                                             'go': 'next'})
+        self.assertEqual(status, 200)
+        self.assertIn('<p class="field-error" id="subsync_trusted_proxy-error">Type gateway or IP addresses separated '
+                      "by commas, like 172.18.0.1: 172.18.0.0/16 isn't one.</p>", text)
+        self.assertRegex(text, r'<input[^>]*name="SUBSYNC_TRUSTED_PROXY"[^>]*value="172\.18\.0\.0/16"')   # as typed
+        status, headers, _ = b.post('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': '172.18.0.1',
+                                                'go': 'next'})
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/signups'))
+        self.assertEqual(b.app.session.e.trusted_proxy, '172.18.0.1')
+
     def test_the_choices_page_starts_from_the_switches_subsync_env_has(self):
         # Read as subsync reads them: Yes and 1 are on, a word it doesn't take is its default (off)
         self.state.mkdir(parents=True)
