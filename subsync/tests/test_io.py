@@ -33,7 +33,10 @@ from subsync.subs import parse, to_srt, ts
 from subsync.worker import Job, JobGuard, READ_RETRY_S, Safety, Turn, UsenetFinder, Worker
 
 TINY = os.path.join(FIXTURES, "tiny.mkv")
-ALASS = os.environ.get("SUBSYNC_ALASS", "alass")
+# the alass program: SUBSYNC_ALASS, else alass on the path (as the image names it), else alass-cli (as Homebrew and
+# `cargo install alass-cli` name it); the tests that run it are skipped when there is none
+ALASS = os.environ.get("SUBSYNC_ALASS") or shutil.which("alass") or shutil.which("alass-cli") or "alass"
+needs_alass = unittest.skipUnless(have(ALASS), "alass (or alass-cli) not found; set SUBSYNC_ALASS to its path")
 
 
 def read_text(name):
@@ -351,7 +354,7 @@ class ListedSizeTest(unittest.TestCase):
             r.get(0, 64)
 
 
-@unittest.skipUnless(have(ALASS), "alass not installed")
+@needs_alass
 class PipelineTest(unittest.TestCase):
     def setUp(self):
         self.srv = RangeServer(FIXTURES)
@@ -421,7 +424,7 @@ class PipelineTest(unittest.TestCase):
 
 
 # -- candidate order, image refs ----------------------------------------------------------------------------------
-@unittest.skipUnless(have(ALASS), "alass not installed")
+@needs_alass
 class ImageRoutePipelineTest(unittest.TestCase):
     def setUp(self):
         self.ref = realistic(300, 7)
@@ -458,7 +461,6 @@ def pgs_left_out(lines, number=7):
     return {"number": number, "language": "eng", "codec": "S_HDMV/PGS", "name": "", "forced": False, "cues": ev}
 
 
-@unittest.skipUnless(have(ALASS), "alass not installed")
 class ImageTranslationTest(unittest.TestCase):
     """Kingdom of Heaven's director's cut has only image tracks; its Russian director's-cut subtitles were
     all "below the bar" because the gate expected every line to pair, while the track pins only its sure starts. With the
@@ -476,12 +478,14 @@ class ImageTranslationTest(unittest.TestCase):
         share = imageref.reference(self.idx.image_tracks()[0])["stats"]["sure_share"]
         self.assertLess(share, 0.85)
 
+    @needs_alass
     def test_a_translation_for_this_cut_passes(self):
         for seed in (4, 5, 6):
             r = self.run_one(translated(self.ref, seed, shift=3.4))
             self.assertEqual((r["route"], r["outcome"]), ("image", "synced"), (seed, r.get("gate_synced")))
             self.assertIn("aligned to another language", r["reason"])   # Russian against the English image track
 
+    @needs_alass
     def test_a_translation_for_another_cut_is_kept_original(self):
         mid = self.ref[len(self.ref) // 2][0]
         r = self.run_one(translated(self.ref, 4, shift=3.4, cut=(mid, mid + 420.0)))
@@ -532,7 +536,7 @@ class WorkerFixture(unittest.TestCase):
         return w._sync_language(Job("movie", "tt1"), self.idx, "f-1", "eng", self.cands, "abcd", filename)
 
 
-@unittest.skipUnless(have(ALASS), "alass not installed")
+@needs_alass
 class WorkerChoiceTest(WorkerFixture):
     """The order subtitles are tried in, and an in-sync original further down listed unchanged."""
 
@@ -570,7 +574,7 @@ class WorkerChoiceTest(WorkerFixture):
         self.assertTrue(r["detail"].get("unchanged"))
 
 
-@unittest.skipUnless(have(ALASS), "alass not installed")
+@needs_alass
 class BestFitTest(WorkerFixture):
     """Every candidate is judged and the best fit is offered first, not the first that passes; an in-sync
     original (a subtitle made for this release) beats any re-timed copy."""
@@ -624,7 +628,7 @@ class BestFitTest(WorkerFixture):
         self.assertIn("os-insync", [store.get(k)["candidate_id"] for k in seen])
         self.assertEqual(store.get(seen[-1])["candidate_id"], "os-insync")
 
-@unittest.skipUnless(have(ALASS), "alass not installed")
+@needs_alass
 class FrameRateTest(unittest.TestCase):
     """A subtitle timed for 25 fps on a 23.976 fps release is corrected on the text route."""
 
@@ -670,7 +674,7 @@ class FastPathTest(WorkerFixture):
         self.assertFalse(r["detail"].get("unchanged"))
         self.assertTrue(r["detail"].get("shift_fit"))           # the shift path's, before any re-timing
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_none_in_sync_falls_back_to_re_timing(self):
         # With the shift path off the offset one is re-timed (alass); with it on, the shift alone synced it
         self.cands = self.cands[:2]                             # broken + offset: no original is in sync
@@ -693,7 +697,6 @@ class FastPathTest(WorkerFixture):
         self.assertEqual(store.db.execute("SELECT COUNT(*) FROM results").fetchone()[0], 0)
 
 
-@unittest.skipUnless(have(ALASS), "alass not installed")
 class MagnetTest(WorkerFixture):
     """An original in sync as it is still starts its lines a little off the release's own (Patriot S01E01's English:
     43 ms early throughout; Burning: an author's stray line). Like AutoSync's "magnet", each line is snapped to the release
@@ -771,7 +774,7 @@ class CrossLanguageTest(unittest.TestCase):
         self.assertTrue(chk["cross"])                                  # recorded as judged against another language
         self.assertLess(self.error_ms(chk["body"]), self.error_ms(text))
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_an_offset_translation_is_aligned_and_snapped(self):
         text = translated(self.ref, 6, shift=3.4, sigma=0.25, resplit=0.1)
         r = pipeline.sync_subtitle(self.idx, text, "rus", rules(better=BETTER), alass=ALASS, audio=False)
@@ -779,7 +782,7 @@ class CrossLanguageTest(unittest.TestCase):
         self.assertIn("another language", r["reason"])
         self.assertLess(self.error_ms(r["body"]), 120)
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_a_loosely_timed_translation_is_aligned_too(self):
         # Breaking Bad S01E02's Russian: alass aligns it (86-94 % paired) but its timing style leaves ~250 ms median, and some
         # tenths of the runtime have under half their lines within 500 ms; every tenth still pairs
@@ -787,13 +790,13 @@ class CrossLanguageTest(unittest.TestCase):
         r = pipeline.sync_subtitle(self.idx, text, "rus", rules(better=BETTER), alass=ALASS, audio=False)
         self.assertEqual(r["outcome"], "synced", (r.get("reason"), r.get("gate_synced"), r.get("aligned")))
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_another_films_translation_is_kept(self):
         text = translated(realistic(600, 77), 6, shift=3.4)
         r = pipeline.sync_subtitle(self.idx, text, "rus", rules(better=BETTER), alass=ALASS, audio=False)
         self.assertEqual(r["outcome"], "keep_original")
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_another_cuts_translation_is_kept(self):
         mid = self.ref[len(self.ref) // 2][0]
         text = translated(self.ref, 6, shift=3.4, sigma=0.25, resplit=0.1, cut=(mid, mid + 400))
@@ -981,7 +984,7 @@ class ShiftPathTest(WorkerFixture):
         self.assertEqual((r["candidate_id"], r["outcome"]), ("os-offset", "synced"))
         self.assertTrue(r["detail"].get("shift_fit"))
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_off_means_alass_as_before(self):
         self.cands = [self.cands[1]]
         w, store = self.worker(SUBSYNC_BEST_FIT="on", SUBSYNC_FAST_PATH="on", SUBSYNC_SHIFT_PATH="off")
@@ -1009,7 +1012,7 @@ class OwnTrackTest(WorkerFixture):
         r = pipeline.sync_subtitle(idx, srt_of(self.ref), "eng", rules(), alass=ALASS, audio=False)
         self.assertIn("audio route is off", r["reason"])
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_the_file_is_not_marked_for_the_audio_route(self):
         with open(os.path.join(self.dir, "long.srt"), "w", encoding="utf-8") as f:
             f.write(self.long_text())
@@ -1053,7 +1056,7 @@ class TinyFileFixture(unittest.TestCase):
 class ParallelLanguagesTest(TinyFileFixture):
     """process() with both languages at once: each is published, results as without parallelism."""
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_both_languages_published(self):
         store = closed_after(self, Store(os.path.join(self.dir, "store")))
         s = Settings({"SUBSYNC_ALASS": ALASS, "SUBSYNC_AUDIO_ROUTE": "off", "SUBSYNC_PARALLEL_LANGUAGES": "on",
@@ -1100,7 +1103,7 @@ class PlayedFileHashTest(TinyFileFixture):
         aliases = {alias for (alias,) in store.db.execute("SELECT alias FROM aliases")}
         self.assertEqual(aliases, {f"hash:{video_hash}|None", f"hash:{video_hash}|{len(data)}"})
 
-    @unittest.skipUnless(have(ALASS), "alass not installed")
+    @needs_alass
     def test_the_played_file_is_synced(self):
         with open(TINY, "rb") as f:
             data = f.read()
@@ -1710,8 +1713,10 @@ class FirstReadRetryTest(unittest.TestCase):
         sized = mock.patch.object(sources, "MIN_VIDEO_BYTES", 1)    # the listing's size is the file's
         sized.start()
         self.addCleanup(sized.stop)
-        waits = mock.patch("subsync.worker.time.sleep")             # the wait is recorded, not waited
-        self.sleep = waits.start()
+        # the wait is recorded, not waited: the worker's own time, whose sleep alone is a stand-in (a patch of
+        # subsync.worker.time.sleep replaced time.sleep for every module and thread)
+        waits = mock.patch("subsync.worker.time", mock.Mock(wraps=time, sleep=mock.Mock()))
+        self.sleep = waits.start().sleep
         self.addCleanup(waits.stop)
         link = self.link
 
@@ -1745,6 +1750,13 @@ class FirstReadRetryTest(unittest.TestCase):
     def backed_off_for(self):
         retry = self.store.file_retry(self.job.alias)
         return None if retry is None else round(retry - time.time(), -1)
+
+    def test_only_the_workers_wait_is_a_stand_in(self):
+        # A sleep anywhere else (another module, another thread) still waits and isn't counted as the worker's
+        t0 = time.monotonic()
+        time.sleep(0.05)
+        self.assertGreaterEqual(time.monotonic() - t0, 0.04)
+        self.sleep.assert_not_called()
 
     def test_one_dropped_connection_is_tried_again_and_the_file_read_in_the_same_job(self):
         flaky = Flaky(self.link, faults=1)
