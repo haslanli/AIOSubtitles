@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 from helpers import (closed_after, Counts, dialogue_srt, FakeDebrid, FakeDownloads, FakeUsenet, FIXTURES, form,
-                     HAVE_CRYPTOGRAPHY, http, KEY, Limits, Listing, NEEDS, RangeServer, row, ServerHarness,
+                     HAVE_CRYPTOGRAPHY, http, KEY, Limits, Listing, NEEDS, RangeServer, row, run_once, ServerHarness,
                      start_server, stop_server, TempDir, wait_until)
 from subsync import sources
 from subsync import worker as worker_mod
@@ -827,7 +827,14 @@ class AudioEndingTest(Base):
     def test_a_pick_stopped_while_it_waits_for_its_turn_waits_again(self):
         w = self.picked(self.worker(Limits()))
         w.audio_turn = StopsWhileWaiting(w)
+        read = []
+
+        def reads(job):             # never reached while stop works; if it is, the loop still ends here
+            read.append(job)
+            w.stop_flag = True
+        w.process = reads
         w._loop("audio")
+        self.assertEqual(read, [])                          # stopped while it waited for its turn: nothing is read
         self.assertTrue(w.waits_for_pick(self.alias))
 
     def test_the_caps_are_logged_in_their_settings_units(self):
@@ -862,14 +869,13 @@ class AudioEndingTest(Base):
             with self.subTest(audio=audio):
                 self.store.db.execute("DELETE FROM pickable")
                 w = self.picked(self.worker(Limits())) if audio else self.worker(Limits())
-                if not audio:
-                    w.submit(Job("movie", "tt1", self.hints))
+                job = w.jobs[self.alias] if audio else Job("movie", "tt1", self.hints)
 
                 def stopped(job, w=w):
                     w.stop()
                     raise Stopped(worker_mod.BACKING_OFF)
                 w.process = stopped
-                w._loop("audio" if audio else "main")
+                run_once(w, job, "audio" if audio else "main")      # one turn, ended without stop
                 self.assertEqual((w.jobs, w.queue), ({}, []))
                 self.assertEqual(w.waits_for_pick(self.alias), audio)
                 self.assertEqual(self.worker(Limits()).waits_for_pick(self.alias), audio)   # its row: the next worker

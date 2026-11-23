@@ -93,15 +93,15 @@ def every_page():
         "result-again": pages.result_page(result(changes=change_lines()[2:])),
         "settings": pages.settings_page(s, RECORD, USAGE, LINK, now=0),
         "settings-kept": pages.settings_page(s, dict(RECORD, auto_password="x"), USAGE, LINK, now=0),
-        "settings-full": pages.settings_page(s, RECORD, {"files": 40, "bytes": 0}, LINK, now=0),
+        "settings-full": pages.settings_page(s, RECORD, {"files": s.user_files_per_day, "bytes": 0}, LINK, now=0),
         "settings-saved": pages.settings_page(s, RECORD, USAGE, LINK, now=0,
                                               message=pages.done_message("languages", RECORD)[0]),
         "settings-error-refresh": pages.settings_page(s, RECORD, USAGE, LINK, now=0, error="Wrong.", field="refresh"),
         "settings-error-link": pages.settings_page(s, RECORD, USAGE, LINK, now=0, error="Wrong.", field="new_link"),
         "settings-error-languages": pages.settings_page(s, RECORD, USAGE, LINK, now=0, error="Wrong.", field="languages"),
         "settings-stored": pages.settings_page(s, dict(RECORD, store_only=True), USAGE, LINK, now=0),
-        "settings-five": pages.settings_page(settings(SUBSYNC_MAX_LANGUAGES="2"),
-                                             dict(RECORD, languages=["eng", "spa", "fre"]), USAGE, LINK, now=0),
+        "settings-over-limit": pages.settings_page(settings(SUBSYNC_MAX_LANGUAGES="2"),
+                                                   dict(RECORD, languages=["eng", "spa", "fre"]), USAGE, LINK, now=0),
         "settings-thousands": pages.settings_page(settings(SUBSYNC_USER_FILES_PER_DAY="2000"), RECORD, THOUSANDS[2],
                                                   LINK, now=0),
         "delete": pages.delete_confirm_page(),
@@ -814,6 +814,9 @@ class SettingsPageTest(unittest.TestCase):
         text = self.page(usage={"files": 200, "bytes": 0})
         self.assertIn("Today's limit is reached", Tree(text).text())
         self.assertIn('class="gauge full"', text)
+        full = every_page()["settings-full"]              # so the every-page checks see this state too
+        self.assertIn("Today's limit is reached", Tree(full).text())
+        self.assertIn('class="gauge full"', full)
 
     def test_success_warning_and_problem_each_look_different(self):
         text = self.page(message="Saved.", notice="Careful.", error="Wrong.", field="refresh")

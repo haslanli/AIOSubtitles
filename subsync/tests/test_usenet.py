@@ -1149,22 +1149,17 @@ class PagesTest(unittest.TestCase):
         self.assertNotIn("searches used today", hidden)
 
     def test_the_signed_up_page(self):
-        import types
+        from helpers import result                 # the stand-in checked against signup.SignupResult
         from subsync import explain, pages
 
-        def SignupResult(token, manifest_url, languages=(), **kw):   # every field of signup.SignupResult
-            fields = dict(token=token, manifest_url=manifest_url, languages=list(languages), changes=[], warning=None,
-                          added=True, manual=False, store_only=False, to_store_only=False, usenet=False,
-                          usenet_why=None, sync_made=True)
-            return types.SimpleNamespace(**dict(fields, **kw))
-        made = pages.result_page(SignupResult("T", "https://subs.test/u/T/manifest.json", languages=["eng"], usenet=True))
+        def done(**kw):
+            return result(changes=[], languages=["eng"], **kw)
+        made = pages.result_page(done(usenet=True))
         self.assertIn("Usenet is on: AIOSubtitles made a second config", made)
         self.assertIn("Made AIOSubtitles&#x27; own config", made)
-        only = pages.result_page(SignupResult("T", "https://subs.test/u/T/manifest.json", languages=["eng"], usenet=True,
-                                              sync_made=False))
+        only = pages.result_page(done(usenet=True, sync_made=False))
         self.assertNotIn("Made AIOSubtitles&#x27; own config", only)
-        why = pages.result_page(SignupResult("T", "https://subs.test/u/T/manifest.json", languages=["eng"],
-                                             usenet_why="nntp"))
+        why = pages.result_page(done(usenet_why="nntp"))
         self.assertIn("Usenet stays off: your AIOStreams has no Usenet service", why)
         self.assertEqual(explain.USENET_WHY["none"], explain.USENET_WHY["nntp"])
 

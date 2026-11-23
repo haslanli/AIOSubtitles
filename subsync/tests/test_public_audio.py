@@ -8,7 +8,7 @@ import time
 import unittest
 
 from helpers import (closed_after, dialogue_srt, FakeDownloads, FIXTURES, HAVE_CRYPTOGRAPHY, have, KEY,
-                     Limits as CountedLimits, Listing, local_network_only, NEEDS, RangeServer, start_server,
+                     Limits as CountedLimits, Listing, local_network_only, NEEDS, RangeServer, run_once, start_server,
                      stop_server, TempDir, wait_until)
 from subsync import audiofit  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -208,9 +208,9 @@ class OwnRowsTest(Base):
             a._needs_pick(job())
             raise Refused("HTTP 429")
         a.process = running
-        a.submit(Job("movie", "tt8", {"filename": "c.mp4", "videoSize": 5}))
         with self.assertLogs("subsync.worker", "WARNING") as logs:
-            a._loop("main")
+            # one turn of the loop, which ends without the stop under test; a job that doesn't run fails
+            run_once(a, Job("movie", "tt8", {"filename": "c.mp4", "videoSize": 5}))
         self.assertEqual(logs.output, ["WARNING:subsync.worker:refused movie/tt8 (HTTP 429): no reads for 900 s"])
         self.assertEqual(self.own_rows("a" * 16), 0)
         self.assertEqual(a.originals[ALIAS], ORIGINALS)              # in memory only, for this worker's last moments
@@ -757,16 +757,13 @@ class TextsTest(unittest.TestCase):
         self.assertIn("(about 60–350 MB, at most 0.5 GB)", half)
 
     def test_the_signed_up_page_says_what_a_file_without_a_track_takes(self):
-        from types import SimpleNamespace
-        from subsync import pages
-        # every field of signup.SignupResult
-        result = SimpleNamespace(added=True, manual=False, changes=[], warning=None, languages=["eng"],
-                                 manifest_url="https://x.test/u/" + "t" * 43 + "/manifest.json", token="t" * 43,
-                                 store_only=False, to_store_only=False, usenet=False, usenet_why=None, sync_made=True)
         import html
-        self.assertIn(T_A11, html.unescape(pages.result_page(result, self.pages_settings())))
-        self.assertNotIn("one to three minutes", pages.result_page(result, self.pages_settings(SUBSYNC_AUDIO_ROUTE="off")))
-        self.assertNotIn("one to three minutes", pages.result_page(result))
+        from helpers import result                 # the stand-in checked against signup.SignupResult
+        from subsync import pages
+        done = result(changes=[], languages=["eng"])
+        self.assertIn(T_A11, html.unescape(pages.result_page(done, self.pages_settings())))
+        self.assertNotIn("one to three minutes", pages.result_page(done, self.pages_settings(SUBSYNC_AUDIO_ROUTE="off")))
+        self.assertNotIn("one to three minutes", pages.result_page(done))
 
 
 # ----------------------------------------------------------------------------------------------- the audio decoder
