@@ -15,14 +15,30 @@ from subsync.store import Store
 from subsync.worker import Job, Safety, Worker
 
 
-class Running(concurrent.futures.Future):
-    """A lookup that never finishes. Nothing may wait for it: each wait (result, exception) or callback hung on it is
-    recorded in `waits`, and a wait is answered at once as one that timed out. A job that waits can't hang the run (a
-    wait uses no processor time, so ulimit -t never ends it), and is seen even where the worker swallows the error."""
+class _Waiters(list):
+    """Running's waiters: concurrent.futures.wait and as_completed hang one on each future they wait for. Each is
+    recorded, and the wait raises TimeoutError at once."""
 
     def __init__(self, waits):
         super().__init__()
         self.waits = waits
+
+    def append(self, waiter):
+        self.waits.append("wait")
+        raise concurrent.futures.TimeoutError("the lookup is still running")
+
+
+class Running(concurrent.futures.Future):
+    """A lookup that never finishes. Nothing may wait for it: every wait on it (its result or exception,
+    concurrent.futures.wait, as_completed) and every callback hung on it is recorded in `waits`, and a wait raises
+    TimeoutError at once, as one whose time ran out. So a job that waits can't hang the run (a wait uses no processor
+    time, so ulimit -t never ends it), and every test checks as it ends that nothing waited (Base), so a wait
+    is seen even where the worker swallows the error."""
+
+    def __init__(self, waits):
+        super().__init__()
+        self.waits = waits
+        self._waiters = _Waiters(waits)
 
     def result(self, timeout=None):
         self.waits.append("result")
@@ -91,7 +107,9 @@ class Base(unittest.TestCase):
             def subtitles(self, *a):
                 return [{"id": "e", "lang": "eng", "url": url, "release": "tiny"}]
         self.listing = Listing()
-        self.lookup = FakeLookup()
+        self.lookup = lookup = FakeLookup()
+        # nothing waited for the lookup, on whatever path the test drove; `lookup`: a test may drop its own
+        self.addCleanup(lambda: self.assertEqual(lookup.waits, [], "something waited for the lookup"))
 
     def worker(self, **env):
         self.s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng", "SUBSYNC_EXTRA_SOURCES": "",
@@ -134,8 +152,7 @@ class JobTest(Base):
         w = self.worker()
         t0 = time.monotonic()
         job, seen = self.run_job(w)
-        self.assertLess(time.monotonic() - t0, 30)       # the never-finishing lookup held nothing
-        self.assertEqual(self.lookup.waits, [])          # nor did anything wait for it
+        self.assertLess(time.monotonic() - t0, 5)        # the never-finishing lookup held nothing (the job: ~0.02 s)
         self.assertEqual(len(self.lookup.started), 1)
         self.assertEqual(set(seen), {None})
         d = self.detail()

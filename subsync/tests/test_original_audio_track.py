@@ -7,7 +7,7 @@ import random
 import threading
 import unittest
 
-from helpers import AUDIO_BETTER, FIXTURES, rhythm
+from helpers import AUDIO_BETTER, FIXTURES, rhythm, timeline_fit
 from subsync import audiofit  # noqa: E402
 from subsync.langs import lang3  # noqa: E402
 from subsync.mp4 import open_index  # noqa: E402
@@ -139,30 +139,15 @@ class FitTest(unittest.TestCase):
         self.dub = rhythm(700, 4242)
 
     def fit(self, original, follows=1):
-        import numpy as np
         r = random.Random(5)
         speech = {follows: [(s + r.gauss(0, 0.08), s + d) for s, d in self.truth],
                   1 - follows: [(s + r.gauss(0, 0.08), s + d) for s, d in self.dub]}
         end = max(self.truth[-1][0] + self.truth[-1][1], self.dub[-1][0] + self.dub[-1][1]) + 30
         index = Index([track(0, "eng", True), track(1, "jpn")], original=original, end=end)
-
-        class TruthFit(audiofit.AudioFit):
-            def _read_window(self, start, length):
-                self.windows_read += 1
-                self.audio_s += length
-                n = int(round(length * 100))
-                mask, onsets = np.zeros(n, dtype=bool), []
-                for a, b in speech[self.track or 0]:
-                    if b <= start or a >= start + length:
-                        continue
-                    mask[max(0, int((a - start) * 100)):min(n, int((b - start) * 100))] = True
-                    if a >= start:
-                        onsets.append(a - self.lead)
-                return {"start": start, "len": length, "mask": mask, "onsets": np.array(onsets)}
         rr = random.Random(1)
         starts = [s - 9.0 + rr.gauss(0, 0.15) for s, _ in self.truth]
         lines = [{"s": a, "e": a + d, "text": "x", "kind": "dialogue"} for a, (_, d) in zip(starts, self.truth)]
-        return audiofit.fit_tracks(index, lines, vad=object(), better=AUDIO_BETTER, fit_class=TruthFit,
+        return audiofit.fit_tracks(index, lines, vad=object(), better=AUDIO_BETTER, fit_class=timeline_fit(speech),
                                    original=original)
 
     def test_the_original_track_first_saves_the_dubs_fit(self):
