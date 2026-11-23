@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
@@ -545,6 +546,24 @@ class SourcesTest(unittest.TestCase):
             with self.subTest(size=size[:8]):
                 self.assertEqual(parse_extras("filename=a.mkv&videoSize=" + urllib.parse.quote(size)),
                                  {"filename": "a.mkv"})
+
+    def test_hints_no_player_sends_name_no_file(self):
+        # A file name and a hash were kept at any length and in any characters (the video id alone had a
+        # bound): each request's hints are remembered and its name keys a person's maps, so 60 KB names held hundreds
+        # of MB, and a name past ~48 KB gave a pick entry longer than the service's own request line
+        name = "a" * (sources.MAX_FILENAME - 4) + ".mkv"
+        self.assertEqual(parse_extras("filename=" + urllib.parse.quote(name)), {"filename": name})   # the longest
+        for extras in ("filename=" + "a" * sources.MAX_FILENAME + ".mkv", "filename=" + "a" * 60_000,
+                       "filename=a%0Ab.mkv", "filename=a%09b.mkv", "filename=a%7Fb.mkv", "filename=a%C2%85b.mkv",
+                       "filename=a%E2%80%A8b.mkv", "videoHash=zzz", "videoHash=" + "z" * 300,
+                       "videoHash=" + "a" * 33, "videoHash=0123%0A4567", "videoHash=%EF%BC%91%EF%BC%92"):
+            with self.subTest(extras=extras[:40]):
+                self.assertEqual(parse_extras(extras), {})
+        self.assertEqual(parse_extras("videoHash=zzz&videoSize=1000&filename=a.mkv"),
+                         {"videoSize": 1000, "filename": "a.mkv"})     # the others stay
+        for video_hash in ("0123456789abcdef", "00FF", "8e245d9679d31e1", "a" * 32, ""):
+            self.assertEqual(parse_extras("videoHash=" + video_hash), {"videoHash": video_hash})
+        self.assertEqual(parse_extras("filename=Am%C3%A9lie%20%E2%80%94%20%E5%A4%A7.mkv"), {"filename": "Amélie — 大.mkv"})
 
     def test_an_id_is_one_path_segment_of_aiostreams_address(self):
         # A "/" in an id ("%2F" in the request) went on into the listing's address as a path
@@ -2317,6 +2336,11 @@ class NameOnlyTest(AddonCase):
         self.assertTrue(other[0]["url"].endswith("/pick/" + token("hash:ffffeeee11112222|None") + "/eng.srt"))
         self.assertEqual(list(self.worker.jobs), ["hash:ffffeeee11112222|None"])
         self.assertEqual(self.app.subtitles("movie", "tt1", ""), [])
+        # A "hash" that isn't hex, or a name no file system keeps, names no file: nothing listed or queued
+        for extras in ("videoHash=" + "z" * 300, "filename=" + "a" * 60_000 + ".mkv"):
+            with self.subTest(extras=extras[:20]):
+                self.assertEqual(self.app.subtitles("movie", "tt1", extras), [])
+        self.assertEqual(list(self.worker.jobs), ["hash:ffffeeee11112222|None"])
 
 
 class ReadLatelyTest(AddonCase):
@@ -2565,6 +2589,132 @@ class FetchSubtitleTest(unittest.TestCase):
                         mock.patch.object(sources, "time", types.SimpleNamespace(sleep=waits.append)):
                     self.assertEqual(fetch_subtitle("https://subs.test/a.srt"), self.TEXT)
                 self.assertEqual(waits, [wait])
+
+    def test_a_season_pack_gives_the_episodes_own_file(self):
+        # The episode was looked for as "s01e05" in each name, without its spaces and dots; a pack naming its
+        # files S01_E05, S01-E05 or 1x05 gave its first file, another episode's, as this one's
+        def pack(*names):
+            out = io.BytesIO()
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                for name in names:
+                    z.writestr(name, f"1\n00:00:01,000 --> 00:00:02,000\n{name}\n")
+            return out.getvalue()
+        for names, wanted in ((("Show.S01_E01.srt", "Show.S01_E05.srt"), "Show.S01_E05.srt"),
+                              (("Show - S01-E01.srt", "Show - S01-E05.srt"), "Show - S01-E05.srt"),
+                              (("Show.1x01.srt", "Show.1x05.srt"), "Show.1x05.srt"),
+                              (("Show.S01E04.srt", "Show.S01E05.srt"), "Show.S01E05.srt"),
+                              (("Show S01 E05.srt", "Show S01 E06.srt"), "Show S01 E05.srt"),
+                              (("Show.S1E5.srt", "Show.S1E6.srt"), "Show.S1E5.srt"),
+                              (("S01E01-E04/Show.srt", "Show.S01E05.srt"), "Show.S01E05.srt"),
+                              (("Show.S01E01.srt", "Show.S01E04-E06.srt"), "Show.S01E04-E06.srt"),
+                              (("Show.S01E05.en.srt", "Show.S02E05.srt"), "Show.S01E05.en.srt")):
+            with self.subTest(names=names):
+                got = self.fetch(pack(*names), url="https://subs.test/a.zip#S01E05").decode()
+                self.assertIn(wanted, got)
+        # members that name only other episodes have none for it; members that name none: the first, as before
+        with self.assertRaisesRegex(ValueError, "^no subtitle for this episode in the zip$"):
+            self.fetch(pack("Show.S01E01.srt", "Show.S01E02.srt"), url="https://subs.test/a.zip#S01E05")
+        self.assertIn("one.srt", self.fetch(pack("one.srt", "two.srt"), url="https://subs.test/a.zip#S01E05").decode())
+        self.assertIn("Show.S01E01.srt", self.fetch(pack("Show.S01E01.srt", "Show.S01E02.srt")).decode())  # a film's
+
+
+class WholeRequestBoundTest(unittest.TestCase):
+    """A listing's and a subtitle download's wait bounds the whole request (net.Deadline), its status line,
+    headers and body; each socket read only was bounded, so a server that sent its answer a byte now and then held a
+    job and its shared place for as long as it liked, and a paced host's two places with them."""
+    LISTING = b'{"streams": []}'
+    TEXT = b"1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+
+    def setUp(self):
+        guard = local_network_only()
+        guard.start()
+        self.addCleanup(guard.stop)
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = outer.LISTING if "/stream/" in self.path else outer.TEXT
+                head = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                if "/fast" in self.path:
+                    self.wfile.write(head + body)
+                    return
+                if "/cut-404" in self.path:   # a status line that never ends: its reason a byte every 0.1 s
+                    try:
+                        self.wfile.write(b"HTTP/1.1 404 ")
+                        for _ in range(30):
+                            self.wfile.write(b"X")
+                            self.wfile.flush()
+                            time.sleep(0.1)
+                    except OSError:
+                        pass
+                    return
+                slow = body if "/slow-body" in self.path else head + body
+                if "/slow-body" in self.path:
+                    self.wfile.write(head)
+                for i in range(len(slow)):   # a byte every 0.2 s: each read within its own wait
+                    try:
+                        self.wfile.write(slow[i:i + 1])
+                        self.wfile.flush()
+                    except OSError:
+                        return
+                    time.sleep(0.2)
+
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.addCleanup(stop_server, self.server)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def timed_out(self, call, within=2.0):
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            call()
+        return time.monotonic() - t0 < within
+
+    def test_a_trickled_listing_ends_at_its_timeout(self):
+        for route in ("slow-head", "slow-body"):
+            with self.subTest(route=route):
+                aios = Aios(f"{self.url}/{route}/manifest.json", timeout=1)
+                aios.check_config = lambda: None
+                self.assertTrue(self.timed_out(lambda: aios.streams("movie", "tt1")))
+        aios = Aios(f"{self.url}/fast/manifest.json", timeout=1)
+        aios.check_config = lambda: None
+        self.assertEqual(aios.streams("movie", "tt1"), [])               # an answer in time is read whole
+
+    def test_a_trickled_download_ends_at_its_timeout_and_frees_its_hosts_place(self):
+        with mock.patch.object(sources, "PACED_HOSTS", ("127.0.0.1",)):
+            for route in ("slow-head", "slow-body"):
+                with self.subTest(route=route):
+                    self.assertTrue(self.timed_out(lambda: fetch_subtitle(f"{self.url}/{route}/a.srt", timeout=1)))
+            # three at once with two places: the third waits for one of the first two, which ends at its bound
+            t0 = time.monotonic()
+            with ThreadPoolExecutor(3) as pool:
+                ended = list(pool.map(lambda i: self.timed_out(lambda: fetch_subtitle(
+                    f"{self.url}/slow-body/{i}.srt", timeout=1), within=3.0), range(3)))
+            self.assertEqual(ended, [True] * 3)
+            self.assertLess(time.monotonic() - t0, 3.0)
+            self.assertEqual(fetch_subtitle(f"{self.url}/fast/a.srt", timeout=1), self.TEXT)
+
+    def test_a_sources_answer_and_a_language_lookups_are_bounded_too(self):
+        # the same reader: a built-in source's answer (extra._get) and an original-language lookup's (origlang._get)
+        from subsync import origlang
+        from subsync.extra import ExtraSources
+        ex = ExtraSources(Settings({}))
+        self.addCleanup(ex.pool.shutdown)
+        self.assertTrue(self.timed_out(lambda: ex._get(f"{self.url}/slow-body/stream/a.json", timeout=1)))
+        self.assertEqual(ex._get(f"{self.url}/fast/stream/a.json", timeout=1), {"streams": []})
+        lookup = origlang.Lookup(Settings({}), None)
+        self.addCleanup(lookup.close)
+        lookup.timeout = 1
+        t0 = time.monotonic()
+        with self.assertRaises(origlang.Failed) as failed:
+            lookup._get("wikidata", f"{self.url}/slow-body/stream/a.json")
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertEqual(failed.exception.why, "timed out")
+        self.assertEqual(lookup._get("wikidata", f"{self.url}/fast/stream/a.json"), {"streams": []})
 
 
 class PlayerAddressTest(unittest.TestCase):

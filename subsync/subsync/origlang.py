@@ -28,6 +28,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from . import digits, langs, net, realdebrid
+from .sources import read_answer
 from .version import user_agent
 
 log = logging.getLogger("subsync.origlang")
@@ -386,9 +387,7 @@ class Lookup:
         req = urllib.request.Request(url, data=data, headers={"user-agent": USER_AGENT, **(headers or {})})
         why, code = None, None
         try:
-            with (_open_keyed(req, self.timeout) if service == "tmdb" else realdebrid.urlopen(req, timeout=self.timeout)) \
-                    as r:
-                body = r.read(MAX_BYTES + 1)
+            body = read_answer(req, self.timeout, MAX_BYTES + 1, _open_keyed if service == "tmdb" else None)
             if len(body) > MAX_BYTES:
                 why = "answer too large"
             else:

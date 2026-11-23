@@ -24,11 +24,11 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 
-from . import choose, digits, net, realdebrid, srclimits
+from . import choose, digits, net, srclimits
 from .bounded import put_bounded
 from .langs import lang2, lang3, name as lang_name
 from .sourcestate import Health, Ledger
-from .sources import extras, release_info, release_name, resource_path
+from .sources import extras, read_answer, release_info, release_name, resource_path
 from .version import user_agent
 
 log = logging.getLogger("subsync.extra")
@@ -161,8 +161,8 @@ class ExtraSources:
         req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                    **(headers or {})})
         try:
-            with realdebrid.urlopen(req, timeout=timeout or max(self.s.source_timeout, srclimits.MIN_TIMEOUT_S)) as r:
-                return json.loads(r.read(srclimits.ANSWER_MAX_BYTES) or b"null")
+            return json.loads(read_answer(req, timeout or max(self.s.source_timeout, srclimits.MIN_TIMEOUT_S),
+                                          srclimits.ANSWER_MAX_BYTES) or b"null")
         except urllib.error.HTTPError as e:
             code, retry = e.code, e.headers.get("Retry-After") if e.headers else None
             e.close()

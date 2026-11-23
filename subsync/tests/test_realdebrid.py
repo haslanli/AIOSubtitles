@@ -416,6 +416,27 @@ class ListingCheckTest(unittest.TestCase):
                         aios.streams('movie', 'tt1')
                 self.assertIn(f"can't read subsync's config ({reason}), so nothing is listed", logs.output[0])
 
+    def test_an_error_code_that_isnt_one_is_never_logged(self):
+        # AIOStreams' error code was logged as it came, any length and any characters, so a person's own
+        # AIOStreams (public mode) could write lines of its own into the operator's log, megabytes of them. A code is
+        # named only when it is an AIOStreams-style token, a status only when it is a number
+        from subsync.aiosconfig import UNREACHABLE, AiosError
+        forged = 'X\n2026-11-19 00:00:00,000 WARNING subsync.realdebrid forged line\n' + 'A' * 200_000
+        for code, named in ((forged, 'an error answer'), ('A' * 65, 'an error answer'), ('bad code', 'an error answer'),
+                            (['USER_INVALID_DETAILS'], 'an error answer'), ({'code': 1}, 'an error answer'),
+                            (1.5, 'an error answer'), (True, 'an error answer'), ('A' * 64, 'A' * 64),
+                            ('USER_INVALID_DETAILS', 'USER_INVALID_DETAILS'), (401, 'HTTP 401'), (None, 'no answer'),
+                            ('', 'no answer'), (UNREACHABLE, 'no answer')):
+            with self.subTest(code=repr(code)[:30]):
+                aios = Aios(f'http://127.0.0.1:9/stremio/{OneConfigAiostreams.UUID}/ENCRYPTED/manifest.json',
+                            password=OneConfigAiostreams.PASSWORD)
+                aios._read_config = mock.Mock(side_effect=AiosError('refused', code=code))
+                with self.assertLogs('subsync.sources', 'WARNING') as logs:
+                    with self.assertRaises(realdebrid.Blocked):
+                        aios.check_config()
+                self.assertEqual(logs.output, [f"WARNING:subsync.sources:Real-Debrid check: can't read subsync's "
+                                               f"config ({named}), so nothing is listed through it"])
+
     def test_a_rate_limited_config_read_is_tried_again(self):
         aios = self.aios(self.SAFE)
         self.fake.limited = 1

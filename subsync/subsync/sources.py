@@ -11,6 +11,7 @@ its password (SUBSYNC_SOURCE_PASSWORD) and nothing is asked when it could reach 
 Real-Debrid row is never read.
 """
 import gzip
+import http.client
 import io
 import json
 import logging
@@ -29,6 +30,15 @@ from .version import user_agent
 
 log = logging.getLogger("subsync.sources")
 MAX_SUBTITLE_BYTES = 5 * 1024 * 1024
+# a whole request's wait, from before it connects to the last byte of its answer (net.Deadline): a stream or subtitle
+# listing through a config (Aios), at most MAX_ANSWER bytes; a subtitle's download, at most MAX_SUBTITLE_BYTES
+LISTING_TIMEOUT_S = 120
+DOWNLOAD_TIMEOUT_S = 30
+# a subtitles request's hints (parse_extras): a file name longer than this (no file system keeps a name past 255 bytes)
+# or with a control character, and a videoHash that isn't an OpenSubtitles hash in hex, name no file
+MAX_FILENAME = 1024
+_VIDEO_HASH = re.compile(r"[0-9A-Fa-f]{1,32}")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 # Stock AIOStreams adds `streamData` (file name, size, service, cache flag) to stream listings only for
 # clients whose User-Agent starts with "AIO" (version.user_agent). Without it no listed row passes `unreadable`, and no
 # file is ever found.
@@ -57,13 +67,17 @@ def parse_extras(text):
     """The hints of a subtitles request's extras segment, as it is in the path: "videoHash=…&videoSize=…&filename=…",
     each value percent-encoded (as `extras` writes it, or form-encoded with "+" for a space), or that whole segment
     percent-encoded once more (Stremio's own form: no "=" left in it). Each value is decoded once, after the split, so
-    an "&" or a "%" in a file name stays in it."""
+    an "&" or a "%" in a file name stays in it. A value no player sends is left out, as if it weren't there: a size
+    that isn't a whole number, a hash that isn't hex, a file name past MAX_FILENAME or with a control character (each
+    request's hints are kept, and its file name is part of the alias that keys a person's maps and entry addresses)."""
     text = text or ""
     if "=" not in text and "%3D" in text.upper():
         text = urllib.parse.unquote(text)
     out = {}
     for k, v in urllib.parse.parse_qsl(text, keep_blank_values=True):
-        if k in ("videoHash", "filename"):
+        if k == "videoHash" and (not v or _VIDEO_HASH.fullmatch(v)):
+            out[k] = v
+        elif k == "filename" and len(v) <= MAX_FILENAME and not _CONTROL.search(v):
             out[k] = v
         elif k == "videoSize" and (size := digits.whole(v)) is not None:   # never "²" nor "１２"
             out[k] = size
@@ -76,11 +90,30 @@ def resource_path(type_, video_id):
     return f"{urllib.parse.quote(type_, safe='')}/{urllib.parse.quote(video_id, safe=':')}"
 
 
+def read_answer(req, timeout, limit, urlopen=None):
+    """A request's answer, at most `limit` bytes, through the request gate (realdebrid.urlopen, or `urlopen`, one of
+    its forms), the whole request within `timeout` seconds (net.Deadline: its connections, any redirect, its status
+    line, headers and body), so a server that sends its answer a byte now and then holds it no longer: TimeoutError
+    then. An HTTP error, and a request toward Real-Debrid, are raised as they are."""
+    bound = net.Deadline(timeout)
+    try:
+        with bound, (urlopen or realdebrid.urlopen)(req, timeout=timeout) as r:
+            body = r.read(limit)
+    except (urllib.error.HTTPError, realdebrid.Blocked):
+        raise
+    except (OSError, http.client.HTTPException):   # its connection shut at the bound fails the read it was in
+        if bound.passed:
+            raise TimeoutError("timed out") from None
+        raise
+    if bound.passed:   # its connection was shut at the bound: what came may be cut short
+        raise TimeoutError("timed out")
+    return body
+
+
 def _get_json(url, timeout):
     req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                "Connection": "close"})
-    with realdebrid.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read(MAX_ANSWER))
+    return json.loads(read_answer(req, timeout, MAX_ANSWER))
 
 
 def row_hints(stream):
@@ -135,7 +168,7 @@ _VIDEO_EXTENSION = re.compile(r"\.(mkv|mp4|m4v|avi|ts|m2ts|webm|mov|wmv)$", re.I
 
 def release_name(name):
     """A file or release name without its video extension, for comparing a Usenet release with the file inside it."""
-    return _VIDEO_EXTENSION.sub("", str(name or "")).strip()
+    return _VIDEO_EXTENSION.sub("", str(name or "").strip()).strip()
 
 
 def usenet_match(rows, name, size):
@@ -146,9 +179,12 @@ def usenet_match(rows, name, size):
     name is listed, once opened, by that name, with the release's name as the row's folder: that counts as its name
     too."""
     wanted = release_name(name)
+    if not wanted:   # a bare extension or blanks name no release
+        return None
 
     def names(s):
-        return {release_name(row_hints(s).get("filename")), release_name((s.get("streamData") or {}).get("folderName"))}
+        return {release_name(row_hints(s).get("filename")),
+                release_name((s.get("streamData") or {}).get("folderName"))} - {""}
 
     def fits(s):
         listed = row_hints(s).get("videoSize")
@@ -190,10 +226,24 @@ def unreadable(stream, skip_addons=(), usenet=False):
 
 
 CONFIG_LINK = re.compile(r"^(?P<instance>.+?)/stremio/(?P<uuid>[^/]+)/[^/]+$")
+_ERROR_CODE = re.compile(r"[A-Z0-9_]{1,64}")   # an AIOStreams error code: USER_INVALID_DETAILS, RATE_LIMIT_EXCEEDED ...
+
+
+def _refusal(code):
+    """How a config read AIOStreams refused is named in the log: by its HTTP status, or by its error code when that is
+    one; any other value is AIOStreams-written text of any length and any characters, never logged."""
+    if type(code) is int:
+        return f"HTTP {code}"
+    if not code or code == UNREACHABLE:
+        return "no answer"
+    if isinstance(code, str) and _ERROR_CODE.fullmatch(code):
+        return code
+    return "an error answer"
 
 
 class Aios:
-    def __init__(self, manifest_url, own_bases=(), timeout=120, skip_addons=(), size_slack=0, password=""):
+    def __init__(self, manifest_url, own_bases=(), timeout=LISTING_TIMEOUT_S, skip_addons=(), size_slack=0,
+                 password=""):
         self.base = manifest_base(manifest_url)
         self.size_slack = size_slack     # bytes a listed size may be off by rounding (SUBSYNC_SIZE_SLACK_MB)
         self.skip = tuple(a.strip().lower() for a in skip_addons if a and a.strip())
@@ -230,8 +280,7 @@ class Aios:
         try:
             config = self._read_config()
         except AiosError as e:   # named by its code only: its words can hold the AIOStreams address
-            reason = f"HTTP {e.code}" if isinstance(e.code, int) else \
-                "no answer" if not e.code or e.code == UNREACHABLE else e.code
+            reason = _refusal(e.code)
         except ValueError as e:
             reason = str(e)
         else:
@@ -246,10 +295,13 @@ class Aios:
         log.warning("Real-Debrid check: can't read subsync's config (%s), so nothing is listed through it", reason)
         raise realdebrid.Blocked("subsync's config can't be checked for Real-Debrid")
 
-    def streams(self, type_, video_id):
+    def streams(self, type_, video_id, checked=False):
+        """The stream listing of a title; `checked`: the caller has just checked the config for this request
+        (check_config), so it isn't read again."""
         if not self.base:
             return []
-        self.check_config()
+        if not checked:
+            self.check_config()
         return _get_json(f"{self.base}/stream/{resource_path(type_, video_id)}.json", self.timeout).get("streams") or []
 
     def find_row(self, type_, video_id, hints):
@@ -270,9 +322,9 @@ class Aios:
                         "" if real_debrid == 1 else "s")
         rows = [s for s in listed if unreadable(s, self.skip, usenet=usenet) is None]
         if video_hash:
-            listed = next((s for s in rows if same_hash(row_hints(s).get("videoHash"), video_hash)), None)
-            if listed is not None:
-                return listed
+            by_hash = next((s for s in rows if same_hash(row_hints(s).get("videoHash"), video_hash)), None)
+            if by_hash is not None:
+                return by_hash
         found = self._by_name_and_size(rows, name, size)
         if found is None and usenet and name:
             found = usenet_match(rows, name, size)
@@ -350,10 +402,11 @@ def _wait_429(err, attempt):
     return min(max(asked or 0.0, RETRY_STEP_S * attempt), RETRY_WAIT_MAX_S)
 
 
-def fetch_subtitle(url, timeout=30, headers=None):
+def fetch_subtitle(url, timeout=DOWNLOAD_TIMEOUT_S, headers=None):
     """A subtitle's bytes. Gzip is unpacked; a zip (SubDL, SubSource) gives its subtitle file, the one named for the
     episode when the link ends in #SxxEyy. `headers`: what the source needs besides (a key, never in the address).
-    MAX_SUBTITLE_BYTES bounds what is downloaded and, again, what is unpacked from it."""
+    MAX_SUBTITLE_BYTES bounds what is downloaded and, again, what is unpacked from it; `timeout` each try's whole
+    download (read_answer), so a paced host's place is never held longer."""
     url, _, frag = url.partition("#")
     gate = _gate((urllib.parse.urlsplit(url).hostname or "").lower())
     for attempt in range(1, RETRIES_429 + 2):
@@ -362,8 +415,7 @@ def fetch_subtitle(url, timeout=30, headers=None):
             if gate:
                 gate.acquire()
             try:
-                with realdebrid.urlopen(req, timeout=timeout) as r:
-                    raw = r.read(MAX_SUBTITLE_BYTES + 1)
+                raw = read_answer(req, timeout, MAX_SUBTITLE_BYTES + 1)
             finally:
                 if gate:
                     gate.release()
@@ -399,15 +451,39 @@ SUBTITLE_FILES = (".srt", ".ass", ".ssa", ".vtt")
 ZIP_METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
 
 
+# a download link's episode ("#S01E05", extra.py), and the "1x05" form of a season pack's names, which
+# choose.episodes doesn't read (its other forms, S01E05, S01_E05, S01-E05, S01E04-E06, it does)
+_EPISODE_FRAGMENT = re.compile(r"S(\d{1,4})E(\d{1,4})", re.I)
+_SEASON_X_EPISODE = re.compile(r"(?<![0-9a-z])(\d{1,2})x(\d{2,3})(?![0-9])", re.I)
+
+
+def _episodes_named(path):
+    """The episodes, (season, first, last), a zip member names: by its file name, else by its folders'."""
+    from .choose import episodes   # choose imports this module
+    for name in (path.rsplit("/", 1)[-1], path):
+        tags = episodes(name) or [(int(s), int(e), int(e)) for s, e in _SEASON_X_EPISODE.findall(name)]
+        if tags:
+            return tags
+    return []
+
+
 def _from_zip(raw, frag):
+    """The subtitle file of a zip (SubDL, SubSource). For an episode (`frag`: "S01E05"), the member that names it; a
+    season pack whose members name other episodes only has none for it (ValueError); a zip whose members name no
+    episode gives its first, as for a film."""
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
         names = [i for i in z.infolist() if i.filename.lower().endswith(SUBTITLE_FILES)
                  and i.file_size <= MAX_SUBTITLE_BYTES and i.compress_type in ZIP_METHODS]
         if not names:
             raise ValueError("no subtitle in the zip")
-        if frag:
-            want = frag.lower()
-            hits = [i for i in names if want in i.filename.lower().replace(" ", "").replace(".", "")]
-            names = hits or names
+        wanted = _EPISODE_FRAGMENT.fullmatch(frag or "")
+        if wanted:
+            season, episode = int(wanted[1]), int(wanted[2])
+            tagged = [(i, _episodes_named(i.filename)) for i in names]
+            hits = [i for i, tags in tagged if any(s == season and first <= episode <= last for s, first, last in tags)]
+            if hits:
+                names = hits
+            elif any(tags for _, tags in tagged):
+                raise ValueError("no subtitle for this episode in the zip")
         with z.open(names[0]) as member:
             return _unpacked(member)

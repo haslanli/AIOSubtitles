@@ -77,8 +77,10 @@ BY_ID_ENTRIES = 5000
 # AIOStreams subtitle presets that are the same source as a built-in one (asked once, through the config).
 CONFIG_PRESETS = {"opensubtitles": "osv3", "opensubtitles-v3-plus": "osv3plus", "subdl": "subdl",
                   "subsource": "subsource", "subhero": "wyzie"}
-# A subtitle's address -> its source (for a config's custom addons and the subtitles a config lists).
-HOSTS = (("opensubtitles-v3.strem.io", "osv3"), ("strem.io", "osv3"), ("stremio.homes", "osv3plus"),
+# A subtitle's address -> its source (for a config's custom addons and the subtitles a config lists): a host is the
+# suffix or one of its subdomains, so "strem.io" covers Stremio's OpenSubtitles addon (opensubtitles-v3.strem.io) and
+# the hosts its files come from (subs5.strem.io ...).
+HOSTS = (("strem.io", "osv3"), ("stremio.homes", "osv3plus"),
          ("thesubtitledb.org", "tsdb"), ("subdl.com", "subdl"), ("subsource.net", "subsource"),
          ("gestdown.info", "gestdown"), ("wyzie.io", "wyzie"))
 # The sign-up's clean-up may remove these presets, each only where the public service asks its site itself (SubDL and

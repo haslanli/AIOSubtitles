@@ -405,6 +405,18 @@ class RowsTest(unittest.TestCase):
         other["streamData"]["folderName"] = "Interstellar.2014.1080p.BluRay.x264-nikt0"
         self.assertIs(a.match([other, opened], asked, usenet=True), opened)
 
+    def test_a_name_that_is_only_an_extension_names_no_release(self):
+        # ".mkv" or blanks, without the extension, is "", which is also the name of every row's missing
+        # folder: the first such row was matched and read, though it was another release
+        a = sources.Aios("")
+        listed = [row(name="Other.Movie.2019.1080p.mkv")]
+        for name in (".mkv", "  ", " .MKV ", "\t.mp4\n"):
+            with self.subTest(name=name):
+                self.assertIsNone(sources.usenet_match(listed, name, None))
+                self.assertIsNone(a.match(listed, {"filename": name}, usenet=True))
+        self.assertEqual(sources.release_name(" Other.Movie.2019.1080p.mkv "), "Other.Movie.2019.1080p")
+        self.assertIs(sources.usenet_match(listed, " Other.Movie.2019.1080p ", None), listed[0])
+
     def test_match_finds_the_played_file(self):
         a = sources.Aios("")
         listed = [row(name="b.mkv"), row(service="stremio_nntp"), row()]
@@ -579,7 +591,7 @@ class WorkerTest(TempDirTest):
         import http.client
 
         class NotRows(FakeUsenet):
-            def streams(self, *a):
+            def streams(self, *a, checked=False):
                 self.listings += 1
                 return ["not a row"]
         for u in (FakeUsenet([], fail=http.client.IncompleteRead(b"", 10)),           # no OSError
@@ -1080,6 +1092,22 @@ class PublicUsenetTest(TempDirTest):
         aios = sources.Aios(link, password=record["usenet_password"])
         self.assertEqual(aios.match(aios.streams("movie", "tt1"), HINTS, usenet=True), row())
         self.assertEqual(self.fake.listed, [(record["usenet_uuid"], "stream")])
+
+    def test_one_usenet_listing_reads_its_config_once(self):
+        # The finder checks the config before it counts a listing, and the listing (sources.Aios.streams)
+        # read it again: two password-carrying calls to AIOStreams' user API for one request, the second able to
+        # fail a listing already counted. The finder's check stands for its listing now
+        _, result = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
+        record = self.users.open(result.token)
+        self.fake.listings[record["usenet_uuid"]] = [row()]
+        aios = sources.Aios(record["usenet_link"].replace(INSTANCE, self.fake.url), password=record["usenet_password"])
+        counts = Counts()
+        finder = worker_mod.UsenetFinder(aios, worker_mod.UsenetGate(closed_after(self, Store(self.dir)), 10, counts,
+                                                                     who="w"))
+        del self.fake.requests[:]
+        self.assertEqual(finder.find(Job("movie", "tt1", HINTS), HINTS), row())
+        self.assertEqual(self.fake.requests.count(("GET", "/api/v1/user")), 1)
+        self.assertEqual((self.fake.listed, counts.n), ([(record["usenet_uuid"], "stream")], 1))
 
 
 class PagesTest(unittest.TestCase):

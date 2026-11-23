@@ -249,9 +249,9 @@ class UsenetFinder:
         if not self.gate.take(job.alias):
             return None
         try:
-            listed = self.config.streams(job.type, job.video_id)
+            listed = self.config.streams(job.type, job.video_id, checked=True)   # the check above stands for it
             error_row = any((s.get("streamData") or {}).get("type") == "error" for s in listed)
-        except realdebrid.Blocked:       # the Usenet config couldn't be checked: nothing was listed
+        except realdebrid.Blocked:       # an address or a redirect toward Real-Debrid: nothing was read
             return None
         except urllib.error.HTTPError as e:
             e.close()

@@ -672,6 +672,8 @@ class StateTest(unittest.TestCase):
                               {"type": "torrentio", "enabled": True, "options": {}}]}
         self.assertEqual(srclimits.config_sources(config), {"osv3", "gestdown"})
         self.assertEqual(srclimits.source_of_url("https://subs5.strem.io/en/download/x"), "osv3")
+        self.assertEqual(srclimits.source_of_url("https://opensubtitles-v3.strem.io/manifest.json"), "osv3")
+        self.assertEqual(srclimits.source_of_url("https://strem.io/x"), "osv3")
         self.assertEqual(srclimits.source_of_url("https://evil-strem.io.example.com/x"), None)
 
 

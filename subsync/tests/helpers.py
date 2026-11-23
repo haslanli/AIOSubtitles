@@ -1084,8 +1084,9 @@ class FakeUsenet(FakeDebrid):
         if self.blocked:
             raise realdebrid.Blocked("subsync's config can't be checked for Real-Debrid")
 
-    def streams(self, *a):
-        self.check_config()                                  # as sources.Aios does before every request through it
+    def streams(self, *a, checked=False):
+        if not checked:                                      # as sources.Aios does before every request through it,
+            self.check_config()                              # unless its caller has just checked
         self.listings += 1
         if self.fail:
             raise self.fail
