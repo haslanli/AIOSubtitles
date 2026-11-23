@@ -78,6 +78,16 @@ class RecipeTest(unittest.TestCase):
         self.assertFalse(recognised(original.replace("Kenobi", "Grievous"), recipe))
         self.assertFalse(recognised(original, dict(recipe, positions=None)))     # a recipe kept before
 
+    def test_a_recipe_of_another_form_makes_no_copy(self):
+        # The recipe's form ("v") was written but never read, so a recipe a later version kept (a rollback
+        # runs this version on the data as it is) was applied as this version's
+        from subsync.subs import RECIPE_VERSION
+        for recipe in (timing_recipe(SRT, SYNCED), timing_recipe(SRT, SRT)):
+            self.assertEqual(recipe["v"], RECIPE_VERSION)
+            self.assertIsNotNone(apply_recipe(SRT, recipe))
+            for other in (dict(recipe, v=RECIPE_VERSION + 1), {k: v for k, v in recipe.items() if k != "v"}):
+                self.assertIsNone(apply_recipe(SRT, other))
+
     def test_a_copy_that_is_not_a_re_timing_of_the_original_has_no_recipe(self):
         self.assertIsNone(timing_recipe(SRT, SYNCED.replace("Kenobi", "Grievous")))
         self.assertIsNone(apply_recipe(SRT + "\n4\n00:00:07,000 --> 00:00:08,000\nmore\n", timing_recipe(SRT, SYNCED)))

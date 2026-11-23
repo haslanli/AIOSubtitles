@@ -259,7 +259,9 @@ def strip_tags(text, repl="", html=True):
 DRAWING = re.compile(r"\{[^{}]*\\p[1-9]")
 _STYLE_TAG = re.compile(r"([ibu])(\d{0,4})")   # ASS italics, bold, underline: 1 on, 0 off; bold also by weight
 _POSITION_TAG = re.compile(r"an[1-9]")         # ASS's position mark, which players honour in SRT too
-_VTT_TAG = re.compile(r"<(/?)([^<>\s./]*)[^<>]*>")   # a WebVTT tag: its name, then any classes and annotation
+# a WebVTT tag: its name, then, after a dot, space or slash, any classes and annotation (the name ends where the rest
+# begins, so an opener with no closer is given up in linear time, not after trying every split of its run)
+_VTT_TAG = re.compile(r"<(/?)([^<>\s./]*)(?:[\s./][^<>]*)?>")
 _SRT_STYLES = ("i", "b", "u")                  # the styles SRT writes as tags (<i>, <b>, <u>)
 
 
@@ -373,11 +375,16 @@ def plain_srt(lines):
     return "\n".join(out)
 
 
+# the shortest a reference cue lasts in timing_srt: a cue whose block gives no duration (or a shorter one) still covers
+# a line's start for alass, which aligns by overlap
+MIN_REFERENCE_CUE_S = 0.5
+
+
 def timing_srt(starts_durations):
     """An SRT of timings only (the reference made from Matroska Cues)."""
     out = []
     for i, (s, d) in enumerate(sorted(starts_durations), 1):
-        out.append(f"{i}\n{ts(s)} --> {ts(s + max(d, 0.5))}\nx\n")
+        out.append(f"{i}\n{ts(s)} --> {ts(s + max(d, MIN_REFERENCE_CUE_S))}\nx\n")
     return "\n".join(out)
 
 
@@ -435,12 +442,17 @@ def _keyed_lines(text):
     return [(l, _srt_text(l["text"], fmt)) for l in parse(text)]
 
 
+# the form of the recipes timing_recipe writes ("v"): apply_recipe refuses another, such as one a later version kept
+# (a rollback runs this version on the data as it is), instead of reading it as this one
+RECIPE_VERSION = 1
+
+
 def timing_recipe(original, body):
     """How `body` was made from `original`: each original line's new start and end in milliseconds, or None
     for a line left out; {"same": True} when the copy is the original as it is. No text. None when `body` isn't a
     re-timing of `original` that apply_recipe rebuilds exactly."""
     if body == original:
-        return {"v": 1, "same": True}
+        return {"v": RECIPE_VERSION, "same": True}
     src, out = _keyed_lines(original), _keyed_lines(body)
     times, j = [], 0
     for _, kept in src:
@@ -452,14 +464,14 @@ def timing_recipe(original, body):
             times.append(None)
     if j != len(out):
         return None
-    recipe = {"v": 1, "times": times}
+    recipe = {"v": RECIPE_VERSION, "times": times}
     return recipe if apply_recipe(original, recipe) == body else None
 
 
 def apply_recipe(original, recipe):
     """The copy a timing recipe makes from its original, or None when the original doesn't fit it (another number
-    of lines)."""
-    if not isinstance(recipe, dict):
+    of lines) or the recipe is of another form (RECIPE_VERSION)."""
+    if not isinstance(recipe, dict) or recipe.get("v") != RECIPE_VERSION:
         return None
     if recipe.get("same"):
         return original

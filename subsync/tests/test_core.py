@@ -87,6 +87,12 @@ class SubsTest(unittest.TestCase):
         self.assertEqual([round(l["s"], 3) for l in back], [round(l["s"], 3) for l in lines])
         self.assertTrue(all(b["e"] > b["s"] for b in back))
 
+    def test_timing_srt_sorts_the_cues_and_gives_each_at_least_the_minimum_length(self):
+        self.assertEqual(subs.MIN_REFERENCE_CUE_S, 0.5)
+        self.assertEqual(subs.timing_srt([(5.0, 2.0), (1.0, 0.0), (3.0, 0.25)]),
+                         "1\n00:00:01,000 --> 00:00:01,500\nx\n\n2\n00:00:03,000 --> 00:00:03,500\nx\n\n"
+                         "3\n00:00:05,000 --> 00:00:07,000\nx\n")
+
     def test_decode(self):
         self.assertEqual(subs.decode("﻿Hi".encode("utf-8")), "Hi")
         self.assertEqual(subs.decode("Привет".encode("cp1251"), "rus"), "Привет")
@@ -262,6 +268,22 @@ class SubsTest(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 2.0)
         self.assertEqual(subs.to_srt([{"s": 1.0, "e": 2.0, "text": "a {b", "kind": "dialogue"}], "ass"),
                          "1\n00:00:01,000 --> 00:00:02,000\na {b\n")    # an opener with no closer is text
+
+    def test_a_webvtt_tag_opener_before_a_long_word_is_read_in_linear_time(self):
+        # The tag's name and the rest after it could both take the same letters, so a '<' with a long run
+        # and no '>' after it took time by the square of the run (a 64,000-letter cue: about 17 s, holding every
+        # thread), on the .srt routes (as_srt), in a copy (write_like) and in public mode's recipe
+        n = 64000
+        t0 = time.monotonic()
+        for text in ("<" + "a" * n, "</" + "a" * n, "<a." + "b" * n, "<a " + "b" * n):
+            self.assertEqual(subs._vtt_srt_text(text), text)            # an opener with no closer is text
+        vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<" + "x" * n + "\n"
+        self.assertEqual(as_srt(vtt), "1\n00:00:01,000 --> 00:00:02,000\n<" + "x" * n + "\n")
+        copy = subs.write_like(vtt, [dict(l, s=l["s"] + 1, e=l["e"] + 1) for l in subs.parse(vtt)])
+        self.assertEqual(subs.apply_recipe(vtt, subs.timing_recipe(vtt, copy)), copy)
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertEqual(subs._vtt_srt_text("<c.a.b>x</c> <v Tom Lee>hi</v> <i.loud>y</i> </b/>"),
+                         "x hi <i>y</i> </b>")                        # names, classes and annotations as before
 
 
 class RelgateTest(unittest.TestCase):
