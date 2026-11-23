@@ -233,8 +233,8 @@ def _settings_link(manifest_url):
 
 
 def usenet_allowed(settings):
-    """Whether this instance lets people turn Usenet on."""
-    return bool(settings.usenet and settings.usenet_listings_per_day > 0)
+    """Whether this instance lets people turn Usenet on (Settings.usenet_offered)."""
+    return settings.usenet_offered
 
 
 def result_page(result, settings=None):

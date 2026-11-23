@@ -426,6 +426,13 @@ class Settings:
         person's worker in public mode."""
         return bool(self.usenet and self.usenet_manifest and self.usenet_password and self.usenet_listings_per_day > 0)
 
+    @property
+    def usenet_offered(self):
+        """Public mode: whether this instance lets people turn Usenet on (the Usenet box of the sign-up and settings
+        pages, and whether a ticked box counts): Usenet on and at least one search a day. Each person's Usenet config
+        and password are in their own record, so usenet_usable's are not asked here."""
+        return bool(self.usenet and self.usenet_listings_per_day > 0)
+
     def is_written_wrong(self, name):
         """Whether the number or on/off setting `name` is written wrong (its sentence is in written_wrong)."""
         return any(sentence.startswith(f"{name} must be ") for sentence in self.written_wrong)

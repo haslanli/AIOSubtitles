@@ -24,8 +24,8 @@ from .addon import MANIFEST_CACHE, App, Handler, Server, head_answer, is_entry, 
 from .aiosconfig import MAX_LANGUAGES, PUBLIC_TIMEOUT, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
-from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh,
-                     remove_tmdb_key, set_audio, set_languages, set_tmdb_key, signup, store_only)
+from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, personal_manifest_url,
+                     public_api, refresh, remove_tmdb_key, set_audio, set_languages, set_tmdb_key, signup, store_only)
 from .sources import Aios
 from .store import day_of
 from .ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS   # the setup page sends the same
@@ -419,7 +419,7 @@ class PublicService:
         return peer
 
     def manifest_url(self, token):
-        return f"{self.s.public_base}/u/{token}/manifest.json"
+        return personal_manifest_url(self.s, token)
 
 
 # A request's line, headers and form come whole within this long of its first bytes, however slowly they trickle in:

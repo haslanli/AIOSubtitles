@@ -5,9 +5,10 @@ their AIOStreams (as ./setup makes one: no Real-Debrid, no Usenet, no AIOSubtitl
 background, so opening a file opens only that file), with Usenet on a second one, the Usenet config (only their Usenet
 searches and services), and, if they leave the box checked, add AIOSubtitles to their own config. A setup
 with no debrid service AIOSubtitles may read gets no sync config: with Usenet on its Usenet config also carries its
-subtitle sources, else, with Real-Debrid as its only service, it gets stored copies only. The password is never logged, and stored only when the person ticks the box that lets AIOSubtitles keep it:
-then it sits in their encrypted record and the daily check (recheck.py) rebuilds the sync config from their config by
-itself; unticking deletes it. The record keeps the sync config's own link and password (made here).
+subtitle sources, else, with Real-Debrid as its only service, it gets stored copies only. The password is never
+logged, and stored only when the person ticks the box that lets AIOSubtitles keep it: then it sits in their encrypted
+record and the daily check (recheck.py) rebuilds the sync config from their config by itself; unticking deletes it. The
+record keeps the sync config's own link and password (made here).
 
 Errors come back as SignupError with a plain message that never repeats the link or the password.
 """
@@ -78,6 +79,12 @@ def public_api(instance, timeout):
     return AiosApi(instance, timeout=timeout, user_agent=USER_AGENT, max_timeout=timeout,
                    retry_wait_cap=PUBLIC_RETRY_WAIT_CAP,
                    on_wait=lambda s: log.info("AIOStreams asked to slow down; waiting %d s", s))
+
+
+def personal_manifest_url(settings, token):
+    """A person's personal link: their own AIOSubtitles' manifest (public.USER_PATH reads it back). The one place its
+    shape is written, since AIOSubtitles' entry in their config is found by it (_add_addon, delete)."""
+    return f"{settings.public_base}/u/{token}/manifest.json"
 
 
 # ------------------------------------------------------------------------------------------- what people type
@@ -357,7 +364,7 @@ def _to_store_only(record):
 
 def wants_usenet(settings, form):
     """The person's Usenet box, ticked on an instance that lets people turn Usenet on."""
-    return bool(settings.usenet and settings.usenet_listings_per_day > 0 and form.get("usenet") == "on")
+    return settings.usenet_offered and form.get("usenet") == "on"
 
 
 def _has_sync(viewer, manifest_url):
@@ -535,7 +542,7 @@ STORED = "stored copies only"   # rebuild's answer when a config became Real-Deb
 
 def _usable_now(settings, record):
     """Whether this record's Usenet box counts now: ticked, and this instance still lets people turn Usenet on."""
-    return bool(record.get("usenet")) and settings.usenet and settings.usenet_listings_per_day > 0
+    return bool(record.get("usenet")) and settings.usenet_offered
 
 
 def rebuild(settings, record, token, api, password, force=False, force_usenet=False):
@@ -548,7 +555,7 @@ def rebuild(settings, record, token, api, password, force=False, force_usenet=Fa
     config follows the person's box. Raises SignupError (field "password" when the password is refused).
     Their own config is never changed."""
     viewer, _ = _read_viewer(api, record["main_uuid"], password)
-    manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
+    manifest_url = personal_manifest_url(settings, token)
     has_sync, usenet, services, why, stored = _configs_for(settings, viewer, manifest_url,
                                                            _usable_now(settings, record))
     drop, changed, made = [], False, []
@@ -641,7 +648,7 @@ def _signup(settings, users, form, api_factory, timeout):
     uuid = _config_id(api, uuid, alias)
     viewer, metadata = _read_viewer(api, uuid, password)
     token = new_token()
-    manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
+    manifest_url = personal_manifest_url(settings, token)
     # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles' own config
     # then lacks those addons too, so it asks their sites itself: only the addons whose site it really asks
     clean_up = cleanable_presets(settings) if form.get("add_addon") == "on" and form.get("clean_up") == "on" else ()
@@ -725,7 +732,7 @@ def _refresh(settings, users, token, form, api_factory, timeout):
         api = api_factory(instance, timeout)
         main_uuid = _config_id(api, main_uuid, alias)
         viewer, metadata = _read_viewer(api, main_uuid, password)
-        manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
+        manifest_url = personal_manifest_url(settings, token)
         want = wants_usenet(settings, form)
         was_stored = store_only(record)
         # stored copies, both ways
@@ -876,7 +883,7 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
                 removed = drop_sync(api, config_fields(record, kind)) and removed
         outcome["sync_removed"] = removed
         if viewer is not None:
-            manifest_url = f"{settings.public_base}/u/{token}/manifest.json"
+            manifest_url = personal_manifest_url(settings, token)
             try:
                 new, taken_out = without_subsync(viewer, manifest_url, names=(ADDON_NAME.lower(),))
                 if taken_out:
