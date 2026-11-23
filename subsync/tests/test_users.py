@@ -220,6 +220,18 @@ class UsersTest(unittest.TestCase):
         self.clock.t += DAY
         self.assertEqual(self.users.usage(self.token), {"files": 0, "bytes": 0})
 
+    def test_usage_starts_again_at_00_00_utc_not_24_hours_later(self):
+        # The test above moves a whole day, which a rolling 24-hour window or a day in local time passes too
+        midnight = 1_799_971_200.0                                       # 2027-01-15 00:00:00 UTC
+        self.users.create(self.token, RECORD)
+        self.clock.t = midnight + 60
+        self.users.add_usage(self.token, files=1, nbytes=500)
+        self.clock.t = midnight + DAY - 60                               # 23:59 UTC, the same day: still counted
+        self.users.add_usage(self.token, files=1, nbytes=250)
+        self.assertEqual(self.users.usage(self.token), {"files": 2, "bytes": 750})
+        self.clock.t = midnight + DAY + 60                               # two minutes later, the next UTC day
+        self.assertEqual(self.users.usage(self.token), {"files": 0, "bytes": 0})
+
     def free(self, token):
         """Whether the person's record lock can be taken at once (it is let go again)."""
         lock = self.users.locked(token)

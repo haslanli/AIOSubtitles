@@ -199,6 +199,17 @@ class StoreTest(unittest.TestCase):
             clock.t += 86400
             self.assertEqual(st.day_count("read"), 0)
 
+    def test_the_day_counters_start_again_at_00_00_utc_not_24_hours_later(self):
+        # The test above moves a whole day, which a rolling 24-hour window or a day in local time passes too
+        midnight = 1_799_971_200.0                                       # 2027-01-15 00:00:00 UTC
+        with TempDir() as d, Store(d, clock=Clock(midnight + 60)) as st:
+            st.day_add("read", 100)
+            st.clock.t = midnight + 86400 - 60                           # 23:59 UTC, the same day: still counted
+            st.day_add("read", 50)
+            self.assertEqual(st.day_count("read"), 150)
+            st.clock.t = midnight + 86400 + 60                           # two minutes later, the next UTC day
+            self.assertEqual(st.day_count("read"), 0)
+
     def test_key_format(self):
         # The language is part of the key, so each language keeps its own verdict
         self.assertEqual(result_key(FILE, "eng", SHA_A), f"subsync:{ALGO_VERSION}:{FILE}:eng:{'a' * 16}")
