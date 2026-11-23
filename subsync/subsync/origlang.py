@@ -57,14 +57,23 @@ NUMBER = re.compile(r"[0-9]{1,9}")
 
 
 class Failed(Exception):
-    """A service didn't answer usably. Carries only the service and a short reason, never an address or a key."""
+    """A service didn't answer usably: a short reason (`why`) and the HTTP status (`code`, None without one); never an
+    address or a key."""
 
-    def __init__(self, service, why, retry_after=None, code=None):
+    def __init__(self, service, why, code=None):
         super().__init__(f"{service}: {why}")
-        self.service, self.why, self.retry_after, self.code = service, why, retry_after, code
+        self.why, self.code = why, code
 
 
 _KEYED_OPENER = net.build_opener(net.NoRedirects())
+
+
+def _key_in(key):
+    """Where a TMDB key goes: (query parameters, headers). A v3 key (32 hex characters) in the address, a Read Access
+    Token in the authorization header."""
+    if V3_KEY.fullmatch(key or ""):
+        return {"api_key": key}, {}
+    return {}, {"authorization": f"Bearer {key}"}
 
 
 def _open_keyed(req, timeout):
@@ -192,14 +201,10 @@ def rule(rule_id, answer):
 def check_key(settings, key, timeout=10.0):
     """Whether TMDB takes a key (one request, GET /configuration, through the request gate): True, False, or None when
     TMDB didn't answer. The key is never logged or put in an error."""
-    params, headers = {}, {"user-agent": USER_AGENT}
-    if V3_KEY.fullmatch(key or ""):
-        params["api_key"] = key
-    else:
-        headers["authorization"] = f"Bearer {key}"
+    params, auth = _key_in(key)
     url = f"{settings.tmdb_url}/configuration" + (f"?{urllib.parse.urlencode(params)}" if params else "")
     try:
-        with _open_keyed(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
+        with _open_keyed(urllib.request.Request(url, headers={"user-agent": USER_AGENT, **auth}), timeout=timeout) as r:
             r.read(MAX_BYTES)
             return True
     except urllib.error.HTTPError as e:
@@ -310,7 +315,9 @@ class Lookup:
                         answer["failed"].append("tmdb")
                         log.info("original language %s: TMDB didn't answer (%s)", title, e.why)
                         if e.code in (401, 403):     # the key itself: not tried again for an hour
-                            self.bad_keys[hashlib.sha256(key.encode()).hexdigest()] = self.clock() + BAD_KEY_S
+                            now = self.clock()
+                            self._set_aside(self.bad_keys, hashlib.sha256(key.encode()).hexdigest(), now + BAD_KEY_S,
+                                            now)
                 try:
                     answer["wikidata"] = self._wikidata(title)
                 except Failed as e:
@@ -324,9 +331,10 @@ class Lookup:
         now = self.clock()
         if key and title.startswith("tt"):   # TMDB was asked: when it didn't answer, start asks it again FAILED_S later
             if answer["tmdb_asked"]:
-                self.tmdb_later.pop(title, None)
+                with self.lock:
+                    self.tmdb_later.pop(title, None)
             else:
-                self.tmdb_later[title] = now + FAILED_S
+                self._set_aside(self.tmdb_later, title, now + FAILED_S, now)
         if kept is not None:
             if not answer["tmdb_asked"]:
                 log.info("original language %s: kept as found before (TMDB asked again later)", title)
@@ -358,6 +366,14 @@ class Lookup:
             log.info("original language %s: not found", title)
         return answer
 
+    def _set_aside(self, times, key, until, now):
+        """times[key] = until, the clock time `key` may be tried again. The entries whose time has passed go first
+: they mean nothing any more, and the keys (titles, refused keys) come from requests."""
+        with self.lock:
+            for passed in [k for k, at in times.items() if at <= now]:
+                del times[passed]
+            times[key] = until
+
     def _paused(self, service):
         return self.paused.get(service, 0) > self.clock()
 
@@ -368,7 +384,7 @@ class Lookup:
         if self._paused(service):
             raise Failed(service, "paused after too many requests")
         req = urllib.request.Request(url, data=data, headers={"user-agent": USER_AGENT, **(headers or {})})
-        why, retry, code = None, None, None
+        why, code = None, None
         try:
             with (_open_keyed(req, self.timeout) if service == "tmdb" else realdebrid.urlopen(req, timeout=self.timeout)) \
                     as r:
@@ -392,35 +408,29 @@ class Lookup:
             why = "timed out" if "timed out" in str(getattr(e, "reason", e)) else type(e).__name__
         except Exception as e:
             why = type(e).__name__
-        raise Failed(service, why, retry, code)
+        raise Failed(service, why, code)
 
     def _tmdb(self, tt, key):
         """TMDB's original_language for an IMDb id: "eng", "none" (no language, or a code outside ISO 639-1) or None
-        (not on TMDB)."""
-        auth = {}
-        params = {"external_source": "imdb_id"}
-        if V3_KEY.fullmatch(key):
-            params["api_key"] = key
-        else:
-            auth = {"authorization": f"Bearer {key}"}
+        (not on TMDB). The first film found, else the first series; its details are asked when the find answer has no
+        original_language."""
+        params, auth = _key_in(key)
         base = self.s.tmdb_url
-        got = self._get("tmdb", f"{base}/find/{tt}?{urllib.parse.urlencode(params)}", auth) or {}
+        query = urllib.parse.urlencode({"external_source": "imdb_id", **params})
+        got = self._get("tmdb", f"{base}/find/{tt}?{query}", auth) or {}
         movies, shows = got.get("movie_results") or [], got.get("tv_results") or []
-        for kind, items in (("movie", movies), ("tv", shows)) if movies else (("tv", shows), ("movie", movies)):
-            if not items:
-                continue
-            item = items[0]
-            code = item.get("original_language")
-            tmdb_id = digits.whole(item.get("id", ""))
-            if code is None and tmdb_id is not None:
-                rest = {k: v for k, v in params.items() if k == "api_key"}
-                details = self._get("tmdb", f"{base}/{kind}/{tmdb_id}" + (f"?{urllib.parse.urlencode(rest)}"
-                                                                         if rest else ""), auth) or {}
-                code = details.get("original_language")
-            if code is None:
-                return None
-            return langs.from_tmdb(code) or "none"
-        return None
+        kind, items = ("movie", movies) if movies else ("tv", shows)
+        if not items:
+            return None
+        item = items[0]
+        code = item.get("original_language")
+        tmdb_id = digits.whole(item.get("id", ""))
+        if code is None and tmdb_id is not None:
+            query = f"?{urllib.parse.urlencode(params)}" if params else ""
+            code = (self._get("tmdb", f"{base}/{kind}/{tmdb_id}{query}", auth) or {}).get("original_language")
+        if code is None:
+            return None
+        return langs.from_tmdb(code) or "none"
 
     def _wikidata(self, tt):
         """Wikidata's original languages of an IMDb id, in the order the query service gave them, each once."""

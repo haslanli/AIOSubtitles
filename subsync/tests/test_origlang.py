@@ -1,6 +1,7 @@
 """A title's original language, looked up by its id: TMDB (with a key) and Wikidata for IMDb ids, Kitsu and AniList for
 anime ids; kept per title in the store, shared, never holding a job. A local stand-in answers like the four services;
 no network."""
+import hashlib
 import json
 import logging
 import time
@@ -114,6 +115,18 @@ class TmdbTest(Base):
         got = self.ask("tt2788316:1:1")
         self.assertEqual(got["tmdb"], "eng")
         self.assertEqual([c["path"] for c in self.srv.of("tmdb")], ["/tmdb/find/tt2788316", "/tmdb/tv/126308"])
+
+    def test_a_film_found_is_never_left_for_a_series_and_its_details_carry_only_the_key(self):
+        # The first film found decides, even when neither its find answer nor its details name a language
+        # (a series in the same answer isn't asked); the details request carries the key and nothing else
+        self.srv.find["tt3"] = {"movie_results": [{"id": 5, "title": "A"}], "tv_results": [{"id": 6,
+                                                                                         "original_language": "fr"}]}
+        self.srv.details[("movie", "5")] = {"id": 5}
+        got = self.ask("tt3")
+        self.assertEqual((got["tmdb"], got["tmdb_asked"], got["failed"]), (None, True, []))
+        calls = self.srv.of("tmdb")
+        self.assertEqual([c["path"] for c in calls], ["/tmdb/find/tt3", "/tmdb/movie/5"])
+        self.assertEqual(urllib.parse.parse_qs(calls[1]["query"]), {"api_key": [KEY]})
 
     def test_an_item_whose_id_is_no_ascii_number_asks_no_details(self):
         # Isdigit took "²" and other scripts' digits for TMDB's id; asking its details by it failed before
@@ -336,6 +349,23 @@ class TmdbLaterTest(Base):
         got = self.again("tt1")
         self.assertEqual((got["wikidata"], origlang.choose(got)), (["fre", "eng"], ("eng", "tmdb")))
         self.assertEqual(self.until("tt1"), self.clock() + 180 * DAY)      # TMDB's value: its 6 months
+
+    def test_times_that_have_passed_are_dropped_when_one_is_added(self):
+        # A title TMDB didn't answer for left tmdb_later only once TMDB answered for that same title, and a
+        # refused key never left bad_keys; now an entry whose time has passed goes when another is added
+        other = "fedcba9876543210fedcba9876543210"                     # another made-up v3 key
+        self.srv.status["tmdb"] = (500, ())
+        self.ask("tt1")
+        self.clock.t += origlang.FAILED_S
+        self.ask("tt2")
+        self.assertEqual(list(self.lookup.tmdb_later), ["tt2"])
+        self.srv.status["tmdb"] = (401, ())
+        self.ask("tt3")
+        self.assertEqual(list(self.lookup.tmdb_later), ["tt2", "tt3"])  # not yet passed: kept
+        self.clock.t += origlang.BAD_KEY_S
+        self.ask("tt4", key=other)
+        self.assertEqual(list(self.lookup.bad_keys), [hashlib.sha256(other.encode()).hexdigest()])
+        self.assertEqual(list(self.lookup.tmdb_later), ["tt4"])
 
     def test_a_tmdb_that_failed_is_not_asked_again_at_once(self):
         self.srv.status["tmdb"] = (500, ())
