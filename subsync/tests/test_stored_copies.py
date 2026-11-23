@@ -203,15 +203,18 @@ class StoredCopiesServedTest(unittest.TestCase):
         from subsync.public import Pool
         from subsync.store import Store
         from subsync.users import Users, new_token
+        # each piece is closed by a cleanup registered as soon as it exists, the folder's first, so it is
+        # removed last and a set-up that fails half-way leaks nothing
         self.tmp = TempDir()
         self.dir = self.tmp.__enter__()
+        self.addCleanup(self.tmp.__exit__, None, None, None)
         self.env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
                     "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_EXTRA_SOURCES": "", "SUBSYNC_ORIGINAL_LANGUAGE": "off",
                     "SUBSYNC_RECHECK_HOURS": "0"}
         self.s = Settings(self.env)
         self.store = closed_after(self, Store(self.dir))
-        self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes())
-        self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
+        self.users = closed_after(self, Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes()))
+        self.pool = closed_after(self, Pool(self.s, self.env, self.store, self.users, start_workers=False))
         self.token = new_token()
         self.users.create(self.token, {"instance": INSTANCE, "main_uuid": "0" * 8 + "-0000-0000-0000-" + "0" * 12,
                                        "languages": ["eng"], "version": 1, "store_only": True})
@@ -220,11 +223,6 @@ class StoredCopiesServedTest(unittest.TestCase):
                        candidate_id="os-1")
         self.store.alias("hash:0123456789abcdef|1000", key)
         self.store.alias("name:a.mkv|1000", key)
-
-    def tearDown(self):
-        self.pool.close()
-        self.users.close()
-        self.tmp.__exit__(None, None, None)
 
     def test_copies_by_hash_and_by_name_and_size(self):
         app = self.pool.app(self.token)

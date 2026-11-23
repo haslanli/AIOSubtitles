@@ -1141,7 +1141,7 @@ class PagesTest(unittest.TestCase):
         self.assertIn("Usenet is paused until 00:00 UTC", self.page(on, {"listings": 3, "stopped": True}))
         off = self.page({"usenet": True, "usenet_why": "proxy"})
         self.assertIn("Usenet: off", off)
-        self.assertIn("Turn on AIOStreams&#x27;s proxy", off.replace("AIOStreams&#x27; proxy", "AIOStreams&#x27;s proxy"))
+        self.assertIn("Turn on AIOStreams&#x27; proxy", off)
         self.assertNotIn("searches used today", off)
         hidden = self.page(on, SUBSYNC_USENET="off")
         self.assertNotIn('id="usenet-h"', hidden)
