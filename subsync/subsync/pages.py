@@ -1,12 +1,13 @@
 """The public mode's web pages: the start page with the sign-up, the signed-up page, a person's settings, delete,
 privacy, not found, error.
 
-Built from the approved design out of
-the parts in ui.py, with one stylesheet and one small script of our own (static/app.css, static/app.js, served by this
-service) and the two self-hosted typefaces. Every page works without the script: the sign-up then opens by its
-link and shows its questions one under another. Nothing is loaded from elsewhere, nothing is inline, and
-every value from a person or a config is escaped. The texts come from explain.py, where each has its one explanation,
-and UI_WORDS below; nothing else is shown.
+Built from the approved design out of the parts in ui.py, with one stylesheet and one small script of our own
+(static/app.css, static/app.js, served by this service) and the two self-hosted typefaces. Every page works
+without the script: the sign-up then opens by its link and shows its questions one under another. Nothing is
+loaded from elsewhere, nothing is inline, and every value from a person or a config is escaped. The texts come from
+explain.py, where each has its one explanation, and UI_WORDS below; a page's problem message (its `error`) is the one
+the sign-up or the form gave (signup.SignupError, public.FormError: their own texts, or explain.py's, aiosconfig's and
+realdebrid's). Nothing else is shown.
 """
 from . import explain, ui
 from .aiosconfig import LANGUAGE_OPTIONS, LANGUAGES, usenet_names
@@ -17,13 +18,27 @@ from .ui import e
 
 _NAMES = {three: name for name, _, three in LANGUAGES}
 
-# The fixed words of the pages, each approved by the owner. A test checks that the pages show nothing else.
+LINK_PLACEHOLDER = "https://…/stremio/…/manifest.json"
+
+# The answers for files with no subtitles of their own, as the pages name them (value, answer, its tag); the
+# saved message names the answer without its tag
+AUDIO_LABEL = "Files with no subtitles of their own"
+AUDIO_ANSWERS = (("off", "Off", ""), ("pick", "On, when I pick the file", " (recommended)"),
+                 ("open", "On, as soon as a file is opened", " (not recommended)"))
+
+# the pages' titles (the start page and the error page have the name alone)
+TITLES = {"done": "Signed up · AIOSubtitles", "settings": "Settings · AIOSubtitles",
+          "delete": "Delete · AIOSubtitles", "deleted": "Deleted · AIOSubtitles", "privacy": "Privacy · AIOSubtitles",
+          "not_found": "Not found · AIOSubtitles"}
+
+# The fixed words of the pages, each approved by the owner, the constants above and ui.py's among them. A test
+# checks that the pages show nothing else.
 UI_WORDS = (
     "AIOSubtitles", "Privacy", "Questions", "Sign up", "Before you start", "Continue", "Back", "Invite", "AIOStreams",
     "Languages", "Config", "Invite code", "Your AIOStreams link", "Your AIOStreams password", "Show", "Hide",
     "Keep my password, so AIOSubtitles follows my config by itself", "Your AIOStreams config",
     "Add AIOSubtitles to my AIOStreams config", "Remove the subtitle addons AIOSubtitles now searches itself",
-    "Add language", "First", "Second", "Third", "Fourth", "None", "Remove: ", "Sign-up didn't go through",
+    "Add language", *ui.ORDINALS, "None", ui.REMOVE, "Sign-up didn't go through",
     "What AIOSubtitles reads and keeps: ", "Your personal addon link", "Copy link", "Copied", "You're signed up",
     "Done on your AIOStreams", "Changed in your AIOStreams config:", "AIOSubtitles is in your AIOStreams config already.",
     "One step left", "Add AIOSubtitles to your AIOStreams config yourself:", "What happens next",
@@ -32,26 +47,17 @@ UI_WORDS = (
     "Stop keeping my password", "Delete my data", "Delete my data…", "That didn't go through", "Delete your data?",
     "Your AIOStreams password (optional)", "Keep my data", "Nothing was deleted", "Your data is deleted",
     "Sign up again", "to use AIOSubtitles again.", "What AIOSubtitles reads and keeps", "This page doesn't exist",
-    "to start over.", "Something went wrong", "Back to the start page", "https://…/stremio/…/manifest.json",
-    "Signed up · AIOSubtitles", "Settings · AIOSubtitles", "Delete · AIOSubtitles", "Deleted · AIOSubtitles",
-    "Privacy · AIOSubtitles", "Not found · AIOSubtitles", "Privacy (opens in a new tab)",
+    "to start over.", "Something went wrong", "Back to the start page", LINK_PLACEHOLDER, *TITLES.values(),
+    "Privacy (opens in a new tab)",
     # Usenet
     "Sync Usenet files too", "Usenet", "searches used today", "search used today",
     # files with no subtitles of their own: the question, its answers, the settings row's button
-    "Files with no subtitles of their own", "Off", "On, when I pick the file (recommended)",
-    "On, as soon as a file is opened (not recommended)", "Save answer",
+    AUDIO_LABEL, *(answer + tag for _, answer, tag in AUDIO_ANSWERS), "Save answer",
     # a person's own TMDB key (when the instance asks each person for one), and TMDB's logo's name
     "Original languages", "Your TMDB key", "Save key", "Remove key", "TMDB",
     # the Show/Hide buttons' spoken names, each before its box's label
-    "Show: ", "Hide: ",
+    ui.SHOW, ui.HIDE,
 )
-LINK_PLACEHOLDER = "https://…/stremio/…/manifest.json"
-
-# The answers for files with no subtitles of their own, as the pages name them (value, answer, its tag); the
-# saved message names the answer without its tag
-AUDIO_LABEL = "Files with no subtitles of their own"
-AUDIO_ANSWERS = (("off", "Off", ""), ("pick", "On, when I pick the file", " (recommended)"),
-                 ("open", "On, as soon as a file is opened", " (not recommended)"))
 
 
 def language_names(codes):
@@ -269,7 +275,7 @@ def result_page(result, settings=None):
             f"<p>{e(explain.next_text(settings))}</p>"
             + ui.link_button("Open your settings page", _settings_link(result.manifest_url), "secondary", arrow=True)
             + f"<p class=\"after\">{e(texts['settings_link'])}</p></section></div></main>{_foot(settings)}</div>")
-    return ui.page("Signed up · AIOSubtitles", body, "done", personal=True)
+    return ui.page(TITLES["done"], body, "done", personal=True)
 
 
 # ------------------------------------------------------------------------------------------- settings
@@ -494,7 +500,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
             f"{_usenet_row(settings, record, usenet_usage)}"
             f"{_tmdb_row(settings, record, error if field == 'tmdb_key' else None)}{refresh}{delete}</div></main>"
             f"{_foot(settings)}</div>")
-    return ui.page("Settings · AIOSubtitles", body, "settings", personal=True)
+    return ui.page(TITLES["settings"], body, "settings", personal=True)
 
 
 # ------------------------------------------------------------------------------------------- delete, privacy, errors
@@ -529,7 +535,7 @@ def delete_confirm_page(error=None, field=None, stored=False, settings=None):
                           attrs="autocomplete=\"off\"")
                + "<div class=\"actions\">" + ui.button("Delete my data", "danger", type="submit")
                + ui.link_button("Keep my data", "configure", "secondary") + "</div>", cls=""))
-    return _letter("Delete · AIOSubtitles", "Delete your data?", content, personal=True, settings=settings)
+    return _letter(TITLES["delete"], "Delete your data?", content, personal=True, settings=settings)
 
 
 def deleted_page(outcome, settings=None):
@@ -543,7 +549,7 @@ def deleted_page(outcome, settings=None):
         notes += ui.note("warn", None, "One step left", extra="".join(f"<p>{e(t)}</p>" for t in left))
     content = (f"<div class=\"notes\">{notes}</div><div class=\"body\"><p><a href=\"/\">Sign up again</a> "
                "to use AIOSubtitles again.</p></div>")
-    return _letter("Deleted · AIOSubtitles", "Your data is deleted", content, personal=True, settings=settings)
+    return _letter(TITLES["deleted"], "Your data is deleted", content, personal=True, settings=settings)
 
 
 def privacy_page(settings):
@@ -557,14 +563,14 @@ def privacy_page(settings):
                  f"<p><a class=\"mono\" href=\"{e(settings.contact)}\">{e(settings.contact)}</a></p></section>"
                  if settings.contact else "")
     content = f"<div class=\"body\">{sections}{questions}</div>"
-    return _letter("Privacy · AIOSubtitles", "What AIOSubtitles reads and keeps", content, settings=settings,
+    return _letter(TITLES["privacy"], "What AIOSubtitles reads and keeps", content, settings=settings,
                    credit=True)
 
 
 def not_found_page(settings=None):
     content = (f"<div class=\"body\"><p>{e(explain.PUBLIC_TEXTS['not_found'])}</p>"
                "<p><a href=\"/\">Sign up</a> to start over.</p></div>")
-    return _letter("Not found · AIOSubtitles", "This page doesn't exist", content, settings=settings)
+    return _letter(TITLES["not_found"], "This page doesn't exist", content, settings=settings)
 
 
 def error_page(message=None, settings=None, personal=False):

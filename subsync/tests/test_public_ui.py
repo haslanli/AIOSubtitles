@@ -416,6 +416,23 @@ class LookTest(unittest.TestCase):
                 with self.subTest(page=name, text=piece[:60]):
                     self.assertTrue(piece in approved or DYNAMIC.match(piece), piece)
 
+    def test_each_page_has_its_title_and_the_words_hold_the_pages_constants(self):
+        # The titles, the link's placeholder, the audio question and its answers, and ui.py's ordinals,
+        # Remove and Show/Hide names live once, as constants; UI_WORDS takes them from there, and each page its title
+        from subsync import pages, ui
+        rendered = every_page()
+        for name, title in (("result", pages.TITLES["done"]), ("settings", pages.TITLES["settings"]),
+                            ("delete", pages.TITLES["delete"]), ("deleted", pages.TITLES["deleted"]),
+                            ("privacy", pages.TITLES["privacy"]), ("not-found", pages.TITLES["not_found"]),
+                            ("signup", "AIOSubtitles"), ("error", "AIOSubtitles")):
+            with self.subTest(page=name):
+                self.assertEqual(html.unescape(re.search(r"<title>(.*?)</title>", rendered[name]).group(1)), title)
+        self.assertEqual(len(set(pages.TITLES.values())), len(pages.TITLES))
+        for word in (*pages.TITLES.values(), pages.LINK_PLACEHOLDER, pages.AUDIO_LABEL, *ui.ORDINALS, ui.REMOVE,
+                     ui.SHOW, ui.HIDE, *(answer + tag for _, answer, tag in pages.AUDIO_ANSWERS)):
+            with self.subTest(word=word):
+                self.assertIn(word, pages.UI_WORDS)
+
     def test_the_pieces_cut_by_inline_markup_are_parts_of_approved_texts(self):
         texts = approved_texts()
         for piece in split_pieces():
