@@ -120,8 +120,9 @@ class UnwantedTest(unittest.TestCase):
         self.assertEqual(choose.order(cands[1:], name, viewer_first=False)[0][1]["id"], "plain")
 
 
-class ReviewCycle2NamesTest(unittest.TestCase):
-    """to (the review, cycle 2): how a file's or a release's name is read."""
+class NameReadingTest(unittest.TestCase):
+    """How a file's or a release's name is read: its groups in linear time, a hyphenated title's end, a pack of several
+    seasons, a tag written with a hyphen, a title's own words."""
 
     def test_a_name_of_many_unclosed_brackets_is_read_in_linear_time(self):
         # From every "[" with no "]" after it, the bracket patterns read to the end of the name (a request's
