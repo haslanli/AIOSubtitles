@@ -353,6 +353,49 @@ class SignupTest(SignupHarness, unittest.TestCase):
         self.assertIsNotNone(self.users.open(result.token))
         self.assertNotIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
 
+    def test_aiostreams_refusing_aiosubtitles_in_their_config_is_logged_for_the_operator(self):
+        # An AIOStreams answer at this step left no log line, so an AIOStreams that refused every AIOSubtitles
+        # entry sent each person to the manual steps unseen. Logged by its kind or code, never by AIOStreams' words,
+        # which may quote the personal link
+        from unittest import mock
+        from subsync.aiosconfig import AiosError
+
+        def entry_link(config):
+            return next((p["options"]["manifestUrl"] for p in config.get("presets") or []
+                         if "/u/" in (p.get("options") or {}).get("manifestUrl", "")), None)
+        self.fake.refusal = lambda config: entry_link(config) and f"Invalid addon {entry_link(config)}"
+        uuid, result = self.run_signup(viewer())
+        self.assertEqual((result.added, result.manual), (False, True))
+        self.assertIn("adding AIOSubtitles to a config failed: CONFIG_REFUSED", self.logs.lines)
+        self.fake.refusal = lambda config: None
+
+        def answering(**error):
+            def factory(base, timeout):
+                api = self.api(base, timeout)
+                api.save_config = mock.Mock(side_effect=AiosError("Saving the config: words", **error))
+                return api
+            return factory
+        for error, logged in (({"code": "INTERNAL"}, "INTERNAL"), ({"code": 502}, "502"),
+                              ({"code": "https://subs.test/u/x"}, "an error answer")):
+            with self.subTest(code=error["code"]):
+                uuid = self.fake.add(viewer(), PASSWORD)
+                self.logs.lines.clear()
+                result = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=answering(**error))
+                self.assertTrue(result.manual)
+                self.assertIn(f"adding AIOSubtitles to a config failed: {logged}", self.logs.lines)
+
+        def unsaved(base, timeout):        # AIOStreams says it saved, and the read-back has no AIOSubtitles
+            api = self.api(base, timeout)
+            api.save_config = mock.Mock(return_value=None)
+            return api
+        uuid = self.fake.add(viewer(), PASSWORD)
+        result = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=unsaved)
+        self.assertTrue(result.manual)
+        self.assertIn("adding AIOSubtitles to a config failed: saved, but not found when read back", self.logs.lines)
+        for line in self.logs.lines:
+            self.assertNotIn("/u/", line)
+            self.assertNotIn(PASSWORD, line)
+
     def test_unchecked_box_leaves_the_main_config_alone(self):
         uuid, result = self.run_signup(viewer(), add_addon="")
         self.assertFalse(result.added)
@@ -532,6 +575,31 @@ class SignupTest(SignupHarness, unittest.TestCase):
                 self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.api)
         self.assertNotIn(("PUT", "/api/v1/user"), self.fake.requests)
         self.assertEqual(len(self.fake.configs), 1)               # the sync config made for it is removed too
+
+    def test_the_user_cap_is_counted_again_when_the_record_is_written(self):
+        # The gate counts the records before the sign-up's AIOStreams calls, and nothing counted them again,
+        # so sign-ups running at once all passed it and the instance ended past SUBSYNC_MAX_USERS
+        from subsync.users import new_token
+        uuid = self.fake.add(viewer(), PASSWORD)
+        s = Settings(dict(self.env, SUBSYNC_MAX_USERS="1"))
+        self.signup.SignupGate(s, self.users.count).check("1.2.3.4", "")    # one place left: the gate lets it in
+
+        def api(base, timeout):
+            client = self.api(base, timeout)
+            create = client.create_config
+
+            def made_while_another_signed_up(config, password):
+                self.users.create(new_token(), {"x": 1})       # another sign-up takes the last place meanwhile
+                return create(config, password)
+            client.create_config = made_while_another_signed_up
+            return client
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.signup(s, self.users, self.form(uuid), api_factory=api)
+        self.assertEqual((e.exception.code, e.exception.message),
+                         (503, "AIOSubtitles is full for now. Try again in a few days."))
+        self.assertEqual(self.users.count(), 1)                   # only the other person's record
+        self.assertEqual(list(self.fake.configs), [uuid])         # the sync config made for it is removed again
+        self.assertNotIn(("PUT", "/api/v1/user"), self.fake.requests)   # their own config not changed
 
     def test_delete_removes_the_sync_config_and_optionally_the_addon(self):
         uuid, result = self.run_signup(viewer())

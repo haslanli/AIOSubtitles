@@ -135,11 +135,20 @@ class Users:
             return None
 
     # -- records -----------------------------------------------------------------------------------------------
-    def create(self, token, record):
+    def create(self, token, record, max_users=None):
+        """Writes a new person's record; True when it was written. With `max_users`, only while fewer records than that
+        exist, counted in the same statement as the write: sign-ups that passed the sign-up gate's count together can't
+        all pass the cap."""
         uid = self.user_id(token)
         today = day_of(self.clock())
+        row = (uid, self._seal(token, uid, record), today, today)
         with self.lock:
-            self.db.execute("INSERT INTO users VALUES (?,?,?,?)", (uid, self._seal(token, uid, record), today, today))
+            if max_users is None:
+                self.db.execute("INSERT INTO users VALUES (?,?,?,?)", row)
+                return True
+            cur = self.db.execute("INSERT INTO users SELECT ?,?,?,? WHERE (SELECT COUNT(*) FROM users) < ?",
+                                  row + (max_users,))
+        return cur.rowcount == 1
 
     def open(self, token):
         """The person's record, or None (unknown, deleted, another secret, or changed on disk)."""

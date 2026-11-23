@@ -273,8 +273,12 @@ def _plain(e, doing, own_password=False, making=False):
     return f"{doing}: {e.reason}"
 
 
+FULL = "AIOSubtitles is full for now. Try again in a few days."
+
+
 class SignupGate:
-    """Checked before a sign-up contacts anything: the invite code, attempts per address per hour, the user cap."""
+    """Checked before a sign-up contacts anything: the invite code, attempts per address per hour, the user cap (counted
+    again where the record is written, Users.create, since sign-ups run at once pass this count together)."""
 
     def __init__(self, settings, count_users, clock=time.time):
         self.s, self.count_users, self.clock = settings, count_users, clock
@@ -301,7 +305,7 @@ class SignupGate:
             raise SignupError("That invite code isn't right. AIOSubtitles is open only to invited people for now.", 403,
                               field="invite")
         if self.count_users() >= self.s.max_users:
-            raise SignupError("AIOSubtitles is full for now. Try again in a few days.", 503)
+            raise SignupError(FULL, 503)
 
 
 # ------------------------------------------------------------------------------------------- the steps
@@ -432,12 +436,23 @@ def _usenet_synced(record, usenet, fields, subtitles, now=None):
         record["synced_at"] = now
 
 
+_CODE_WORD = re.compile(r"[A-Z][A-Z0-9_]{0,63}")   # an error code as AIOStreams and aiosconfig write them
+
+
 def _log_fault(e, doing):
-    """A best-effort step that failed. An AiosError is AIOStreams' answer (the caller says what it means); anything else
-    (a config of a shape AIOSubtitles doesn't know, or a fault of its own) is logged by its kind only: its text may hold
-    a link."""
+    """A best-effort step that failed, for the operator (the person is told by the page), never by its text, which may
+    hold a link: AIOStreams' answer (an AiosError) by what it means (its kind) or else its code, when that is a code
+    word or an HTTP status (a code of another shape stands for anything a person's AIOStreams chose to put there);
+    anything else (a config of a shape AIOSubtitles doesn't know, or a fault of its own) by its kind of exception."""
     if not isinstance(e, AiosError):
-        log.warning("%s failed: %s", doing, type(e).__name__)
+        what = type(e).__name__
+    elif e.kind:
+        what = e.kind
+    elif isinstance(e.code, int) or (isinstance(e.code, str) and _CODE_WORD.fullmatch(e.code)):
+        what = e.code
+    else:
+        what = "an error answer"
+    log.warning("%s failed: %s", doing, what)
 
 
 def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=()):
@@ -453,6 +468,7 @@ def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=())
         saved, _ = api.get_config(uuid, password)
         if any(is_subsync_preset(p, manifest_url, ()) for p in saved.get("presets") or []):
             return changes, True, False
+        log.warning("adding AIOSubtitles to a config failed: saved, but not found when read back")
     except Exception as e:
         _log_fault(e, "adding AIOSubtitles to a config")
     return [], False, True
@@ -684,7 +700,10 @@ def _signup(settings, users, form, api_factory, timeout):
         # the person chose it (unticked by default): AIOSubtitles refreshes by itself
         if keeps_password(settings, form):
             record["auto_password"] = password
-        users.create(token, record)   # the record first: the person's own config gets the link only once the link works
+        # the record first: the person's own config gets the link only once the link works; the cap is counted again
+        # with the write, and a sign-up past it removes the configs it made
+        if not users.create(token, record, settings.max_users):
+            raise SignupError(FULL, 503)
     changes, added, manual = [], False, False
     if form.get("add_addon") == "on":
         changes, added, manual = _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up)
