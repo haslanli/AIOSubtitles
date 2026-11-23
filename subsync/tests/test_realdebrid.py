@@ -2,6 +2,8 @@
 only; nothing here reaches a debrid service)."""
 import base64
 import json
+import threading
+import time
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -246,6 +248,52 @@ class GateTest(unittest.TestCase):
         with self.assertLogs('subsync.realdebrid', 'WARNING'):
             with self.assertRaises(realdebrid.Blocked):
                 fetch_subtitle(self.redirector.url, timeout=5)
+
+    def test_a_wrapped_address_is_checked_as_urllib_reads_it(self):
+        # Urllib unwraps "<URL:…>" and "<…>" when it makes a Request of an address, which urlsplit reads as a
+        # path without a host: the Real-Debrid check reads the Request's own address, so it is the one that refuses
+        for url in ('<URL:https://42.download.real-debrid.com/d/X/file.mkv>', ' <URL:https://real-debrid.com/x>',
+                    '<https://real-debrid.com/x>'):
+            with self.assertLogs('subsync.realdebrid', 'WARNING') as logs:
+                with self.assertRaises(realdebrid.Blocked, msg=url):
+                    realdebrid.urlopen(url, timeout=5)
+            self.assertIn('blocked a request to Real-Debrid (', logs.output[0])
+        self.assertEqual(self.redirector.hits, 0)
+
+
+class RedirectBodyTest(unittest.TestCase):
+    def test_a_followed_redirects_own_body_is_never_read(self):
+        # Urllib read a redirect's whole body before following it, with no bound on its size or time: an
+        # endless one filled memory, one that stops coming held the request. Here it stops after its first bytes
+        release = threading.Event()
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path == '/a':
+                    self.send_response(302)
+                    self.send_header('Location', '/b')
+                    self.send_header('Content-Length', str(1 << 30))
+                    self.end_headers()
+                    self.wfile.write(b'x' * 65536)
+                    self.wfile.flush()
+                    release.wait(10)          # the rest never comes
+                    return
+                self.send_response(200)
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'ok')
+
+        server = start_server(ThreadingHTTPServer(('127.0.0.1', 0), H))
+        self.addCleanup(stop_server, server)
+        self.addCleanup(release.set)
+        t0 = time.monotonic()
+        with local_network_only():
+            with realdebrid.urlopen(f'http://127.0.0.1:{server.server_address[1]}/a', timeout=2) as r:
+                self.assertEqual(r.read(), b'ok')
+        self.assertLess(time.monotonic() - t0, 1.5)   # not the read's own wait (2 s) on the redirect's body
 
 
 class OneConfigAiostreams:

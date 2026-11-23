@@ -252,6 +252,16 @@ class GateTest(unittest.TestCase):
             refused(self, lambda: realdebrid.GuardedRedirects().redirect_request(          # and a redirect to one
                 urllib.request.Request("http://files.test/"), _Closable(), 302, "Found", {}, "ftp://127.0.0.1:9/x"))
 
+    def test_a_listed_file_address_is_not_downloaded_off_public_mode(self):
+        # A subtitle address a source lists as file:… was downloaded from this machine's
+        # disk on an install of your own, and could be served as an original
+        from subsync.sources import fetch_subtitle
+        net.configure(public_only=False)
+        with tempfile.NamedTemporaryFile("w", suffix=".srt") as local:
+            local.write("1\n00:00:01,000 --> 00:00:02,000\nLOCAL FILE CONTENT\n")
+            local.flush()
+            refused(self, lambda: fetch_subtitle(pathlib.Path(local.name).as_uri(), timeout=5))
+
     def test_policy_off_reaches_local_servers(self):
         server = Server()
         try:

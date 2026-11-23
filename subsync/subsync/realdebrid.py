@@ -77,9 +77,9 @@ def check(url):
 
 
 class GuardedRedirects(urllib.request.HTTPRedirectHandler):
-    """Follows redirects like urllib does, except to a Real-Debrid address, and without the request's credentials (a
-    source's key, a password) when the redirect leaves its origin: urllib would send every header on to wherever it
-    points."""
+    """Follows redirects like urllib does, except to a Real-Debrid address, without the request's credentials (a
+    source's key, a password) when the redirect leaves its origin (urllib would send every header on to wherever it
+    points), and without reading the redirect's own body."""
     CREDENTIALS = ("authorization", "x-api-key")
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -90,9 +90,13 @@ class GuardedRedirects(urllib.request.HTTPRedirectHandler):
             fp.close()
             raise
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and not net.credentials_follow(req.full_url, new.full_url):
-            for name in [k for k in new.headers if k.lower() in self.CREDENTIALS]:
-                del new.headers[name]
+        if new is not None:
+            if not net.credentials_follow(req.full_url, new.full_url):
+                for name in [k for k in new.headers if k.lower() in self.CREDENTIALS]:
+                    del new.headers[name]
+            # urllib reads a redirect's whole body before it follows it, with no bound on its size or its time
+            #: closed here, the body is never read, and its connection goes with it
+            fp.close()
         return new
 
 
@@ -101,11 +105,14 @@ _OPENER = net.build_opener()
 
 def urlopen(request, timeout, opener=None):
     """urllib.request.urlopen with the checks on the address and on every redirect (and, in public mode, net.py's
-    public-address check on every connection). `opener`: another of net.build_opener's (with a cookie jar, or
-    net.NoRedirects for a request that carries a key or a password)."""
-    url = request.full_url if isinstance(request, urllib.request.Request) else request
-    check(url)
-    net.check_scheme(url)
+    public-address check on every connection). `request`: a urllib Request, or an address, made into one first so the
+    checks read the address urllib connects to (a Request unwraps "<URL:…>", which urlsplit reads as a path).
+    `opener`: another of net.build_opener's (with a cookie jar, or net.NoRedirects for a request that carries a key or
+    a password)."""
+    if not isinstance(request, urllib.request.Request):
+        request = urllib.request.Request(request)
+    check(request.full_url)
+    net.check_scheme(request.full_url)
     return (opener or _OPENER).open(request, timeout=timeout)
 
 
