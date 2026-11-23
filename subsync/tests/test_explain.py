@@ -490,7 +490,10 @@ class Group3Test(unittest.TestCase):
         # "1 sign-up attempts", "at most 1 extra searches", "(0 of 1 searches used today)"
         self.assertEqual(explain.tries_text(1), "Each try counts: 1 sign-up attempt per address in an hour.")
         self.assertEqual(explain.tries_text(5), "Each try counts: 5 sign-up attempts per address in an hour.")
-        self.assertIn(" The cost: at most 1 extra search a day through your indexers ", explain.usenet_help(1))
+        # each look searches every indexer, so the count is each one's, not the total
+        self.assertIn(" The cost: at most 1 extra search a day on each indexer ", explain.usenet_help(1))
+        self.assertIn("Each look is one search per indexer in your config",
+                      explain.SETTINGS["SUBSYNC_USENET_LISTINGS_PER_DAY"][1])
         self.assertNotIn("extra searches", explain.usenet_help(1))
         self.assertEqual(explain.usenet_help(10), explain.QUESTIONS["USENET"][1])
         self.assertEqual(explain.setup_help("USENET", Settings({"SUBSYNC_USENET_LISTINGS_PER_DAY": "1"})),
@@ -778,6 +781,15 @@ class NumbersTest(unittest.TestCase):
                       f"{WORDS[per_file['subsource']]} subtitles per file and language", subsource)
         self.assertIn(f"from {per(('tsdb', 'download', False), 3600)} an hour to "
                       f"{per(('tsdb', 'download', True), day)} a day", explain.SETTINGS["SUBSYNC_TSDB_KEY"][1])
+
+    def test_the_size_slacks_rounding_is_in_its_own_unit(self):
+        # Half of 0.01 GiB was given in decimal MB (5.4) beside a setting counted in MiB, where it is 5.1
+        from subsync.settings import MB
+        half = 0.01 * 1024 * MB / 2 / MB
+        self.assertIn(f"listings round sizes to 0.01 GiB, up to {half:.1f} MB off. Recommended: 5.5.",
+                      explain.SETTINGS["SUBSYNC_SIZE_SLACK_MB"][1])
+        self.assertEqual(f"{half:.1f}", "5.1")
+        self.assertEqual(Settings({}).size_slack, int(float(explain.SETTINGS["SUBSYNC_SIZE_SLACK_MB"][0]) * MB))
 
     def test_a_workers_memory(self):
         # The text said about 2.5 MB a worker, leaving out the downloads each keeps for the audio job after a

@@ -679,10 +679,10 @@ class OriginalEntryPublicTest(Base):
 T_A1 = ("Your answer to ./setup's audio question, on or off: whether files with no subtitle track of their own are synced "
         "from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each, after someone picks their "
         "\"(Subsync)\" entry or, with SUBSYNC_AUDIO_WHEN=open, as soon as they are opened; on a public instance each "
-        "person chooses. Recommended: off on your own install unless you often watch such files; on a public instance, "
-        "on if the server has two or more processors. Off: they keep their original subtitles and subsync reads about 1 "
-        "MB per file. On a public instance each person's audio reads go through their own debrid service or Usenet and "
-        "count in their daily data, and one sync serves everyone who plays the same file.")
+        "person chooses. Recommended: on if the server has two or more processors. Off: they keep their original "
+        "subtitles and subsync reads about 1 MB per file. On a public instance each person's audio reads go through "
+        "their own debrid service or Usenet and count in their daily data, and one sync serves everyone who plays the "
+        "same file.")      # its recommendation the audio question's
 T_A2 = ("The setting SUBSYNC_AUDIO_WHEN replaced, still read while that one isn't set: on means pick, off means open. "
         "Recommended: leave it out and set SUBSYNC_AUDIO_WHEN instead. A public instance ignores both: each person "
         "chooses on their settings page.")

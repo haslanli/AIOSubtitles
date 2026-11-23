@@ -208,7 +208,7 @@ USENET_TEXT = (
     "Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a "
     "second config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it "
     "needs (more for audio syncs). Recommended if you play from Usenet and your indexer's daily limit isn't "
-    "tight. The cost: at most {searches} a day through your indexers (usually none, because your AIOStreams reuses "
+    "tight. The cost: at most {searches} a day on each indexer (usually none, because your AIOStreams reuses "
     "the search you just made), fetching a release's NZB when your Usenet service doesn't have it yet, and some "
     "Usenet data per file (more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps "
     "you first, and everyone who plays the same release, because one sync serves all of them. Off: nothing on Usenet "
@@ -426,10 +426,10 @@ GROUPS = [
             "Your answer to ./setup's audio question, on or off: whether files with no subtitle track of their own are "
             "synced from their speech, reading up to SUBSYNC_AUDIO_BUDGET_GB of audio each, after someone picks their "
             "\"(Subsync)\" entry or, with SUBSYNC_AUDIO_WHEN=open, as soon as they are opened; on a public instance each "
-            "person chooses. Recommended: off on your own install unless you often watch such files; on a public "
-            "instance, on if the server has two or more processors. Off: they keep their original subtitles and subsync "
-            "reads about 1 MB per file. On a public instance each person's audio reads go through their own debrid "
-            "service or Usenet and count in their daily data, and one sync serves everyone who plays the same file."),
+            "person chooses. Recommended: on if the server has two or more processors. Off: they keep their original "
+            "subtitles and subsync reads about 1 MB per file. On a public instance each person's audio reads go "
+            "through their own debrid service or Usenet and count in their daily data, and one sync serves everyone "
+            "who plays the same file."),
         "SUBSYNC_AUDIO_WHEN": (
             "pick",
             "Pick or open: when a file with no subtitle track of its own starts its audio sync, with SUBSYNC_AUDIO_ROUTE "
@@ -476,8 +476,9 @@ GROUPS = [
         "SUBSYNC_PORT": (
             "8790",
             "The port subsync listens on: inside its container, or on the machine itself when AIOStreams uses host "
-            "networking. Change it only when 8790 is taken, by giving ./setup's address question another port; ./setup "
-            "then sets it."),
+            "networking. Leave it as it is: ./setup picks the port on this machine from your address: the address's "
+            "own port (8791 in http://192.168.1.5:8791), or, for an address behind your web server, 8790 or the next "
+            "free port (the rule setup shows names it)."),
         "SUBSYNC_BIND": (
             "0.0.0.0",
             "The address subsync listens on. ./setup sets 127.0.0.1 when AIOStreams uses host networking and your web "
@@ -542,7 +543,7 @@ GROUPS = [
         "SUBSYNC_SIZE_SLACK_MB": (
             "5.5",
             "How far a file's listed size may be from its real size and still be taken for the same file, in MB; "
-            "listings round sizes to 0.01 GiB, up to 5.4 MB off. Recommended: 5.5. Lower: rounded listings stop "
+            "listings round sizes to 0.01 GiB, up to 5.1 MB off. Recommended: 5.5. Lower: rounded listings stop "
             "matching and those files get no copy. Higher: another file of the same name could be taken, though its "
             "own hash still catches that."),
         "SUBSYNC_STORE_CAP_MB": (

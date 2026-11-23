@@ -846,6 +846,46 @@ class AiostreamsShapes(Offline):
         last = {'public_base': f'{PUBLIC}/subsync', 'public_kind': 'path', 'port': 8791, 'bind': '127.0.0.1'}
         self.assertEqual(self.public_address(last, f'{PUBLIC}/subtitles'), (('path', 8791, '127.0.0.1'), []))
 
+    def test_an_address_behind_the_web_server_takes_the_next_free_port(self):
+        # With 8790 taken, setup stopped with "Port 8790 on this machine is already in use." and no answer got
+        # past it: such an address names no port, and SUBSYNC_PORT's advice ("give the address question another
+        # port") didn't apply to it
+        self.assertEqual(explain.SETTINGS['SUBSYNC_PORT'], ('8790', (
+            "The port subsync listens on: inside its container, or on the machine itself when AIOStreams uses host "
+            "networking. Leave it as it is: ./setup picks the port on this machine from your address: the address's "
+            "own port (8791 in http://192.168.1.5:8791), or, for an address behind your web server, 8790 or the next "
+            "free port (the rule setup shows names it).")))
+        last = {'public_base': 'http://192.168.1.10', 'public_kind': 'port', 'port': 80, 'bind': '0.0.0.0'}
+        self.assertEqual(self.public_address(last, f'{PUBLIC}/subsync', taken={8790}),
+                         (('path', 8791, '127.0.0.1'), [(8790, '127.0.0.1'), (8791, '127.0.0.1')]))
+        # the one its last path address had first (its container gone: checked), then the next ones up
+        last = {'public_base': f'{PUBLIC}/subsync', 'public_kind': 'path', 'port': 8791, 'bind': '127.0.0.1'}
+        with mock.patch.object(dockerenv, 'container_state', lambda name: ''):
+            self.assertEqual(self.public_address(last, f'{PUBLIC}/subsync', taken={8791, 8792}),
+                             (('path', 8793, '127.0.0.1'), [(port, '127.0.0.1') for port in (8791, 8792, 8793)]))
+        # PORTS_TRIED in all, then the stop it gave before
+        tried = range(plan.SUBSYNC_PORT, plan.SUBSYNC_PORT + engine.PORTS_TRIED)
+        with self.assertRaises(engine.Problem) as caught:
+            self.public_address({}, f'{PUBLIC}/subsync', taken=set(tried))
+        self.assertEqual((caught.exception.field, caught.exception.message),
+                         ('PUBLIC_ADDRESS', 'Port 8790 on this machine is already in use.'))
+        # an address's own port is the one it names: never another
+        with self.assertRaises(engine.Problem) as caught:
+            self.public_address({}, 'http://192.168.1.10:8791', taken={8791})
+        self.assertEqual(caught.exception.message, 'Port 8791 on this machine is already in use.')
+
+    def test_the_rule_names_the_port_taken_when_8790_is_in_use(self):
+        # The whole install with 8790 taken: published on 127.0.0.1:8791, the web server rule sends there
+        with mock.patch.object(dockerenv, 'port_in_use', lambda port, host: port == plan.SUBSYNC_PORT):
+            code, out = self.run_setup(dict(self.ANSWERS, TEST_READ='no', PUBLIC_ADDRESS=f'{PUBLIC}/subsync'))
+        self.assertEqual(code, 0, out)
+        self.assertIn('    ports: ["127.0.0.1:8791:8790"]\n', self.compose())
+        for line in ('reverse_proxy /subsync/* 127.0.0.1:8791', 'proxy_pass http://127.0.0.1:8791;',
+                     'service: http://127.0.0.1:8791  (no StripPrefix)'):
+            self.assertIn(line, out)
+        self.assertNotIn('127.0.0.1:8790', out)
+        self.assertEqual(engine.load_settings()['port'], 8791)
+
     def test_two_aiostreams_on_this_machine(self):
         two = [self.container(name='aio-one', networks=['one_default']),
                self.container(name='aio-two', networks=['two_default'])]
@@ -1331,7 +1371,7 @@ class StepResults(TmpState):
 
 class HostPort(TmpState):
     """A public instance's port: its own on a re-run, never a personal install's; checked unless this install's
-    container already holds it."""
+    container already holds it, and taken, the next free one up."""
 
     def host_address(self, prev, running=True, taken=()):
         engine.save_settings(prev)
@@ -1350,8 +1390,11 @@ class HostPort(TmpState):
         # a personal address typed without a port listens on 80: the hoster's web server needs that one
         personal = {'route': 'yourself', 'port': 80, 'public_base': 'http://192.168.1.10', 'public_kind': 'port'}
         self.assertEqual(self.host_address(personal), (hosting.PORT, [(hosting.PORT, '127.0.0.1')]))
+        # Taken, the next free one up (the web server rule setup shows names it); it stopped there
+        self.assertEqual(self.host_address(personal, taken={hosting.PORT}),
+                         (hosting.PORT + 1, [(hosting.PORT, '127.0.0.1'), (hosting.PORT + 1, '127.0.0.1')]))
         with self.assertRaises(engine.Stop) as caught:
-            self.host_address(personal, taken={hosting.PORT})
+            self.host_address(personal, taken=set(range(hosting.PORT, hosting.PORT + engine.PORTS_TRIED)))
         self.assertEqual(caught.exception.message, f'Port {hosting.PORT} on this machine is already in use.')
 
     def test_the_port_this_installs_container_holds_is_not_checked(self):
@@ -1360,8 +1403,12 @@ class HostPort(TmpState):
                 self.assertEqual(self.host_address(prev), (prev['port'], []))
 
     def test_a_public_instances_port_without_its_container_is_checked(self):
+        # taken, the next free one up (it stopped there); none free, the stop
+        self.assertEqual(self.host_address({'route': 'host', 'port': 8791}, running=False, taken={8791}),
+                         (8792, [(8791, '127.0.0.1'), (8792, '127.0.0.1')]))
         with self.assertRaises(engine.Stop):
-            self.host_address({'route': 'host', 'port': 8791}, running=False, taken={8791})
+            self.host_address({'route': 'host', 'port': 8791}, running=False,
+                              taken=set(range(8791, 8791 + engine.PORTS_TRIED)))
         self.assertEqual(self.host_address({'route': 'host', 'port': 8791}, running=False), (8791, [(8791, '127.0.0.1')]))
 
 
@@ -1507,6 +1554,18 @@ class OptionalKeys(Offline):
         self.assertNotIn('SUBDL_KEY', self.keys())
         self.assertNotIn('SUBSYNC_SUBDL_KEY', self.env())
         self.assertEqual(self.env()['SUBSYNC_TMDB_KEY'], 'tmdb-key-1')       # the other key stays
+
+    def test_the_answers_example_used_as_it_is_keeps_the_saved_keys(self):
+        # Its empty key lines (SUBDL_KEY=, WYZIE_KEY=, TMDB_KEY=) removed every saved key on a re-run
+        self.install(SUBDL_KEY='subdl-key-1', WYZIE_KEY='wyzie-key-1', TMDB_KEY='tmdb-key-1')
+        example = Path(self.tmp.name) / 'example-answers'          # filled in where it leaves a line for you
+        example.write_text(docs.answers_example().replace('\nAIOS_CONFIG_ID=\n', f'\nAIOS_CONFIG_ID={UUID}\n')
+                           .replace('\nAIOS_CONFIG_PASSWORD=\n', f'\nAIOS_CONFIG_PASSWORD={PASSWORD}\n'))
+        code, out = self.run_main('--answers', str(example), '--yes')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('Removed the saved', out)
+        self.assertEqual({key: self.keys().get(key) for key in ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY')},
+                         {'SUBDL_KEY': 'subdl-key-1', 'WYZIE_KEY': 'wyzie-key-1', 'TMDB_KEY': 'tmdb-key-1'})
 
     def test_the_pages_box_removes_the_saved_key(self):
         self.install(TMDB_KEY='tmdb-key-1')

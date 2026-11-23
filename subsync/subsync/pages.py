@@ -34,9 +34,9 @@ TITLES = {"done": "Signed up · AIOSubtitles", "settings": "Settings · AIOSubti
 # The fixed words of the pages, each approved by the owner, the constants above and ui.py's among them. A test
 # checks that the pages show nothing else.
 UI_WORDS = (
-    "AIOSubtitles", "Privacy", "Questions", "Sign up", "Before you start", "Continue", "Back", "Invite", "AIOStreams",
-    "Languages", "Config", "Invite code", "Your AIOStreams link", "Your AIOStreams password", "Show", "Hide",
-    "Keep my password, so AIOSubtitles follows my config by itself", "Your AIOStreams config",
+    "AIOSubtitles", "Privacy", "Source", "Questions", "Sign up", "Before you start", "Continue", "Back", "Invite",
+    "AIOStreams", "Languages", "Config", "Invite code", "Your AIOStreams link", "Your AIOStreams password", "Show",
+    "Hide", "Keep my password, so AIOSubtitles follows my config by itself", "Your AIOStreams config",
     "Add AIOSubtitles to my AIOStreams config", "Remove the subtitle addons AIOSubtitles now searches itself",
     "Add language", *ui.ORDINALS, "None", ui.REMOVE, "Sign-up didn't go through",
     "What AIOSubtitles reads and keeps: ", "Your personal addon link", "Copy link", "Copied", "You're signed up",

@@ -629,7 +629,7 @@ class Personal(YourselfSteps, BackgroundWork, FlowFixture):
         _, _, text = self.b.follow('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': '', 'go': 'next'})
         self.assertIn('Sync files you play from Usenet too?', text)
         self.assertIn('next are read too (at most 3 a day).', text)
-        self.assertIn('The cost: at most 7 extra searches a day through your indexers', text)
+        self.assertIn('The cost: at most 7 extra searches a day on each indexer', text)    # each, not in all
         self.assertNotIn('(at most 5 a day)', text)
         self.assertNotIn('at most 10 extra searches', text)
 

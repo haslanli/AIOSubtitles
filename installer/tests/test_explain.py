@@ -223,16 +223,21 @@ class Documents(unittest.TestCase):
 
     @staticmethod
     def example_parts():
-        """docs/answers.example as [(heading, [(key, explanation, value)])], the route's question under heading None."""
+        """docs/answers.example as [(heading, [(key, explanation, value, commented out)])], the route's question under
+        heading None; a key's line written commented out ("# KEY=value", docs.COMMENTED_OUT) is a key's line too."""
         parts, heading, comment = [(None, [])], None, []
         for line in docs.answers_example().split('\n')[1:]:
+            commented = re.fullmatch(r'# ([A-Z][A-Z0-9_]*)=(\S*)', line)
             if line.startswith('# ====='):
                 heading = ''
+            elif commented and commented[1] in explain.QUESTIONS.keys() | explain.SETTINGS.keys():
+                parts[-1][1].append((commented[1], ' '.join(comment), commented[2], True))
+                comment = []
             elif line.startswith('# '):
                 comment.append(line[2:])
             elif '=' in line:
                 key, value = line.split('=', 1)
-                parts[-1][1].append((key, ' '.join(comment), value))
+                parts[-1][1].append((key, ' '.join(comment), value, False))
                 comment = []
             elif heading == '' and comment:                     # a part's heading ends at its blank line
                 parts.append((' '.join(comment), []))
@@ -243,16 +248,21 @@ class Documents(unittest.TestCase):
 
     def test_the_answers_example_has_its_four_parts_each_key_with_its_explanation(self):
         # one list mixed both routes and removal, and left out the keys asked under a setting's name;
-        # removing asked CONFIRM, and no part said when restoring asks its keys (the headings)
+        # removing asked CONFIRM, and no part said when restoring asks its keys (the headings); the
+        # public part wrote the two limits again, and removing's and restoring's headings left out the
+        # AIOStreams sign-in and, after an uninstall, AIOStreams' container or address
         parts = self.example_parts()
         self.assertEqual([heading for heading, _ in parts], [
             None, 'Install it for yourself (ROUTE=yourself)',
-            'Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.',
-            'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too; on a '
-            'public instance only REMOVE.',
+            'Host a public instance (ROUTE=host). SUBDL_KEY, TMDB_KEY, SUBSYNC_USENET_LISTINGS_PER_DAY and '
+            'SUBSYNC_DAILY_BUDGET_GB above are asked here too.',
+            'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too, and '
+            'AIOS_USERNAME and AIOS_PASSWORD when your AIOStreams wants a sign-in to save configs; on a public '
+            'instance only REMOVE.',
             'Restoring a saved copy (./setup --restore FILE --answers FILE). AIOS_CONFIG_PASSWORD above is asked here '
-            'too.'])
-        keys = [[key for key, _, _ in lines] for _, lines in parts]
+            'too, AIOS_USERNAME and AIOS_PASSWORD when your AIOStreams wants a sign-in to save configs, and after '
+            './setup --uninstall AIOS_CONTAINER or AIOS_URL, as when installing.'])
+        keys = [[key for key, _, _, _ in lines] for _, lines in parts]
         self.assertEqual(keys[0], ['ROUTE'])
         self.assertEqual(keys[1], ['AIOS_CONTAINER', 'AIOS_URL', 'AIOS_CONFIG_ID', 'AIOS_CONFIG_PASSWORD', 'LANGUAGES',
                                    'AUDIO', 'USENET', 'AUDIO_BUDGET', 'SUBSYNC_DAILY_BUDGET_GB',
@@ -262,18 +272,24 @@ class Documents(unittest.TestCase):
         self.assertEqual(keys[2][:7], ['HOST_ADDRESS', 'SUBSYNC_TRUSTED_PROXY', 'SUBSYNC_PUBLIC_INVITE',
                                        'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_TMDB_PERSONAL', 'SUBSYNC_USENET',
                                        'SUBSYNC_AUDIO_ROUTE'])
-        self.assertEqual(keys[2][7:], [lim.setting for lim in limits.hosting(usenet=True, audio=True)])
+        self.assertEqual(keys[2][7:], [lim.setting for lim in limits.hosting(usenet=True, audio=True)
+                                       if lim.setting not in keys[1]])
         self.assertEqual(keys[3], ['REMOVE', 'REMOVE_OPENSUBTITLES'])
         self.assertEqual(keys[4], ['RESTORE'])
         self.assertEqual(len(keys), 5)
+        notes = {'AUDIO': 'In an answers file: no, pick or open.',
+                 'SUBSYNC_PUBLIC_INVITE': 'In an answers file: leave this line out to keep the current code (on a '
+                                          'first setup, the one setup makes); an empty line lets anyone sign up.'}
+        commented_out = {'SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_PUBLIC_INVITE'}
         for _, lines in parts:
-            for key, text, value in lines:
+            for key, text, value, commented in lines:
                 with self.subTest(key=key):
                     question = explain.QUESTIONS.get(key)
                     explanation = question[1] if question else explain.SETTINGS[key][1]
-                    if key == 'AUDIO':                      # with its line for answers files
-                        explanation += ' In an answers file: no, pick or open.'
+                    if key in notes:                        # with its lines for answers files
+                        explanation += ' ' + notes[key]
                     self.assertEqual(text, explanation)
+                    self.assertEqual(commented, key in commented_out)
                     if question:
                         self.assertEqual(value, question[0])
                     elif key == 'SUBSYNC_TRUSTED_PROXY':          # setup's own answer when none is given
@@ -298,8 +314,49 @@ class Documents(unittest.TestCase):
         asked = asked_by_name() | set(web.PERSONAL_KEYS + web.HOST_KEYS)   # the optional keys, by engine.optional_key
         asked |= {lim.setting for lim in limits.personal(audio=False, usenet=True) + limits.hosting(True, True)}
         self.assertIn('SUBSYNC_PUBLIC_INVITE', asked_by_name())      # asked like every question
-        in_example = {key for _, lines in self.example_parts() for key, _, _ in lines}
+        in_example = {key for _, lines in self.example_parts() for key, _, _, _ in lines}
         self.assertEqual(in_example, asked)
+
+    def test_each_key_has_one_line_and_the_public_part_names_the_ones_above(self):
+        # The public part wrote the daily limit and the Usenet searches again, and setup takes a key's last
+        # line: the public part's 100 GB silently won over a lower limit set in your own install's part
+        lines = [line.removeprefix('# ') for line in docs.answers_example().splitlines()]
+        keys = [line.split('=', 1)[0] for line in lines if re.fullmatch(r'[A-Z][A-Z0-9_]*=\S*', line)]
+        self.assertEqual(sorted(key for key in set(keys) if keys.count(key) > 1), [])
+        example = docs.answers_example()
+        # your own install's part's line, lowered as a person would
+        lowered = example.replace('\nSUBSYNC_DAILY_BUDGET_GB=100\n', '\nSUBSYNC_DAILY_BUDGET_GB=20\n', 1)
+        self.assertNotEqual(lowered, example)
+        self.assertEqual(plan.parse_env(lowered)['SUBSYNC_DAILY_BUDGET_GB'], '20')
+        # the heading names each key a public instance asks that is written above it, and only those
+        parts = self.example_parts()
+        heading = parts[2][0]
+        written = {key for key, _, _, _ in parts[2][1]}
+        host_asked = {'HOST_ADDRESS', *docs.HOSTING_SETTINGS, *web.HOST_KEYS,
+                      *limits.names(limits.hosting(usenet=True, audio=True))}
+        named = set(re.findall(r'\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b', heading))
+        self.assertEqual(named, host_asked - written)
+        self.assertLessEqual(named, {key for key, _, _, _ in parts[1][1]})
+
+    def test_the_example_used_as_it_is_removes_nothing_setup_keeps(self):
+        # Its empty key lines (SUBDL_KEY= ...) removed the saved keys, and its empty
+        # SUBSYNC_PUBLIC_INVITE= opened a public instance to anyone; they are written commented out, as a line left out
+        example = docs.answers_example()
+        for key in ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_PUBLIC_INVITE'):
+            with self.subTest(key=key):
+                self.assertEqual(example.count(f'\n# {key}=\n'), 1)
+                self.assertNotIn(f'\n{key}=', example)
+        self.assertEqual(set(plan.parse_env(example)) & set(docs.COMMENTED_OUT), set())
+        note = ('In an answers file: leave this line out to keep the current code (on a first setup, the one setup '
+                'makes); an empty line lets anyone sign up.')
+        self.assertIn('\n'.join(docs.comment(explain.SETTINGS['SUBSYNC_PUBLIC_INVITE'][1]) + docs.comment(note))
+                      + '\n# SUBSYNC_PUBLIC_INVITE=\n', example)
+        # they are the keys whose empty line removes what setup keeps: every answer asked as optional
+        optional = {node.args[0].value for node in ast.walk(wizard_tree())
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'text'
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and any(k.arg == 'optional' and getattr(k.value, 'value', None) is True for k in node.keywords)}
+        self.assertEqual(set(docs.COMMENTED_OUT), optional | set(web.PERSONAL_KEYS + web.HOST_KEYS))
 
     def test_every_setting_and_rule_is_in_the_readme(self):
         section = docs.readme_section()

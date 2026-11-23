@@ -238,13 +238,17 @@ class Folder(unittest.TestCase):
             self.assertEqual(files(Path(tmp)), ['.notes.md', 'answers.example', 'notes.md'])
 
     def test_each_suites_command_is_the_one_the_image_build_runs(self):
-        # subsync's had none (R3-1)
+        # subsync's had none (R3-1); it left out numpy, without which its test modules fail to import
         rows = self.rows()
         self.assertEqual(rows['subsync/'], "The service, and the image's `Dockerfile` (built from this folder: "
                                            '`docker build -f subsync/Dockerfile .`). Its tests run with `python3 -m '
-                                           'unittest discover -s subsync/tests -t subsync/tests`; the public-mode '
-                                           'tests need the `cryptography` package and are skipped without it. The '
-                                           'build runs both test suites and stops if any test fails.')
+                                           'unittest discover -s subsync/tests -t subsync/tests` and need the `numpy` '
+                                           'package; the public-mode tests also need the `cryptography` package and '
+                                           'are skipped without it. The build runs both test suites and stops if any '
+                                           'test fails.')
+        requirements = (REPO / 'subsync' / 'requirements.txt').read_text()
+        self.assertRegex(requirements, r'(?m)^numpy==')                   # the service's own, not only its tests'
+        self.assertIn('import numpy', (REPO / 'subsync' / 'subsync' / 'audiofit.py').read_text())
         build = (REPO / 'subsync' / 'Dockerfile').read_text()
         self.assertIn('set -- -s /src/subsync/tests -t /src/subsync/tests;', build)
         self.assertIn('set -- -s /src/installer/tests -t /src;', build)
@@ -255,6 +259,19 @@ class Folder(unittest.TestCase):
         # with "f-string expression part cannot include a backslash"
         self.assertIn('Its tests run with Python 3.12 or newer (`python3 -m unittest discover -s installer/tests -t .`), '
                       "and inside the image's build;", self.rows()['installer/'])
+
+
+class Licence(unittest.TestCase):
+    def test_the_licence_says_the_public_pages_link_the_source(self):
+        # The public pages had no link to the source, and nothing told a host who changes the code to offer
+        # theirs, as the AGPL asks of a service people use over the network
+        self.assertEqual(section('Licence').split(' AIOSubtitles uses TMDB')[0],
+                         "AGPL-3.0-or-later; see `LICENSE` and `NOTICE.md`. A public instance's pages link to this "
+                         'repository (Source). If you change the code and run it for others, publish your version and '
+                         'point that link at it: the AGPL asks a service people use over the network to offer them its '
+                         'source.')
+        from subsync import ui, version
+        self.assertIn(f'<a href="{version.PROJECT}">Source</a>', ui.top(''))
 
 
 if __name__ == '__main__':

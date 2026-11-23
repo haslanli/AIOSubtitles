@@ -583,6 +583,20 @@ class Route(RouteFixture):
         self.assertEqual(code, 0, out)                          # the whole run, not only its env lines
         self.assertNotIn('SUBSYNC_PUBLIC_INVITE', engine.read_kv(self.state / 'subsync.env'))
 
+    def test_the_answers_example_used_as_it_is_keeps_the_invite_code(self):
+        # Its empty SUBSYNC_PUBLIC_INVITE= line made a first public instance open to anyone, and removed the
+        # code of one that had it; the line is commented out, as one left out: setup makes a code, then keeps it
+        example = Path(self.tmp.name) / 'example-answers'
+        example.write_text(docs.answers_example().replace('\nROUTE=yourself\n', '\nROUTE=host\n')
+                           .replace('\nHOST_ADDRESS=\n', f'\nHOST_ADDRESS={ADDRESS}\n'))
+        code, out = self.run_main('--answers', str(example), '--yes')
+        self.assertEqual(code, 0, out)
+        invite = engine.read_kv(self.state / 'subsync.env')['SUBSYNC_PUBLIC_INVITE']
+        self.assertRegex(invite, INVITE_CODE)                                     # the one setup made
+        code, out = self.run_main('--answers', str(example), '--yes')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(engine.read_kv(self.state / 'subsync.env')['SUBSYNC_PUBLIC_INVITE'], invite)
+
     def test_the_invite_code_is_asked_in_a_terminal_and_shown_at_the_end(self):
         # A terminal never asked it, and the end said to share "the invite code" without saying it
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})

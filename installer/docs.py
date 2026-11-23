@@ -25,25 +25,35 @@ WIDTH = 116
 # it asks under their setting names after the audio limit's question.
 YOURSELF_LIMITS = limits.names(limits.personal(audio=False, usenet=True))
 # A public instance: its address, the settings it asks under their own names (its trusted proxy, its invite code, its
-# choices, its audio question), then every limit; SUBDL_KEY and TMDB_KEY are asked as for your own install. The audio
-# question keeps its own words on setup's screen and in the example (explain.QUESTIONS); README explains it once,
-# under the settings, as it does the others.
+# choices, its audio question), then its limits. The keys it shares with your own install (SUBDL_KEY, TMDB_KEY and the
+# two limits above) are written once, in that part, and its heading names them: setup takes a key's last line, so a
+# second line would silently win over the first. The audio question keeps its own words on setup's screen and
+# in the example (explain.QUESTIONS); README explains it once, under the settings, as it does the others.
 HOSTING_SETTINGS = ('SUBSYNC_TRUSTED_PROXY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_TMDB_PERSONAL',
                     'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE')
-HOSTING = ('HOST_ADDRESS', *HOSTING_SETTINGS) + limits.names(limits.hosting(usenet=True, audio=True))
+HOSTING = ('HOST_ADDRESS', *HOSTING_SETTINGS) + tuple(
+    name for name in limits.names(limits.hosting(usenet=True, audio=True)) if name not in YOURSELF_LIMITS)
 # Removing and restoring each ask their own yes (REMOVE, RESTORE), never CONFIRM's
 REMOVING = ('REMOVE', 'REMOVE_OPENSUBTITLES')
 RESTORING = ('RESTORE',)
 PARTS = ('Install it for yourself (ROUTE=yourself)',
-         'Host a public instance (ROUTE=host). SUBDL_KEY and TMDB_KEY above are asked here too.',
-         'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too; on a public '
-         'instance only REMOVE.',
+         'Host a public instance (ROUTE=host). SUBDL_KEY, TMDB_KEY, SUBSYNC_USENET_LISTINGS_PER_DAY and '
+         'SUBSYNC_DAILY_BUDGET_GB above are asked here too.',
+         'Removing it (./setup --uninstall --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too, and '
+         'AIOS_USERNAME and AIOS_PASSWORD when your AIOStreams wants a sign-in to save configs; on a public instance '
+         'only REMOVE.',
          'Restoring a saved copy (./setup --restore FILE --answers FILE). AIOS_CONFIG_PASSWORD above is asked here '
-         'too.')
+         'too, AIOS_USERNAME and AIOS_PASSWORD when your AIOStreams wants a sign-in to save configs, and after '
+         './setup --uninstall AIOS_CONTAINER or AIOS_URL, as when installing.')
 EXAMPLE_ON_GITHUB = f'{PROJECT}/blob/main/docs/answers.example'   # the image has no docs/
-# A comment line under a key's explanation in docs/answers.example, for what only an answers file needs; the question's
+# Comment lines under a key's explanation in docs/answers.example, for what only an answers file needs; the question's
 # own text stays as setup shows it
-ANSWERS_NOTES = {'AUDIO': 'In an answers file: no, pick or open.'}
+ANSWERS_NOTES = {'AUDIO': 'In an answers file: no, pick or open.',
+                 'SUBSYNC_PUBLIC_INVITE': 'In an answers file: leave this line out to keep the current code (on a '
+                                          'first setup, the one setup makes); an empty line lets anyone sign up.'}
+# The keys whose empty line removes what setup keeps (an optional answer: a saved key, the invite code), written
+# commented out: the example used as it is then keeps them, as a line left out does
+COMMENTED_OUT = ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_PUBLIC_INVITE')
 
 
 def yourself():
@@ -106,14 +116,16 @@ def readme_section():
 def example(key):
     """A key's example line, under its explanation (and its note for answers files, ANSWERS_NOTES): a question's own
     example, else (a setting's name) the setting's default, or the answer setup takes when the line is left out where
-    that differs (the trusted proxy)."""
+    that differs (the trusted proxy); commented out for a key whose empty line removes what setup keeps (COMMENTED_OUT:
+    the invite code's left-out answer differs too)."""
     if key in explain.QUESTIONS:
         value, text = explain.QUESTIONS[key]
     else:
         default, text = explain.SETTINGS[key]
         value = hosting.TRUSTED_PROXY if key == 'SUBSYNC_TRUSTED_PROXY' else default or ''
-    note = ['# ' + ANSWERS_NOTES[key]] if key in ANSWERS_NOTES else []
-    return [''] + comment(text) + note + [f'{key}={value}']
+    note = comment(ANSWERS_NOTES[key]) if key in ANSWERS_NOTES else []
+    line = f'{key}={value}'
+    return [''] + comment(text) + note + ['# ' + line if key in COMMENTED_OUT else line]
 
 
 def answers_example():

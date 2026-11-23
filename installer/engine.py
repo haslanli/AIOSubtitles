@@ -57,6 +57,9 @@ STARTING = 'Starting {name}'
 # subsync's own port below 1024 with AIOStreams on the host network (an address with none means 80)
 HOST_NETWORK_PORT = ("subsync runs on this machine's own network here, as AIOStreams does, so it can't use a port below "
                      '1024. Add a port to the address, like http://{host}:8790.')
+# An address behind your web server names no port on this machine: setup takes subsync's port (or the one it had), or
+# the first free one of this many from it up, and the web server rule it shows names that port
+PORTS_TRIED = 10
 TEST_TITLES = [('movie', 'tt0816692', 'Interstellar'), ('movie', 'tt0133093', 'The Matrix'),
                ('movie', 'tt0110912', 'Pulp Fiction')]
 # The stops about the config, each with its way out on the page (where Continue reads the config again:
@@ -959,7 +962,7 @@ class Engine:
             bind = '0.0.0.0'
         else:
             # behind your web server: the last path address's port, never a port address's own (80, say: the one your
-            # web server needs)
+            # web server needs), or the next free one up when it is taken (PORTS_TRIED)
             kept = self.prev.get('port') if self.prev.get('public_kind') == 'path' else None
             port = int(kept or plan.SUBSYNC_PORT)
             bind = '127.0.0.1'
@@ -968,9 +971,16 @@ class Engine:
             if kind == 'port' and port < 1024:      # its user may listen there on 1024 and above only
                 host = urllib.parse.urlsplit(url).hostname
                 raise Problem('PUBLIC_ADDRESS', HOST_NETWORK_PORT.format(host=f'[{host}]' if ':' in host else host))
-        if self.port_in_use(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0'):
+        # an address's own port is the one it names: that one alone
+        free = self.free_port(port, '127.0.0.1' if bind == '127.0.0.1' else '0.0.0.0',
+                              tries=PORTS_TRIED if kind == 'path' else 1)
+        if free is None:
             raise Problem('PUBLIC_ADDRESS', f'Port {port} on this machine is already in use.')
-        self.s.update(public_base=url, public_kind=kind, port=port, bind=bind)
+        self.s.update(public_base=url, public_kind=kind, port=free, bind=bind)
+
+    def free_port(self, port, host, tries=PORTS_TRIED):
+        """The first of `tries` ports from `port` up that is free on this machine at `host` (port_in_use), or None."""
+        return next((p for p in range(port, port + tries) if not self.port_in_use(p, host)), None)
 
     def port_in_use(self, port, host):
         """Whether `port` on this machine (at `host`) is taken by anything but this install's own container, which holds
@@ -1545,11 +1555,13 @@ class Engine:
                                            current=env.get('SUBSYNC_TRUSTED_PROXY'), default=hosting.TRUSTED_PROXY,
                                            check=hosting.check_trusted_proxy)
         # a public instance keeps its own port on a re-run; a personal install's (80, say) is never taken over. The port
-        # is checked unless this install's own container holds it.
+        # is checked unless this install's own container holds it; in use, the next free one up is used (PORTS_TRIED):
+        # the web server rule setup shows names it.
         port = int(self.prev.get('port') or hosting.PORT) if self.prev.get('route') == 'host' else hosting.PORT
-        if self.port_in_use(port, '127.0.0.1'):
+        free = self.free_port(port, '127.0.0.1')
+        if free is None:
             stop(f'Port {port} on this machine is already in use.')
-        self.s.update(route='host', public_base=self.address, port=port)
+        self.s.update(route='host', public_base=self.address, port=free)
 
     def known_invite(self):
         """The invite code before this run's answer, as (code, suggested): state/subsync.env's ('' when anyone may sign

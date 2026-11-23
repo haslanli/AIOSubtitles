@@ -6,9 +6,12 @@ from subsync import ui
 
 class UiAdditions(unittest.TestCase):
     def test_the_installers_header_has_no_privacy_link(self):
-        self.assertNotIn('/privacy', ui.top('https://q.example', start='./', privacy=False))
-        self.assertIn('Questions', ui.top('https://q.example', start='./', privacy=False))
+        self.assertNotIn('/privacy', ui.top('https://q.example', start='./', site=False))
+        self.assertIn('Questions', ui.top('https://q.example', start='./', site=False))
         self.assertIn('/privacy', ui.top('https://q.example'))                  # the site's stays as it was
+        # nor the site's Source link: setup's page is no service for others
+        self.assertNotIn('>Source<', ui.top('https://q.example', start='./', site=False))
+        self.assertIn('>Source<', ui.top('https://q.example'))
 
     def test_a_page_can_load_itself_again(self):
         # without the script only; with it, the script shows the progress and the page stays

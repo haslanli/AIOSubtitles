@@ -104,6 +104,18 @@ class SettingsTest(unittest.TestCase):
                 self.assertNotIn("must stay on", explain.SETTINGS[name][1])
         self.assertIn("their own debrid service or Usenet", explain.SETTINGS["SUBSYNC_AUDIO_ROUTE"][1])
 
+    def test_the_setting_gives_the_audio_questions_advice(self):
+        # The setting the audio question writes recommended it off on your own install, while the question
+        # recommends "When I pick the file" with two or more processors, as the public instance's question does
+        from subsync import explain
+        text = explain.SETTINGS["SUBSYNC_AUDIO_ROUTE"][1]
+        self.assertIn("each person chooses. Recommended: on if the server has two or more processors. Off: they keep "
+                      "their original subtitles", text)
+        self.assertEqual(text.count("Recommended"), 1)
+        self.assertIn("When I pick the file (recommended with two or more processors)", explain.QUESTIONS["AUDIO"][1])
+        self.assertIn("Recommended: on, if your server has two or more processors",
+                      explain.QUESTIONS["SUBSYNC_AUDIO_ROUTE"][1])
+
 
 # --------------------------------------------------------------------------------------- the self-hosted day counts
 

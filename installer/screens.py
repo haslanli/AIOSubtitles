@@ -152,7 +152,7 @@ def _page(content, refresh=None, heading=None):
     """A page in setup's frame, titled by its `heading` (its step's name, or its own heading) before setup's name, so
     tabs, history and a screen reader's announcement tell the pages apart."""
     title = f'{heading} · {TITLE}' if heading and heading != TITLE else TITLE
-    return ui.page(title, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}{content}</div>',
+    return ui.page(title, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", site=False)}{content}</div>',
                    'letter', refresh=refresh)
 
 
@@ -277,7 +277,7 @@ def start(route='yourself'):
             f'{ui.button("Continue", "primary", type="submit", arrow=True)}</div></form>')
     main = f'<main class="grid"><h1>{e(TITLE)}</h1>{what}{form}<div class="page-end" aria-hidden="true"></div></main>'
     dock = f'<div class="dock">{ui.button("Continue", "primary", type="submit", attrs="form=\"ways\"", arrow=True)}</div>'
-    return ui.page(TITLE, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}{main}</div>{dock}',
+    return ui.page(TITLE, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", site=False)}{main}</div>{dock}',
                    'start')
 
 
@@ -573,7 +573,7 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
     remove = ui.row('rm-h', REMOVING[route], f'<p class="help">{e(about)}</p>',
                     f'<form class="controls" method="post" action="remove">{controls}</form>')
     return ui.page(STATUS[route],         # titled by its heading
-                   f'<div class="wrap">{ui.top(explain.CONTACT, start="./", privacy=False)}<main>{status}'
+                   f'<div class="wrap">{ui.top(explain.CONTACT, start="./", site=False)}<main>{status}'
                    f'<div class="rows">{panel}{answers}{remove}</div></main></div>', 'settings')
 
 

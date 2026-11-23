@@ -364,7 +364,8 @@ class LookTest(unittest.TestCase):
         from subsync import ui
         for name, text in every_page().items():
             with self.subTest(page=name):
-                self.assertNotRegex(text, r"(src|href)=\"(https?:)?//(?!github\.com/haslanli/AIOSubtitles/issues\"|subs\.test/u/)")
+                # the outside links: the project's repository (Source) and its issues (Questions)
+                self.assertNotRegex(text, r"(src|href)=\"(https?:)?//(?!github\.com/haslanli/AIOSubtitles(/issues)?\"|subs\.test/u/)")
                 self.assertNotRegex(text, r"<style|\sstyle=|\son[a-z]+=|javascript:")
                 tree = Tree(text)
                 self.assertEqual([a["src"] for a in tree.all("script")], [ui.JS_URL])
@@ -1063,7 +1064,7 @@ class OtherPagesTest(unittest.TestCase):
 
     def test_an_unexpected_failure_has_its_page(self):
         # The page existed but was never shown; a browser got a blank page
-        from subsync import explain, pages
+        from subsync import explain, pages, version
         self.assertEqual(explain.PUBLIC_TEXTS["went_wrong"],
                          "AIOSubtitles ran into a problem on its side. Try again in a few minutes.")
         for personal in (False, True):
@@ -1072,7 +1073,7 @@ class OtherPagesTest(unittest.TestCase):
                 text = tree.text()
                 self.assertIn("Something went wrong " + explain.PUBLIC_TEXTS["went_wrong"] + " Back to the start page",
                               text)
-                self.assertEqual([a["href"] for a in tree.all("a")], ["/", "/privacy", CONTACT, "/"])
+                self.assertEqual([a["href"] for a in tree.all("a")], ["/", "/privacy", version.PROJECT, CONTACT, "/"])
                 self.assertEqual(bool(tree.all("meta", name="robots", content="noindex")), personal)
         self.assertIn("Wrong.", Tree(pages.error_page("Wrong.")).text())          # a page given its own line
 
@@ -1189,13 +1190,29 @@ class InstanceWordsTest(unittest.TestCase):
             with self.subTest(page=name, tmdb=True):
                 self.assertEqual(explain.TMDB_NOTICE in page, name in ("start", "signed up", "settings", "privacy"))
 
+    def test_every_page_links_to_the_source(self):
+        # The header had Privacy and Questions only; the AGPL asks a service people use over the network to
+        # offer them its source, so each page links the project's repository (a host who changes the code points it at
+        # theirs), beside Privacy
+        from subsync import version
+        source = f'<a href="{version.PROJECT}">Source</a>'
+        for s in (settings(), settings(**HOST)):
+            for name, page in self.every_kind(s).items():
+                with self.subTest(page=name, contact=bool(s.contact)):
+                    links = re.search(r'<nav class="links"[^>]*>(.*?)</nav>', page).group(1)
+                    self.assertEqual(links.count(">Source<"), 1)
+                    self.assertTrue(links.startswith('<a href="/privacy">Privacy</a>' + source), links)
+        # on a phone the links go under the name when the three don't fit beside it (320 px wide, with Questions)
+        self.assertIn("\n  .top{padding-top:10px;align-items:center;flex-wrap:wrap;row-gap:0}\n",
+                      css_media("(max-width:1023px),(max-height:599px)"))
+
     def test_counts_of_one(self):
         # "1 sign-up attempts", "at most 1 extra searches", "(0 of 1 searches used today)"
         from subsync import pages
         one = settings(SUBSYNC_SIGNUPS_PER_HOUR="1", SUBSYNC_USENET="on", SUBSYNC_USENET_LISTINGS_PER_DAY="1")
         start = Tree(pages.signup_page(one)).text()
         self.assertIn("Each try counts: 1 sign-up attempt per address in an hour.", start)
-        self.assertIn("The cost: at most 1 extra search a day through your indexers", start)
+        self.assertIn("The cost: at most 1 extra search a day on each indexer", start)
         record = dict(RECORD, sync_uuid="s", usenet=True, usenet_uuid="u", usenet_services=["nzbdav"])
         page = pages.settings_page(one, record, USAGE, LINK, now=0, usenet_usage={"listings": 0, "stopped": False})
         self.assertIn("Usenet: on, through NzbDAV (0 of 1 search used today)", Tree(page).text())

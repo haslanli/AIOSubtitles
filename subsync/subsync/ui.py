@@ -11,6 +11,7 @@ import html
 import os
 
 from .langs import DEFAULT_LANGUAGE
+from .version import PROJECT
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 FONT_FILES = ("AtkinsonHyperlegibleNext-wght.ttf", "AtkinsonHyperlegibleMono-wght.ttf")   # put in by the image build
@@ -139,10 +140,13 @@ def page(title, body, kind, personal=False, body_attrs="", opened=False, refresh
             f"{body}</body></html>")
 
 
-def top(contact, start="/", privacy=True):
-    """The page's header: the name, Privacy (the site only) and Questions (where there is a `contact`)."""
+def top(contact, start="/", site=True):
+    """The page's header: the name, Privacy and Source (the site's pages only, `site`; Source links the project's
+    repository, the source the AGPL asks a service people use over the network to offer) and Questions (where
+    there is a `contact`)."""
     return (f"<header class=\"top\"><a class=\"wordmark\" href=\"{e(start)}\">AIOSubtitles</a>"
-            f"<nav class=\"links\" aria-label=\"AIOSubtitles\">" + ("<a href=\"/privacy\">Privacy</a>" if privacy else "")
+            f"<nav class=\"links\" aria-label=\"AIOSubtitles\">"
+            + (f"<a href=\"/privacy\">Privacy</a><a href=\"{e(PROJECT)}\">Source</a>" if site else "")
             + (f"<a href=\"{e(contact)}\">Questions</a>" if contact else "") + "</nav></header>")
 
 
