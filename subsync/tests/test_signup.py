@@ -538,11 +538,13 @@ class SignupTest(SignupHarness, unittest.TestCase):
 
     def test_delete_with_a_wrong_password_deletes_nothing(self):
         uuid, result = self.run_signup(viewer())
-        before = {k: dict(v) for k, v in self.fake.configs.items()}
+        # the configs whole, not only their ids, and no write at all (the twin)
+        before, writes = copy.deepcopy(self.fake.configs), len(self.fake.writes())
         with self.assertRaises(self.signup.SignupError):
             self.signup.delete(self.s, self.users, result.token, {"password": "wrong"}, api_factory=self.api)
         self.assertIsNotNone(self.users.open(result.token))     # nothing deleted: the person can try again
-        self.assertEqual(set(self.fake.configs), set(before))
+        self.assertEqual(self.fake.configs, before)
+        self.assertEqual(len(self.fake.writes()), writes)
 
     def test_delete_says_when_it_is_certain_before_it_removes_anything(self):
         # The router stopped the person's service, forgetting them, before a mistyped password deleted nothing
@@ -979,8 +981,8 @@ class GateTest(unittest.TestCase):
 
     def test_wrong_invite_codes_count_as_attempts(self):
         from subsync.signup import SignupError
-        gate = self.gate(SUBSYNC_PUBLIC_INVITE="letmein")
-        for _ in range(5):
+        gate = self.gate(SUBSYNC_PUBLIC_INVITE="letmein", SUBSYNC_SIGNUPS_PER_HOUR="3")   # the setting read
+        for _ in range(gate.s.signups_per_hour):
             with self.assertRaises(SignupError):
                 gate.check("1.2.3.4", "guess")
         with self.assertRaises(SignupError) as e:
@@ -989,11 +991,11 @@ class GateTest(unittest.TestCase):
 
     def test_attempts_per_address_per_hour(self):
         from subsync.signup import SignupError
-        gate = self.gate()
-        for _ in range(5):
+        gate = self.gate(SUBSYNC_SIGNUPS_PER_HOUR="3")   # the setting read, not its default
+        for _ in range(gate.s.signups_per_hour):
             gate.check("1.2.3.4", "")
         with self.assertRaises(SignupError):
-            gate.check("1.2.3.4", "")               # the 6th in an hour
+            gate.check("1.2.3.4", "")               # one more in an hour
         gate.check("5.6.7.8", "")                    # another address
         self.now[0] += 3601
         gate.check("1.2.3.4", "")                    # an hour later
