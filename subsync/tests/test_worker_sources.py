@@ -205,6 +205,21 @@ class FetchTest(unittest.TestCase):
         self.assertIsNone(self.seen[-1].get("x-api-key"))
         self.assertEqual(ledger.used("subdl", "download", 86400), 1)
 
+    def test_a_download_without_room_in_its_sites_limit_is_not_made(self):
+        # A download was counted as it started, after its plan had checked the limit (_within_limits), so
+        # the downloads planned together all passed the same room; each takes its room as it starts now, or isn't made
+        ledger = closed_after(self, Ledger(keyed={"subdl": True}))
+        ledger.count("subdl", "download", 299)                            # SubDL's 300 a day: room for one
+        w = Worker(Settings({"SUBSYNC_DATA": self.dir}), closed_after(self, Store(self.dir)), FakeAios(), None,
+                   extra=FakeExtra(ledger=ledger))
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            got = [w._fetch_one(Job("movie", "tt1"), "rus", rank, {"id": f"d-{rank}", "source": "subdl",
+                                                                   "url": f"{self.url}/{rank}"}) for rank in range(3)]
+        self.assertEqual([g is not None for g in got], [True, False, False])
+        self.assertEqual((len(self.seen), ledger.used("subdl", "download", 86400)), (1, 300))
+        self.assertIn("INFO:subsync.worker:subtitle fetch movie/tt1 rus rank 1: no room left in subdl's limit",
+                      logs.output)
+
 
 class RestoredOriginalTest(unittest.TestCase):
     """An original known only from the store (after a restart: the lists are memory only, the store keeps its

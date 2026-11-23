@@ -112,8 +112,9 @@ class NotFound(Exception):
 
 
 class Busy(Exception):
-    """The source asked to be asked again later without being down (Gestdown's 423), or a site it needs an id from did
-    (Cinemeta's "too many requests"): nothing now, nothing kept, no pause."""
+    """The source asked to be asked again later without being down (Gestdown's 423), a site it needs an id from did
+    (Cinemeta's "too many requests"), or its published limit has no room left now (_count): nothing now, nothing kept,
+    no pause."""
 
 
 class Limited(Exception):
@@ -203,8 +204,16 @@ class ExtraSources:
         return value
 
     def _count(self, source, kind="request", n=1):
+        """Before a request of the source: its room in the source's windows is taken (sourcestate.Ledger.take), or,
+        none being left, Busy and nothing asked."""
+        if self.ledger is not None and not self.ledger.take(source, kind, n):
+            raise Busy()
+
+    def close(self):
+        """Calls not started are dropped, running ones end on their own (bounded by their timeout); the ledger closes."""
+        self.pool.shutdown(wait=False, cancel_futures=True)
         if self.ledger is not None:
-            self.ledger.count(source, kind, n)
+            self.ledger.close()
 
     def headers_for(self, cand):
         """The headers a candidate's download needs (a source's key), never part of its address; only for a subtitle

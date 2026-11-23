@@ -363,6 +363,8 @@ class Pool:
             entry["app"].worker.stop()
         if self.lookup is not None:   # lookups still waiting are dropped, so stopping isn't held up by them
             self.lookup.close()
+        if self.extra is not None:    # so are source calls; the sites' ledger closes
+            self.extra.close()
 
 
 # ------------------------------------------------------------------------------------------- the router

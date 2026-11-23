@@ -5,8 +5,10 @@ PAUSE_S, then tried with one request: a success opens it again, a failure pauses
 requests" (429, 503 with Retry-After) pauses it for as long as it asks. "Not found" is an answer, not a failure.
 
 Ledger: requests and downloads per source and clock window (minute, hour, UTC day), against the sites' published limits
-(srclimits.LIMITS), kept in SQLite so a restart doesn't forget them. In public mode it also counts per person, so that
-near a limit the people who already had their share get the site only for the best candidates.
+(srclimits.LIMITS), kept in SQLite so a restart doesn't forget them. A request or download takes its room before it is
+made (Ledger.take: checked and counted at once), so requests made at the same time can't all pass the same room. In
+public mode it also counts per person, so that near a limit the people who already had their share get the site only
+for the best candidates.
 """
 import logging
 import os
@@ -17,6 +19,10 @@ import time
 from . import net, srclimits
 
 log = logging.getLogger("subsync.sources")
+# the ledger's housekeeping: once every LEDGER_SWEEP_S, the rows of windows that started more than LEDGER_KEEP_S ago go
+# (a window is at most a UTC day long, so each of them ended more than a day ago)
+LEDGER_SWEEP_S = 3600
+LEDGER_KEEP_S = 2 * 86400
 
 
 class Health:
@@ -82,7 +88,8 @@ class Health:
         log.info("source %s asked to slow down: paused for %d s", source, wait)
 
     def status(self):
-        """{source: time the pause ends} for the paused sources, for a status line."""
+        """{source: time the pause ends} for the paused sources: the pauses as the tests read them (the service itself
+        asks allowed())."""
         now = self.clock()
         with self.lock:
             return {s: t for s, t in self.paused_until.items() if t > now}
@@ -100,9 +107,17 @@ class Ledger:
         if path:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.db = sqlite3.connect(path or ":memory:", check_same_thread=False, isolation_level=None)
+        # counters, as store.py's: with WAL, NORMAL commits without syncing the disk and can lose only the last counts
+        # on a power cut, never corrupt the file
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS counts (source TEXT NOT NULL, kind TEXT NOT NULL, span INTEGER NOT NULL,"
                         " start INTEGER NOT NULL, who TEXT NOT NULL DEFAULT '', n INTEGER NOT NULL,"
                         " PRIMARY KEY (source, kind, span, start, who))")
+
+    def close(self):
+        with self.lock:
+            self.db.close()
 
     def limits(self, source, kind):
         return srclimits.LIMITS.get((source, kind, bool(self.keyed.get(source))), [])
@@ -112,28 +127,61 @@ class Ledger:
         now = int(self.clock())
         return [(span, limit, now - now % span) for span, limit in self.limits(source, kind)]
 
-    def count(self, source, kind, n=1, who=None):
+    def take(self, source, kind, n=1, who=None):
+        """Room for `n` more of `kind` in every window of the source's limits, taken before the requests or downloads
+        are made: counted (as count()) and True, or, when some window hasn't the room, False and nothing counted. The
+        check and the count are one step under the lock. A source without published limits always has room."""
         wins = self._windows(source, kind)
         if not wins:
-            return
+            return True
         with self.lock:
-            for span, _, start in wins:
-                for w in ("", who or "") if who else ("",):
-                    self.db.execute("INSERT INTO counts VALUES (?,?,?,?,?,?) ON CONFLICT(source, kind, span, start, who) "
-                                    "DO UPDATE SET n = n + excluded.n", (source, kind, span, start, w, n))
-            if self.clock() - self.swept > 3600:   # once an hour: windows that ended more than a day ago are dropped
-                self.swept = self.clock()
-                self.db.execute("DELETE FROM counts WHERE start < ?", (int(self.clock()) - 2 * 86400,))
+            if any(self._n(source, kind, span, start) + n > limit for span, limit, start in wins):
+                return False
+            self._add(source, kind, n, who, wins)
+        return True
+
+    def count(self, source, kind, n=1, who=None):
+        """Counts `n` of `kind` in every window of the source's limits (and, with `who`, the person's), whatever room
+        is left: how the tests fill a window (the service takes its room first, take())."""
+        wins = self._windows(source, kind)
+        if wins:
+            with self.lock:
+                self._add(source, kind, n, who, wins)
+
+    def _add(self, source, kind, n, who, wins):
+        """(lock held) `n` added to each window's row, and the person's, in one transaction, with the sweep when it is
+        due."""
+        rows = [(source, kind, span, start, w, n) for span, _, start in wins for w in (("", who) if who else ("",))]
+        now = self.clock()
+        sweep = now - self.swept > LEDGER_SWEEP_S
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.executemany("INSERT INTO counts VALUES (?,?,?,?,?,?) ON CONFLICT(source, kind, span, start, who) "
+                                "DO UPDATE SET n = n + excluded.n", rows)
+            if sweep:
+                self.db.execute("DELETE FROM counts WHERE start < ?", (int(now) - LEDGER_KEEP_S,))
+        except BaseException:
+            if self.db.in_transaction:   # SQLite may have rolled it back itself (a full disk)
+                self.db.execute("ROLLBACK")
+            raise
+        self.db.execute("COMMIT")
+        if sweep:
+            self.swept = now
 
     def used(self, source, kind, span, who=""):
-        """The count in the current window of `span` seconds."""
+        """The count in the current window of `span` seconds: a window as the tests read it (the service asks
+        take(), exhausted() and tight())."""
         now = int(self.clock())
         return self._used(source, kind, span, now - now % span, who)
 
     def _used(self, source, kind, span, start, who=""):
         with self.lock:
-            row = self.db.execute("SELECT n FROM counts WHERE source=? AND kind=? AND span=? AND start=? AND who=?",
-                                  (source, kind, span, start, who or "")).fetchone()
+            return self._n(source, kind, span, start, who)
+
+    def _n(self, source, kind, span, start, who=""):
+        """(lock held) The count of one window, the person's with `who`."""
+        row = self.db.execute("SELECT n FROM counts WHERE source=? AND kind=? AND span=? AND start=? AND who=?",
+                              (source, kind, span, start, who or "")).fetchone()
         return row[0] if row else 0
 
     def exhausted(self, source, kind):

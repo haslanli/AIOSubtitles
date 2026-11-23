@@ -57,6 +57,8 @@ def main():
         worker.stop()
         if lookup is not None:     # lookups still waiting are dropped, so stopping isn't held up by them
             lookup.close()
+        if extra is not None:      # so are source calls; the sites' ledger closes
+            extra.close()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)

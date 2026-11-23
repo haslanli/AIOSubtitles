@@ -265,7 +265,7 @@ class ExtraSourcesTest(unittest.TestCase):
         self.assertEqual(self.extra(SUBSYNC_EXTRA_SOURCES="wyzie,subdl,subsource").search("series", "tt2:1:2"), [])
         self.assertEqual(self.fake.calls, [])                                     # none asked without its key
         with tempfile.TemporaryDirectory() as data, self.assertLogs("subsync.extra", "WARNING") as logs:
-            make_sources(Settings(dict(self.env, SUBSYNC_EXTRA_SOURCES=written, SUBSYNC_DATA=data)))
+            make_sources(Settings(dict(self.env, SUBSYNC_EXTRA_SOURCES=written, SUBSYNC_DATA=data))).close()
         self.assertEqual(logs.output, [f'WARNING:subsync.extra:SUBSYNC_EXTRA_SOURCES: "{name}" ignored: it takes only '
                                        'osv3, osv3plus, tsdb and gestdown; SubDL, SubSource and Wyzie Subs have their '
                                        'own key settings.' for name in ("wyzie", "subdl", "subsource", "opensubs")])

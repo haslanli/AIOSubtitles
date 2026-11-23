@@ -2076,8 +2076,10 @@ class Worker(threading.Thread):
         raw = None
         try:
             source, ledger = cand.get("source"), self._ledger
-            if ledger is not None and source:
-                ledger.count(source, srclimits.DOWNLOAD_KIND.get(source, "download"), who=self.who)
+            if ledger is not None and source and \
+                    not ledger.take(source, srclimits.DOWNLOAD_KIND.get(source, "download"), who=self.who):
+                log.info("subtitle fetch %s %s rank %d: no room left in %s's limit", job.label, lang, rank, source)
+                return None
             raw = fetch_subtitle(url, headers=self.extra.headers_for(cand) if self.extra is not None else None)
             with self.cv:
                 self._keep_download(url, now, raw)

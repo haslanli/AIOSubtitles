@@ -813,6 +813,20 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(a.worker.turn.places, self.settings.syncs_at_once)
         self.assertIsNotNone(a.worker.limits)
 
+    def test_closing_the_pool_closes_the_sources_ledger(self):
+        # Pool.close stopped the workers and the lookup but left the built-in sources' ledger open: its
+        # database (sources.sqlite3) and the source calls' pool outlived it
+        import sqlite3
+        from subsync.public import Pool
+        env = dict(self.env, SUBSYNC_EXTRA_SOURCES="osv3")
+        pool = Pool(Settings(env), env, self.store, self.users, clock=self.clock)
+        ledger = pool.extra.ledger
+        pool.close()
+        with self.assertRaises(sqlite3.ProgrammingError):              # closed
+            ledger.db.execute("SELECT 1")
+        with self.assertRaises(RuntimeError):                          # no call starts after
+            pool.extra.pool.submit(int)
+
     def test_the_turn_has_as_many_places_as_files_at_once(self):
         from subsync.public import Pool
         env = dict(self.env, SUBSYNC_SYNCS_AT_ONCE="2")
@@ -956,6 +970,9 @@ class Listing:
 
     def headers_for(self, cand):
         return None
+
+    def close(self):   # as ExtraSources, when the pool closes: nothing held here
+        pass
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)

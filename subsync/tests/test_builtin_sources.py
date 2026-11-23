@@ -2,15 +2,18 @@
 torrent hash and release name), Stremio's OpenSubtitles v3, Cinemeta + Gestdown and SubSource; no network (a test that
 opens a connection to anything but this machine fails)."""
 import json
+import os
+import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 from unittest import mock
 
 from helpers import Clock, FakeSources, HASH, PACK, SINGLE, SourcesHarness, wait_until
-from subsync import srclimits
+from subsync import sourcestate, srclimits
 from subsync.extra import Busy, split_id
 from subsync.settings import Settings
 from subsync.sourcestate import Health, Ledger
@@ -215,6 +218,7 @@ class SubSourceTest(SourcesHarness, unittest.TestCase):
 
     def test_requests_are_counted_and_an_exhausted_limit_stops_it(self):
         ledger = Ledger(clock=self.clock, keyed={"subsource": True})
+        self.addCleanup(ledger.close)
         ex = self.extra(SUBSYNC_EXTRA_SOURCES="", SUBSYNC_SUBSOURCE_KEY="ss-key", ledger=ledger)
         ex.search("series", "tt2:1:2")
         self.assertEqual(ledger.used("subsource", "request", 86400), 2)
@@ -223,6 +227,23 @@ class SubSourceTest(SourcesHarness, unittest.TestCase):
         n = len(self.fake.asked("/subsource"))
         self.assertEqual(ex.search("series", "tt2:1:2"), [])
         self.assertEqual(len(self.fake.asked("/subsource")), n)
+
+    def test_a_request_without_room_in_the_limit_is_not_made(self):
+        # A search checked the limit once, then counted each request as it made it: SubSource's two requests
+        # at 59 of its 60 a minute made 61. Each request takes its room first now; the second finds none, so it isn't
+        # made, nothing fails and nothing is kept: asked again next time
+        ledger = Ledger(clock=self.clock, keyed={"subsource": True})
+        self.addCleanup(ledger.close)
+        ledger.count("subsource", "request", 59)
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="", SUBSYNC_SUBSOURCE_KEY="ss-key", ledger=ledger)
+        self.assertEqual(ex.search("series", "tt2:1:2"), [])
+        self.assertEqual(ledger.used("subsource", "request", 60), 60)
+        self.assertEqual([p for p, _ in self.fake.calls if p.startswith("/subsource")], ["/subsource/movies/search"])
+        self.assertEqual(ex.health.status(), {})                              # no failure, no pause
+        self.clock.t += 60                                                     # the next minute has room
+        self.assertEqual([c["id"] for c in ex.search("series", "tt2:1:2")],
+                         ["subsource-7001", "subsource-7003", "subsource-7004"])
+        self.assertEqual(ledger.used("subsource", "request", 60), 1)          # the id was kept: one request
 
 
 class WaitPauseCacheTest(SourcesHarness, unittest.TestCase):
@@ -609,6 +630,7 @@ class StateTest(unittest.TestCase):
     def test_ledger_windows_and_fair_share(self):
         clock = Clock()
         ledger = Ledger(clock=clock, keyed={"subdl": True})
+        self.addCleanup(ledger.close)
         self.assertEqual(ledger.limits("subdl", "download"), [(86400, 300)])
         for _ in range(200):
             ledger.count("subdl", "download", who="a")
@@ -630,6 +652,7 @@ class StateTest(unittest.TestCase):
         clock = Clock()
         clock.t += 39.9999                                              # the end of second 39 of a minute window
         ledger = Ledger(clock=clock, keyed={"subsource": True})
+        self.addCleanup(ledger.close)
         ledger.count("subsource", "request", 60)                        # SubSource's minute is full
         ledger.clock = Ticking(clock.t, clock.t + 0.0001)
         self.assertEqual(ledger.used("subsource", "request", 60), 60)
@@ -637,6 +660,60 @@ class StateTest(unittest.TestCase):
         self.assertTrue(ledger.exhausted("subsource", "request"))
         ledger.clock = Ticking(clock.t, clock.t, clock.t + 0.0001)
         self.assertTrue(ledger.tight("subsource", "request"))
+
+    def test_room_is_taken_at_once_so_requests_made_together_cant_pass_a_limit(self):
+        # The limit was checked (exhausted) and the request counted later (count), so requests made at the
+        # same time all passed the same room. take() checks every window and counts in one step
+        clock = Clock()
+        ledger = Ledger(clock=clock, keyed={"subsource": True})
+        self.addCleanup(ledger.close)
+        ledger.count("subsource", "request", 50)
+        with ThreadPoolExecutor(16) as pool:
+            taken = list(pool.map(lambda _: ledger.take("subsource", "request", who="me"), range(40)))
+        self.assertEqual(taken.count(True), 10)
+        self.assertEqual((ledger.used("subsource", "request", 60), ledger.used("subsource", "request", 60, "me")),
+                         (60, 10))
+        self.assertFalse(ledger.take("subsource", "request"))
+        clock.t += 60                                                   # the next minute
+        ledger.count("subsource", "request", 59)
+        self.assertFalse(ledger.take("subsource", "request", 2))       # room for one, not two: nothing counted
+        self.assertEqual(ledger.used("subsource", "request", 60), 59)
+        self.assertTrue(ledger.take("subsource", "request"))
+        self.assertEqual(ledger.used("subsource", "request", 3600), 120)   # the hour's window counted each one too
+        self.assertTrue(ledger.take("osv3", "download"))                # no published limit: always room, nothing kept
+        self.assertEqual(ledger.db.execute("SELECT COUNT(*) FROM counts WHERE source='osv3'").fetchone()[0], 0)
+
+    def test_a_count_is_one_transaction_of_a_wal_database(self):
+        # Each window's row, and the person's, was a transaction of its own in a rollback journal synced in
+        # full: six disk flushes for one SubSource request, under the lock every limit check waits for
+        with tempfile.TemporaryDirectory() as data:
+            ledger = Ledger(os.path.join(data, "sources.sqlite3"), clock=Clock(), keyed={"subsource": True})
+            try:
+                self.assertEqual(ledger.db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+                self.assertEqual(ledger.db.execute("PRAGMA synchronous").fetchone()[0], 1)     # NORMAL
+                statements = []
+                ledger.db.set_trace_callback(statements.append)
+                self.assertTrue(ledger.take("subsource", "request", who="me"))
+                ledger.count("subsource", "request", who="me")
+                ledger.db.set_trace_callback(None)
+                self.assertEqual([x for x in statements if not x.startswith(("INSERT", "SELECT"))],
+                                 ["BEGIN IMMEDIATE", "DELETE FROM counts WHERE start < 1799827200", "COMMIT",
+                                  "BEGIN IMMEDIATE", "COMMIT"])           # the sweep once, with the first
+                self.assertEqual(ledger.db.execute("SELECT COUNT(*), SUM(n) FROM counts").fetchone(), (6, 12))
+            finally:
+                ledger.close()
+
+    def test_the_sweep_drops_windows_that_started_over_two_days_ago(self):
+        clock = Clock(1_799_971_200.0)                                  # 00:00 UTC
+        ledger = Ledger(clock=clock, keyed={"subdl": True})
+        self.addCleanup(ledger.close)
+        ledger.count("subdl", "download", 7)                            # day 0
+        clock.t += sourcestate.LEDGER_KEEP_S - 1                        # nearly two days on: kept
+        ledger.count("subdl", "download")
+        self.assertEqual(ledger.db.execute("SELECT COUNT(*) FROM counts").fetchone()[0], 2)
+        clock.t += sourcestate.LEDGER_SWEEP_S + 2                       # an hour later: day 0's window goes
+        ledger.count("subdl", "download")
+        self.assertEqual(ledger.db.execute("SELECT SUM(n) FROM counts").fetchone()[0], 2)
 
     def test_a_retry_after_that_is_no_number_pauses_for_the_default(self):
         # "nan" paused nothing (every comparison with it is false); a number is kept within the bounds
