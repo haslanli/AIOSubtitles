@@ -364,6 +364,19 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         self.assertEqual(answers(data), [411])                 # and closed: what followed is never read
         self.assertIn(b"The form arrived without its length.", data)
 
+    def test_a_length_not_in_digits_alone_is_no_length(self):
+        # The form's Content-Length was read with int, which takes a sign and underscores: "+16" and "1_6"
+        # read the form, "-1" was called too large. Such a length is none, as every number in a header is read
+        # (digits.py, and parse_request); spaces around one are not part of it
+        port = self.server.server_address[1]
+        body = form(link="", password="x")
+        n = str(len(body))
+        for length, code in (("+" + n, 411), (n[0] + "_" + n[1:], 411), ("-1", 411), (f" {n} ", 400)):
+            with self.subTest(length=length):
+                data = exchange(port, b"POST /signup HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded"
+                                b"\r\nConnection: close\r\nContent-Length: " + length.encode() + b"\r\n\r\n" + body)
+                self.assertEqual(answers(data), [code])
+
     def test_a_405_names_the_methods_the_address_takes(self):
         # RFC 9110 asks a 405 to name them (Allow); none was named
         _, _, _, _, token = self.sign_up()

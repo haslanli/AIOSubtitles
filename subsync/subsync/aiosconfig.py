@@ -464,10 +464,16 @@ CALL_TIMEOUT = 30            # a call's wait when neither the call nor the clien
 QUICK_TIMEOUT = 15           # the status, whether a config exists, an alias: small answers given at once
 WRITE_TIMEOUT = 90           # saving or making a config (AIOStreams checks every addon in it)
 ADDON_TIMEOUT = 60           # an addon route of a config: its manifest, a stream or subtitle listing
+SETUP_CHECK_TIMEOUT = 40     # ./setup's last check: a subtitle listing through the person's config, the Usenet config's
+                             # manifest
+SETUP_SEARCH_TIMEOUT = 90    # ./setup's last check: a stream listing through the sync config, whose search of every
+                             # source and cache check take longest
 TRIES = 6                    # tries at a call AIOStreams asks to slow down
 SLOW_DOWN_WAIT = 6           # the wait for a "too many requests" that names none (stock AIOStreams: a 5-second window)
 RETRY_WAIT_CAP = 60          # the longest wait asked for that is waited out; a longer one is reported
 PUBLIC_RETRY_WAIT_CAP = 5    # the public sign-up's (a person is waiting on the page)
+PUBLIC_TIMEOUT = 30          # public mode's longest wait for any call, from its start to its whole answer: the sign-up,
+                             # the settings page and the daily check (signup.public_api)
 MAX_ANSWER = 16 * 1024 * 1024   # the largest AIOStreams answer read (a config, a stream or subtitle listing)
 MAX_REFUSAL = 64 * 1024      # the most of an alias lookup's refusal read
 ERROR_EXCERPT = 300          # bytes of an error answer that isn't JSON kept as its message

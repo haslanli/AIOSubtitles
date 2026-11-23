@@ -19,9 +19,9 @@ import threading
 import time
 import urllib.parse
 
-from . import pages, ui
+from . import digits, pages, ui
 from .addon import MANIFEST_CACHE, App, Handler, Server, head_answer, is_entry, manifest
-from .aiosconfig import MAX_LANGUAGES, parse_languages
+from .aiosconfig import MAX_LANGUAGES, PUBLIC_TIMEOUT, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
 from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, public_api, refresh,
@@ -397,8 +397,8 @@ class FormError(Exception):
 class PublicService:
     """What the public pages and routes share: settings, the stores, the pool, the sign-up gate."""
 
-    def __init__(self, settings, env, store, users, pool, api_factory=public_api, timeout=30, clock=time.time):
-        self.s, self.env, self.store, self.users, self.pool = settings, env, store, users, pool
+    def __init__(self, settings, store, users, pool, api_factory=public_api, timeout=PUBLIC_TIMEOUT, clock=time.time):
+        self.s, self.store, self.users, self.pool = settings, store, users, pool
         self.api_factory, self.timeout, self.clock = api_factory, timeout, clock
         self.gate = SignupGate(settings, users.count, clock=clock)
         # each person's AIOStreams checked again about once a day while they use the service; a change restarts their
@@ -520,12 +520,13 @@ class PublicHandler(Handler):
         self.end_headers()
 
     def _form(self):
-        try:
-            length = int(self.headers.get("Content-Length") or "")
-        except ValueError:
+        # a length in the digits 0 to 9 alone, as every number in a header is read (digits.py), and as
+        # parse_request reads it: a sign or an underscore makes it none
+        length = digits.whole((self.headers.get("Content-Length") or "").strip())
+        if length is None:
             self.close_connection = True
-            raise FormError("The form arrived without its length.", 411) from None
-        if length < 0 or length > MAX_FORM:
+            raise FormError("The form arrived without its length.", 411)
+        if length > MAX_FORM:
             self.close_connection = True
             raise FormError("The form is too large: send it again from this page.", 413)
         raw = self.read_body(length)
@@ -561,7 +562,7 @@ class PublicHandler(Handler):
                     return self._not_allowed("GET, HEAD")
                 if path != "/health" and not svc.store.keep_texts:
                     # a store of recipes (public mode's): a copy is rebuilt from a person's own list, under
-                    # their link (/u/<token>/file/), never here
+                    # their read key (/r/<read key>/file/, ENTRY_PATH), never here
                     return self._send(404, b"")
                 return self.dispatch(svc.shared, path, False)
             m = ENTRY_PATH.match(path)
@@ -766,6 +767,6 @@ class _CappedServer(Server):
 
 
 def serve_public(service, port, host="0.0.0.0"):
-    handler = type("BoundPublicHandler", (PublicHandler,), {"service": service, "app": service.shared})
+    handler = type("BoundPublicHandler", (PublicHandler,), {"service": service})
     return _CappedServer((host, port), handler, service.s.max_connections)
 

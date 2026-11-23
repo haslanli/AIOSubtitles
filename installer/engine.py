@@ -707,7 +707,7 @@ class Engine:
         if gateway:
             value = urllib.parse.urlunsplit(parts._replace(netloc=f'{PLACE.gateway}:{parts.port or 80}'))
         try:
-            self.status = Aios(value, timeout=15).status()
+            self.status = Aios(value).status()
         except AiosError as e:
             if gateway:
                 return False, CANT_REACH, value
@@ -1291,7 +1291,7 @@ class Engine:
         reached = False
         for type_, imdb, _ in TEST_TITLES:
             try:
-                self.aios.addon_get(viewer_base, f'/subtitles/{type_}/{imdb}.json', timeout=40)
+                self.aios.addon_get(viewer_base, f'/subtitles/{type_}/{imdb}.json', timeout=aios.SETUP_CHECK_TIMEOUT)
             except AiosError:
                 continue
             if self.subsync_status().get('subtitle_requests', 0) > before:
@@ -1307,7 +1307,7 @@ class Engine:
         if self.usenet and self.keys.get('USENET_UUID'):
             usenet_base = self.addon_base(self.keys['USENET_UUID'], self.usenet_encrypted)
             try:
-                self.aios.addon_get(usenet_base, '/manifest.json', timeout=40)
+                self.aios.addon_get(usenet_base, '/manifest.json', timeout=aios.SETUP_CHECK_TIMEOUT)
                 self.out.ok("subsync's Usenet config answers (no search made, to spare your indexer's daily calls)")
             except AiosError:
                 self.good = False
@@ -1321,7 +1321,8 @@ class Engine:
         rows, title = [], None
         for type_, imdb, name in TEST_TITLES[:2]:
             try:
-                streams = self.aios.addon_get(sync_base, f'/stream/{type_}/{imdb}.json', timeout=90).get('streams') or []
+                streams = self.aios.addon_get(sync_base, f'/stream/{type_}/{imdb}.json',
+                                              timeout=aios.SETUP_SEARCH_TIMEOUT).get('streams') or []
             except AiosError as e:
                 self.out.warn(e.message)
                 continue

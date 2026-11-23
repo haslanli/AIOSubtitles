@@ -147,7 +147,7 @@ def main_public(s):
     users = Users(os.path.join(s.data, USERS_DATABASE), s.secret_bytes())
     env = dict(os.environ)
     pool = Pool(s, env, store, users)
-    server = serve_public(PublicService(s, env, store, users, pool), s.port, s.bind)
+    server = serve_public(PublicService(s, store, users, pool), s.port, s.bind)
 
     def housekeeping():
         last_expire = float("-inf")   # the first round expires; a step of the system clock moves no expiry

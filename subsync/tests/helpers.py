@@ -675,7 +675,7 @@ class ServerHarness(PublicParts):
                                   "SUBSYNC_RECHECK_HOURS": "0"}, **env))
         self.store = Store(self.dir)
         self.pool = Pool(self.s, self.env, self.store, self.users, start_workers=False)
-        self.service = PublicService(self.s, self.env, self.store, self.users, self.pool, api_factory=self.api)
+        self.service = PublicService(self.s, self.store, self.users, self.pool, api_factory=self.api)
         self.server = start_server(serve_public(self.service, 0, host="127.0.0.1"))
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 

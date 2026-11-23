@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 
-from .aiosconfig import UNREACHABLE, AiosError, install_link
+from .aiosconfig import PUBLIC_TIMEOUT, UNREACHABLE, AiosError, install_link
 from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, drop_sync,
                      instance_key, public_api, rebuild, store_only)
 
@@ -47,7 +47,8 @@ def _problem(e):
 
 
 class Checker:
-    def __init__(self, settings, users, on_change=None, api_factory=public_api, clock=time.time, timeout=30):
+    def __init__(self, settings, users, on_change=None, api_factory=public_api, clock=time.time,
+                 timeout=PUBLIC_TIMEOUT):
         self.s, self.users, self.on_change = settings, users, on_change
         self.api_factory, self.clock, self.timeout = api_factory, clock, timeout
         self.lock = threading.Lock()

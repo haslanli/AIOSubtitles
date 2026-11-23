@@ -2,6 +2,7 @@
 the subtitle cache setting. Errors come back as plain sentences that say how to fix them. The client lives in
 subsync/aiosconfig.py, shared with the public sign-up."""
 from subsync.aiosconfig import (  # noqa: F401
-    ALIAS_NO_CONFIG, ALIAS_UNKNOWN, WRONG_PASSWORD_CODES, AiosApi, AiosError, needs_sign_in)
+    ALIAS_NO_CONFIG, ALIAS_UNKNOWN, SETUP_CHECK_TIMEOUT, SETUP_SEARCH_TIMEOUT, WRONG_PASSWORD_CODES, AiosApi, AiosError,
+    needs_sign_in)
 
 Aios = AiosApi

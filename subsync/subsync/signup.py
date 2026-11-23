@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 
 from . import explain, realdebrid
 from .aiosconfig import (ALIAS_NO_CONFIG, ALIAS_UNKNOWN, BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, NOT_AIOSTREAMS,
-                         PUBLIC_RETRY_WAIT_CAP, UNREACHABLE, UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES, AiosApi,
-                         AiosError, install_link, is_limited, is_subsync_preset, needs_sign_in, new_key,
+                         PUBLIC_RETRY_WAIT_CAP, PUBLIC_TIMEOUT, UNREACHABLE, UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES,
+                         AiosApi, AiosError, install_link, is_limited, is_subsync_preset, needs_sign_in, new_key,
                          parse_languages, sync_config, sync_config_problems, usenet_route, usenet_sync_config,
                          viewer_change, without_builtin_twins, without_subsync)
 from .extra import cleanable_presets
@@ -627,7 +627,7 @@ def form_audio(settings, form):
     return _audio_answer(form.get("audio"), settings)
 
 
-def signup(settings, users, form, api_factory=public_api, timeout=30):
+def signup(settings, users, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
     with _refusal_explained():
         return _signup(settings, users, form, api_factory, timeout)
 
@@ -688,7 +688,7 @@ def _signup(settings, users, form, api_factory, timeout):
                         usenet=usenet is not None, usenet_why=why if want else None, sync_made=has_sync and not stored)
 
 
-def refresh(settings, users, token, form, api_factory=public_api, timeout=30):
+def refresh(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
     """Rebuilds the sync config, and with the Usenet box ticked the Usenet config, from the person's config as it is now
     (and puts AIOSubtitles back if it is missing). A gone config is made again. With a new config link (`link`), that
     config becomes theirs; on another AIOStreams their configs move there and the old ones are removed. The kept
@@ -849,7 +849,7 @@ def set_audio(users, token, choice, settings):
     return choice
 
 
-def delete(settings, users, token, form, api_factory=public_api, timeout=30):
+def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
     """Removes the sync config and the Usenet config from the person's AIOStreams, with their password also AIOSubtitles
     from their own config, then their record and usage. Under the record's lock, so a refresh or the daily check can't
     make a config for a record being deleted; once the password is accepted, the record is always deleted."""
