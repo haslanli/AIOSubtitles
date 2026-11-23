@@ -1134,6 +1134,18 @@ class SectionsTest(unittest.TestCase):
         moved = [(s + 10, e + 10) for s, e in typo[:20]] + [(s - 5, e - 5) for s, e in typo[20:]]
         self.assertEqual(sections.moved_back(typo, moved), {20, 21, 22, 23, 24})   # an end an hour late hides none
 
+    def test_the_fit_and_the_word_check_share_one_dialogue_order(self):
+        # The anchors are keyed by position in the dialogue lines' time order, which sections.fit and
+        # TextCheck each worked out by hand; one function gives it to both: by start, lines starting together in file
+        # order, signs and songs left out
+        lines = [{"s": 5.0, "e": 6.0, "text": "b", "kind": "dialogue"},
+                 {"s": 1.0, "e": 2.0, "text": "SIGN", "kind": "sign"},
+                 {"s": 3.0, "e": 4.0, "text": "a", "kind": "dialogue"},
+                 {"s": 5.0, "e": 7.0, "text": "c", "kind": "dialogue"}]
+        self.assertEqual(sections.dialogue_order(lines), [2, 0, 3])
+        words = pipeline.TextCheck(None, {}, lines, "eng", False)
+        self.assertEqual([line["text"] for line in words.lines], ["a", "b", "c"])
+
     def test_one_steady_shift_is_no_sectioned_fit(self):
         release = rhythm(600, 41)
         _, sect, _ = judge_sections(release, [(st - 20.0, d) for st, d in release])

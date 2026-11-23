@@ -55,6 +55,12 @@ def moved_back(was, now):
     return out
 
 
+def dialogue_order(lines):
+    """The indexes of the dialogue lines of `lines` in time order (by start; lines starting together in file order):
+    the order the sectioned fit works in and keys its anchors by, the one pipeline.TextCheck pairs words in."""
+    return sorted((i for i, l in enumerate(lines) if l["kind"] == "dialogue"), key=lambda i: lines[i]["s"])
+
+
 def offsets(starts, ref):
     """The shifts worth trying: up to MAX_OFFSETS peaks of the start-difference histogram, PEAK_APART apart. starts in
     any order; ref sorted."""
@@ -89,7 +95,7 @@ def _cut_scene(a, b, now, landing):
     out after them (moved_back), so each choice leaves out a run of lines around the break; the one chosen lands the
     fewest of the release's lines under their own section's shift (landing), then is the shortest, then leaves out the
     later lines. The cut scene lands only by chance, so its lines go wherever the break fell: before, inside or after
-    it. a, b: the two sections' lines (dialogue indexes in time order); now: each line's re-timed (start, end)."""
+    it. a, b: the two sections' lines (positions in dialogue_order); now: each line's re-timed (start, end)."""
     head = now[b[0]][0]
     ends = [min(e1, s1 + LONGEST_S) for s1, e1 in (now[i] for i in a)]
     most = 0                     # a's last lines still on screen when b starts; a keeps at least its first
@@ -157,11 +163,12 @@ def _assign(s, e, ref, ref_e, offs, anchors):
 
 
 def fit(lines, ref_cues, anchors=None):
-    """lines: parse() dicts in file order; ref_cues: the reference's (start, duration). anchors: {dialogue index in time
-    order: the shift its words give}, or a function giving them, called only once a sectioned fit is possible (the
-    words are read only then). Returns None, or {"lines": the re-timed lines (dropped ones marked), "groups":
-    [line indexes of each section, in file order], "summary": what the verdict records}."""
-    dial = sorted((i for i, l in enumerate(lines) if l["kind"] == "dialogue"), key=lambda i: lines[i]["s"])
+    """lines: parse() dicts in file order; ref_cues: the reference's (start, duration). anchors: {position in
+    dialogue_order(lines): the shift its words give}, or a function giving them, called only once a sectioned fit is
+    possible (the words are read only then). Returns None, or {"lines": the re-timed lines (dropped ones marked),
+    "groups": [the indexes into `lines` of each section's lines, in time order], "summary": what the verdict
+    records}."""
+    dial = dialogue_order(lines)
     n = len(dial)
     if n < 2 * MIN_SECTION_LINES:
         return None

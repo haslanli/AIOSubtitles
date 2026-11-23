@@ -435,9 +435,8 @@ class TextCheck:
         own = written(lang)
         self.on = bool(on) and ref.get("route") in ("cues", "image") and not is_cross(ref, lang) \
             and FAMILY.get(own, own) not in textpair.UNSPACED
-        dial = [i for i, l in enumerate(lines) if l["kind"] == "dialogue"]
-        self.order = sorted(range(len(dial)), key=lambda j: lines[dial[j]]["s"])
-        self.lines = [lines[dial[j]] for j in self.order]
+        self.order = sections.dialogue_order(lines)   # the sectioned fit's order: its anchors are keyed by it
+        self.lines = [lines[i] for i in self.order]
         self.anchors = None
 
     def _track(self, may_read):
@@ -453,7 +452,8 @@ class TextCheck:
         return track
 
     def shifts(self, may_read):
-        """For the sectioned fit: {dialogue index in time order: the shift its words give} (empty without words)."""
+        """For the sectioned fit: {position in sections.dialogue_order: the shift its words give} (empty without
+        words)."""
         track = self._track(may_read)
         if track is None:
             return {}
@@ -466,8 +466,7 @@ class TextCheck:
         track = self._track(may_read)
         if track is None:
             return None
-        dial = [l for l in timed if l["kind"] == "dialogue"]
-        ordered = [dial[j] for j in self.order]
+        ordered = [timed[i] for i in self.order]
         anchors = [a for a in self.anchors if not any(ordered[i].get("drop") for i in a["c"])]   # lines left out
         errs = textpair.errors(anchors, ordered, track)
         ok, why, s = textpair.confirm(anchors, errs, limit_ms, timing_weak(gate, timed))

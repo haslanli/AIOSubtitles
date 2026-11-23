@@ -25,6 +25,8 @@ FILM = 24000 / 1001     # 23.976 fps
 SCALES = (1.0, 25 / FILM, FILM / 25, 24 / FILM, FILM / 24, 25 / 24, 24 / 25)
 MAX_OFFSET_S = 120.0
 BIN_S = 0.05
+PEAK_BINS = 3           # a peak's width: each bin counted with its neighbours (the window), its differences taken
+                        # within half of it either way (the refined offset), so both see the same differences
 NEAR_S = 0.1            # a candidate start "lands" on a reference start within this
 SCALE_MARGIN = 1.1      # a frame-rate scale must land 10 % more starts than none
 END_WEIGHT = 0.5        # an end that lands counts half a start
@@ -41,12 +43,12 @@ def _votes(cand, ref, offset):
 
 
 def _window(cand, ref, max_offset):
-    """Every (reference - candidate) difference within max_offset binned (numpy), each bin with its two neighbours:
-    (window, n), bin i being the offset (i - n) * BIN_S; None when no difference is within max_offset. cand and ref in
-    any order. The candidate starts are taken STARTS_AT_ONCE at a time, each block only against the reference starts
-    it can reach and at most PAIRS_AT_ONCE differences at once, so a long or crafted track (tens of thousands of lines,
-    whose every pair would take gigabytes) costs time, not memory; a 1,500-line subtitle against a 1,700-line track
-    takes milliseconds."""
+    """Every (reference - candidate) difference within max_offset binned (numpy), each bin summed with its neighbours
+    over PEAK_BINS bins: (window, n), bin i being the offset (i - n) * BIN_S; None when no difference is within
+    max_offset. cand and ref in any order. The candidate starts are taken STARTS_AT_ONCE at a time, each block only
+    against the reference starts it can reach and at most PAIRS_AT_ONCE differences at once, so a long or crafted track
+    (tens of thousands of lines, whose every pair would take gigabytes) costs time, not memory; a 1,500-line subtitle
+    against a 1,700-line track takes milliseconds."""
     cand, ref = np.sort(np.asarray(cand)), np.sort(np.asarray(ref))
     n = int(round(max_offset / BIN_S))
     counts = np.zeros(2 * n + 1, dtype=np.int64)
@@ -61,15 +63,15 @@ def _window(cand, ref, max_offset):
             counts += np.bincount(np.rint(diffs / BIN_S).astype(np.int64) + n, minlength=2 * n + 1)
     if not counts.any():
         return None
-    return np.convolve(counts, np.ones(3, dtype=np.int64), mode="same"), n
+    return np.convolve(counts, np.ones(PEAK_BINS, dtype=np.int64), mode="same"), n
 
 
 def _refine(cand, ref, peak):
-    """The median of the differences within 1.5 bins of a peak (in bins)."""
-    near = []
+    """The median of the differences within a peak's width (PEAK_BINS bins centred on it); `peak` in bins."""
+    near, half = [], PEAK_BINS / 2 * BIN_S
     for c in cand:
-        k = bisect.bisect_left(ref, c + peak * BIN_S - 1.5 * BIN_S)
-        while k < len(ref) and ref[k] <= c + peak * BIN_S + 1.5 * BIN_S:
+        k = bisect.bisect_left(ref, c + peak * BIN_S - half)
+        while k < len(ref) and ref[k] <= c + peak * BIN_S + half:
             near.append(ref[k] - c)
             k += 1
     return statistics.median(near) if near else peak * BIN_S

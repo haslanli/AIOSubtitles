@@ -406,7 +406,8 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
         with self.assertLogs("subsync.recheck", "WARNING") as logged:
             self.assertEqual(self.checker().check(token), "config_refused")
         detail = self.record(token)["state_detail"]
-        self.assertTrue(detail.startswith("x 2026-11-19 00:00:00,000 ERROR subsync.public forged line [31m AAA"), detail)
+        self.assertTrue(detail.startswith("x 2026-11-19 00:00:00,000 ERROR subsync.public forged line [31m AAA"),
+                        detail)
         self.assertTrue(detail.endswith("A…"))
         self.assertEqual(len(detail), ERROR_EXCERPT)
         self.assertEqual(logged.output, ['WARNING:subsync.recheck:AIOStreams refused the config AIOSubtitles made at a '

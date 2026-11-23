@@ -102,9 +102,9 @@ def _pair(ref, cand):
     return m
 
 
-def missing_scene(ref, cand, each=True, window=WINDOW):
+def missing_scene(ref, cand, each=True):
     """The part of the release a subtitle lacks: a stretch of consecutive reference starts that no candidate start is
-    within `window` of. Inside the candidate's span, a stretch of at least MISSING_LINES lines over at least MISSING_S
+    within WINDOW of. Inside the candidate's span, a stretch of at least MISSING_LINES lines over at least MISSING_S
     seconds (a scene a subtitle for another cut lacks): with `each` (a track in the subtitle's own language) any such
     stretch, else (another language's track) only the stretch with the most lines; beyond its first or last line, the
     release's lines there when they are at least LONG_END_LINES over at least LONG_END_S, far longer than any credits
@@ -113,7 +113,7 @@ def missing_scene(ref, cand, each=True, window=WINDOW):
     the candidate's ends is found; inside_at, the last reference start of each stretch found inside the span."""
     stretches, run = [], []     # (lines, seconds, last start)
     for r in ref[bisect.bisect_left(ref, cand[0]):bisect.bisect_right(ref, cand[-1])]:
-        if lands(cand, r, window):
+        if lands(cand, r, WINDOW):
             if run:
                 stretches.append((len(run), run[-1] - run[0], run[-1]))
             run = []
@@ -122,7 +122,7 @@ def missing_scene(ref, cand, each=True, window=WINDOW):
     if run:
         stretches.append((len(run), run[-1] - run[0], run[-1]))
     top = max(stretches, key=lambda x: x[0], default=(0, 0.0, None))      # the first with the most lines
-    ends = ref[:bisect.bisect_left(ref, cand[0] - window)], ref[bisect.bisect_right(ref, cand[-1] + window):]
+    ends = ref[:bisect.bisect_left(ref, cand[0] - WINDOW)], ref[bisect.bisect_right(ref, cand[-1] + WINDOW):]
     found = [(len(e), e[-1] - e[0]) for e in ends if len(e) >= LONG_END_LINES and e[-1] - e[0] >= LONG_END_S]
     at_end = bool(found)
     inside = [x for x in (stretches if each else [top]) if x[0] >= MISSING_LINES and x[1] >= MISSING_S]
@@ -248,7 +248,8 @@ def clearly_better(original, copy, rule=None, min_span=None, ref_recall=1.0):
     earlier or later), so after a perfect shift only about 80 % of them are within 200 ms and the main bar (90 %) is out
     of reach, while the original may be seconds off. The copy passes here when at least `paired` of its lines pair,
     its median error is at most `median_ms` and at most `ratio` of the original's, no tenth of the runtime has fewer
-    than half of its lines within 500 ms, and it covers `min_span` of the release's span.
+    than half of its lines within 500 ms, it covers `min_span` of the release's span, and no scene of the release is
+    missing (another cut).
     original, copy: relgate() results. Returns (passes, why)."""
     rule = dict(BETTER, **(rule or {}))
     recall = max(0.0, min(1.0, ref_recall))
