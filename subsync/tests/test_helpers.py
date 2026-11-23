@@ -447,6 +447,24 @@ class HalfwaySetUpTest(unittest.TestCase):
                 self.assertEqual(case.fake.server.socket.fileno(), -1)           # the stand-in AIOStreams
                 self.assert_closed(case.users.db, *([case.store.db] if kind in (Server, InBody) else []))
 
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_records_a_test_reopens_are_closed_too(self):
+        # the scans for a secret on disk close the people's records and open them again (test_signup, test_recheck):
+        # the harness closes the ones there when it ends, as it did before it held each part's undoing
+        from subsync.users import Users
+        opened = []
+
+        class Reopens(SignupHarness, unittest.TestCase):
+            def test(case):
+                case.users.close()
+                case.users = Users(os.path.join(case.dir, "users.sqlite3"), case.s.secret_bytes())
+                opened.append(case.users)
+
+        result = unittest.TestResult()
+        Reopens("test").run(result)
+        self.assertEqual((result.testsRun, result.errors, result.failures), (1, [], []))
+        self.assert_closed(opened[0].db)
+
     def test_the_sources_harness_takes_its_patch_off(self):
         class Sources(SourcesHarness, unittest.TestCase):
             def test(case):

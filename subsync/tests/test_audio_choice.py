@@ -389,7 +389,10 @@ class OpenedTest(Base):
                 return sources.Aios("").match([rd], hints)
         w = Worker(self.settings(), self.store, RealDebridOnly(None, self.subs()), Safety(), limits=Limits())
         self.workers.append(w)
-        self.first_pass(w)
+        with self.assertLogs("subsync.sources", "WARNING") as logs:
+            self.first_pass(w)
+        self.assertEqual(logs.output,
+                         ["WARNING:subsync.sources:Real-Debrid check: 1 listed Real-Debrid file skipped, never read"])
         self.assertEqual((len(w.jobs), self.file_key(), self.srv.log), (0, None, []))   # nothing read, nothing started
         self.assertFalse(w.waits_for_pick(self.alias))
 
@@ -771,6 +774,10 @@ class AudioEndingTest(Base):
         w._loop("audio")
 
     def test_a_failure_during_the_sync_leaves_the_file_waiting(self):
+        said = {ReadFailed: "INFO:subsync.worker:read failed movie/tt1 during the audio sync (timed out): it waits for "
+                            "another pick",
+                Refused: "WARNING:subsync.worker:refused movie/tt1 (HTTP 429): no reads for 900 s",
+                RuntimeError: "WARNING:subsync.worker:failed movie/tt1: RuntimeError"}
         for error in (ReadFailed("timed out"), Refused("HTTP 429"), RuntimeError("a bug")):
             with self.subTest(error=type(error).__name__):
                 self.store.db.execute("DELETE FROM pickable")
@@ -780,7 +787,12 @@ class AudioEndingTest(Base):
                 def failing(*a, error=error):
                     raise error
                 w._sync_all = failing                       # the audio fit fails after the index was read
-                self.one_audio_turn(w)
+                with self.assertLogs("subsync.worker", "INFO") as logs:
+                    self.one_audio_turn(w)
+                line = said[type(error)]
+                self.assertIn(line, logs.output)
+                self.assertEqual([x for x in logs.output if x.startswith("WARNING")],
+                                 [line] if line.startswith("WARNING") else [])
                 self.assertTrue(w.waits_for_pick(self.alias))
                 self.assertTrue(self.worker(Limits()).waits_for_pick(self.alias))   # its row too
                 # 1 h, 6 h, 24 h, for this person: a refusal is most likely their account's limit

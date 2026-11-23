@@ -1640,8 +1640,10 @@ class UnreadableFileTest(unittest.TestCase):
         w = self.worker()
         job = self.job("tiny.mkv")
         # a 2,000-byte TrackNumber opens, then fails here (json.dumps of the tracks: Python's limit of 4,300 digits)
-        with mock.patch.object(self.store, "file_read", side_effect=ValueError("Exceeds the limit (4300 digits)")):
+        with mock.patch.object(self.store, "file_read", side_effect=ValueError("Exceeds the limit (4300 digits)")), \
+                self.assertLogs("subsync.worker", "WARNING") as logs:
             run_once(w, job)
+        self.assertEqual(logs.output, ["WARNING:subsync.worker:failed movie/tt1: ValueError"])
         retry = self.store.file_retry(job.alias)
         self.assertIsNotNone(retry, "nothing marked: read again on every request")
         self.assertAlmostEqual(retry, time.time() + READ_FAILED_BACKOFF_S[0], delta=60)
@@ -1650,8 +1652,10 @@ class UnreadableFileTest(unittest.TestCase):
         self.assertEqual((len(self.srv.log), self.aios.lists), (read, lists))
         # a failure before the index is read (here the subtitle list's) marks nothing: nothing is known of the file
         self.store.db.execute("DELETE FROM files")
-        with mock.patch.object(w, "_candidates", side_effect=RuntimeError("a bug")):
+        with mock.patch.object(w, "_candidates", side_effect=RuntimeError("a bug")), \
+                self.assertLogs("subsync.worker", "WARNING") as logs:
             run_once(w, self.job("tiny.mkv"))
+        self.assertEqual(logs.output, ["WARNING:subsync.worker:failed movie/tt1: RuntimeError"])
         self.assertIsNone(self.store.file_retry(job.alias))
 
 
@@ -1784,7 +1788,9 @@ class FirstReadRetryTest(unittest.TestCase):
 
     def test_a_refusal_is_not_tried_again(self):
         self.srv.fault = "403"
-        self.run_with()
+        with self.assertLogs("subsync.worker", "WARNING") as logs:
+            self.run_with()
+        self.assertEqual(logs.output, ["WARNING:subsync.worker:refused movie/tt1 (HTTP 403): no reads for 900 s"])
         self.sleep.assert_not_called()
         self.assertEqual(len(self.srv.headers), 1)
         self.assertEqual(self.backed_off_for(), 3600)             # a refused file waits an hour first, as before

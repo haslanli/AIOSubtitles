@@ -592,7 +592,10 @@ class KeepTest(Base):
         self.assertEqual(self.lookup.peek("tt1")["tmdb"], "eng")
 
     def test_overrides_need_no_lookup(self):
-        lk = self.make(SUBSYNC_ORIGINAL_LANGUAGES="tt1375666=en, tt2788316=ja,bad,tt3=zz")
+        with self.assertLogs("subsync.origlang", "WARNING") as logs:
+            lk = self.make(SUBSYNC_ORIGINAL_LANGUAGES="tt1375666=en, tt2788316=ja,bad,tt3=zz")
+        self.assertEqual(logs.output, ["WARNING:subsync.origlang:SUBSYNC_ORIGINAL_LANGUAGES: 2 entries ignored "
+                                       "(not an id=language pair)"])
         self.assertEqual(origlang.choose(lk.peek("tt2788316:1:1")), ("jpn", "override"))
         self.assertIsNone(lk.start("tt1375666", key=KEY))
         self.assertEqual(self.srv.calls, [])
@@ -600,7 +603,10 @@ class KeepTest(Base):
     def test_anime_known_only_by_a_myanimelist_or_kitsu_number_can_be_set(self):
         # Only IMDb ids were taken, so the anime rule's weakest answers (kept with no expiry) couldn't be
         # corrected; an episode's id is still no key
-        lk = self.make(SUBSYNC_ORIGINAL_LANGUAGES="mal:5114=ja,kitsu:7442=zh,mal:21:1=ko")
+        with self.assertLogs("subsync.origlang", "WARNING") as logs:
+            lk = self.make(SUBSYNC_ORIGINAL_LANGUAGES="mal:5114=ja,kitsu:7442=zh,mal:21:1=ko")
+        self.assertEqual(logs.output, ["WARNING:subsync.origlang:SUBSYNC_ORIGINAL_LANGUAGES: 1 entries ignored "
+                                       "(not an id=language pair)"])
         self.assertEqual(origlang.choose(lk.peek("mal:5114:3")), ("jpn", "override"))
         self.assertEqual(origlang.choose(lk.peek("kitsu:7442")), ("chi", "override"))
         self.assertIsNone(lk.start("kitsu:7442:1", key=KEY))

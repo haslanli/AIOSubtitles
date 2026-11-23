@@ -209,7 +209,9 @@ class OwnRowsTest(Base):
             raise Refused("HTTP 429")
         a.process = running
         a.submit(Job("movie", "tt8", {"filename": "c.mp4", "videoSize": 5}))
-        a._loop("main")
+        with self.assertLogs("subsync.worker", "WARNING") as logs:
+            a._loop("main")
+        self.assertEqual(logs.output, ["WARNING:subsync.worker:refused movie/tt8 (HTTP 429): no reads for 900 s"])
         self.assertEqual(self.own_rows("a" * 16), 0)
         self.assertEqual(a.originals[ALIAS], ORIGINALS)              # in memory only, for this worker's last moments
         self.assertTrue(a.waits_for_pick(ALIAS))

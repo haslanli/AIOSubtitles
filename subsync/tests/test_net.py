@@ -274,8 +274,10 @@ class GateTest(unittest.TestCase):
         for public in (False, True):
             net.configure(public_only=public, resolver=resolver_answering("93.184.216.34"))
             with self.subTest(public=public), local_network_only():
-                with self.assertRaises(realdebrid.Blocked):
+                with self.assertRaises(realdebrid.Blocked), self.assertLogs("subsync.realdebrid", "WARNING") as logs:
                     realdebrid.urlopen("https://api.real-debrid.com/rest/1.0/user", timeout=5)
+                self.assertEqual(logs.output,
+                                 ["WARNING:subsync.realdebrid:blocked a request to Real-Debrid (api.real-debrid.com)"])
 
     def test_proxies_from_the_environment_are_not_used_in_public_mode(self):
         server = Server()

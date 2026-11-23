@@ -598,7 +598,7 @@ class PublicParts:
                              "SUBSYNC_PUBLIC_BASE": "https://subs.test"}, **env)
             self.s = Settings(self.env)
             self.users = Users(os.path.join(self.dir, "users.sqlite3"), self.s.secret_bytes(), clock=clock)
-            self.undo.callback(self.users.close)
+            self.undo.callback(lambda: self.users.close())      # the records there at the end: a test may reopen them
             self.fake = FakeAiostreams()
             self.undo.callback(self.fake.close)
             self.logs = Logs().on()

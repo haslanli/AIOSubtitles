@@ -619,7 +619,9 @@ class WorkerHooksTest(unittest.TestCase):
             raise Refused("HTTP 429")
         a.process = refused
         a.submit(job)
-        a._loop("main")
+        with self.assertLogs("subsync.worker", "WARNING") as logs:
+            a._loop("main")
+        self.assertEqual(logs.output, ["WARNING:subsync.worker:refused movie/tt1 (HTTP 429): no reads for 900 s"])
         self.assertTrue(a._file_blocked(job.alias))          # 1 h, then 6 h, 24 h, for this person
         self.assertFalse(self.store.file_blocked(job.alias))
         b.process(Job("movie", "tt1", dict(job.hints)))
