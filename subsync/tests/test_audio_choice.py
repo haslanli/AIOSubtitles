@@ -658,10 +658,10 @@ class QueueTest(Base):
         with w.cv:
             w.done[self.alias] = {"eng": None}              # an earlier job of the file published nothing
         w.submit(Job("movie", "tt1", self.hints))           # asked again (another rule, say): queued, not run here
-        t0 = time.time()
+        t0 = time.monotonic()
         self.assertEqual(w.wait_for(self.alias, "eng", 0.3), (None, None))
         self.assertIsNone(w.wait_for_file(self.alias, 0.3))
-        self.assertGreaterEqual(time.time() - t0, 0.5)      # both waited for this job's first pass
+        self.assertGreaterEqual(time.monotonic() - t0, 0.5)      # both waited for this job's first pass
         w = self.worker(Limits())
         with w.cv:
             w.done[self.alias] = {"eng": "k1"}              # a pass an earlier job published is still served
@@ -680,15 +680,15 @@ class QueueTest(Base):
         w.process = stopped
         w._run(w._next("main"), "main")
         self.assertIs(w.jobs.get(self.alias), job)          # queued again, put off
-        t0 = time.time()
+        t0 = time.monotonic()
         self.assertEqual(w.wait_for(self.alias, "eng", 2.0), (None, None))   # no wait holds for it meanwhile
-        self.assertLess(time.time() - t0, 0.5)
+        self.assertLess(time.monotonic() - t0, 0.5)
         job.not_before = 0
         self.assertIs(w._next("main"), job)                 # due: the retry runs
-        t0 = time.time()
+        t0 = time.monotonic()
         self.assertEqual(w.wait_for(self.alias, "eng", 0.3), (None, None))
         self.assertIsNone(w.wait_for_file(self.alias, 0.3))
-        self.assertGreaterEqual(time.time() - t0, 0.5)      # both waited for the retry's first pass
+        self.assertGreaterEqual(time.monotonic() - t0, 0.5)      # both waited for the retry's first pass
 
     def test_a_wait_lasts_its_timeout_when_the_wall_clock_steps_back(self):
         """The waits time out on the monotonic clock, so a step of the wall clock (NTP) never holds a request

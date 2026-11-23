@@ -446,10 +446,10 @@ class WorkerHooksTest(unittest.TestCase):
 
         class Recording(Worker):
             def process(self, job):
-                t0 = time.time()
+                t0 = time.monotonic()
                 time.sleep(0.05)
                 with lock:
-                    spans.append((t0, time.time()))
+                    spans.append((t0, time.monotonic()))
         for n in range(2):
             w = Recording(self.settings(), self.store, ListingAios(), Safety(), turn=turn)
             self.workers.append(w)
@@ -494,10 +494,10 @@ class WorkerHooksTest(unittest.TestCase):
 
         def work(key, i):
             with turn.claim(key):
-                t0 = time.time()
+                t0 = time.monotonic()
                 time.sleep(0.1)
                 with lock:
-                    spans.setdefault(key, []).append((t0, time.time()))
+                    spans.setdefault(key, []).append((t0, time.monotonic()))
         threads = [threading.Thread(target=work, args=(key, i)) for i, key in enumerate(("a", "a", "b"))]
         for t in threads:
             t.start()
@@ -515,10 +515,10 @@ class WorkerHooksTest(unittest.TestCase):
 
         class Recording(Worker):
             def process(self, job):
-                t0 = time.time()
+                t0 = time.monotonic()
                 time.sleep(0.15)
                 with lock:
-                    spans.append((job.alias, t0, time.time()))
+                    spans.append((job.alias, t0, time.monotonic()))
         jobs = (("tt1", "same.mkv"), ("tt2", "other.mkv"), ("tt1", "same.mkv"))
         for video_id, name in jobs:      # three people: two play the same file
             w = Recording(self.settings(), self.store, ListingAios(), Safety(), turn=turn)
@@ -580,10 +580,10 @@ class WorkerHooksTest(unittest.TestCase):
         torrent = {"url": "http://127.0.0.1:9/never", "streamData": {"torrent": {"infoHash": HASH, "fileIdx": 2}}}
 
         def process_row(job, hints, row, bt):
-            t0 = time.time()
+            t0 = time.monotonic()
             time.sleep(0.6)
             with lock:
-                spans[job.alias] = (t0, time.time())
+                spans[job.alias] = (t0, time.monotonic())
         for name, row in (("same.mkv", torrent), ("same-renamed.mkv", torrent),
                           ("other.mkv", {"url": "http://127.0.0.1:9/other"})):
             w = Worker(self.settings(), self.store, ListingAios(row), Safety(), turn=turn)

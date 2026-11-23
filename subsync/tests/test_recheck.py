@@ -131,9 +131,9 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
         checker = self.checker()
         self.fake.fault, self.fake.hang_s = "hang", 1.0
         self.clock.t += 24 * HOUR
-        t0 = time.time()
+        t0 = time.monotonic()
         self.assertTrue(checker.maybe_start(token))
-        self.assertLess(time.time() - t0, 0.5)
+        self.assertLess(time.monotonic() - t0, 0.5)
         self.assertFalse(checker.maybe_start(token))                      # one check per person at a time
         checker.join(10)
 

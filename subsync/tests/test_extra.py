@@ -349,10 +349,10 @@ class PacingTest(unittest.TestCase):
         self.assertLessEqual(self.state["max"], 2)
 
     def test_a_429_is_tried_again(self):
-        t0 = time.time()
+        t0 = time.monotonic()
         self.assertIn(b"Hello", fetch_subtitle(f"{self.url}/busy/1"))
         self.assertEqual(self.state["hits"]["/busy/1"], 2)
-        self.assertGreaterEqual(time.time() - t0, 0.9)        # it waited for Retry-After
+        self.assertGreaterEqual(time.monotonic() - t0, 0.9)        # it waited for Retry-After
 
     def test_other_hosts_are_not_paced(self):
         self.sources.PACED_HOSTS = ("opensubtitles", "strem.io")

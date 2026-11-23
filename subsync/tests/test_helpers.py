@@ -12,14 +12,16 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import unittest
 import urllib.request
 from unittest import mock
 
+import helpers
 import imagesubs as I
 from helpers import (BACKLOG, FIXTURES, have, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS, PASSWORD,
                      RangeServer, REALDEBRID, RecheckHarness, ServerHarness, SignupHarness, SOURCE, SourcesHarness,
-                     start_server, stop_server, TempDir, TORBOX, TORRENTIO, watch_the_log)
+                     start_server, stop_server, TempDir, TORBOX, TORRENTIO, wait_until, watch_the_log)
 from subsync import net
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -452,6 +454,26 @@ class HalfwaySetUpTest(unittest.TestCase):
         with mock.patch("helpers.FakeSources", side_effect=RuntimeError("a later part failed")):
             self.run_failing(Sources)
         self.left_as_found()
+
+
+class WaitUntilTest(unittest.TestCase):
+    def test_a_step_of_the_wall_clock_neither_stretches_nor_cuts_the_wait(self):
+        # Its time was the wall clock's: stepped back (NTP) it waited for ever, stepped forward it gave up at once
+        for step in (-3.0, 3.0):
+            looks, gave = [], []
+
+            def stepped():                      # each look at the wall clock is `step` seconds past the last
+                looks.append(1)
+                return time.time() + step * len(looks)
+            with self.subTest(step=step), \
+                    mock.patch.object(helpers, "time", types.SimpleNamespace(**dict(vars(time), time=stepped))):
+                t0 = time.monotonic()
+                t = threading.Thread(target=lambda: gave.append(wait_until(lambda: False, 0.3)), daemon=True)
+                t.start()
+                t.join(3)
+                self.assertFalse(t.is_alive())
+                self.assertEqual(gave, [False])
+                self.assertGreaterEqual(time.monotonic() - t0, 0.25)
 
 
 class LocalLookupTest(unittest.TestCase):

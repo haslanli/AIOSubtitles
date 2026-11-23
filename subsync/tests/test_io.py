@@ -930,8 +930,8 @@ class StreamedJudgingTest(WorkerFixture):
                 time.sleep(1.5)
             return fetch(job, lang, rank, cand)
         w._fetch_one = fetch_one
-        t0, seen = time.time(), []
-        w._publish = lambda alias, lang, key, final=False: seen.append(time.time() - t0)
+        t0, seen = time.monotonic(), []
+        w._publish = lambda alias, lang, key, final=False: seen.append(time.monotonic() - t0)
         self.sync(w)
         self.assertTrue(seen)
         self.assertLess(seen[0], 1.0)                               # the in-sync one, before the slow download ended
@@ -948,9 +948,9 @@ class StreamedJudgingTest(WorkerFixture):
         w._fetch_one = lambda job, lang, rank, cand: (time.sleep(0.0 if rank == 0 else 0.6), (rank, cand, b"x"))[1]
         stream = w._fetch_stream(Job("movie", "tt1"), "eng", [(k, self.cands[0]) for k in range(12)])
         self.assertEqual(next(stream)[0], 0)
-        t0 = time.time()
+        t0 = time.monotonic()
         stream.close()                                  # judging raised: the 8 downloads not started are dropped
-        self.assertLess(time.time() - t0, 0.3)
+        self.assertLess(time.monotonic() - t0, 0.3)
 
 
 class ShiftPathTest(WorkerFixture):

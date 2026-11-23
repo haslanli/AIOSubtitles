@@ -373,9 +373,9 @@ class WaitPauseCacheTest(SourcesHarness, unittest.TestCase):
         self.fake.mode["tsdb"] = "slow"
         self.fake.slow_s = 1.2
         ex = self.extra(clock=time.time, SUBSYNC_EXTRA_SOURCES="tsdb,osv3", SUBSYNC_SOURCE_TIMEOUT_S="0.4")
-        t0 = time.time()
+        t0 = time.monotonic()
         got = ex.search("movie", "tt1")
-        self.assertLess(time.time() - t0, 1.0)
+        self.assertLess(time.monotonic() - t0, 1.0)
         self.assertEqual({c["source"] for c in got}, {"osv3"})
 
         def kept():

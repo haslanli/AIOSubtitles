@@ -89,10 +89,10 @@ class LaneTest(Base):
 
         class Recording(Worker):
             def process(self, job):
-                t0 = time.time()
+                t0 = time.monotonic()
                 time.sleep(0.3)
                 with lock:
-                    spans.append((job.audio, t0, time.time()))
+                    spans.append((job.audio, t0, time.monotonic()))
         for name, audio in (("a", True), ("b", True), ("c", False)):
             w = Recording(self.settings(), self.store, Listing(), Safety(), turn=turn, audio_turn=audio_turn)
             self.workers.append(w)

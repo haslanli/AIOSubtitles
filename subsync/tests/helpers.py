@@ -871,9 +871,9 @@ class Clock:
 
 
 def wait_until(check, timeout=5.0):
-    """check() once it is true, or its last answer after `timeout` seconds."""
-    t0 = time.time()
-    while not check() and time.time() - t0 < timeout:
+    """check once it is true, or its last answer after `timeout` seconds of the monotonic clock."""
+    t0 = time.monotonic()
+    while not check() and time.monotonic() - t0 < timeout:
         time.sleep(0.02)
     return check()
 

@@ -444,10 +444,10 @@ class SignupTest(SignupHarness, unittest.TestCase):
 
     def test_a_hanging_aiostreams_fails_plainly(self):
         self.fake.fault = "hang"
-        t0 = time.time()
+        t0 = time.monotonic()
         with self.assertRaises(self.signup.SignupError):
             self.run_signup(viewer(), timeout=1)
-        self.assertLess(time.time() - t0, 2.5)
+        self.assertLess(time.monotonic() - t0, 2.5)
 
     def test_unexpected_answers_create_nothing(self):
         for fault in ("html", "bad_config"):

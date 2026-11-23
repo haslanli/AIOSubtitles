@@ -547,9 +547,9 @@ class ConnectionCapTest(ServerHarness, unittest.TestCase):
         held = socket.create_connection(("127.0.0.1", self.server.server_address[1]))
 
         def refused():
-            t0 = time.time()
+            t0 = time.monotonic()
             code = http(self.base + "/health")[0]
-            self.assertLess(time.time() - t0, 2)               # answered at once, never left waiting for the slot
+            self.assertLess(time.monotonic() - t0, 2)               # answered at once, never left waiting for the slot
             return code == 503
         try:
             self.assertTrue(wait_until(refused, timeout=10))   # once the server has the first connection, its only slot
@@ -701,8 +701,8 @@ class PublicCheckTest(ServerHarness, unittest.TestCase):
         self.users.update(token, record)
         heads = sum(1 for m, _ in self.fake.requests if m == "HEAD")
         self.subtitles(token)
-        deadline = time.time() + 5
-        while time.time() < deadline and not self.users.open(token).get("checked_at"):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not self.users.open(token).get("checked_at"):
             time.sleep(0.05)
         self.assertIsNotNone(self.users.open(token).get("checked_at"))
         self.assertEqual(sum(1 for m, _ in self.fake.requests if m == "HEAD"), heads + 1)

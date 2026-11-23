@@ -1630,9 +1630,9 @@ class AudioPrefetchTest(unittest.TestCase):
         idx = self.index()
         fit = AudioFit(idx, [{"s": 1.0, "e": 2.0, "text": "x", "kind": "dialogue"}], vad=self.Silent())
         starts = [100.0 * k for k in range(1, 13)]
-        t0 = time.time()
+        t0 = time.monotonic()
         fit.prefetch(starts, 30.0)
-        took = time.time() - t0
+        took = time.monotonic() - t0
         self.assertEqual(sorted(idx.reads), starts)
         self.assertEqual(idx.peak, 4)
         self.assertLess(took, 1.2)                             # 12 reads of 0.2 s: 0.6 s at 4 at once, 2.4 s one by one

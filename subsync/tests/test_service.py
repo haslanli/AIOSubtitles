@@ -820,18 +820,18 @@ class AddonTest(AddonFixture):
         self.assertEqual((job.type, job.video_id), ("series", "tt2:1:1"))
         # the job has its subtitle list (English only): a pending English entry, none for Russian
         self.worker.originals[job.alias] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
-        t0 = time.time()
+        t0 = time.monotonic()
         code, body, _ = http(self.base + "/subtitles/series/tt2%3A1%3A1/filename=b.mkv&videoSize=5.json")
         subs = json.loads(body)["subtitles"]
-        self.assertLess(time.time() - t0, 2.0)
+        self.assertLess(time.monotonic() - t0, 2.0)
         self.assertEqual([(s["lang"], s["label"], s["variantOf"]) for s in subs], [("eng", "English (synced)", "os-9")])
         self.assertIn("/pending/", subs[0]["url"])
         del self.worker.originals[job.alias]
         # no result and no original known yet: 503 so the player retries
-        t0 = time.time()
+        t0 = time.monotonic()
         code, _, headers = http(self.base + "/pending/" + token(job.alias) + "/eng.srt")
         self.assertEqual(code, 503)
-        self.assertLess(time.time() - t0, 2.0)
+        self.assertLess(time.monotonic() - t0, 2.0)
         # the original known: its text, downloaded and checked, not a redirect to it
         self.worker.originals[job.alias] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}}
         code, body, headers = http(self.base + "/pending/" + token(job.alias) + "/eng.srt")
@@ -945,9 +945,9 @@ class PickTest(AddonFixture):
     def test_the_first_answer_is_not_held_back(self):
         self.s.pending_entry = False
         self.s.pending_wait = 3.0
-        t0 = time.time()
+        t0 = time.monotonic()
         subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
-        self.assertLess(time.time() - t0, 1.0)             # AIOStreams orders addons by who answers first
+        self.assertLess(time.monotonic() - t0, 1.0)             # AIOStreams orders addons by who answers first
         self.assertEqual([s["label"] for s in subs], ["English (Subsync)"])
 
     def test_public_mode_names_the_entry_aiosubtitles_and_self_hosted_keeps_subsync(self):
@@ -975,10 +975,10 @@ class PickTest(AddonFixture):
                 self.worker.done[self.ALIAS] = {"eng": None, "rus": None}
                 self.worker.cv.notify_all()
         threading.Thread(target=list_arrives, daemon=True).start()
-        t0 = time.time()
+        t0 = time.monotonic()
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, body.decode()), (200, X_TEXT))
-        self.assertLess(time.time() - t0, 2.5)
+        self.assertLess(time.monotonic() - t0, 2.5)
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/rus.srt")   # no Russian subtitle exists: a note
         self.assertEqual(code, 200)
         self.assertIn(b"No Russian subtitle was found for this file", body)
@@ -1005,24 +1005,24 @@ class PickTest(AddonFixture):
         self.worker._requeue(put_off)                           # as a stopped job is
         self.assertTrue(self.worker.busy_with(self.ALIAS))
         self.assertFalse(self.worker.busy_reading(self.ALIAS))
-        t0 = time.time()
+        t0 = time.monotonic()
         self.assertEqual(self.worker.wait_for(self.ALIAS, "eng", 2.0, final=True), (None, "http://opensubs/x.srt"))
         self.assertEqual(self.worker.wait_for_originals(self.ALIAS, 2.0), self.worker.originals[self.ALIAS])
-        self.assertLess(time.time() - t0, 0.5)
-        t0 = time.time()
+        self.assertLess(time.monotonic() - t0, 0.5)
+        t0 = time.monotonic()
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, body.decode()), (200, X_TEXT))
-        self.assertLess(time.time() - t0, 1.0)
-        t0 = time.time()
+        self.assertLess(time.monotonic() - t0, 1.0)
+        t0 = time.monotonic()
         subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
-        self.assertLess(time.time() - t0, 1.0)
+        self.assertLess(time.monotonic() - t0, 1.0)
         self.assertEqual([(s["lang"], s["label"]) for s in subs], [("eng", "English (synced)")])   # its pending entry
         self.assertEqual(list(self.worker.jobs.values()), [put_off])
         put_off.not_before = 0                                  # due: waits are for it again
         self.assertTrue(self.worker.busy_reading(self.ALIAS))
-        t0 = time.time()
+        t0 = time.monotonic()
         self.worker.wait_for(self.ALIAS, "eng", 0.3, final=True)
-        self.assertGreaterEqual(time.time() - t0, 0.25)
+        self.assertGreaterEqual(time.monotonic() - t0, 0.25)
 
     def test_a_language_whose_subtitles_are_all_unwanted_gets_no_entry(self):
         # With SUBSYNC_SKIP_AI on, a forced, AI-made or machine-translated subtitle is never the original a
@@ -1420,10 +1420,10 @@ class PickTest(AddonFixture):
         # subtitle timeout, and the viewer got HTTP 502
         self.s.pick_wait = 1.0
         http(self.base + self.URL)                                     # unknown file: an index-only job, nothing answers
-        t0 = time.time()
+        t0 = time.monotonic()
         code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, headers.get("Retry-After")), (503, "1"))
-        self.assertLess(time.time() - t0, 1.5)
+        self.assertLess(time.monotonic() - t0, 1.5)
 
     def test_a_download_while_best_fit_judges_gets_the_best_copy_so_far(self):
         # Passes are published before every subtitle is judged; the final best slot is written at the end.
@@ -1446,11 +1446,11 @@ class PickTest(AddonFixture):
             time.sleep(0.3)
             self.worker._publish(self.ALIAS, "eng", keys[1])
         threading.Thread(target=judging, daemon=True).start()
-        t0 = time.time()
+        t0 = time.monotonic()
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual(code, 200)
         self.assertIn(b"better pass", body)
-        self.assertGreaterEqual(time.time() - t0, 2.5)                 # still judging: it waited the pick wait out
+        self.assertGreaterEqual(time.monotonic() - t0, 2.5)                 # still judging: it waited the pick wait out
 
     def test_a_new_job_for_the_file_is_waited_for_not_the_last_ones_result(self):
         # review: a file judged before (a rule change, a list asked again) is queued anew; a pick must wait for the new
@@ -1472,10 +1472,10 @@ class PickTest(AddonFixture):
             time.sleep(0.3)
             self.worker._publish(self.ALIAS, "eng", key, final=True)
         threading.Thread(target=judged, daemon=True).start()
-        t0 = time.time()
+        t0 = time.monotonic()
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, b"the best" in body), (200, True))
-        self.assertLess(time.time() - t0, 2.0)
+        self.assertLess(time.monotonic() - t0, 2.0)
 
     def test_a_download_moves_its_files_job_to_the_front(self):
         self.s.pick_wait = 0.3
@@ -1558,10 +1558,10 @@ class PickTest(AddonFixture):
         release = threading.Event()
         self.addCleanup(release.set)
         self.downloads.hold["http://opensubs/x.srt"] = release
-        t0 = time.time()
+        t0 = time.monotonic()
         code, _, headers = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, headers.get("Location")), (302, "http://opensubs/x.srt"))
-        self.assertLess(time.time() - t0, 1.5)
+        self.assertLess(time.monotonic() - t0, 1.5)
         code, _, headers = self.get("/pending/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, headers.get("Location")), (302, "http://opensubs/x.srt"))
         # a subtitle subsync found itself that a player can't use as it is (a zip): the player asks again instead
@@ -1600,10 +1600,10 @@ class PickTest(AddonFixture):
         timer = threading.Timer(1.0, release.set)
         self.addCleanup(timer.cancel)
         timer.start()
-        t0 = time.time()
+        t0 = time.monotonic()
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual((code, body.decode()), (200, X_TEXT))
-        self.assertLess(time.time() - t0, 3.5)
+        self.assertLess(time.monotonic() - t0, 3.5)
 
     def test_downloads_of_originals_share_one_pool(self):
         # review: original_for made and shut down a thread pool for every download on the request path
@@ -1701,10 +1701,10 @@ class PickTest(AddonFixture):
                 timer = threading.Timer(0.5, published)
                 self.addCleanup(timer.cancel)
                 timer.start()
-                t0 = time.time()
+                t0 = time.monotonic()
                 code, body, headers = self.get(f"/{route}/{token(self.ALIAS)}/eng.srt")
                 self.assertEqual((code, body.decode(), headers.get(SERVED)), (200, copy, "copy"))
-                self.assertLess(time.time() - t0, 2.0)                   # as it was published, not at the deadline
+                self.assertLess(time.monotonic() - t0, 2.0)                   # as it was published, not at the deadline
 
     def test_a_copy_stored_while_the_original_downloaded_is_served_instead(self):
         # The original arrived in time, but a copy came first: the copy is looked for once more before the
@@ -1819,8 +1819,8 @@ class OriginalEntryFixture(AddonCase):
             self.worker.queue.clear()
 
     def wait_for(self, check, timeout=3.0):
-        t0 = time.time()
-        while not check() and time.time() - t0 < timeout:
+        t0 = time.monotonic()
+        while not check() and time.monotonic() - t0 < timeout:
             time.sleep(0.02)
         return check()
 
@@ -1926,9 +1926,9 @@ class OriginalEntryTest(OriginalEntryFixture):
             return listed(*a)
         self.worker.aios.subtitles = slow_list
         self.worker.remember(self.job)
-        t0 = time.time()
+        t0 = time.monotonic()
         self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 0.3), (None, "late", None))
-        self.assertLess(time.time() - t0, 1.5)
+        self.assertLess(time.monotonic() - t0, 1.5)
         slow.set()
         self.assertTrue(self.wait_for(lambda: self.ALIAS in self.worker.lists))
         self.worker.aios.subtitles = lambda *a: self.fail("the list kept is used")
@@ -2018,14 +2018,14 @@ class LanesTest(unittest.TestCase):
             self.addCleanup(release.set)
             time.sleep(0.3)                                    # the audio job is running
             w.submit(Job("movie", "tt2", {"filename": "b.mkv", "videoSize": 2}))
-            t0 = time.time()
-            while "name:b.mkv|2" not in order and time.time() - t0 < 3:
+            t0 = time.monotonic()
+            while "name:b.mkv|2" not in order and time.monotonic() - t0 < 3:
                 time.sleep(0.05)
             self.assertEqual(order, ["name:b.mkv|2"])           # done while the audio job still runs
             self.assertTrue(w.busy_with("name:a.mkv|1"))
             release.set()
-            t0 = time.time()
-            while len(order) < 2 and time.time() - t0 < 3:
+            t0 = time.monotonic()
+            while len(order) < 2 and time.monotonic() - t0 < 3:
                 time.sleep(0.05)
             self.assertEqual(order, ["name:b.mkv|2", "name:a.mkv|1"])
 
@@ -2051,8 +2051,8 @@ class LanesTest(unittest.TestCase):
             w.submit(Job("movie", "tt2", {"filename": "b.mkv", "videoSize": 2}))
             with self.assertLogs("subsync.worker", "WARNING") as logs:
                 w.start()
-                t0 = time.time()
-                while len(ran) < 2 and time.time() - t0 < 3:
+                t0 = time.monotonic()
+                while len(ran) < 2 and time.monotonic() - t0 < 3:
                     time.sleep(0.05)
                 w.stop()
             self.assertEqual(ran, ["name:a.mkv|1", "name:b.mkv|2"])
@@ -2074,8 +2074,8 @@ class LanesTest(unittest.TestCase):
                 w = W(Settings(env), store, FakeAios(), Safety())
                 w.submit(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1}))
                 w.start()
-                t0 = time.time()
-                while not ran and time.time() - t0 < 3:
+                t0 = time.monotonic()
+                while not ran and time.monotonic() - t0 < 3:
                     time.sleep(0.05)
                 w.stop()
                 w.join(3)
@@ -2476,9 +2476,9 @@ class ConnectionTest(AddonCase):
         self.assertIsNotNone(handler.timeout)
         self.assertLessEqual(handler.timeout, 30)
         with mock.patch.object(handler, "timeout", 0.3), socket.create_connection(("127.0.0.1", self.port), 5) as sock:
-            t0 = time.time()
+            t0 = time.monotonic()
             self.assertEqual(sock.recv(1), b"")
-            self.assertLess(time.time() - t0, 3)
+            self.assertLess(time.monotonic() - t0, 3)
 
     def test_each_server_answers_with_its_own_app(self):
         # Serve set the app on Handler itself, so the last server made answered for every one
@@ -2831,9 +2831,9 @@ class AudioOffEntryTest(AddonCase):
         self.serve_addon()
 
     def test_the_first_answer_comes_at_once_with_an_entry_per_language(self):
-        t0 = time.time()
+        t0 = time.monotonic()
         subs = json.loads(http(self.base + self.URL)[1])["subtitles"]
-        self.assertLess(time.time() - t0, 1.0)                 # AIOStreams orders addons by who answers first
+        self.assertLess(time.monotonic() - t0, 1.0)                 # AIOStreams orders addons by who answers first
         self.assertEqual([(s["lang"], s["label"], s["variantOf"]) for s in subs],
                          [("eng", "English (Subsync)", "original"), ("rus", "Russian (Subsync)", "original")])
         self.assertTrue(subs[0]["url"].endswith("/pick/" + token(self.ALIAS) + "/eng.srt"))
@@ -2852,11 +2852,11 @@ class AudioOffEntryTest(AddonCase):
             self.store.alias(self.ALIAS, FILE)
             self.worker._publish(self.ALIAS, "eng", key, final=True)     # the job's result for the language
         threading.Thread(target=copy_ready, daemon=True).start()
-        t0 = time.time()
+        t0 = time.monotonic()
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual(code, 200)
         self.assertEqual(body.decode(), "1\n00:00:01,000 --> 00:00:02,000\nHi\n")   # the copy, not the original
-        self.assertLess(time.time() - t0, 2.5)
+        self.assertLess(time.monotonic() - t0, 2.5)
 
     def test_picking_after_the_original_was_kept_serves_the_original_and_reads_nothing_more(self):
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
