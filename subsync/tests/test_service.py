@@ -2116,6 +2116,7 @@ class StopTest(unittest.TestCase):
                     mock.patch.object(entry, "serve", Server), local_network_only(), \
                     self.assertLogs("subsync", "INFO"):
                 entry.main()
+            closed_after(self, servers[0].app.store)             # main() leaves its store to the process's end
             self.assertEqual(servers[0].host, "0.0.0.0")          # SUBSYNC_BIND's default
             worker = servers[0].app.worker
             self.assertIn(pick.alias, worker.pickable)

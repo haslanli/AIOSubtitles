@@ -861,7 +861,7 @@ class PublicStartTest(Base):
         from subsync.__main__ import public_store
         self.store.pickable_put(ALIAS, *JOB)
         self.store.originals_put(ALIAS, ORIGINALS)
-        store = public_store(self.settings())
+        store = closed_after(self, public_store(self.settings()))
         self.assertFalse(store.keep_texts)
         self.assertIsNone(store.pickable_get(ALIAS))
         self.assertIsNone(store.originals_get(ALIAS))
