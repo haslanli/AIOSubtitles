@@ -5,12 +5,10 @@ that fails far from the cause."""
 import dataclasses
 import hashlib
 import json
-import os
 import re
 import unittest
-from unittest import mock
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+import helpers  # (first: it puts the package on the import path)
 from subsync import ALGO_VERSION, RULE_REVISION, explain, settings as settings_module
 from subsync.settings import GB, MB, Rules, Settings
 
@@ -67,7 +65,6 @@ class NumbersTest(unittest.TestCase):
     def test_a_keep_days_below_1_stops_the_start(self):
         # 0 (which may be read as "keep for ever") deleted every record not used today at the first
         # housekeeping, -1 every record; the owner's start line, word for word
-        from subsync import __main__ as entry
         line = "SUBSYNC_USER_KEEP_DAYS must be a whole number from 1, like 180."
         for value in ("0", "-1", "1.5", "a year", ""):
             with self.subTest(value=value):
@@ -76,11 +73,7 @@ class NumbersTest(unittest.TestCase):
                           Settings({"SUBSYNC_USER_KEEP_DAYS": "1"}).conflicts()), (1, []))
         env = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": helpers.KEY, "SUBSYNC_PUBLIC_BASE": "https://subs.test",
                "SUBSYNC_USER_KEEP_DAYS": "0"}
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(entry.logging, "basicConfig"), \
-                self.assertLogs("subsync", "INFO") as logs, self.assertRaises(SystemExit) as stopped:
-            entry.main()
-        self.assertEqual(stopped.exception.code, 2)
-        self.assertEqual(logs.output, ["ERROR:subsync:not started: " + line])
+        self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:not started: " + line])   # exit code 2
         self.assertTrue(explain.SETTINGS["SUBSYNC_USER_KEEP_DAYS"][1].startswith(
             "Days without a single request before a person's record is deleted (a whole number from 1). Their sync "
             "config can't be removed "))
@@ -190,17 +183,11 @@ class SwitchesTest(unittest.TestCase):
 
     def test_the_start_says_a_misspelt_switch_before_what_must_be_set(self):
         # read as off, a misspelt SUBSYNC_PUBLIC made a public instance ask for a self-hosted install's settings
-        from subsync import __main__ as entry
-        with mock.patch.dict(os.environ, {"SUBSYNC_PUBLIC": "enabled"}, clear=True), \
-                mock.patch.object(entry.logging, "basicConfig"), self.assertLogs("subsync", "INFO") as logs, \
-                self.assertRaises(SystemExit) as stopped:
-            entry.main()
-        self.assertEqual(stopped.exception.code, 2)
-        self.assertEqual(logs.output, ["ERROR:subsync:not started: SUBSYNC_PUBLIC must be on or off."])
+        self.assertEqual(helpers.run_main(self, {"SUBSYNC_PUBLIC": "enabled"}, "INFO"),
+                         ["ERROR:subsync:not started: SUBSYNC_PUBLIC must be on or off."])
 
     def test_the_start_says_every_setting_written_wrong_and_missing_at_once(self):
         # A missing setting hid a conflicting one until the next start
-        from subsync import __main__ as entry
         for env, lines in (
                 ({"SUBSYNC_AUDIO_WHEN": "later"},
                  ["not started: SUBSYNC_AUDIO_WHEN must be pick or open.",
@@ -210,11 +197,7 @@ class SwitchesTest(unittest.TestCase):
                  ["not started: SUBSYNC_AUDIO_AT_ONCE must be a whole number from 1, or auto.",
                   "not started: set SUBSYNC_SECRET_KEY, SUBSYNC_PUBLIC_BASE"])):
             with self.subTest(env=env):
-                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(entry.logging, "basicConfig"), \
-                        self.assertLogs("subsync", "INFO") as logs, self.assertRaises(SystemExit) as stopped:
-                    entry.main()
-                self.assertEqual(stopped.exception.code, 2)
-                self.assertEqual(logs.output, ["ERROR:subsync:" + line for line in lines])
+                self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:" + line for line in lines])
 
 
 class LanguagesTest(unittest.TestCase):

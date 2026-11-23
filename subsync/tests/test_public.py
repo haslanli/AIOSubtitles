@@ -6,7 +6,7 @@ import os
 import threading
 import unittest
 
-from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, run_once, wait_until
+from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, run_main, run_once, wait_until
 from subsync.settings import Settings, available_cpus
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -1276,20 +1276,8 @@ class ListenTest(unittest.TestCase):
 
 class StartupTest(unittest.TestCase):
     def run_main(self, env):
-        """subsync's entry point with `env` as the whole environment: its logs at ERROR, once it has stopped as it must.
-        Its logging set-up (an INFO handler on stdout) is left out, so later tests' logs stay theirs, and a
-        main that went past its checks fails at once, never serves (it would serve until stopped)."""
-        from unittest import mock
-        from subsync import __main__ as entry
-        went_on = AssertionError("main went on past its checks")
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch("logging.basicConfig"), \
-                mock.patch.object(entry, "main_public", side_effect=went_on), \
-                mock.patch.object(entry, "Store", side_effect=went_on), \
-                self.assertLogs("subsync", level="ERROR") as logs:
-            with self.assertRaises(SystemExit) as e:
-                entry.main()
-        self.assertEqual(e.exception.code, 2)
-        return "\n".join(logs.output)
+        """helpers.run_main's log lines at ERROR, as one text."""
+        return "\n".join(run_main(self, env))
 
     def test_main_refuses_public_mode_without_a_secret(self):
         out = self.run_main({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://x.test"})

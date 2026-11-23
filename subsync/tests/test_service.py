@@ -1415,8 +1415,8 @@ class PickTest(AddonFixture):
         # Passes are published before every subtitle is judged; the final best slot is written at the end.
         # Sherlock S01E01's first download was the first pass (Russian 62 % within 200 ms) where a better one (82 %) came
         # seconds later: the download waits for the language's final result within the pick wait, and is served the best
-        # pass published by then
-        self.s.pick_wait = 3.0
+        # pass published by then (a short pick wait: the passes come 0.2 s and 0.5 s in)
+        self.s.pick_wait = 1.0
         http(self.base + self.URL)                                     # unknown file: an index-only job is queued
         self.worker.originals[self.ALIAS] = {"eng": {"url": "http://opensubs/x.srt", "id": "os-9"}, "rus": None}
         with self.worker.cv:   # the pass downloaded the original first: the pick may wait its whole deadline
@@ -1436,7 +1436,7 @@ class PickTest(AddonFixture):
         code, body, _ = self.get("/pick/" + token(self.ALIAS) + "/eng.srt")
         self.assertEqual(code, 200)
         self.assertIn(b"better pass", body)
-        self.assertGreaterEqual(time.monotonic() - t0, 2.5)                 # still judging: it waited the pick wait out
+        self.assertGreaterEqual(time.monotonic() - t0, 0.9)                 # still judging: it waited the pick wait out
 
     def test_a_new_job_for_the_file_is_waited_for_not_the_last_ones_result(self):
         # review: a file judged before (a rule change, a list asked again) is queued anew; a pick must wait for the new

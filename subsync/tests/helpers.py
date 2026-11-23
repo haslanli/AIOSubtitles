@@ -970,6 +970,24 @@ def run_once(w, job, lane="main", within=RUN_ONCE_S):
         raise AssertionError(f"{job.label} didn't start within {within:g} s")
 
 
+# -- the service's start -----------------------------------------------------------------------------------------------
+def run_main(test, env, level="ERROR"):
+    """subsync's entry point with `env` as the whole environment, once it has stopped as it must (exit code 2): its log
+    lines at `level` and above. Its logging set-up (an INFO handler on stdout) is left out, so later tests' logs stay
+    theirs, and a main that went past its checks fails the test at once, never serves (it
+    would serve until stopped)."""
+    from subsync import __main__ as entry
+    went_on = AssertionError("main went on past its checks")
+    with mock.patch.dict(os.environ, env, clear=True), mock.patch("logging.basicConfig"), \
+            mock.patch.object(entry, "main_public", side_effect=went_on), \
+            mock.patch.object(entry, "Store", side_effect=went_on), \
+            test.assertLogs("subsync", level=level) as logs:
+        with test.assertRaises(SystemExit) as e:
+            entry.main()
+    test.assertEqual(e.exception.code, 2)
+    return logs.output
+
+
 # -- synthetic timings: a release's lines as (start, duration), and subtitles made from them ----------------------------
 def rhythm(n, seed, start=20.0):
     """n release lines: durations 1-4 s, gaps 0.3-3 s."""
