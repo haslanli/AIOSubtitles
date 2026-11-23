@@ -829,6 +829,14 @@ class AnchoredGuessTest(unittest.TestCase):
         self.assertIsNone(pipeline.anchored_guess(self.main, [translated(realistic(500, 98), 1, shift=0.0)]))
         self.assertIsNone(pipeline.anchored_guess("not a subtitle", [translated(self.ref, 2, shift=9.0)]))
 
+    def test_a_near_tie_goes_to_the_share_higher_before_rounding(self):
+        # 200 of 600 lines (0.33333) first, 400 of 1,201 (0.33306) second; both read 0.333 rounded, and the
+        # second was taken when its share was compared with the first's rounded one
+        texts = [srt_of(realistic(600, 31)), srt_of(realistic(1201, 32))]
+        with mock.patch.object(pipeline.shift, "best_shift", side_effect=[(1.0, 0.0, 200), (1.0, 0.0, 400)]):
+            got = pipeline.anchored_guess(self.main, texts)
+        self.assertEqual((got["index"], got["share"]), (0, 0.333))
+
 
 class RecentreTest(unittest.TestCase):
     """A copy offered without the per-line snap keeps any steady bias alass left (Kingdom of Heaven's Russian: -57 ms
@@ -846,6 +854,24 @@ class RecentreTest(unittest.TestCase):
         self.assertEqual(out["outcome"], "synced")
         self.assertLess(abs(out["gate_synced"]["signed_median_ms"]), 15)
         self.assertGreater(abs(out["recentred_ms"]), 40)
+
+    def test_a_move_that_would_make_a_passing_copy_fail_is_not_made(self):
+        # Most lines 60 ms late, 7 spread out 250 ms late, 6 of one tenth 170 ms early: it passes (93 % within
+        # 200 ms); moved 60 ms earlier it pairs better (94 %, median 0) but the early tenth turns weak, and it fails
+        ref = [(30.0 + 10 * k, 2.0) for k in range(100)]
+        ref_track = {"route": "cues", "cues": ref, "number": 3, "language": "eng", "codec": "S_TEXT/UTF8"}
+        late, early = {5, 18, 31, 57, 70, 83, 96}, set(range(40, 46))
+        new = [{"s": s + off, "e": s + d + off, "text": "x", "kind": "dialogue"}
+               for k, (s, d) in enumerate(ref) for off in [0.25 if k in late else -0.17 if k in early else 0.06]]
+        gate, _ = pipeline.reference_gate(ref_track, len(new))
+        as_fitted = pipeline.gate_lines(gate, new)
+        self.assertTrue(as_fitted["pass"])
+        moved = pipeline.gate_lines(gate, [dict(l, s=l["s"] - 0.06, e=l["e"] - 0.06) for l in new])
+        self.assertFalse(moved["pass"])                                      # what the move would have made of it
+        self.assertGreaterEqual(moved["within200"], as_fitted["within200"])
+        kept, g, moved_ms = pipeline.recentre(new, gate)
+        self.assertEqual((g["pass"], moved_ms), (True, 0.0))
+        self.assertTrue(kept is new)
 
 
 class StreamedJudgingTest(WorkerFixture):

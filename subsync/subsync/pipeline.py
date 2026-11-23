@@ -23,12 +23,13 @@ from . import imageref, imagetext, refine, sections, shift, textpair
 from .audiofit import fit_tracks
 from .langs import lang3, same_language, written
 from .reader import CapReached
-from .relgate import MIN_PAIRED, TENTHS, WITHIN_SHARE, aligned, clearly_better, relgate
+from .relgate import MIN_PAIRED, TENTHS, WINDOW, WITHIN_SHARE, aligned, clearly_better, relgate
 from .subs import dialogue_ends, dialogue_starts, parse, plain_srt, timing_srt, write_like
 
 MIN_LINES = 10
 MIN_SHIFT_S = 0.100
 MIN_SPAN = 0.70          # a candidate must cover >= 70 % of the release track's span
+MIN_TEXT_SHARE = 0.50    # a text reference needs >= 50 % as many lines as the candidate has dialogue lines
 MIN_IMAGE_SHARE = 0.40   # an image reference needs sure starts for >= 40 % of the candidate's lines
 IMAGE_SNAP_WITHIN = 0.97 # a snapped copy against an image reference reads higher still (sparser reference):
                          # on 72 synthetic cases 0.95 offered 7 copies under the true bar, 0.97 none
@@ -164,7 +165,7 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
     own, whose line count ranks it (choose.order)."""
     want = written(cand_lang)
     fallback = {lang3(x) for x in fallback}
-    usable = [t for t in text_references(index) if not t["forced"] and len(t["cues"]) >= 0.5 * n_dialogue]
+    usable = [t for t in text_references(index) if not t["forced"] and len(t["cues"]) >= MIN_TEXT_SHARE * n_dialogue]
     original = getattr(index, "original_language", None) if by_original else None
     if original:
         # with the title's original language known (origlang.py looks it up by the title's id), a track in it is every
@@ -172,8 +173,9 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
         # 167-250 ms early against it): a plain text track first; else, with image references on, an image track
         # (Kingdom of Heaven DC: Russian to the English PGS track); else a CC or SDH-only track, only for a subtitle
         # whose own language has no plain track (Dan Da Dan: its English and Spanish keep their own). With none of
-        # these, the rules below
-        # one language by its family too (Cantonese tagged yue against TMDB's Chinese, Norwegian nob against nor)
+        # these, the rules below apply.
+        # same_language counts a family as one language (Cantonese tagged yue against TMDB's Chinese, Norwegian nob
+        # against nor)
         own = [t for t in usable if same_language(t["language"], original)]
         plain = [t for t in own if not is_secondary(t)]
         if plain:
@@ -194,9 +196,9 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
                                    prefer_plain and is_secondary(t), -len(t["cues"])))
         first = usable[0]
         if written(first["language"]) == want:
-            plain = bool(prefer_plain and is_secondary(first))
+            secondary = bool(prefer_plain and is_secondary(first))
             same = [t for t in usable
-                    if written(t["language"]) == want and bool(prefer_plain and is_secondary(t)) == plain]
+                    if written(t["language"]) == want and bool(prefer_plain and is_secondary(t)) == secondary]
             if len(same) > 1:
                 first = agreeing(index, same)
         return dict(first, route="cues")
@@ -217,14 +219,18 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
     return images[0]
 
 
-OWN_TRACK_SHARE = 0.25   # a track with fewer lines than this share of a subtitle's is not its dialogue (signs, songs)
+OWN_TRACK_FRACTION = 0.5   # a track with fewer lines than this fraction of what a reference needs (MIN_TEXT_SHARE,
+                           # MIN_IMAGE_SHARE) is not the subtitle's dialogue (signs, songs)
 
 
 def own_track(index, n_dialogue, image_ref=False):
     """The file has a subtitle track of its own that this subtitle could be checked against, had it not more
-    than twice that track's lines: a text track (or with image_ref an image track that reads as subtitles) with at least
-    a quarter of its lines. Such a subtitle is kept; only a file with no such track needs the audio route."""
-    if any(not t["forced"] and len(t["cues"]) >= OWN_TRACK_SHARE * n_dialogue for t in text_references(index)):
+    than twice the lines that track can be a reference for: a text track (or with image_ref an image track that reads
+    as subtitles) with at least half the lines a reference needs (OWN_TRACK_FRACTION): a quarter of the subtitle's
+    lines for a text track, sure starts for a fifth of them for an image track. Such a subtitle is kept; only a file
+    with no such track needs the audio route."""
+    if any(not t["forced"] and len(t["cues"]) >= OWN_TRACK_FRACTION * MIN_TEXT_SHARE * n_dialogue
+           for t in text_references(index)):
         return True
     if not image_ref or not hasattr(index, "image_tracks"):
         return False
@@ -232,16 +238,22 @@ def own_track(index, n_dialogue, image_ref=False):
         if t["forced"]:
             continue
         ref = image_reference(index, t)
-        if ref["plausible"] and len(ref["cues"]) >= OWN_TRACK_SHARE * 2 * MIN_IMAGE_SHARE * n_dialogue:
+        if ref["plausible"] and len(ref["cues"]) >= OWN_TRACK_FRACTION * MIN_IMAGE_SHARE * n_dialogue:
             return True
     return False
 
 
+IMAGE_CHECKS_KEPT = 4   # image tracks image_check measures, at most
+
+
 def image_check(text_tracks, image_tracks):
     """Calibration of image references, at no read cost: on a file with a text track and an image track in the same language,
-    how well the image track's derived line starts match the text track's (recorded in the file's detail)."""
+    how well the image track's derived line starts match the text track's (recorded in the file's detail), for the first
+    IMAGE_CHECKS_KEPT such image tracks."""
     out = []
     for im in image_tracks:
+        if len(out) == IMAGE_CHECKS_KEPT:
+            break
         if im["forced"]:
             continue
         txt = [t for t in text_tracks if not t["forced"] and lang3(t["language"]) == lang3(im["language"]) and t["cues"]]
@@ -253,7 +265,7 @@ def image_check(text_tracks, image_tracks):
         out.append({"image_track": im["number"], "text_track": t["number"], "language": im["language"],
                     "plausible": ref["plausible"], **ref["stats"],
                     "vs_text": {k: g.get(k) for k in ("paired", "median_ms", "within200", "weak_tenths", "pass")}})
-    return out[:4]
+    return out
 
 
 def _shift_stats(before, after):
@@ -363,6 +375,10 @@ def settles(r, lang):
                               "in sync as it is"))
 
 
+WORDS_MAIN_MS = 100.0     # D2: the median error the words allow a pass by the main rule (an original as it is too)
+WORDS_BETTER_MS = 200.0   # and a pass as "clearly better" than the original
+
+
 class TextCheck:
     """D2 for one subtitle against one reference: its lines paired with the track's by their words, worked out once,
     then the confirmation of any timing of it. Off across languages, with text pairing off, and for the languages
@@ -431,13 +447,16 @@ def original_fits(g, cross, better, recall):
         abs(g.get("signed_median_ms") or 0.0) <= MIN_SHIFT_S * 1000
 
 
+SNAP_MOVED_S = 0.001   # a line the snap moves by no more than this is not moved
+
+
 def magnet(text, lines, ref, gate, snap_within, cross=False):
     """AutoSync's "magnet" for an original that is in sync as it is: its author still starts each line a little off the
     release's own line (Patriot S01E01's English: 43 ms early throughout; Burning: a stray line), so each dialogue line
     is snapped to the release line it clearly belongs to (refine.snap). Returns {"body", "stats"} when that moved a line
     and the snapped copy passes the snapped bar, else None (the original is listed as it is)."""
     snapped, stats = refine.snap(lines, ref["cues"])
-    if all(abs(a["s"] - b["s"]) <= 0.001 for a, b in zip(lines, snapped)):
+    if all(abs(a["s"] - b["s"]) <= SNAP_MOVED_S for a, b in zip(lines, snapped)):
         return None
     g = gate_lines(gate, snapped, within_share=snap_bar(ref, snap_within))
     if cross:   # no per-line bar holds across languages: the snap must bring the lines closer to the reference
@@ -460,7 +479,8 @@ RECENTRE_MS = 20    # a copy offered unsnapped whose lines sit steadily more tha
 
 def recentre(new, gate):
     """A re-timed copy moved by its own signed median error against the reference (alass can leave a steady bias:
-    Kingdom of Heaven's Russian, -57 ms against its image track's starts), kept when that pairs no worse.
+    Kingdom of Heaven's Russian, -57 ms against its image track's starts), kept when that pairs no worse and doesn't
+    make a passing copy fail (a steady move can leave one tenth weak while the whole pairs better).
     Returns (lines, gate result, moved ms)."""
     g = gate_lines(gate, new)
     bias = (g.get("signed_median_ms") or 0.0) / 1000
@@ -468,7 +488,8 @@ def recentre(new, gate):
         return new, g, 0.0
     moved = [dict(l, s=l["s"] - bias, e=l["e"] - bias) for l in new]
     g2 = gate_lines(gate, moved)
-    if g2.get("median_ms", 1e9) <= g["median_ms"] and g2.get("within200", 0) >= g["within200"]:
+    if g2.get("median_ms", 1e9) <= g["median_ms"] and g2.get("within200", 0) >= g["within200"] \
+            and (g2["pass"] or not g["pass"]):
         return moved, g2, round(-bias * 1000, 1)
     return new, g, 0.0
 
@@ -483,7 +504,7 @@ def section_checks(out, best, groups, ref, recall, snap_within, better, cross=Fa
         new = [best[i]["s"] for i in g if best[i]["kind"] == "dialogue" and not best[i].get("drop")]
         if not new:
             continue
-        lo, hi = min(new) - 1.0, max(new) + 1.0
+        lo, hi = min(new) - WINDOW, max(new) + WINDOW   # with the track's lines its own lines may pair with
         a, z = bisect.bisect_left(starts, lo), bisect.bisect_right(starts, hi)
         sub = cues[a:z]
         if out.get("refined"):
@@ -550,7 +571,7 @@ def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=
             return dict(out, outcome="keep_original", reason=note + how)
     if words is not None and not out.get("aligned"):
         clearly = bool((out.get("better") or {}).get("pass"))
-        chk = words.check(best, 200.0 if clearly else 100.0, may_read or clearly,
+        chk = words.check(best, WORDS_BETTER_MS if clearly else WORDS_MAIN_MS, may_read or clearly,
                           out["gate_snapped"] if best is snapped else out["gate_synced"])
         if chk is not None:
             out["text"] = chk
@@ -612,7 +633,7 @@ def anchored_guess(main_text, texts):
     anchor = dialogue_starts(parse(main_text))
     if len(anchor) < MIN_LINES:
         return None
-    best = None
+    best, best_share = None, 0.0   # the share compared unrounded (the returned one is rounded)
     for i, text in enumerate(texts):
         lines = parse(text)
         dial = dialogue_starts(lines)
@@ -620,9 +641,9 @@ def anchored_guess(main_text, texts):
             continue
         scale, offset, votes = shift.best_shift(dial, anchor)
         share = votes / len(dial)
-        if share >= ANCHOR_SHARE and (best is None or share > best["share"]):
+        if share >= ANCHOR_SHARE and (best is None or share > best_share):
             moved = [dict(l, s=l["s"] * scale + offset, e=l["e"] * scale + offset) for l in lines]
-            best = {"index": i, "body": write_like(text, moved), "share": round(share, 3)}
+            best, best_share = {"index": i, "body": write_like(text, moved), "share": round(share, 3)}, share
     return best
 
 
@@ -695,7 +716,7 @@ def check_original(index, text, lang, splits=True, image_ref=False, prefer_plain
     out = {"in_sync": fits, "route": ref["route"], "reference": reference, "gate_original": g,
            "lines": len(lines), "dialogue": len(dial), "cross": cross and not g["pass"]}
     if fits:    # D2 with the words already read for this file, if any (an original in sync reads nothing)
-        chk = TextCheck(index, ref, lines, lang, text_pairing).check(lines, 100.0, False, g)
+        chk = TextCheck(index, ref, lines, lang, text_pairing).check(lines, WORDS_MAIN_MS, False, g)
         if chk is not None:
             out["text"] = chk
             out["in_sync"] = fits = chk["ok"]
@@ -729,7 +750,7 @@ def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19,
         words = TextCheck(index, ref, lines, lang, text_pairing)
         fits = original_fits(out["gate_original"], cross, better, recall)
         if fits:
-            chk = words.check(lines, 100.0, unsettled, out["gate_original"])
+            chk = words.check(lines, WORDS_MAIN_MS, unsettled, out["gate_original"])
             if chk is not None:
                 out["text_original"] = chk
                 fits = chk["ok"]
