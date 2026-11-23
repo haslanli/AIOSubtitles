@@ -125,11 +125,13 @@ class ResolveOnceTest(unittest.TestCase):
                 out[k] = r.get(1000 * k, 100)
             except Exception as e:                          # pragma: no cover: reported below
                 errors.append(e)
-        threads = [threading.Thread(target=read, args=(k,)) for k in range(4)]
+        # daemon threads: one stuck on the reader's resolve lock fails the test, never holds up the run's exit
+        threads = [threading.Thread(target=read, args=(k,), daemon=True) for k in range(4)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(10)
+        self.assertEqual([t.is_alive() for t in threads], [False] * 4)   # none still waits for the lock
         self.assertEqual(errors, [])
         self.assertEqual({k: v for k, v in out.items()}, {k: self.d.data[1000 * k:1000 * k + 100] for k in range(4)})
         self.assertEqual(self.d.link_hits, 1)

@@ -1816,8 +1816,9 @@ class RoutesTest(unittest.TestCase):
         self.addCleanup(b.close)
         uuid = b.fake.add(json.loads(json.dumps(VIEWER)), "the-password")
         link, wrong = f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", "not-the-password-0435"
-        for sent in ({}, {"add_addon": "on"}, {"add_addon": "on", "clean_up": "on", "usenet": "on"},
-                     {"keep_password": "on", "usenet": "on"}, {"add_addon": "yes", "keep_password": ""}):
+        tries = ({}, {"add_addon": "on"}, {"add_addon": "on", "clean_up": "on", "usenet": "on"},
+                 {"keep_password": "on", "usenet": "on"}, {"add_addon": "yes", "keep_password": ""})
+        for sent in tries:
             with self.subTest(sent=sent):
                 code, body, _ = http(b.base + "/signup", form(link=link, password=wrong, languages="English", **sent))
                 self.assertEqual(code, 400)
@@ -1828,11 +1829,12 @@ class RoutesTest(unittest.TestCase):
                 self.assertEqual(tree.all("body")[0]["data-open-at"], "link")
                 self.assertIn(note, tree.text_of["problem"])
                 self.assertNotIn(wrong.encode(), body)                          # the password isn't sent back
-        while True:                       # the hour's attempts used up: trying again only costs a try
-            code, body, _ = http(b.base + "/signup", form(link=link, password=wrong, languages="English"))
-            if code == 429:
-                break
-            self.assertEqual(code, 400)
+        # the rest of the hour's attempts, then one too many: trying again only costs a try (a count, so a limit that
+        # never refuses fails the test instead of looping for ever)
+        for _ in range(b.s.signups_per_hour - len(tries)):
+            self.assertEqual(http(b.base + "/signup", form(link=link, password=wrong, languages="English"))[0], 400)
+        code, body, _ = http(b.base + "/signup", form(link=link, password=wrong, languages="English"))
+        self.assertEqual(code, 429)
         problem = Tree(body.decode()).text_of["problem"]
         self.assertIn("Too many sign-up attempts", problem)
         self.assertNotIn(note, problem)

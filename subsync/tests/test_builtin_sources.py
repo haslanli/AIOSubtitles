@@ -90,14 +90,16 @@ class IdsTest(SourcesHarness, unittest.TestCase):
                 ex._id("tvdb", key, lambda: key)
             except Exception as e:
                 errors.append(e)
+        # daemon threads: one stuck on the ids' lock fails the test, never holds up the run's exit
         with mock.patch.object(srclimits, "SEARCH_CACHE_ENTRIES", 2):
-            a = threading.Thread(target=look, args=("tt1",))
+            a = threading.Thread(target=look, args=("tt1",), daemon=True)
             a.start()
             first_look.wait(2)
-            b = threading.Thread(target=look, args=("tt2",))
+            b = threading.Thread(target=look, args=("tt2",), daemon=True)
             b.start()
             a.join(5)
             b.join(5)
+        self.assertEqual((a.is_alive(), b.is_alive()), (False, False))
         self.assertEqual(errors, [])
         self.assertEqual(set(ex.ids), {("tvdb", "tt1"), ("tvdb", "tt2")})
 
@@ -134,16 +136,17 @@ class IdsTest(SourcesHarness, unittest.TestCase):
             with self.subTest(key=key):
                 for state in (started, release, calls, got):
                     state.clear()
-                a = threading.Thread(target=need, args=(key, answer))
+                a = threading.Thread(target=need, args=(key, answer), daemon=True)   # as above
                 a.start()
                 self.assertTrue(started.wait(5))
-                b = threading.Thread(target=need, args=(key, answer))
+                b = threading.Thread(target=need, args=(key, answer), daemon=True)
                 b.start()
                 b.join(0.3)
                 self.assertTrue(b.is_alive())                                    # waiting
                 release.set()
                 a.join(5)
                 b.join(5)
+                self.assertEqual((a.is_alive(), b.is_alive()), (False, False))
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(got, [555, 555] if key == "tt2" else ["ValueError", "ValueError"])
                 self.assertEqual(ex.looking, {})

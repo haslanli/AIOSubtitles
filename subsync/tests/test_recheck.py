@@ -156,11 +156,13 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
                 outcomes[token] = checker.check(token)
             except Exception as e:
                 outcomes[token] = e
-        threads = [threading.Thread(target=check, args=(t,)) for t in tokens]
+        # daemon threads: one stuck on the per-AIOStreams lock fails the test, never holds up the run's exit
+        threads = [threading.Thread(target=check, args=(t,), daemon=True) for t in tokens]
         for t in threads:
             t.start()
         for t in threads:
             t.join(20)
+        self.assertEqual([t.is_alive() for t in threads], [False] * 3)   # none still waits for the lock
         self.assertEqual(outcomes, dict.fromkeys(tokens))          # all three ran to the end, each "all well"
         self.assertEqual([self.record(t)["checked_at"] for t in tokens], [self.clock.t] * 3)
         self.assertEqual(self.fake.max_inflight, 1)
