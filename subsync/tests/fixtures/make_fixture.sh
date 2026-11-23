@@ -4,6 +4,7 @@
 # every subtitle block has a Cue point. Also writes tiny.srt (the embedded timing) and tiny-offset.srt (+2.7 s).
 set -e
 cd "${0:A:h}"
+trap 'rm -f tiny-av.mkv tone.expr' EXIT   # the working files, gone whether a step fails or not
 python3 -I - <<'PY'
 lines = []
 t = 2.0
@@ -26,7 +27,6 @@ ffmpeg -v error -y -f lavfi -i "color=c=black:s=64x36:r=2:d=90" -f lavfi -i "sin
   -filter_complex "[1:a]volume='if($(cat tone.expr),0.5,0)':eval=frame[a]" -map 0:v -map "[a]" \
   -c:v libx264 -preset ultrafast -g 4 -c:a aac -b:a 24k tiny-av.mkv
 mkvmerge -q -o tiny.mkv tiny-av.mkv --language 0:eng tiny.srt
-rm -f tiny-av.mkv tone.expr
 # The same file as MP4, for the MP4 reader: the text track as mov_text, the movie box at the end (tiny.mp4) and at the
 # start (tiny-fast.mp4), and one without a subtitle track (tiny-nosub.mp4).
 ffmpeg -v error -y -i tiny.mkv -map 0:v -map 0:a -map 0:s -c:v copy -c:a copy -c:s mov_text -metadata:s:s:0 language=eng tiny.mp4

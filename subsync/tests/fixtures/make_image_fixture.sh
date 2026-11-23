@@ -5,6 +5,7 @@
 # the PGS track uncompressed, the second zlib-compressed, as mkvmerge does by default. Needs tiny.mkv (make_fixture.sh).
 set -e
 cd "${0:A:h}"
+trap 'rm -f lines.sup' EXIT   # the working file, gone whether a step fails or not
 python3 -I - <<'PY'
 import sys
 sys.path.insert(0, "..")
@@ -21,5 +22,4 @@ open("lines.sup", "wb").write(I.sup(events))
 PY
 mkvmerge -q -o tiny-pgs.mkv tiny.mkv --language 0:eng --compression 0:none lines.sup
 mkvmerge -q -o tiny-pgs-zlib.mkv tiny.mkv --language 0:eng --compression 0:zlib lines.sup
-rm -f lines.sup
 ls -l tiny-pgs.mkv tiny-pgs-zlib.mkv

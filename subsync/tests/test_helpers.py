@@ -17,9 +17,9 @@ import urllib.request
 from unittest import mock
 
 import imagesubs as I
-from helpers import (BACKLOG, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS, PASSWORD, RangeServer, REALDEBRID,
-                     RecheckHarness, ServerHarness, SignupHarness, SOURCE, SourcesHarness, start_server, stop_server,
-                     TempDir, TORBOX, TORRENTIO, watch_the_log)
+from helpers import (BACKLOG, FIXTURES, have, HAVE_CRYPTOGRAPHY, INSTANCE, local_lookup, Logs, NEEDS, PASSWORD,
+                     RangeServer, REALDEBRID, RecheckHarness, ServerHarness, SignupHarness, SOURCE, SourcesHarness,
+                     start_server, stop_server, TempDir, TORBOX, TORRENTIO, watch_the_log)
 from subsync import net
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -169,6 +169,57 @@ class PgsShowTest(unittest.TestCase):
             segments.append(ds[p])
             p += 3 + n
         self.assertEqual(segments.count(0x15), -(-size // 90))   # one object segment per 90 bytes
+
+
+# a stand-in for each tool a fixture script runs: it writes the file it would make (python3: those in $MADE; ffmpeg its
+# last argument; mkvmerge the one after -o), and the one named in $FAILING then fails, as a step that stops half done
+STAND_IN = """#!/bin/sh
+tool=$(basename "$0")
+case "$tool" in
+  python3) cat > /dev/null; for f in $MADE; do : > "$f"; done ;;
+  ffmpeg) for a; do out=$a; done; : > "$out" ;;
+  mkvmerge) : > "$3" ;;
+esac
+[ "$tool" != "$FAILING" ]
+"""
+
+
+@unittest.skipUnless(have("zsh"), "the fixture scripts are zsh scripts")
+class FixtureScriptsTest(unittest.TestCase):
+    """A fixture script leaves none of its own working files beside the fixtures, whether a step fails or not
+    (they were removed only after every step had worked)."""
+
+    def run_script(self, name, made, failing):
+        """A copy of fixtures/`name` run in a folder of its own with STAND_IN for each tool, `failing` failing: (its exit
+        code, the files left there)."""
+        tmp = TempDir()
+        folder = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        tools = os.path.join(folder, "tools")
+        os.mkdir(tools)
+        for tool in ("python3", "ffmpeg", "mkvmerge"):
+            with open(os.path.join(tools, tool), "w") as f:
+                f.write(STAND_IN)
+            os.chmod(os.path.join(tools, tool), 0o755)
+        work = os.path.join(folder, "fixtures")
+        os.mkdir(work)
+        shutil.copy(os.path.join(FIXTURES, name), work)
+        env = {"PATH": os.pathsep.join((tools, "/usr/bin", "/bin")), "MADE": " ".join(made), "FAILING": failing or ""}
+        out = subprocess.run([shutil.which("zsh"), os.path.join(work, name)], env=env, stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=60)
+        return out.returncode, set(os.listdir(work)) - {name}
+
+    def test_the_working_files_go_whether_a_step_fails_or_not(self):
+        for name, made, working, steps in (
+                ("make_fixture.sh", ("tiny.srt", "tiny-offset.srt", "tone.expr"), {"tone.expr", "tiny-av.mkv"},
+                 ("ffmpeg", "mkvmerge")),
+                ("make_image_fixture.sh", ("lines.sup",), {"lines.sup"}, ("mkvmerge",))):
+            for failing in (None, *steps):
+                with self.subTest(script=name, failing=failing):
+                    code, left = self.run_script(name, made, failing)
+                    self.assertEqual(code != 0, failing is not None)
+                    self.assertEqual(left & working, set())
+                    self.assertTrue(left)                       # the steps ran: they made files of their own
 
 
 class ImageBuildTest(unittest.TestCase):
