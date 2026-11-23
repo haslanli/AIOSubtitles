@@ -132,7 +132,7 @@ class Checks(unittest.TestCase):
         for bad in ('1e300', '2e299', '1' * 16, '9' * 400, '9' * 5000):
             with self.subTest(bad=bad[:20]):
                 self.assertEqual(limits.check(daily, bad), (None, 'A number above 0, like 100.'))
-        self.assertEqual(limits.check(daily, '1e290'), (str(int(1e290)), None))      # its bytes still a number
+        self.assertEqual(limits.check(daily, '1e290'), (None, 'A number above 0, like 100.'))   # no exponent
         self.assertEqual(limits.check(daily, ' 123456789012345 '), ('123456789012345', None))    # 15 characters
         by = {lim.setting: lim for lim in limits.hosting(usenet=True, audio=True)}
         for setting, words in (('SUBSYNC_USER_DAILY_MB', 'A whole number from 1, like 10,000.'),
@@ -143,6 +143,21 @@ class Checks(unittest.TestCase):
                     self.assertEqual(limits.check(by[setting], bad), (None, words))
             with self.subTest(setting=setting, good='15 characters'):
                 self.assertEqual(limits.check(by[setting], '999,999,999,999'), ('999999999999', None))
+
+    def test_a_gb_value_is_plain_digits_of_at_least_one_byte_that_the_next_run_takes_again(self):
+        # "1e-10" (or "0.0000000001") passed as above 0 and subsync read it as 0 bytes a day; "1e15" was
+        # written as a 16-digit value the next run refused (with --yes the run stopped); "1_5" was read as 15
+        daily = self.lim('SUBSYNC_DAILY_BUDGET_GB')
+        for bad in ('1e-10', '0.0000000001', '1e15', '1e3', '1E2', '1_5', '1_000', '+5', '1.2.3', '.', '0.0',
+                    '.12345678901234'):                                     # the last: 16 characters as written
+            with self.subTest(bad=bad):
+                self.assertEqual(limits.check(daily, bad), (None, 'A number above 0, like 100.'))
+        for typed, written in (('0.000000001', '0.000000001'), ('0.00001', '0.00001'), ('.5', '0.5'), ('1.', '1'),
+                               ('007', '7'), ('1.50', '1.5'), ('20.0', '20'), ('999999999999999', '999999999999999')):
+            with self.subTest(typed=typed):
+                self.assertEqual(limits.check(daily, typed), (written, None))
+                self.assertEqual(limits.check(daily, written), (written, None))     # the next run takes it again
+                self.assertGreaterEqual(settings.Settings({daily.setting: written}).daily_budget, 1)
 
     def test_a_number_in_other_digits_is_refused_with_the_fields_words(self):
         # Isdigit took "²", which int refuses (ValueError out of the check, and with it the setup page's
@@ -196,6 +211,24 @@ class Checks(unittest.TestCase):
                 self.assertEqual(limits.check(by[name], ' 12 '), ('12', None))
                 for bad in ('-1', '1.5', 'lots', '', 'auto'):
                     self.assertEqual(limits.check(by[name], bad), (None, f'A whole number from 0, like {default}.'))
+
+    def test_the_usenet_searches_take_0_as_their_explanation_says(self):
+        # 0 was refused ("A whole number from 1, like 10.") under a text that says "0 turns Usenet off";
+        # subsync refuses 0 only where Usenet is your own install's only source
+        for lim in (limits.USENET, limits.USENET_HOSTED):
+            with self.subTest(label=lim.label):
+                self.assertIn('0 turns Usenet off', explain.setup_help(lim.setting))
+                self.assertEqual(limits.check(lim, '0'), ('0', None))
+                self.assertEqual(limits.check(lim, ' 7 '), ('7', None))
+                for bad in ('-1', '1.5', 'lots', '', 'auto'):
+                    self.assertEqual(limits.check(lim, bad), (None, 'A whole number from 0, like 10.'))
+        only = ("A whole number from 1, like 10: Usenet is this install's only source, so 0 would leave subsync "
+                'nothing to read.')
+        for bad in ('0', '-1', 'lots', ''):
+            with self.subTest(usenet_only=bad):
+                self.assertEqual(limits.check(limits.USENET, bad, usenet_only=True), (None, only))
+        self.assertEqual(limits.check(limits.USENET, '3', usenet_only=True), ('3', None))
+        self.assertEqual(settings.Settings({'SUBSYNC_USENET_LISTINGS_PER_DAY': '0'}).conflicts(), [])   # as subsync
 
     def test_audio_syncs_at_a_time_cant_be_more_than_the_files_synced_at_a_time(self):
         lim = {lim.setting: lim for lim in limits.hosting(audio=True)}['SUBSYNC_AUDIO_AT_ONCE']

@@ -9,7 +9,8 @@ nothing: the language limit on a personal install (you choose your own languages
 A limit is written to state/subsync.env only when it differs from subsync's default, so a later default still
 applies to everyone who kept it.
 """
-import math
+import decimal
+import re
 from collections import namedtuple
 
 from installer import plan
@@ -23,9 +24,10 @@ Limit.default = property(lambda self: explain.SETTINGS[self.setting][0])
 
 DAILY = Limit('SUBSYNC_DAILY_BUDGET_GB', 'Data a day in total', 'GB', 'decimal')
 AUDIO = Limit('SUBSYNC_AUDIO_BUDGET_GB', 'Audio per file', 'GB', 'segmented', plan.AUDIO_BUDGETS)
-# The Usenet searches a day (one setting, per person on a public instance)
-USENET = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches a day', None, 'number')
-USENET_HOSTED = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches per person a day', None, 'number')
+# The Usenet searches a day (one setting, per person on a public instance): 0 turns Usenet off, as its explanation says
+#, except where Usenet is your own install's only source (check's usenet_only)
+USENET = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches a day', None, 'count')
+USENET_HOSTED = Limit('SUBSYNC_USENET_LISTINGS_PER_DAY', 'Usenet searches per person a day', None, 'count')
 # A public instance's audio route, asked only with it on (0 stops new audio syncs, or removes the opened answer)
 AUDIO_PER_DAY = Limit('SUBSYNC_USER_AUDIO_PER_DAY', 'Audio syncs per person a day', None, 'count')
 OPENED_PER_DAY = Limit('SUBSYNC_USER_OPENED_PER_DAY', 'Of those, as soon as a file is opened', None, 'count')
@@ -54,6 +56,9 @@ HOSTING = [
 # the words for a value that doesn't fit (the two segmented ones are the terminal setup's; the page's are choose())
 WHOLE = 'A whole number from 1, like {default}.'
 COUNT = 'A whole number from 0, like {default}.'
+# the Usenet searches a day where Usenet is your own install's only source: subsync refuses 0 there (settings.py)
+USENET_ONLY = ("A whole number from 1, like {default}: Usenet is this install's only source, so 0 would leave subsync "
+               "nothing to read.")
 WHOLE_OR_AUTO = 'A whole number from 1, or auto.'
 NOT_ABOVE_PLACES = 'A whole number from 1 to {places} (the files synced at a time), or auto.'
 ABOVE_ZERO = 'A number above 0, like {default}.'
@@ -64,6 +69,8 @@ NOT_A_LANGUAGE_LIMIT = f'SUBSYNC_MAX_LANGUAGES must be a whole number from 1 to 
 # what subsync can hold: a longer answer, or a GB value whose bytes (subsync counts settings.GB, 10^9, to a GB) are no
 # finite number, crashed it at start
 LONGEST = 15
+# a GB value: digits with one dot at most ("1.5", ".5", "2"); no exponent, sign or underscore
+PLAIN_DECIMAL = re.compile(r'[0-9]+\.?[0-9]*|\.[0-9]+')
 
 
 def personal(audio, usenet=False):
@@ -108,27 +115,30 @@ def _whole(text, least=1):
 
 
 def _above_zero(text):
-    """A GB value above 0, written with a dot for decimals (a comma is refused before, with NO_COMMA)."""
+    """A GB value of at least one byte (subsync counts whole bytes), written in digits with a dot for decimals (a comma
+    is refused before, with NO_COMMA), and as state/subsync.env gets it: in the same plain digits, no longer than
+    LONGEST, so the next run takes it again ("1e15" was written as 16 digits setup then refused, "1e-10" as a
+    value subsync reads as 0 bytes a day)."""
     value = text.strip()
-    if len(value) > LONGEST:
+    if len(value) > LONGEST or not PLAIN_DECIMAL.fullmatch(value) or int(float(value) * GB) < 1:
         return None
-    number = digits.decimal(value)
-    if number is None or not (math.isfinite(number * GB) and number > 0):
-        return None
-    return str(int(number)) if number == int(number) else str(number)
+    written = format(decimal.Decimal(value).normalize(), 'f')       # "1.50" -> 1.5, "20.0" -> 20, ".5" -> 0.5
+    return written if len(written) <= LONGEST else None
 
 
-def check(lim, text, current=None, places=None):
+def check(lim, text, current=None, places=None, usenet_only=False):
     """(value as written in subsync.env, None) or (None, the words for the problem). `current`: a value set by hand
     before, kept when it is given again (the audio limit, as ./setup did). `places`: the files synced at a time, which
-    the audio syncs at a time can't be more than (subsync refuses to start otherwise)."""
+    the audio syncs at a time can't be more than (subsync refuses to start otherwise). `usenet_only`: Usenet is
+    your own install's only source, so its searches a day start at 1 (subsync refuses to start on 0)."""
     text = '' if text is None else str(text)
     if lim.kind == 'number':
         value = _whole(text)
         return (value, None) if value else (None, WHOLE.format(default=shown(lim, lim.default)))
     if lim.kind == 'count':
-        value = _whole(text, least=0)
-        return (value, None) if value else (None, COUNT.format(default=shown(lim, lim.default)))
+        value = _whole(text, least=1 if usenet_only else 0)
+        words = USENET_ONLY if usenet_only else COUNT
+        return (value, None) if value else (None, words.format(default=shown(lim, lim.default)))
     if lim.kind == 'auto':
         if text.strip().lower() == 'auto':
             return 'auto', None

@@ -123,6 +123,18 @@ class Place(unittest.TestCase):
         self.assertEqual(p.page_port, 8899)                                 # the machine's own port still preferred
         self.assertFalse(where.place_from(inspect(ports={}), PULLED, '1.4.0', 'image', (0, 0)).page_exposed)
 
+    def test_a_page_port_published_on_1_only_is_marked_with_its_address(self):
+        # -p [::1]:8789:8789 passed as local, but setup printed the 127.0.0.1 address, where nothing listens
+        ipv6 = {'HostIp': '::1', 'HostPort': '8899'}
+        for binds, host in (([ipv6], '::1'), ([{'HostIp': '127.0.0.1', 'HostPort': '8899'}], '127.0.0.1'),
+                            ([ipv6, {'HostIp': '127.0.0.1', 'HostPort': '8899'}], '127.0.0.1'), ([], '127.0.0.1')):
+            with self.subTest(binds=binds):
+                p = where.place_from(inspect(ports={'8789/tcp': binds}), PULLED, '1.4.0', 'image', (0, 0))
+                self.assertEqual(p.page_host, host)
+                self.assertFalse(p.page_exposed)
+        on_host = where.place_from(inspect(network='host', ports={}), PULLED, '1.4.0', 'image', (0, 0))
+        self.assertEqual(on_host.page_host, '127.0.0.1')
+
     def test_what_is_missing_from_the_docker_run_command(self):
         self.assertEqual(where.missing(inspect(), 'image'), [])
         self.assertEqual(where.missing(inspect(mounts=[]), 'image'), [where.NO_FOLDER])

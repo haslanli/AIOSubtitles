@@ -32,6 +32,14 @@ ADDRESS_REFUSED = ('Type an https address with no path after the name, like http
 NO_ANSWER = "{address}/health doesn't answer from this machine."
 NO_ANSWER_NOTES = ('If you just added the web server rule, reload the web server; some routers also block a machine',
                    'from reaching its own public address, so check it from your phone too: it should say "ok".')
+# the sign-up page answering without its own security header (a web server that sets its own Content-Security-Policy
+# instead): it loads, so not "doesn't load ...: HTTP 200"
+NO_SECURITY_HEADERS = ('The sign-up page loads at {address}, but without its security headers: make your web server '
+                       'pass them on as they are.')
+# the note under the web server rule: a web server in a container reaches 127.0.0.1 only on this machine's network, as
+# the public AIOSubtitles' own Caddy runs (the trusted proxy, gateway, stays right with it)
+IN_DOCKER = ("Web server running in Docker: run it on this machine's network (network_mode: host), so it reaches "
+             "{target}.")
 # setup's answer to SUBSYNC_TRUSTED_PROXY when none is given: the web server reaches the instance through the port
 # Docker publishes, from its network's gateway
 TRUSTED_PROXY = 'gateway'
@@ -139,15 +147,16 @@ def web_server_rule(address, target):
 
 def fetch(url, timeout=10):
     """(status, headers, body) of one GET from this machine, through subsync's request gate (realdebrid.urlopen: never
-    to Real-Debrid, nor on to it by a redirect). OSError when nothing answers with HTTP: no answer, a name that can't
-    be looked up as written, or an answer that isn't HTTP."""
+    to Real-Debrid, nor on to it by a redirect). The headers as the answer gave them, one given twice kept twice (a
+    web server may add a header of a name the page sends too). OSError when nothing answers with HTTP: no answer, a
+    name that can't be looked up as written, or an answer that isn't HTTP."""
     try:
         request = urllib.request.Request(url, headers={'User-Agent': user_agent('setup')})
         with realdebrid.urlopen(request, timeout) as response:
-            return response.status, dict(response.headers.items()), response.read(4096)
+            return response.status, response.headers, response.read(4096)
     except urllib.error.HTTPError as e:
         with e:             # its response, closed now rather than when it is collected
-            return e.code, dict(e.headers.items()), b''
+            return e.code, e.headers, b''
     except (ValueError, http.client.HTTPException) as e:     # IDNA's UnicodeError; BadStatusLine, IncompleteRead, ...
         raise OSError(' '.join(str(e).split()) or type(e).__name__) from e
 
@@ -174,14 +183,18 @@ def check(address, out):
             out.note(line)
     try:
         status, headers, _ = fetch(address + '/')
-        headers = {k.lower(): v for k, v in headers.items()}
-        reason = None if status == 200 and "default-src 'none'" in headers.get('content-security-policy', '') \
-            else f'HTTP {status}'
+        reason = None if status == 200 else f'HTTP {status}'
+        # the page's own policy, among any others a web server adds
+        secured = any(name.lower() == 'content-security-policy' and "default-src 'none'" in value
+                      for name, value in headers.items())
     except OSError as e:
-        reason = str(getattr(e, 'reason', None) or e)
-    if reason is None:
-        out.ok(f'The sign-up page loads at {address}, with its security headers')
-    else:
+        reason, secured = str(getattr(e, 'reason', None) or e), False
+    if reason is not None:
         good = False
         out.bad(f"The sign-up page doesn't load at {address}: {reason}.")
+    elif not secured:
+        good = False
+        out.bad(NO_SECURITY_HEADERS.format(address=address))
+    else:
+        out.ok(f'The sign-up page loads at {address}, with its security headers')
     return good

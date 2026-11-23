@@ -73,7 +73,11 @@ class CommandLine(FlowFixture):
         with mock.patch.object(engine, 'PLACE', place):
             code, _, served = self.serve()
         app, _ = served[0]
-        self.assertEqual((app.bind, app.port, app.public_port), ('0.0.0.0', 8789, 8899))
+        self.assertEqual((app.bind, app.port, app.public_port, app.public_host), ('0.0.0.0', 8789, 8899, '127.0.0.1'))
+        # published on::1 only: the page's address is [::1]'s
+        with mock.patch.object(engine, 'PLACE', place._replace(page_host='::1')):
+            code, _, served = self.serve()
+        self.assertEqual((code, served[0][0].public_host), (0, '[::1]'))
 
     def test_no_port_for_the_page_says_how_to_add_it(self):
         place = self.place._replace(network='bridge', page_port=None)

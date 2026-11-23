@@ -22,10 +22,11 @@ def whole(text):
 
 
 def decimal(text):
-    """The number `text` writes as float() reads it ("1.5", ".5", "2", "1e3", "inf", "nan"), in ASCII only, else None.
-    The caller judges what it may be (finite, above 0)."""
+    """The number `text` writes as float() reads it ("1.5", ".5", "2", "1e3", "inf", "nan"), in ASCII only and without
+    an underscore, else None. The caller judges what it may be (finite, above 0). float() reads an underscore between
+    digits as nothing, so "1_5" (1.5 mistyped) was 15: refused here as whole refuses it (S9)."""
     text = str(text)
-    if not text.isascii():
+    if not text.isascii() or '_' in text:
         return None
     try:
         return float(text)

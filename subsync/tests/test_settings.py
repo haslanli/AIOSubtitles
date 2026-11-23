@@ -9,7 +9,7 @@ import re
 import unittest
 
 import helpers  # (first: it puts the package on the import path)
-from subsync import ALGO_VERSION, RULE_REVISION, explain, settings as settings_module
+from subsync import ALGO_VERSION, RULE_REVISION, digits, explain, settings as settings_module
 from subsync.settings import GB, MB, Rules, Settings
 
 PUBLIC = {"SUBSYNC_PUBLIC": "on"}
@@ -92,6 +92,25 @@ class NumbersTest(unittest.TestCase):
                 s = Settings({name: value})
                 self.assertEqual(s.conflicts(), [line])
                 self.assertEqual(s.written_wrong, [line])
+
+    def test_a_decimal_with_an_underscore_is_written_wrong(self):
+        # S9: float reads an underscore between digits as nothing, so "1_5" GB (1.5 mistyped) was read as 15
+        # and "1_000" MB as 1000; whole numbers refused it already
+        for name, value, line, default in (
+                ("SUBSYNC_DAILY_BUDGET_GB", "1_5", "SUBSYNC_DAILY_BUDGET_GB must be a number from 0, like 100.",
+                 ("daily_budget", 100 * GB)),
+                ("SUBSYNC_STORE_CAP_MB", "1_000", "SUBSYNC_STORE_CAP_MB must be a number from 0, like 2048.",
+                 ("cap_bytes", 2048 * MB)),
+                ("SUBSYNC_READ_TIMEOUT_S", "6_0", "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60.",
+                 ("read_timeout", 60))):
+            with self.subTest(name=name, value=value):
+                s = Settings({name: value})
+                self.assertEqual(s.conflicts(), [line])
+                self.assertEqual(getattr(s, default[0]), default[1])          # read as its default meanwhile
+        for value in ("1_5", "_1", "1_", "1._5", "1e1_0"):
+            with self.subTest(value=value):
+                self.assertIsNone(digits.decimal(value))
+        self.assertEqual((digits.decimal("1.5"), digits.decimal("15")), (1.5, 15.0))
 
     def test_every_documented_zero_keeps_its_meaning(self):
         # "0 removes the limit" (the audio and per-file limits), "0 turns Usenet off", "0 turns the check off", "0 stops

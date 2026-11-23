@@ -139,6 +139,22 @@ class Personal(FlowFixture):
         self.assertNotIn('Subsync', out.replace('(Subsync)', ''))
         self.assertNotEqual(self.keys()['USENET_UUID'], old)
 
+    def test_0_searches_a_day_turn_usenet_off_unless_it_is_the_only_source(self):
+        # Setup refused 0, the value the field's own text offers; with Usenet the only source subsync refuses
+        # it, so setup does too, saying why
+        self.viewer([TORBOX, ENGINE], [ZILEAN, NEWZNAB, SUBS])
+        code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', SUBSYNC_USENET_LISTINGS_PER_DAY='0',
+                                        TEST_READ='no'))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.env()['SUBSYNC_USENET_LISTINGS_PER_DAY'], '0')
+        self.viewer([ENGINE], [NEWZNAB, SUBS])
+        code, out = self.run_setup(dict(self.ANSWERS, USENET='yes', SUBSYNC_USENET_LISTINGS_PER_DAY='0',
+                                        TEST_READ='no'))
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("SUBSYNC_USENET_LISTINGS_PER_DAY: A whole number from 1, like 10: Usenet is this install's only "
+                      'source, so 0 would leave subsync nothing to read.', ' '.join(out.split()))
+        self.assertEqual(self.env()['SUBSYNC_USENET_LISTINGS_PER_DAY'], '0')           # the first run's, unchanged
+
     def test_a_usenet_only_config(self):
         self.viewer([ENGINE], [NEWZNAB, SUBS])
         code, out = self.run_setup(dict(self.ANSWERS, USENET='no'))

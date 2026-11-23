@@ -986,7 +986,8 @@ class Engine:
         lim = limits.DAILY
 
         def check(value):
-            chosen, error = limits.check(lim, value)
+            # Usenet as the only source (no sync config of the debrid services): its searches a day can't be 0
+            chosen, error = limits.check(lim, value, usenet_only=lim is limits.USENET and not self.has_sync)
             return (False, error, value) if error else (True, '', chosen)
         self.limit_values = {lim.setting: self.ask.text(lim.setting, lim.label, current=limits.current(lim, env_values()),
                                                         check=check)}
@@ -1631,10 +1632,11 @@ class Engine:
             self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
         self._deploy('AIOSubtitles', 'AIOSubtitles is running (it restarts by itself after a reboot)')
         if not hosting.health_ok(self.address):
-            self.show_rule(hosting.web_server_rule(self.address, f"127.0.0.1:{self.s['port']}"),
+            target = f"127.0.0.1:{self.s['port']}"
+            self.show_rule(hosting.web_server_rule(self.address, target),
                            f'Your web server needs one rule so {self.address} reaches AIOSubtitles on this machine. '
                            'Add it with the https certificate your web server has for that name, and reload the web '
-                           'server:')
+                           'server:', note=hosting.IN_DOCKER.format(target=target))
 
     def host_check(self):
         self.show_step('hostcheck', 'host')
@@ -1831,8 +1833,8 @@ class Engine:
             raise Stop(update.NO_ROLLBACK)
         copy = prev.get('databases') if restore else None
         if copy and not real_folder(STATE / 'backups' / copy):
-            raise Stop(update.ROLLBACK_FAILED.format(reason=f'{copy} is not in state/backups',
-                                                     version=self.prev.get('version')))
+            raise Stop(update.failed(True, dockerenv.running(CONTAINER)).format(
+                reason=f'{copy} is not in state/backups', version=self.prev.get('version')))
         return self.switch(prev['image'], prev.get('local', False), prev['version'], back=True, restore=copy)
 
     def route_check(self, out=None):
@@ -1850,15 +1852,17 @@ class Engine:
     def switch(self, image, local, version, back=False, restore=None):
         """Copy the databases; check `image` while the old version keeps running; switch; check again; put the old
         version back (with the copy when it needs it) if the new one doesn't answer. `back`: a rollback, whose stops
-        say so."""
+        say so. A service that isn't running is switched too, and its stops say it stays stopped."""
         s = self.s = dict(self.prev)
         old = {'image': s.get('image'), 'local': bool(s.get('local')), 'version': s.get('version')}
-        failed = update.ROLLBACK_FAILED if back else update.FAILED
         guard(s.get('install_id'), unlabelled_own(s))
+        running = dockerenv.running(CONTAINER)
+        failed = update.failed(back, running)
         held = self.route_check()            # what held before: a check that failed already can't fail the update
         needed = {(s.get('previous') or {}).get('databases'), restore} - {None}     # never pruned: a rollback needs them
-        copy = self.copy_databases(old['version'], failed, keep=needed)
-        self.out.working(update.CHECKING.format(version=version, old=old['version']))
+        copy = self.copy_databases(old, failed, running, keep=needed)
+        checking = update.CHECKING if running else update.CHECKING_STOPPED
+        self.out.working(checking.format(version=version, old=old['version']))
         good, reason = dockerenv.check_image(image, plan.project(), s['install_id'])
         if not good:
             raise Stop(failed.format(reason=reason.rstrip('.'), version=old['version']))
@@ -1927,14 +1931,21 @@ class Engine:
         except ValueError:
             return False
 
-    def copy_databases(self, old_version, failed, keep=()):
+    def copy_databases(self, old, failed, running, keep=()):
         """A checked copy of the service's databases, out of its container, the newest three kept. Returns its folder.
-        `failed`: the stop when it can't be made, an update's or a rollback's."""
+        `old`: the version installed ({'image', 'version'}); `failed`: the stop when it can't be made, an update's or a
+        rollback's; `running`: whether the service runs. While it doesn't, Docker runs nothing in its container, so the
+        copy is made (and removed again) by a short-lived container of its version on its volume; docker cp takes it
+        out of the stopped container all the same."""
         self.out.working(update.COPYING)
         stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
         inside = f'{plan.DATA}/before-update-{stamp}'
-        code, out, err = dockerenv.exec_in(CONTAINER, ['python', '-m', 'subsync.hostcmd', 'copy-databases', inside],
-                                           timeout=600)
+
+        def in_service(cmd, timeout=120):
+            if running:
+                return dockerenv.exec_in(CONTAINER, cmd, timeout=timeout)
+            return dockerenv.run_on_volume(old['image'], data_volume(self.s), cmd, timeout=timeout)
+        code, out, err = in_service(['python', '-m', 'subsync.hostcmd', 'copy-databases', inside], timeout=600)
         backups = STATE / 'backups'
         dest = backups / f'databases-{stamp}'
         if code == 0:
@@ -1946,10 +1957,10 @@ class Engine:
                 code, out, err = 1, '', update.COPY_NOT_A_FOLDER
             if code != 0:
                 remove_entry(dest)      # what the copy that failed left: never kept as one of the copies
-        dockerenv.exec_in(CONTAINER, ['python', '-c', f'import shutil; shutil.rmtree({inside!r}, ignore_errors=True)'])
+        in_service(['python', '-c', f'import shutil; shutil.rmtree({inside!r}, ignore_errors=True)'])
         if code != 0:
             reason = ((err or out).strip().splitlines() or ['no answer'])[-1]
-            raise Stop(failed.format(reason=reason.rstrip('.'), version=old_version))
+            raise Stop(failed.format(reason=reason.rstrip('.'), version=old['version']))
         databases = plain_databases(dest)
         for path in list(dest.iterdir()):
             if path.name not in databases:

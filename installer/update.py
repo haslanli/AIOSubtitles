@@ -5,7 +5,9 @@ A new version comes as a newer image: on the image route ./setup fetches the new
 the source route ./setup --update fetches the folder's newer commit with git and builds its image first (the folder's
 ./setup script, which uses the git words below). Setup then compares its own version with the one the service runs,
 and the update (installer/engine.py) copies the databases, checks the new version while the old one keeps running,
-switches, checks again, and puts the old version back when the new one doesn't answer.
+switches, checks again, and puts the old version back when the new one doesn't answer. A service that isn't running
+(stopped, or restarting in a loop) is updated too: its databases are copied by a short-lived container of its version,
+and the words say it is stopped.
 """
 import os
 import re
@@ -27,10 +29,15 @@ NEWER_HERE = ('This machine runs version {running}, newer than this setup ({setu
               'made.')
 FAILED = "The update didn't go through: {reason}. Version {version} keeps running."
 ROLLBACK_FAILED = "The rollback didn't go through: {reason}. Version {version} keeps running."
+# the same while the service isn't running: nothing has started it (failed())
+FAILED_STOPPED = "The update didn't go through: {reason}. Version {version} stays installed, stopped as it was."
+ROLLBACK_FAILED_STOPPED = ("The rollback didn't go through: {reason}. Version {version} stays installed, stopped as it "
+                           "was.")
 COPY_NOT_A_FOLDER = 'the copy of the databases is not a folder'     # a reason: made by a service tampered with
 SAVED_DATABASES = 'Saved a copy of the databases: {path}'
 COPYING = 'Copying the databases'
 CHECKING = 'Checking version {version} while version {old} keeps running'
+CHECKING_STOPPED = 'Checking version {version}'         # while the service isn't running
 CHECKED = 'The new version answers'
 SWITCHING = 'Switching to version {version}'
 SWITCHED = 'Switched to version {version}'
@@ -64,6 +71,14 @@ LOOK_FAILED = "Couldn't look for a new version: {reason}."
 NOT_GIT = ("This folder wasn't downloaded with git, so it can't fetch a new version: download the new version, copy "
            "this folder's state/ into it, and run ./setup there.")
 CHANGED = 'This folder has changes of its own, so the update stopped before changing anything: {files}.'
+
+
+def failed(back, running):
+    """The stop of an update, or of a rollback (`back`), that didn't go through: the version installed keeps running,
+    or, when the service wasn't running (stopped, or restarting in a loop), stays as it was."""
+    if back:
+        return ROLLBACK_FAILED if running else ROLLBACK_FAILED_STOPPED
+    return FAILED if running else FAILED_STOPPED
 
 
 def _parts(version):

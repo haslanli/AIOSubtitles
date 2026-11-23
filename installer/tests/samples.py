@@ -226,8 +226,10 @@ def every_state():
     add('host-limits-languages-problem', screens.limits('host', {'SUBSYNC_MAX_LANGUAGES': '6'}, problem=languages))
     host_progress = [('done', 'Made the secret key and kept it in state/subsync.env, readable only by your user.', None),
                      ('ok', 'AIOSubtitles is running (it restarts by itself after a reboot)', None)]
-    add('host-install', screens.installing('host', host_progress, running=False, rule=rule, rule_intro=intro),
-        *[r[1] for r in host_progress], intro, *rule, *[line for lines in rule.values() for line in lines])
+    in_docker = hosting.IN_DOCKER.format(target='127.0.0.1:8790')
+    add('host-install', screens.installing('host', host_progress, running=False, rule=rule, rule_intro=intro,
+                                           rule_note=in_docker),
+        *[r[1] for r in host_progress], intro, *rule, *[line for lines in rule.values() for line in lines], in_docker)
     host_checks = [('ok', f'People can reach AIOSubtitles at {ADDRESS}', None),
                    ('ok', f'The sign-up page loads at {ADDRESS}, with its security headers', None)]
     add('host-check', screens.check('host', host_checks, running=False), *[r[1] for r in host_checks])

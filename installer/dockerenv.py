@@ -161,6 +161,12 @@ def stopped(name):
     return container_state(name).split()[:1] not in ([], ['running'])
 
 
+def running(name):
+    """Whether the container `name` runs: Docker runs a command in it (exec_in) only then, never while it is stopped,
+    restarting in a loop or gone."""
+    return container_state(name).split()[:1] == ['running']
+
+
 def exec_in(name, cmd, stdin=None, timeout=120):
     return run(['docker', 'exec', '-i', name, *cmd], stdin=stdin, timeout=timeout)
 
@@ -326,6 +332,14 @@ for name in names:
         os.replace(tmp, os.path.join(data, name))
 print("restored")
 """
+
+
+def run_on_volume(image, volume, cmd, timeout=120):
+    """`cmd`, as exec_in runs it in the service's container, in a short-lived container of `image` instead (the
+    version installed, as the service's user, on the service's volume, removed when it ends): for a service that isn't
+    running."""
+    return run(['docker', 'run', '--rm', '--user', SERVICE_USER, '--entrypoint', cmd[0], '-v', f'{volume}:{DATA}',
+                image, *cmd[1:]], timeout=timeout)
 
 
 def restore_databases(image, volume, files):

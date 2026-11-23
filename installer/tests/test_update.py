@@ -422,6 +422,87 @@ class EngineUpdate(unittest.TestCase):
                 self.assertEqual(self.running, NEW)
                 self.assertEqual(engine.load_settings()['previous']['version'], '1.3.0')    # still there to go back
 
+    def stopped_run(self):
+        """The service stopped: `docker run`s recorded as events, `docker cp` as the fixture makes it."""
+        cp = dockerenv.run
+
+        def run(cmd, timeout=60, stdin=None):
+            if cmd[:2] == ['docker', 'run']:
+                self.events.append(('run', ' '.join(cmd)))
+                return 0, json.dumps({'copied': ['users.sqlite3', 'subsync.sqlite3']}), ''
+            return cp(cmd, timeout, stdin)
+        self.running = None
+        return mock.patch.object(dockerenv, 'run', run)
+
+    def test_a_stopped_service_is_updated_with_a_copy_made_beside_it(self):
+        # The copy was made only by docker exec in the service's container, which Docker refuses while it is
+        # stopped or restarting in a loop: the update stopped, saying the version "keeps running"
+        self.install()
+        e = engine.Engine({}, page=True)
+        with self.stopped_run():
+            self.assertTrue(e.update())
+        runs = [ev[1] for ev in self.events if ev[0] == 'run']
+        inside = runs[0].rsplit(' ', 1)[-1]
+        self.assertTrue(inside.startswith('/data/before-update-'), inside)
+        short_lived = f'docker run --rm --user 10001:10001 --entrypoint python -v aiosubtitles_subsync-data:/data {OLD}'
+        self.assertEqual(runs, [f'{short_lived} -m subsync.hostcmd copy-databases {inside}',
+                                f'{short_lived} -c import shutil; shutil.rmtree({inside!r}, ignore_errors=True)'])
+        self.assertFalse([ev for ev in self.events if ev[0] == 'exec' and 'copy-databases' in ev[1]])
+        kinds = self.kinds()
+        self.assertLess(kinds.index('run'), kinds.index('cp'))
+        self.assertLess(kinds.index('cp'), kinds.index('check'))
+        self.assertIn(['done', 'Checking version 1.4.0'], [r[:2] for r in e.out.rows])
+        self.assertNotIn('keeps running', ' '.join(r[1] for r in e.out.rows))
+        self.assertEqual(self.running, NEW)
+        s = engine.load_settings()
+        self.assertEqual((s['version'], s['previous']['version']), ('1.4.0', '1.3.0'))
+
+    def test_a_stopped_services_update_that_cant_go_ahead_says_it_stays_stopped(self):
+        # "... Version 1.3.0 keeps running." was said of a service that wasn't running
+        self.assertEqual(update.FAILED_STOPPED.format(reason='no answer within 90 seconds', version='1.3.0'),
+                         "The update didn't go through: no answer within 90 seconds. Version 1.3.0 stays installed, "
+                         'stopped as it was.')
+        self.assertEqual(update.ROLLBACK_FAILED_STOPPED.format(reason='no answer within 90 seconds', version='1.4.0'),
+                         "The rollback didn't go through: no answer within 90 seconds. Version 1.4.0 stays installed, "
+                         'stopped as it was.')
+        self.assertEqual(update.CHECKING_STOPPED.format(version='1.4.0', old='1.3.0'), 'Checking version 1.4.0')
+        for case in ('the new version does not start', 'the copy fails'):
+            with self.subTest(case=case):
+                if self.state.exists():
+                    import shutil
+                    shutil.rmtree(self.state)
+                self.events.clear()
+                self.install()
+                self.check_answers = case != 'the new version does not start'
+
+                def cp(dest):
+                    return 1, '', 'Error response from daemon: no space left on device'
+                with self.stopped_run(), self.copying(cp) if case == 'the copy fails' else contextlib.nullcontext(), \
+                        self.assertRaises(Stop) as caught:
+                    engine.Engine({}, page=True).update()
+                reason = 'no answer within 90 seconds' if case == 'the new version does not start' \
+                    else 'Error response from daemon: no space left on device'
+                self.assertEqual(caught.exception.message, update.FAILED_STOPPED.format(reason=reason, version='1.3.0'))
+                self.assertNotIn('up', self.kinds())
+                self.assertIsNone(self.running)                                 # stopped as it was
+                self.assertEqual(engine.load_settings()['version'], '1.3.0')
+        # a rollback's: its older version that doesn't start, and its copy gone
+        for restore in (False, True):
+            with self.subTest(rollback_restore=restore):
+                import shutil
+                shutil.rmtree(self.state)
+                self.events.clear()
+                self.install(image=NEW, version='1.4.0',
+                             previous={'image': OLD, 'version': '1.3.0', 'local': False, 'databases': 'databases-x'})
+                self.check_answers = False
+                with self.stopped_run(), self.assertRaises(Stop) as caught:
+                    engine.Engine({}, page=True).rollback(restore=restore)
+                reason = 'databases-x is not in state/backups' if restore else 'no answer within 90 seconds'
+                self.assertEqual(caught.exception.message,
+                                 update.ROLLBACK_FAILED_STOPPED.format(reason=reason, version='1.4.0'))
+                self.assertIsNone(self.running)
+                self.assertEqual(engine.load_settings()['previous']['version'], '1.3.0')
+
     def test_no_earlier_version_no_rollback(self):
         self.install()
         with self.assertRaises(Stop) as caught:

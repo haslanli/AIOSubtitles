@@ -354,9 +354,10 @@ def choices(languages, audio, public_address, problem=None, offer_opensubtitles=
 KEYPADS = {'decimal': 'decimal', 'auto': 'text'}
 
 
-def _limit(lim, value, problem):
-    """A limit's field, with its problem under its label, tied to the box or the row of buttons."""
-    text, error = _explanation(lim.setting), _error(problem, lim.setting)
+def _limit(lim, value, problem, text=None):
+    """A limit's field, with its problem under its label, tied to the box or the row of buttons; `text`: its
+    explanation, when it isn't its setting's."""
+    text, error = text or _explanation(lim.setting), _error(problem, lim.setting)
     if lim.kind == 'segmented':
         return ui.segmented(lim.setting, lim.label, lim.options, value, text, lim.unit, error=error)
     return ui.number_field(lim.setting, lim.label, limit_list.shown(lim, value), text, lim.unit,
@@ -375,10 +376,12 @@ def _choose(problem, asked):
     return (lim.setting, limit_list.choose(lim)) if lim and lim.kind == 'segmented' else problem
 
 
-def limits(route, values, problem=None, audio=False, usenet=False, stop=None):
+def limits(route, values, problem=None, audio=False, usenet=False, stop=None, settings=None):
     """Limits: a personal install asks the daily total and, with the audio route, the audio limit; a public instance
     every limit in its three groups (each
-    install only the limits that do something for it)."""
+    install only the limits that do something for it). On a personal install the audio limit is ./setup's question
+    (AUDIO_BUDGET), explained as the terminal asks it, with the wait of this install's `settings`; a public
+    instance's is its setting."""
     if route == 'host':
         asked = limit_list.hosting(usenet, audio)
         problem = _choose(problem, asked)
@@ -389,7 +392,9 @@ def limits(route, values, problem=None, audio=False, usenet=False, stop=None):
                     problem=problem, fields=_limit_ids(asked))
     asked = limit_list.personal(audio, usenet)
     problem = _choose(problem, asked)
-    body = '<div class="limits">' + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem)
+    audio_text = _explanation('AUDIO_BUDGET', settings)
+    body = '<div class="limits">' + ''.join(_limit(lim, values.get(lim.setting, lim.default), problem,
+                                                   audio_text if lim is limit_list.AUDIO else None)
                                             for lim in asked) + '</div>'
     return step('yourself', 'limits', _stop(stop) + body, _back_and_continue('yourself', 'limits'), problem=problem,
                 fields=_limit_ids(asked))

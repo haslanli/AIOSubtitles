@@ -425,15 +425,18 @@ class Fetch(unittest.TestCase):
         no_answer = [('warn', hosting.NO_ANSWER.format(address=ADDRESS)),
                      *(('note', line) for line in hosting.NO_ANSWER_NOTES)]
         doesnt = f"The sign-up page doesn't load at {ADDRESS}: "
+        without = (f'The sign-up page loads at {ADDRESS}, but without its security headers: make your web server pass '
+                   'them on as they are.')
         for case, health, answer, expected in (
                 ('both good', ok, page, (True, [reach, loads])),
                 ('its header named in lower case', ok, (200, {'content-security-policy': "default-src 'none'"}, b''),
                  (True, [reach, loads])),
+                # These two said "The sign-up page doesn't load at ...: HTTP 200."
                 ('no security header', ok, (200, {'Content-Type': 'text/html'}, b'<!doctype html>'),
-                 (False, [reach, ('bad', doesnt + 'HTTP 200.')])),
+                 (False, [reach, ('bad', without)])),
                 ("the web server's own header instead", ok,
                  (200, {'Content-Security-Policy': "default-src 'self'"}, b''),
-                 (False, [reach, ('bad', doesnt + 'HTTP 200.')])),
+                 (False, [reach, ('bad', without)])),
                 ('an error page', ok, (502, {'Content-Security-Policy': "default-src 'none'"}, b''),
                  (False, [reach, ('bad', doesnt + 'HTTP 502.')])),
                 ('the page refused', ok, urllib.error.URLError('refused'),
@@ -445,6 +448,29 @@ class Fetch(unittest.TestCase):
                 ('/health answering an error', (503, {}, b'ok'), page, (False, [*no_answer, loads]))):
             with self.subTest(case):
                 self.assertEqual(self.check_with(health, answer), expected)
+
+    def test_the_pages_own_security_header_counts_beside_another_of_the_web_servers(self):
+        # Fetch kept one header of each name, the last, so a web server adding a policy of its own after the
+        # page's (nginx's add_header) failed the check though the page's own was there
+        class TwoPolicies(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                if self.path == '/':
+                    self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self'")
+                    self.send_header('Content-Security-Policy', "frame-ancestors 'self'")
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'ok')
+
+            def log_message(self, *args):
+                pass
+        base = self.serve(TwoPolicies)
+        self.assertEqual(hosting.fetch(base + '/')[1].get_all('Content-Security-Policy'),
+                         ["default-src 'none'; script-src 'self'", "frame-ancestors 'self'"])
+        out = Rows()
+        self.assertTrue(hosting.check(base, out))
+        self.assertEqual(out.rows, [('ok', f'People can reach AIOSubtitles at {base}'),
+                                    ('ok', f'The sign-up page loads at {base}, with its security headers')])
 
     def test_it_says_which_release_of_setup_asks(self):
         # It said "AIOSubtitles-setup", no version; every User-Agent now carries the release's (VERSION)
@@ -791,6 +817,27 @@ class Route(RouteFixture):
         self.assertIn(f'{ADDRESS}/health doesn\'t answer from this machine.', out)
         self.assertIn(f'Your web server needs one rule so {ADDRESS} reaches AIOSubtitles on this machine.', ' '.join(out.split()))
         self.assertIn('reverse_proxy 127.0.0.1:8790', out)
+
+    def test_the_rule_says_how_a_web_server_in_docker_reaches_it(self):
+        # The rule points at this machine's 127.0.0.1, which a web server in a container (its own 127.0.0.1)
+        # never reaches; your own install's route had a note for that case, a public instance's none
+        note = ("Web server running in Docker: run it on this machine's network (network_mode: host), so it reaches "
+                '127.0.0.1:8790.')
+        with mock.patch.object(hosting, 'fetch', side_effect=OSError('refused')):
+            code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS})
+        self.assertEqual(code, 3, out)
+        said = ' '.join(out.split())
+        self.assertIn(note, said)
+        self.assertLess(said.index('reverse_proxy 127.0.0.1:8790'), said.index(note))      # under the rule
+        e = engine.Engine({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS}, page=True)
+        with mock.patch.object(hosting, 'fetch', side_effect=OSError('refused')):
+            e.check_machine()
+            e.host_address()
+            e.host_signups()
+            e.host_choices()
+            e.host_limits()
+            e.host_install()
+        self.assertEqual(e.rule_note, note)                                     # the page shows it under the rule
 
     def test_a_removed_tmdb_key_asks_each_persons_question_again(self):
         code, out = self.run_setup({'ROUTE': 'host', 'HOST_ADDRESS': ADDRESS, 'TMDB_KEY': 'tmdb-key-1'})

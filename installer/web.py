@@ -4,11 +4,11 @@ It listens on 127.0.0.1 only, at a free port (on Docker's bridge network: inside
 reaches through the port on this machine only (127.0.0.1 or ::1) given in the docker run command: setup refuses to start
 the page on a port published beyond it, wizard.open_page. Other containers on the same Docker networks reach the
 container's port too, and get nothing without the key), and answers only under a one-time random key in the address
-and only to a Host of 127.0.0.1 or localhost at the machine's port (a page elsewhere in the same browser can't guess
-it, and DNS rebinding gets nothing). Every page has the public site's security header, which also lets a page fetch
-its own address, and nothing inline. Passwords and keys typed in stay in this process's memory for the run and are never
-sent back in a page. The work of each step is installer/engine.py; long work (installing, checking, updating) runs in
-the background once (an install that stopped is tried again on the person's word, and one whose answers changed after
+and only to a Host of 127.0.0.1, [::1] or localhost at the machine's port (a page elsewhere in the same browser can't
+guess it, and DNS rebinding gets nothing). Every page has the public site's security header, which also lets a page
+fetch its own address, and nothing inline. Passwords and keys typed in stay in this process's memory for the run and are
+never sent back in a page. The work of each step is installer/engine.py; long work (installing, checking, updating) runs
+in the background once (an install that stopped is tried again on the person's word, and one whose answers changed after
 it runs again), and its page shows the progress again every screens.REFRESH_S seconds until it is done (the script
 fetches the page; without it the page loads itself again); meanwhile every other address leads to its page, the start
 page and the page after setup's actions too. One request at a time works on the page's state. An error setup doesn't
@@ -49,13 +49,15 @@ STOPS = ('Setup is done; the page has stopped.',)
 PERSONAL_KEYS = ('SUBDL_KEY', 'WYZIE_KEY', 'TMDB_KEY')          # the optional keys each route asks
 HOST_KEYS = ('SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'TMDB_KEY')
 SIGN_IN = ('AIOS_USERNAME', 'AIOS_PASSWORD')                     # AIOStreams' own sign-in
+# this machine's names a browser on it sends as the Host, with the page's port: the page answers to them alone
+LOCAL_HOSTS = ('127.0.0.1', '[::1]', 'localhost')
 
 
-def terminal_lines(port, url):
-    """What ./setup prints when the page starts."""
+def terminal_lines(port, url, host='127.0.0.1'):
+    """What ./setup prints when the page starts. `host`: the machine's address for the page, as `url` writes it."""
     return ['Setup runs in your browser. Open this address on this machine:', f'  {url}',
             'On another computer, run this there first, then open the same address:',
-            f'  ssh -L {port}:127.0.0.1:{port} you@this-server   (your usual ssh login to this machine)',
+            f'  ssh -L {port}:{host}:{port} you@this-server   (your usual ssh login to this machine)',
             'The page stops when you finish, after 60 minutes without use, or with Ctrl-C.']
 
 
@@ -69,6 +71,13 @@ def take_keys(e, one, keys):
             e.answers[key] = ''
         elif e.answers.get(key) == '':
             del e.answers[key]              # the box ticked before, not now
+
+
+def config_answer(given):
+    """The config step's answer as kept and shown in its box again: a pasted install link's config ID alone (the link
+    holds the config's encrypted password, never sent back in a page); an alias link, which holds none, and
+    anything without an ID as typed (read_viewer says what is wrong with it)."""
+    return given if plan.alias_from(given) else plan.config_id_from(given) or given
 
 
 def saved_keys(e, keys):
@@ -185,10 +194,12 @@ class Session:
 
 
 class App:
-    def __init__(self, port=0, idle_s=IDLE_S, bind='127.0.0.1', public_port=None):
+    def __init__(self, port=0, idle_s=IDLE_S, bind='127.0.0.1', public_port=None, public_host='127.0.0.1'):
         self.key = secrets.token_urlsafe(24)
         self.port, self.idle_s = port, idle_s
         self.bind, self.public_port = bind, public_port      # the machine's port for the page, when it differs
+        # the machine's address for the page, as an address writes it: [::1] when the port is published there only
+        self.public_host = f'[{public_host}]' if ':' in public_host else public_host
         self.last = time.monotonic()
         self.finished = threading.Event()
         self.finishing = None        # when the page stops, once setup is done or removed
@@ -203,7 +214,7 @@ class App:
     def handle(self, method, path, headers, body):
         host = headers.get('Host') or headers.get('host') or ''
         port = self.public_port or self.port
-        if host not in (f'127.0.0.1:{port}', f'localhost:{port}'):
+        if host not in [f'{name}:{port}' for name in LOCAL_HOSTS]:
             return 404, dict(PAGE_HEADERS, **{'Content-Type': 'text/plain'}), b''
         parsed = urllib.parse.urlsplit(path)
         if parsed.path.startswith('/static/'):
@@ -319,7 +330,7 @@ class App:
         e = s.e
         config_id = None                # the ID box, when it shows what was sent
         if method == 'POST':
-            given = one.get('AIOS_CONFIG_ID', '')
+            given = config_answer(one.get('AIOS_CONFIG_ID', ''))
             password = one.get('AIOS_CONFIG_PASSWORD', '')
             if password:
                 e.answers['AIOS_CONFIG_ID'] = given
@@ -331,10 +342,9 @@ class App:
                 s.problems.pop('config', None)      # the config read before, its ID unchanged
                 return self.go('choices')
             else:
-                # another config's ID (or none read yet) needs its password; the box keeps the ID sent (a link's
-                # config ID: never its encrypted password)
+                # another config's ID (or none read yet) needs its password; the box keeps the ID sent
                 s.problems['config'] = ('AIOS_CONFIG_PASSWORD', needs_answer(screens.LABELS['AIOS_CONFIG_PASSWORD']))
-                config_id = plan.config_id_from(given) or given
+                config_id = given
         if config_id is None:
             config_id = e.uuid if 'config' in s.done else \
                 e.answers.get('AIOS_CONFIG_ID') or e.prefill().get('AIOS_CONFIG_ID', '')
@@ -391,7 +401,7 @@ class App:
         if problem and problem[0] == 'AUDIO_BUDGET':        # the engine's key for the page's audio limit
             problem = (limits.AUDIO.setting, problem[1])
         return self.page(screens.limits('yourself', values, problem, audio=e.audio, usenet=e.usenet,
-                                        stop=s.stops.get('limits')))
+                                        stop=s.stops.get('limits'), settings=e.env_settings))
 
     def step_review(self, s, method, form, one):
         e = s.e
@@ -704,9 +714,9 @@ def serve(app, say=print):
     """./setup's page: prints where it is (setup runs in a container: no browser to open there), and waits until it
     stops."""
     server = start(app)
-    port = app.public_port or app.port
-    url = f'http://127.0.0.1:{port}/{app.key}/'
-    for line in terminal_lines(port, url):
+    port, host = app.public_port or app.port, app.public_host
+    url = f'http://{host}:{port}/{app.key}/'
+    for line in terminal_lines(port, url, host):
         say(line)
     try:
         app.finished.wait()

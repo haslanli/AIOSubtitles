@@ -575,6 +575,37 @@ class Personal(YourselfSteps, BackgroundWork, FlowFixture):
         self.assertIn('Config found', text)
         self.assertEqual(self.app.session.e.uuid, other)
 
+    def test_a_pasted_install_links_encrypted_part_never_comes_back_in_the_page(self):
+        # After a wrong password, or a stop at this step, the box held the whole link again, the config's
+        # encrypted password included; it holds the config ID taken from it now, and Continue works with it
+        box = (rf'<input[^>]*name="AIOS_CONFIG_ID"[^>]*value="{UUID}"'
+               rf'|<input[^>]*value="{UUID}"[^>]*name="AIOS_CONFIG_ID"')
+        self.walk_to_config()
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': 'wrong', 'go': 'next'})
+        self.assertIn("don't match", text)
+        self.assertRegex(self.b.pages[-1], box)
+        self.assertNotIn('/ENC/', self.b.pages[-1])
+        self.assertEqual(self.app.session.e.answers['AIOS_CONFIG_ID'], UUID)
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
+        self.assertIn('Config found', text)                                 # the box as the page left it
+        # a stop at this step (Real-Debrid only): the same box, and Continue reads the config again with it
+        config = self.aios.users[UUID]['config']
+        services = config['services']
+        config['services'] = [{'id': 'realdebrid', 'enabled': True, 'credentials': {}}]
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': self.LINK, 'AIOS_CONFIG_PASSWORD': PASSWORD,
+                                            'go': 'next'})
+        self.assertIn('press Continue again', text)
+        self.assertRegex(self.b.pages[-1], box)
+        config['services'] = services
+        _, _, text = self.b.post('config', {'AIOS_CONFIG_ID': UUID, 'go': 'next'})
+        self.assertIn('Debrid services: TorBox', text)
+        self.assertFalse(any('/ENC/' in page for page in self.b.pages))
+        # an alias link holds no password: kept as typed
+        alias = f'{PUBLIC}/stremio/u/my-alias/manifest.json'
+        self.assertEqual(web.config_answer(alias), alias)
+        self.assertEqual((web.config_answer(self.LINK), web.config_answer(UUID), web.config_answer('nonsense')),
+                         (UUID, UUID, 'nonsense'))
+
     def test_the_missing_password_message_names_the_fields_label(self):
         # The message was typed out by hand beside the label it quotes
         self.walk_to_config()
@@ -615,7 +646,7 @@ class Personal(YourselfSteps, BackgroundWork, FlowFixture):
         status, _, text = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.USENET.setting: 'abc',
                                                  'go': 'next'})
         self.assertEqual(status, 200)
-        self.assertIn('A whole number from 1', text)
+        self.assertIn('A whole number from 0, like 10.', text)                    # 0 turns Usenet off
         status, headers, _ = self.b.post('limits', {'SUBSYNC_DAILY_BUDGET_GB': '50', limits.USENET.setting: '',
                                                     'go': 'next'})
         self.assertEqual((status, headers.get('Location')), (303, f'/{self.app.key}/review'))
@@ -765,6 +796,25 @@ class Personal(YourselfSteps, BackgroundWork, FlowFixture):
         self.assertIn("That didn&#x27;t go through", body)
         _, _, text = b.post('config', {'AIOS_CONFIG_ID': UUID, 'AIOS_CONFIG_PASSWORD': PASSWORD, 'go': 'next'})
         self.assertNotIn('id="problem"', b.pages[-1])
+
+    def test_the_audio_limit_is_explained_as_the_terminal_asks_it_with_this_installs_wait(self):
+        # The page showed state/subsync.env's comment for the setting ("your answer to ./setup's audio limit
+        # question", values its four buttons can't give, no word of the wait); the terminal asks it with the question's
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'subsync.env').write_text('SUBSYNC_PICK_WAIT_MS=20000\n')
+        self.walk_to_review(AUDIO='pick')
+        _, _, text = self.b.get('limits')
+        asked = explain.AUDIO_BUDGET_TEXT.format(wait=20)
+        self.assertIn('Audio per file', text)
+        self.assertIn(asked, text)
+        self.assertIn('take longer than the 20 seconds an app waits', text)
+        self.assertNotIn(explain.SETTINGS['SUBSYNC_AUDIO_BUDGET_GB'][1], text)
+        self.assertNotIn("your answer to ./setup's audio limit question", text)
+        self.assertEqual(explain.setup_help('AUDIO_BUDGET', self.app.session.e.env_settings), asked)   # the terminal's
+        # the public instance's audio limit keeps its setting's text
+        page = screens.limits('host', {}, audio=True)
+        self.assertIn(html.escape(explain.SETTINGS['SUBSYNC_AUDIO_BUDGET_GB'][1]), page)
+        self.assertNotIn(html.escape(explain.AUDIO_BUDGET_TEXT.format(wait=14)), page)
 
     def test_a_refused_audio_limit_shows_under_its_field(self):
         # the engine refuses it under its answers-file key, AUDIO_BUDGET, which the page's field isn't named by
@@ -1177,6 +1227,23 @@ class Pieces(unittest.TestCase):
                              ('evil.example:8899', 404)):
             got = app.handle('GET', f'/{app.key}/', {'Host': host}, b'')[0]
             self.assertEqual(got, status, host)
+
+    def test_a_page_port_published_on_1_only_is_printed_and_answered_there(self):
+        # Setup printed http://127.0.0.1:<port>/... and its ssh line, where nothing listens, and the [::1]
+        # address that works answered an empty 404
+        app = web.App(port=8789, bind='0.0.0.0', public_port=8899, public_host='::1')
+        lines = []
+        with mock.patch.object(web, 'start', lambda a: setattr(a, 'finished', mock.Mock(wait=lambda: None))
+                               or mock.Mock()):
+            web.serve(app, say=lines.append)
+        self.assertEqual(lines[1:4], [
+            f'  http://[::1]:8899/{app.key}/', 'On another computer, run this there first, then open the same address:',
+            '  ssh -L 8899:[::1]:8899 you@this-server   (your usual ssh login to this machine)'])
+        self.assertFalse(any('127.0.0.1' in line for line in lines))
+        for host, status in (('[::1]:8899', 200), ('localhost:8899', 200), ('127.0.0.1:8899', 200),
+                             ('[::1]:8789', 404), ('[::2]:8899', 404), ('evil.example:8899', 404)):
+            with self.subTest(host=host):
+                self.assertEqual(app.handle('GET', f'/{app.key}/', {'Host': host}, b'')[0], status)
 
     def test_the_done_line_only_when_setup_finished(self):
         app = web.App()
