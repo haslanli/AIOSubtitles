@@ -680,10 +680,11 @@ class PublicHandler(Handler):
                                 field={"password": "refresh", "link": link}.get(e.field, e.field))
                 svc.pool.stop(token, reset=True)   # reads start again at once: they may have changed their debrid key
                 svc.checker.forget(token)
+                # AIOSubtitles not back in their own config: nothing changed there, or sent but not checked
+                by_hand = "-unchecked" if result.unchecked else "-manual" if result.manual else ""
                 if result.store_only:          # stored copies only: moved there by this refresh, or still
-                    done = ("to-stored" if result.to_store_only else "stored") + ("-manual" if result.manual else "")
-                    return self._see(done)
-                return self._see("refreshed-manual" if result.manual else "refreshed-rd" if result.warning
+                    return self._see(("to-stored" if result.to_store_only else "stored") + by_hand)
+                return self._see("refreshed" + by_hand if by_hand else "refreshed-rd" if result.warning
                                  else "refreshed")
             if action == "forget-password":
                 forget_password(svc.users, token)

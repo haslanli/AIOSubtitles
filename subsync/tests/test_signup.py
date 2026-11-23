@@ -390,7 +390,9 @@ class SignupTest(SignupHarness, unittest.TestCase):
             return api
         uuid = self.fake.add(viewer(), PASSWORD)
         result = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=unsaved)
-        self.assertTrue(result.manual)
+        # the save went out and AIOStreams said it worked: sent, not checked, never "nothing changed"
+        self.assertEqual((result.added, result.manual, result.unchecked), (False, False, True))
+        self.assertTrue(result.changes)
         self.assertIn("adding AIOSubtitles to a config failed: saved, but not found when read back", self.logs.lines)
         for line in self.logs.lines:
             self.assertNotIn("/u/", line)
@@ -607,14 +609,14 @@ class SignupTest(SignupHarness, unittest.TestCase):
         uuid, result = self.run_signup(viewer())
         sync_uuid = self.users.open(result.token)["sync_uuid"]
         outcome = self.signup.delete(self.s, self.users, result.token, {}, api_factory=self.api)
-        self.assertEqual(outcome, {"sync_removed": True, "addon_removed": False})
+        self.assertEqual(outcome, {"sync_removed": True, "usenet_removed": True, "addon_removed": False})
         self.assertNotIn(sync_uuid, self.fake.configs)
         self.assertIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
         self.assertIsNone(self.users.open(result.token))
 
         uuid, result = self.run_signup(viewer())
         outcome = self.signup.delete(self.s, self.users, result.token, {"password": PASSWORD}, api_factory=self.api)
-        self.assertEqual(outcome, {"sync_removed": True, "addon_removed": True})
+        self.assertEqual(outcome, {"sync_removed": True, "usenet_removed": True, "addon_removed": True})
         self.assertNotIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
         self.assertEqual(self.users.count(), 0)
 
@@ -715,8 +717,64 @@ class SignupTest(SignupHarness, unittest.TestCase):
         with mock.patch.object(self.signup, "viewer_change", side_effect=RuntimeError("a fault")):
             uuid, result = self.run_signup(viewer())
         self.assertEqual((result.added, result.manual, result.changes), (False, True, []))   # added by hand
+        self.assertFalse(result.unchecked)                                                    # nothing was sent
         self.assertIsNotNone(self.users.open(result.token))
         self.assertNotIn(("PUT", "/api/v1/user"), self.fake.requests)
+
+    def test_a_save_sent_but_not_checked_is_told_from_one_that_changed_nothing(self):
+        # Every failure once the save was sent said "nothing there was changed", though it may have gone
+        # through (AIOSubtitles added, with the clean-up the subtitle addons taken out). A save AIOStreams answered
+        # with an error, or one never sent, still changed nothing
+        from subsync.aiosconfig import BAD_ANSWER, LIMITING, UNREACHABLE, UNREADABLE, AiosError
+
+        def api(save_error=None, read_error=None):
+            def factory(base, timeout):
+                client = self.api(base, timeout)
+                save, read, saved = client.save_config, client.get_config, []
+
+                def save_config(uuid, password, config):
+                    if save_error is not None:
+                        raise save_error
+                    save(uuid, password, config)
+                    saved.append(uuid)
+
+                def get_config(uuid, password):
+                    if saved and read_error is not None:     # the read-back after the save
+                        raise read_error
+                    return read(uuid, password)
+                client.save_config, client.get_config = save_config, get_config
+                return client
+            return factory
+        unchecked = [("no answer to the save", AiosError("timed out", code=UNREACHABLE), None, False),
+                     ("an answer cut short", AiosError("cut short", code=UNREADABLE), None, False),
+                     ("an answer of another shape", AiosError("odd", code=BAD_ANSWER), None, False),
+                     ("no answer to the read-back", None, AiosError("timed out", code=UNREACHABLE), True),
+                     ("a read-back refused", None, AiosError("Too many", code="RATE_LIMIT_EXCEEDED", kind=LIMITING),
+                      True)]
+        for why, save_error, read_error, went_through in unchecked:
+            with self.subTest(why=why):
+                uuid = self.fake.add(viewer(), PASSWORD)
+                result = self.signup.signup(self.s, self.users, self.form(uuid),
+                                            api_factory=api(save_error, read_error))
+                self.assertEqual((result.added, result.manual, result.unchecked), (False, False, True))
+                self.assertEqual(result.changes[0], "adds 1 subtitle source: AIOSubtitles (synced copies of the "
+                                                    "subtitles you already get)")
+                self.assertEqual("AIOSubtitles" in str(self.fake.configs[uuid]["config"]), went_through)
+        for why, error in (("refused", AiosError("Saving the config: boom", code="INTERNAL")),
+                           ("refused with a status", AiosError("Saving the config: boom", code=502))):
+            with self.subTest(why=why):
+                uuid = self.fake.add(viewer(), PASSWORD)
+                result = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=api(save_error=error))
+                self.assertEqual((result.added, result.manual, result.unchecked, result.changes),
+                                 (False, True, False, []))
+        # a refresh tells them apart the same way
+        uuid, result = self.run_signup(viewer())
+        main = self.fake.configs[uuid]["config"]
+        main["presets"] = [p for p in main["presets"] if (p.get("options") or {}).get("name") != "AIOSubtitles"]
+        again = self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD, "add_addon": "on"},
+                                    api_factory=api(read_error=AiosError("timed out", code=UNREACHABLE)))
+        self.assertEqual((again.added, again.manual, again.unchecked), (False, False, True))
+        self.assertIn("AIOSubtitles", str(self.fake.configs[uuid]["config"]))
 
     def test_an_aiostreams_listing_preset_options_of_another_shape(self):
         options = [None, "timeout", {"default": 1}, {"id": ["x"], "default": 1}, {"id": "maxSubs", "default": 9}]
@@ -740,9 +798,10 @@ class SignupTest(SignupHarness, unittest.TestCase):
         self.assertIn("removing a config failed: RuntimeError", self.logs.lines)
 
     def test_a_fault_while_deleting_still_deletes_the_record(self):
-        for method, form, outcome in (("delete_config", {}, {"sync_removed": False, "addon_removed": False}),
+        for method, form, outcome in (("delete_config", {},
+                                       {"sync_removed": False, "usenet_removed": True, "addon_removed": False}),
                                       ("save_config", {"password": PASSWORD},
-                                       {"sync_removed": True, "addon_removed": False})):
+                                       {"sync_removed": True, "usenet_removed": True, "addon_removed": False})):
             with self.subTest(method=method):
                 uuid, result = self.run_signup(viewer())
                 self.assertEqual(self.signup.delete(self.s, self.users, result.token, form,
@@ -757,7 +816,7 @@ class SignupTest(SignupHarness, unittest.TestCase):
         uuid, result = self.run_signup(viewer())
         del self.fake.configs[self.users.open(result.token)["sync_uuid"]]      # removed in AIOStreams meanwhile
         self.assertEqual(self.signup.delete(self.s, self.users, result.token, {}, api_factory=self.api),
-                         {"sync_removed": True, "addon_removed": False})
+                         {"sync_removed": True, "usenet_removed": True, "addon_removed": False})
         self.assertIsNone(self.users.open(result.token))
 
         def failing(base, timeout):
@@ -766,7 +825,7 @@ class SignupTest(SignupHarness, unittest.TestCase):
             return api
         uuid, result = self.run_signup(viewer())
         self.assertEqual(self.signup.delete(self.s, self.users, result.token, {}, api_factory=failing),
-                         {"sync_removed": False, "addon_removed": False})
+                         {"sync_removed": False, "usenet_removed": True, "addon_removed": False})
         self.assertIsNone(self.users.open(result.token))
 
     def test_unticking_keep_my_password_deletes_it_even_when_the_refresh_fails(self):
@@ -806,7 +865,7 @@ class SignupTest(SignupHarness, unittest.TestCase):
             self.assertEqual(done, [])
             self.assertIsNotNone(self.users.open(result.token))
         thread.join(10)
-        self.assertEqual(done, [{"sync_removed": True, "addon_removed": False}])
+        self.assertEqual(done, [{"sync_removed": True, "usenet_removed": True, "addon_removed": False}])
         self.assertIsNone(self.users.open(result.token))
 
     def test_a_refresh_whose_record_went_meanwhile_leaves_nothing_behind(self):

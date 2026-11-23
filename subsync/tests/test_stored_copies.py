@@ -190,7 +190,7 @@ class StoredCopiesTest(RecheckHarness, unittest.TestCase):
         uuid, result = self.sign_up_rd()
         outcome = self.signup.delete(self.s, self.users, result.token, {"password": PASSWORD}, api_factory=self.api,
                                      timeout=5)
-        self.assertEqual(outcome, {"sync_removed": True, "addon_removed": True})
+        self.assertEqual(outcome, {"sync_removed": True, "usenet_removed": True, "addon_removed": True})
         self.assertNotIn("AIOSubtitles", self.names(uuid))
 
 

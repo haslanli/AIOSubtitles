@@ -1080,8 +1080,46 @@ class PublicUsenetTest(TempDirTest):
 
     def test_delete_removes_both_configs(self):
         uuid, result = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
-        self.signup.delete(self.s, self.users, result.token, {}, api_factory=self.api, timeout=10)
+        outcome = self.signup.delete(self.s, self.users, result.token, {}, api_factory=self.api, timeout=10)
         self.assertEqual(list(self.fake.configs), [uuid])
+        self.assertEqual(outcome, {"sync_removed": True, "usenet_removed": True, "addon_removed": False})
+
+    def test_delete_records_which_config_it_couldnt_remove(self):
+        # One flag for both configs, so the page said AIOSubtitles' own config with debrid keys was left when
+        # it was the Usenet config, with Usenet and indexer keys
+        from unittest import mock
+        from subsync.aiosconfig import AiosError
+
+        def failing(left):
+            def factory(base, timeout):
+                api = self.api(base, timeout)
+                delete = api.delete_config
+
+                def delete_config(uuid, password):
+                    if uuid in left:
+                        raise AiosError("Internal error", code="INTERNAL")
+                    return delete(uuid, password)
+                api.delete_config = mock.Mock(side_effect=delete_config)
+                return api
+            return factory
+        for kinds in (("usenet",), ("sync",), ("sync", "usenet")):
+            with self.subTest(left=kinds):
+                uuid, result = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
+                record = self.users.open(result.token)
+                left = {record[f"{kind}_uuid"] for kind in kinds}
+                outcome = self.signup.delete(self.s, self.users, result.token, {}, api_factory=failing(left),
+                                             timeout=10)
+                self.assertEqual(outcome, {"sync_removed": "sync" not in kinds, "usenet_removed": "usenet" not in kinds,
+                                           "addon_removed": False})
+                self.assertEqual(set(self.fake.configs) & {record["sync_uuid"], record["usenet_uuid"]}, left)
+                self.assertIsNone(self.users.open(result.token))
+        # Usenet only: no sync config of its own, so only the Usenet config can be left
+        uuid, result = self.run_signup(setup_of([ENGINE], [NEWZNAB, SUBS]))
+        record = self.users.open(result.token)
+        self.assertNotIn("sync_uuid", record)
+        outcome = self.signup.delete(self.s, self.users, result.token, {}, api_factory=failing({record["usenet_uuid"]}),
+                                     timeout=10)
+        self.assertEqual(outcome, {"sync_removed": True, "usenet_removed": False, "addon_removed": False})
 
     def test_the_usenet_config_lists_through_its_own_link(self):
         # end to end through the stand-in: the Real-Debrid check before every request passes, and its rows are read

@@ -41,6 +41,7 @@ UI_WORDS = (
     "Add language", *ui.ORDINALS, "None", ui.REMOVE, "Sign-up didn't go through",
     "What AIOSubtitles reads and keeps: ", "Your personal addon link", "Copy link", "Copied", "You're signed up",
     "Done on your AIOStreams", "Changed in your AIOStreams config:", "AIOSubtitles is in your AIOStreams config already.",
+    "Sent to your AIOStreams config, not checked:",
     "One step left", "Add AIOSubtitles to your AIOStreams config yourself:", "What happens next",
     "Open your settings page", "Your AIOSubtitles", "Today", "new files", "read", "Today's limit is reached",
     "Save languages", "Refresh after changing your AIOStreams config", "A new AIOStreams link (optional)", "Refresh",
@@ -137,13 +138,14 @@ def _intro(settings=None):
     return "".join(f"<p>{e(p)}</p>" for p in explain.intro_parts(settings))
 
 
-def _screen(name, steps, fill, content, last=False):
+def _screen(name, steps, fill, content, last=None):
     """One screen of the sign-up: its question, field or choices, Continue (Sign up on the last). `fill`: how much of
-    its step's segment is filled once it shows (50 or 100)."""
+    its step's segment is filled once it shows (50 or 100). `last`: on the last screen, the note on the password under
+    Sign up, in the instance's words (explain.public_text)."""
     step = steps.index(STEP_OF[name])
     # the Privacy link right above Sign up opens in a new tab, so the sign-up keeps what was typed
     action = (ui.button("Sign up", "primary", type="submit", arrow=True)
-              + f"<p class=\"after\">{e(explain.PUBLIC_TEXTS['password_once'])} What AIOSubtitles reads and keeps: "
+              + f"<p class=\"after\">{e(last)} What AIOSubtitles reads and keeps: "
               "<a href=\"/privacy\" target=\"_blank\" rel=\"noopener\" aria-label=\"Privacy (opens in a new tab)\">"
               "Privacy</a>.</p>") if last else ui.button("Continue", "primary", attrs="data-next", arrow=True)
     return (f"<section class=\"screen\" data-screen=\"{name}\" data-step=\"{step}\" data-fill=\"{fill}\">{content}"
@@ -173,7 +175,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None, ticked
         error_ref=err("link"), attrs=f"required autocomplete=\"off\" spellcheck=\"false\" inputmode=\"url\" "
                                  f"placeholder=\"{e(LINK_PLACEHOLDER)}\"")))
     screens.append(_screen("password", steps, 100, ui.field(
-        "password", "Your AIOStreams password", explain.PUBLIC_FIELDS["password"], kind="password", mono=True,
+        "password", "Your AIOStreams password", explain.field_help("password", settings), kind="password", mono=True,
         question=True, reveal=True, error_ref=err("password"), attrs="required autocomplete=\"off\"")
         + _choices(*_keep_password(settings, ticked["keep_password"]))))
     screens.append(_screen("languages", steps, 100,
@@ -194,7 +196,8 @@ def signup_page(settings, error=None, field=None, order=None, audio=None, ticked
         ui.choice("add_addon", "Add AIOSubtitles to my AIOStreams config", explain.PUBLIC_FIELDS["add_addon"],
                   checked=ticked["add_addon"]),
         *clean_up, *usenet)
-        + (_audio_group(settings, audio, error_id=err("audio")) if asks_audio else ""), last=True))
+        + (_audio_group(settings, audio, error_id=err("audio")) if asks_audio else ""),
+        last=explain.public_text("password_once", settings)))
     fields = ("link", "password", "languages") + (("invite",) if settings.invite else ()) \
         + (("audio",) if asks_audio else ())
     problem = _problem(error, field, "Sign-up didn't go through", fields,
@@ -243,11 +246,14 @@ def result_page(result, settings=None):
     done = [texts["made_config"]] if result.sync_made and not stored else []
     if result.usenet:
         done.append(texts["usenet_made" if result.sync_made else "usenet_only_made"])
+    # the change lines are written for ./setup's review (aiosconfig.viewer_change): here each is its own sentence under
+    # one item
+    changes = [c[:1].upper() + c[1:] for c in result.changes]
     if result.added:
-        # the change lines are written for ./setup's review (aiosconfig.viewer_change): here each is its own sentence
-        # under one item
-        done.append(("Changed in your AIOStreams config:", [c[:1].upper() + c[1:] for c in result.changes])
-                    if result.changes else "AIOSubtitles is in your AIOStreams config already.")
+        done.append(("Changed in your AIOStreams config:", changes) if changes
+                    else "AIOSubtitles is in your AIOStreams config already.")
+    elif result.unchecked:          # sent, but it may not have gone through: listed as sent, not as made
+        done.append(("Sent to your AIOStreams config, not checked:", changes))
     if result.languages:
         done.append(texts["languages_chosen"].format(names=language_names(result.languages)))
     notes = []
@@ -261,8 +267,9 @@ def result_page(result, settings=None):
         notes.append(ui.note("warn", text, title, role="status"))
     left = ""
     if not result.added:
-        lines = ([f"<p>{e(texts['not_added'])}</p>"] if result.manual else []) + \
-                [f"<p>{e(explain.PUBLIC_MANUAL_LEAD)}</p>", ui.dots(explain.PUBLIC_MANUAL_STEPS)]
+        lead = [explain.PUBLIC_UNCHECKED_LEAD] if result.unchecked else \
+            ([texts["not_added"]] if result.manual else []) + [explain.PUBLIC_MANUAL_LEAD]
+        lines = [f"<p>{e(line)}</p>" for line in lead] + [ui.dots(explain.PUBLIC_MANUAL_STEPS)]
         left = ui.note("warn", None, "One step left", extra="".join(lines))
     # the personal link first; what to know about this setup heads the column beside it
     body = (f"<div class=\"wrap\">{_top(settings)}<main class=\"grid\"><h1>You're signed up</h1>"
@@ -309,9 +316,9 @@ def _text(key):
     return explain.PUBLIC_TEXTS[key]
 
 
-def _with_steps(key):
+def _with_steps(text):
     """A fixed text followed by the steps to add AIOSubtitles to an AIOStreams config by hand."""
-    return " ".join((_text(key),) + explain.PUBLIC_MANUAL_STEPS)
+    return " ".join((text,) + explain.PUBLIC_MANUAL_STEPS)
 
 
 def _audio_saved(record):
@@ -322,20 +329,24 @@ def _audio_saved(record):
 
 # Every code a save sends the settings page back with (configure?done=<code>, public.py), and what the page then shows:
 # record -> (message, notice), fixed texts only. "stored" and "to-stored": stored copies only, still there or
-# moved there by this refresh (the page's note says the rest).
+# moved there by this refresh (the page's note says the rest). "-manual": AIOSubtitles couldn't put itself back in their
+# config, and nothing there changed; "-unchecked": it sent the change but couldn't check it.
 DONE = {
     "languages": lambda record: (_text("languages_saved").format(names=language_names(record["languages"])), None),
     "audio": lambda record: (_audio_saved(record), None),
     "refreshed": lambda record: (_text("refreshed"), None),
     "refreshed-rd": lambda record: (_text("refreshed"), explain.PUBLIC_REAL_DEBRID_NOTICE),
-    "refreshed-manual": lambda record: (None, _with_steps("refresh_manual")),
+    "refreshed-manual": lambda record: (None, _with_steps(_text("refresh_manual"))),
+    "refreshed-unchecked": lambda record: (None, _with_steps(explain.PUBLIC_REFRESH_UNCHECKED)),
     "forgot": lambda record: (_text("forgot"), None),
     "tmdb-key": lambda record: (_text("tmdb_saved"), None),
     "tmdb-key-removed": lambda record: (_text("tmdb_removed"), None),
     "to-stored": lambda record: (_text("to_stored"), None),
-    "to-stored-manual": lambda record: (_text("to_stored"), _with_steps("not_added")),
+    "to-stored-manual": lambda record: (_text("to_stored"), _with_steps(_text("not_added"))),
+    "to-stored-unchecked": lambda record: (_text("to_stored"), _with_steps(explain.PUBLIC_UNCHECKED_LEAD)),
     "stored": lambda record: (None, None),
-    "stored-manual": lambda record: (None, _with_steps("not_added")),
+    "stored-manual": lambda record: (None, _with_steps(_text("not_added"))),
+    "stored-unchecked": lambda record: (None, _with_steps(explain.PUBLIC_UNCHECKED_LEAD)),
 }
 
 
@@ -478,9 +489,11 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
         + f"</div><p class=\"after\" id=\"forget_password-help\">{e(explain.field_help('forget_password', settings))}</p>",
         cls="forget") if kept else ""
     refresh = _row("refresh-h", "Refresh after changing your AIOStreams config", copied, "<div class=\"controls\">"
-                   + _form("refresh", ui.field("refresh", "Your AIOStreams password", explain.PUBLIC_FIELDS["refresh"], name="password",
-                            kind="password", mono=True, reveal=True, error=error if field == "refresh" else None,
-                            attrs="required autocomplete=\"off\"")
+                   + _form("refresh", ui.field("refresh", "Your AIOStreams password",
+                                               explain.field_help("refresh", settings), name="password",
+                                               kind="password", mono=True, reveal=True,
+                                               error=error if field == "refresh" else None,
+                                               attrs="required autocomplete=\"off\"")
                    + ui.field("new_link", "A new AIOStreams link (optional)", explain.PUBLIC_FIELDS["new_link"],
                               name="link", kind="url", mono=True, error=error if field == "new_link" else None,
                               attrs=f"autocomplete=\"off\" spellcheck=\"false\" inputmode=\"url\" "
@@ -491,7 +504,8 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                                            checked=bool(record.get("usenet"))),) if usenet_allowed(settings) else ()))
                    + f"<div class=\"actions\">{ui.button('Refresh', 'primary', type='submit')}</div>", cls="")
                    + forget + "</div>")
-    delete = _row("delete-h", "Delete my data", f"<p class=\"help\" id=\"delete-help\">{e(_delete_help(stored))}</p>",
+    delete = _row("delete-h", "Delete my data",
+                  f"<p class=\"help\" id=\"delete-help\">{e(_delete_help(stored, settings))}</p>",
                   _form("delete-confirm", "<div class=\"actions\">" + ui.button(
                       "Delete my data…", "danger", type="submit", attrs="aria-describedby=\"delete-help\"") + "</div>"))
     body = (f"<div class=\"wrap\">{_top(settings)}<main><h1>Your AIOSubtitles</h1>"
@@ -519,33 +533,40 @@ def _letter(title, heading, content, personal=False, settings=None, credit=False
     return ui.page(title, body, "letter", personal=personal)
 
 
-def _delete_help(stored):
+def _delete_help(stored, settings):
     """What Delete does, as the delete step and the settings page's Delete row say it: without removing a config of
-    AIOSubtitles' own for a person with stored copies only (`stored`), who has none."""
-    return explain.PUBLIC_FIELDS["delete_stored" if stored else "delete"]
+    AIOSubtitles' own for a person with stored copies only (`stored`), who has none; with how long the
+    instance's backups keep what is deleted."""
+    return explain.field_help("delete_stored" if stored else "delete", settings)
 
 
-def delete_confirm_page(error=None, field=None, stored=False, settings=None):
+def delete_confirm_page(settings, error=None, field=None, stored=False):
     """The delete step. `stored`: a person with stored copies only has no config of AIOSubtitles' own to remove."""
     gone = [line for key, line in explain.PUBLIC_DELETE_LIST.items() if not (stored and key == "config")]
     content = (_problem(error, field, "Nothing was deleted", ("delete",))
                + f"<div class=\"body\"><div><p class=\"lead\">{e(explain.PUBLIC_TEXTS['undone'])}</p>{ui.dots(gone)}</div></div>"
-               + _form("delete", ui.field("delete", "Your AIOStreams password (optional)", _delete_help(stored), name="password",
-                          kind="password", mono=True, reveal=True,
-                          error_ref="problem-message" if error and field == "delete" else None,
-                          attrs="autocomplete=\"off\"")
+               + _form("delete", ui.field("delete", "Your AIOStreams password (optional)",
+                                          _delete_help(stored, settings), name="password", kind="password",
+                                          mono=True, reveal=True,
+                                          error_ref="problem-message" if error and field == "delete" else None,
+                                          attrs="autocomplete=\"off\"")
                + "<div class=\"actions\">" + ui.button("Delete my data", "danger", type="submit")
                + ui.link_button("Keep my data", "configure", "secondary") + "</div>", cls=""))
     return _letter(TITLES["delete"], "Delete your data?", content, personal=True, settings=settings)
 
 
-def deleted_page(outcome, settings=None):
+# The note on AIOSubtitles' configs a delete couldn't remove (signup.delete), by those left
+CONFIGS_LEFT = {("sync",): "sync_left", ("usenet",): "usenet_left", ("sync", "usenet"): "configs_left"}
+
+
+def deleted_page(outcome, settings):
     left = []
-    if not outcome.get("sync_removed"):
-        left.append(explain.PUBLIC_TEXTS["sync_left"])
+    configs = tuple(kind for kind in ("sync", "usenet") if not outcome.get(f"{kind}_removed"))
+    if configs:
+        left.append(explain.PUBLIC_TEXTS[CONFIGS_LEFT[configs]])
     if not outcome.get("addon_removed"):
         left.append(explain.PUBLIC_TEXTS["addon_left"])
-    notes = ui.note("ok", explain.PUBLIC_TEXTS["deleted"], role="status")
+    notes = ui.note("ok", explain.public_text("deleted", settings), role="status")
     if left:
         notes += ui.note("warn", None, "One step left", extra="".join(f"<p>{e(t)}</p>" for t in left))
     content = (f"<div class=\"notes\">{notes}</div><div class=\"body\"><p><a href=\"/\">Sign up again</a> "

@@ -64,6 +64,8 @@ BOXES = ("add_addon", "clean_up", "usenet", "keep_password")         # the sign-
 # a host allowing thousands: its settings, a record with Usenet on, and a day's use
 THOUSANDS = (settings(SUBSYNC_USER_FILES_PER_DAY="2000", SUBSYNC_USENET="on", SUBSYNC_USENET_LISTINGS_PER_DAY="1500"),
              dict(RECORD, usenet_uuid="u"), {"files": 1200, "bytes": 9500 * 1024 * 1024})
+# instances that offer less, or more: no kept password (the check off), Usenet with the audio route
+OFFERS = (settings(SUBSYNC_RECHECK_HOURS="0"), settings(SUBSYNC_USENET="on", SUBSYNC_AUDIO_ROUTE="on"))
 
 
 def every_page():
@@ -87,6 +89,8 @@ def every_page():
         "signup-error-full": pages.signup_page(s, error="Wrong.", retry=False),
         "result": pages.result_page(result()),
         "result-manual": pages.result_page(result(added=False, manual=True, changes=[])),
+        # The change sent to their config but not checked
+        "result-unchecked": pages.result_page(result(added=False, unchecked=True)),
         "result-unticked": pages.result_page(result(added=False, manual=False, changes=[])),
         "result-rd": pages.result_page(result(warning=explain.PUBLIC_REAL_DEBRID_WARNING)),
         "result-stored": pages.result_page(result(store_only=True)),
@@ -104,11 +108,14 @@ def every_page():
                                                    dict(RECORD, languages=["eng", "spa", "fre"]), USAGE, LINK, now=0),
         "settings-thousands": pages.settings_page(settings(SUBSYNC_USER_FILES_PER_DAY="2000"), RECORD, THOUSANDS[2],
                                                   LINK, now=0),
-        "delete": pages.delete_confirm_page(),
-        "delete-error": pages.delete_confirm_page(error="Wrong.", field="delete"),
-        "delete-stored": pages.delete_confirm_page(stored=True),
-        "deleted": pages.deleted_page({"sync_removed": True, "addon_removed": True}),
-        "deleted-left": pages.deleted_page({}),
+        "delete": pages.delete_confirm_page(s),
+        "delete-error": pages.delete_confirm_page(s, error="Wrong.", field="delete"),
+        "delete-stored": pages.delete_confirm_page(s, stored=True),
+        "deleted": pages.deleted_page({"sync_removed": True, "usenet_removed": True, "addon_removed": True}, s),
+        "deleted-left": pages.deleted_page({}, s),
+        # The configs a delete left, named
+        "deleted-sync-left": pages.deleted_page({"usenet_removed": True}, s),
+        "deleted-usenet-left": pages.deleted_page({"sync_removed": True}, s),
         "privacy": pages.privacy_page(s),
         # TMDB (the original-language lookup): its credit where the instance uses it, a person's own key's row
         "signup-tmdb": pages.signup_page(settings(SUBSYNC_TMDB_KEY="k")),
@@ -144,6 +151,7 @@ def every_page():
         "signup-no-audio-syncs": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_USER_AUDIO_PER_DAY="0")),
         # The check off (no password kept), or every 6 hours
         "signup-no-check": pages.signup_page(settings(SUBSYNC_RECHECK_HOURS="0")),
+        "privacy-no-check": pages.privacy_page(settings(SUBSYNC_RECHECK_HOURS="0")),
         "settings-kept-no-check": pages.settings_page(settings(SUBSYNC_RECHECK_HOURS="0"),
                                                       dict(RECORD, auto_password="x"), USAGE, LINK, now=0),
         "settings-kept-6-hours": pages.settings_page(settings(SUBSYNC_RECHECK_HOURS="6"),
@@ -154,7 +162,7 @@ def every_page():
         "settings-host": pages.settings_page(settings(SUBSYNC_TMDB_PERSONAL="on", **HOST),
                                              dict(RECORD, auto_password="x", tmdb_key="x" * 32), USAGE, LINK, now=0),
         "privacy-host": pages.privacy_page(settings(**HOST)),
-        "delete-host": pages.delete_confirm_page(settings=settings(**HOST)),
+        "delete-host": pages.delete_confirm_page(settings(**HOST)),
         "deleted-host": pages.deleted_page({}, settings(**HOST)),
         "not-found-host": pages.not_found_page(settings(**HOST)),
         "not-found": pages.not_found_page(),
@@ -196,9 +204,16 @@ def approved_texts():
     for s in (settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0"), settings(**HOST)):
         texts += [(t[:1].upper() + t[1:]) for _, t in privacy_parts(s)]
     texts.append(explain.audio_help(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")))
-    # the fields that state how often the check runs and how long backups keep what is deleted
-    for s in (settings(), settings(SUBSYNC_RECHECK_HOURS="6"), settings(**HOST)):
-        texts += [explain.field_help(name, s) for name in ("tmdb_key", "keep_password", "forget_password")]
+    # the fields and texts that state how often the check runs and how long backups keep what is deleted (
+    #), and what the instance offers: keeping the password, Usenet
+    for s in (settings(), settings(SUBSYNC_RECHECK_HOURS="6"), settings(**HOST), *OFFERS):
+        texts += [explain.field_help(name, s) for name in ("tmdb_key", "keep_password", "forget_password", "password",
+                                                            "refresh", "delete", "delete_stored")]
+        texts += [explain.public_text("password_once", s) + " What AIOSubtitles reads and keeps:",
+                  explain.public_text("deleted", s)]
+    for s in OFFERS:
+        texts += [(t[:1].upper() + t[1:]) for _, t in privacy_parts(s)]
+        texts += [explain.intro_parts(s)[0], explain.audio_help(s)]
     # the original-language lookups' words, by what the instance uses (TMDB with its key, each person's, Wikidata
     # only, none), and TMDB's notice and its logo's name
     for env in ({"SUBSYNC_TMDB_KEY": "k"}, {"SUBSYNC_TMDB_PERSONAL": "on"}, {}, {"SUBSYNC_ORIGINAL_LANGUAGE": "off"},
@@ -209,7 +224,8 @@ def approved_texts():
         texts += [title, text.replace("{detail}", "Detail.")]
     for key, text in explain.PUBLIC_TEXTS.items():
         texts.append(text.format(when="at sign-up", names="English, Spanish", answer="Off",
-                                 attempts="5 sign-up attempts", every="about once a day") if "{" in text else text)
+                                 attempts="5 sign-up attempts", backups=explain.backup_words(settings(), "field"),
+                                 **explain.instance_words(settings())) if "{" in text else text)
     texts.append(explain.PUBLIC_TEXTS["copied_auto"].format(when="at sign-up", every="about every 6 hours"))
     # the answer for files with no subtitles of their own, as an instance with three or two answers shows it
     for env in ({}, {"SUBSYNC_USER_OPENED_PER_DAY": "0"}):
@@ -219,10 +235,11 @@ def approved_texts():
     texts.append(explain.PUBLIC_AUDIO["opened_note"])
     texts += [pages.done_message("audio", {"audio": value})[0] for value in ("off", "pick", "open")]
     texts.append(explain.PUBLIC_TEXTS["reset"].format(when=pages.reset_in(0)))
-    # the last sign-up step's note, as today's page has it, the Privacy link after it
-    texts.append(explain.PUBLIC_TEXTS["password_once"] + " What AIOSubtitles reads and keeps:")
-    for lead in ("not_added", "refresh_manual"):          # a note's text with the manual steps after it
-        texts.append(" ".join((explain.PUBLIC_TEXTS[lead],) + explain.PUBLIC_MANUAL_STEPS))
+    # a note's text with the manual steps after it; the lead when the change was sent but not checked
+    texts.append(explain.PUBLIC_UNCHECKED_LEAD)
+    for lead in (explain.PUBLIC_TEXTS["not_added"], explain.PUBLIC_TEXTS["refresh_manual"],
+                 explain.PUBLIC_UNCHECKED_LEAD, explain.PUBLIC_REFRESH_UNCHECKED):
+        texts.append(" ".join((lead,) + explain.PUBLIC_MANUAL_STEPS))
     texts += [name for name, _, _ in LANGUAGES] + list(pages.UI_WORDS) + list(CHANGES)
     return texts
 
@@ -526,7 +543,7 @@ class LookTest(unittest.TestCase):
                                          LINK + HOSTILE, now=0, error=HOSTILE, notice=HOSTILE, message=HOSTILE),
                      pages.result_page(result(changes=[HOSTILE], manifest_url=LINK + HOSTILE,
                                               warning=(HOSTILE, HOSTILE))),
-                     pages.delete_confirm_page(error=HOSTILE)):
+                     pages.delete_confirm_page(settings(), error=HOSTILE)):
             self.assertNotIn("<b onclick", text)
             self.assertIn("&lt;b onclick=&quot;x&quot;&gt;&amp;&#x27;&quot;", text)
 
@@ -761,6 +778,25 @@ class ResultPageTest(unittest.TestCase):
         for step in explain.PUBLIC_MANUAL_STEPS:
             self.assertIn(step, text)
 
+    def test_a_change_sent_but_not_checked_is_listed_as_sent(self):
+        # Once the save was sent, a failed check said "nothing there was changed" and asked to add AIOSubtitles
+        # by hand, though the save (and the clean-up's removals) may have gone through
+        from subsync import explain, pages
+        from subsync.ui import e
+        page = pages.result_page(result(added=False, unchecked=True, changes=change_lines()))
+        self.assertIn("<li>Sent to your AIOStreams config, not checked:<ul class=\"dots\">"
+                      + "".join(f"<li>{e(line)}</li>" for line in CHANGES) + "</ul></li>", page)
+        text = Tree(page).text()
+        self.assertIn("One step left " + explain.PUBLIC_UNCHECKED_LEAD + " " + " ".join(explain.PUBLIC_MANUAL_STEPS),
+                      text)
+        for words in (explain.PUBLIC_TEXTS["not_added"], explain.PUBLIC_MANUAL_LEAD, "nothing there was changed",
+                      "Changed in your AIOStreams config"):
+            self.assertNotIn(words, text)
+        manual = Tree(pages.result_page(result(added=False, manual=True, changes=[]))).text()
+        self.assertIn("One step left " + explain.PUBLIC_TEXTS["not_added"] + " " + explain.PUBLIC_MANUAL_LEAD, manual)
+        self.assertNotIn("Sent to your AIOStreams config", manual)
+        self.assertNotIn("not checked", Tree(pages.result_page(result())).text())
+
     def test_the_real_debrid_warning(self):
         from subsync import explain, pages
         self.assertIn("Real-Debrid is left out",
@@ -860,8 +896,9 @@ class SettingsPageTest(unittest.TestCase):
         with open(os.path.join(os.path.dirname(os.path.abspath(pages.__file__)), "public.py"), encoding="utf-8") as f:
             sent = set(re.findall(r'_see\("([a-z-]+)"\)', f.read()))               # the codes sent as they are
         self.assertLessEqual({"languages", "audio", "forgot", "tmdb-key", "tmdb-key-removed"}, sent)
-        sent |= {"refreshed", "refreshed-rd", "refreshed-manual"}                    # a refresh's, by its result
-        sent |= {kind + manual for kind in ("to-stored", "stored") for manual in ("", "-manual")}   # stored copies only
+        sent |= {"refreshed", "refreshed-rd", "refreshed-manual", "refreshed-unchecked"}   # a refresh's, by its result
+        sent |= {kind + manual for kind in ("to-stored", "stored")                          # stored copies only
+                 for manual in ("", "-manual", "-unchecked")}
         self.assertEqual(set(pages.DONE), sent)
 
     def test_the_refresh_form_sends_only_what_the_server_reads(self):
@@ -886,6 +923,21 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual(pages.done_message("stored-manual", record), (None, manual))
         self.assertEqual(pages.done_message("forgot", record), (explain.PUBLIC_TEXTS["forgot"], None))
         self.assertEqual(pages.done_message("<script>", record), (None, None))
+
+    def test_a_refresh_whose_change_was_sent_but_not_checked_says_so(self):
+        # Refresh said AIOSubtitles "couldn't put itself back" (or that nothing was changed) also when the
+        # save was sent and only its check failed
+        from subsync import explain, pages
+        record = {"languages": ["eng", "spa"]}
+        steps = " " + " ".join(explain.PUBLIC_MANUAL_STEPS)
+        self.assertEqual(pages.done_message("refreshed-unchecked", record), (None, (
+            "AIOSubtitles' config on your AIOStreams now matches yours, but AIOSubtitles couldn't check that it is "
+            "back in your own config. If it isn't among the addons there, add it yourself:" + steps)))
+        sent = explain.PUBLIC_UNCHECKED_LEAD + steps              # with stored copies only, the sign-up's words
+        self.assertEqual(pages.done_message("to-stored-unchecked", record), (explain.PUBLIC_TEXTS["to_stored"], sent))
+        self.assertEqual(pages.done_message("stored-unchecked", record), (None, sent))
+        self.assertEqual(pages.done_message("refreshed-manual", record),
+                         (None, explain.PUBLIC_TEXTS["refresh_manual"] + steps))
 
 
 class AudioChoiceTest(unittest.TestCase):
@@ -1028,34 +1080,37 @@ class AudioChoiceTest(unittest.TestCase):
 class OtherPagesTest(unittest.TestCase):
     def test_delete_confirm_lists_what_goes_and_shows_an_error_at_the_password(self):
         from subsync import explain, pages
-        tree = Tree(pages.delete_confirm_page(error="Wrong.", field="delete"))
+        tree = Tree(pages.delete_confirm_page(settings(), error="Wrong.", field="delete"))
         for line in explain.PUBLIC_DELETE_LIST.values():
             self.assertIn(line, tree.text())
         self.assertEqual(tree.all("input", id="delete")[0].get("aria-invalid"), "true")
         self.assertIn("Nothing was deleted", tree.text())
         self.assertEqual(tree.all("input", type="hidden", name="action")[0]["value"], "delete")
-        stored = Tree(pages.delete_confirm_page(stored=True)).text()
+        stored = Tree(pages.delete_confirm_page(settings(), stored=True)).text()
         self.assertNotIn(explain.PUBLIC_DELETE_LIST["config"], stored)       # no config of its own to remove
 
     def test_for_stored_copies_only_delete_doesnt_say_it_removes_a_config(self):
         # The delete step's list left the config out, but the explanation under it, and the settings page's
         # Delete row, still said Delete "removes its own config from your AIOStreams"
         from subsync import explain, pages
-        stored = ("Deletes everything AIOSubtitles keeps about you; your personal link stops working at once. "
-                  "Optional: with your AIOStreams password it also takes itself out of your AIOStreams config; without "
-                  "it, remove the AIOSubtitles addon there yourself. The password is used once and not stored. How "
-                  "subtitles were synced stays in the shared store: it belongs to files, not to you.")
-        others = ("Deletes everything AIOSubtitles keeps about you and removes its own config from your AIOStreams; "
-                  "your personal link stops working at once. Optional: with your AIOStreams password it also takes "
-                  "itself out of your AIOStreams config; without it, remove the AIOSubtitles addon there yourself. The "
-                  "password is used once and not stored. How subtitles were synced stays in the shared store: it "
-                  "belongs to files, not to you.")
+        # how long the backups keep what is deleted, as the other deletion texts say it
+        stored = ("Deletes everything AIOSubtitles keeps about you ({backups}); your personal link stops working at "
+                  "once. Optional: with your AIOStreams password it also takes itself out of your AIOStreams config; "
+                  "without it, remove the AIOSubtitles addon there yourself. The password is used once and not stored. "
+                  "How subtitles were synced stays in the shared store: it belongs to files, not to you.")
+        others = ("Deletes everything AIOSubtitles keeps about you ({backups}) and removes its own config from your "
+                  "AIOStreams; your personal link stops working at once. Optional: with your AIOStreams password it "
+                  "also takes itself out of your AIOStreams config; without it, remove the AIOSubtitles addon there "
+                  "yourself. The password is used once and not stored. How subtitles were synced stays in the shared "
+                  "store: it belongs to files, not to you.")
         self.assertEqual(explain.PUBLIC_FIELDS["delete_stored"], stored)
         self.assertEqual(explain.PUBLIC_FIELDS["delete"], others)
+        backups = "the host's encrypted backups may keep it longer"
+        stored, others = stored.format(backups=backups), others.format(backups=backups)
         s = settings()
         for is_stored, help_text in ((True, stored), (False, others)):
             with self.subTest(stored=is_stored):
-                step = Tree(pages.delete_confirm_page(stored=is_stored, settings=s))
+                step = Tree(pages.delete_confirm_page(s, stored=is_stored))
                 row = Tree(pages.settings_page(s, dict(RECORD, store_only=is_stored), USAGE, LINK, now=0))
                 self.assertEqual(step.text_of["delete-help"], help_text)
                 self.assertEqual(row.text_of["delete-help"], help_text)
@@ -1079,11 +1134,44 @@ class OtherPagesTest(unittest.TestCase):
 
     def test_deleted_page_says_what_is_left_to_do(self):
         from subsync import explain, pages
-        text = Tree(pages.deleted_page({})).text()
+        text = Tree(pages.deleted_page({"usenet_removed": True}, settings())).text()
         self.assertIn(explain.PUBLIC_TEXTS["sync_left"], text)
         self.assertIn(explain.PUBLIC_TEXTS["addon_left"], text)
-        clean = Tree(pages.deleted_page({"sync_removed": True, "addon_removed": True})).text()
+        clean = Tree(pages.deleted_page({"sync_removed": True, "usenet_removed": True, "addon_removed": True},
+                                        settings())).text()
         self.assertNotIn("One step left", clean)
+
+    def test_the_deleted_page_names_the_configs_left_and_their_keys(self):
+        # It named AIOSubtitles' own config and debrid keys whichever config was left, its Usenet config too
+        from subsync import explain, pages
+        done = {"addon_removed": True}
+        for removed, left in (({"usenet_removed": True}, "sync_left"), ({"sync_removed": True}, "usenet_left"),
+                              ({}, "configs_left")):
+            with self.subTest(left=left):
+                text = Tree(pages.deleted_page(dict(done, **removed), settings())).text()
+                self.assertIn("One step left " + explain.PUBLIC_TEXTS[left], text)
+                for other in {"sync_left", "usenet_left", "configs_left"} - {left}:
+                    self.assertNotIn(explain.PUBLIC_TEXTS[other], text)
+        usenet = Tree(pages.deleted_page({"sync_removed": True, "addon_removed": True}, settings())).text()
+        self.assertIn("couldn't remove its Usenet config from your AIOStreams. It stays there unused and holds the "
+                      "same Usenet and indexer keys as your config;", usenet)
+        self.assertNotIn("debrid keys", usenet)
+
+    def test_delete_says_how_long_the_backups_keep_it(self):
+        # Every other deletion text says how long the host's backups keep it; Delete, the biggest, didn't
+        from subsync import pages
+        for s, backups in ((settings(**HOST), "the encrypted backups keep it up to 30 days more"),
+                           (settings(), "the host's encrypted backups may keep it longer")):
+            for stored in (False, True):
+                with self.subTest(days=s.backup_days, stored=stored):
+                    start = f"Deletes everything AIOSubtitles keeps about you ({backups})" + ("; " if stored else " ")
+                    step = Tree(pages.delete_confirm_page(s, stored=stored))
+                    row = Tree(pages.settings_page(s, dict(RECORD, store_only=stored), USAGE, LINK, now=0))
+                    self.assertTrue(step.text_of["delete-help"].startswith(start), step.text_of["delete-help"])
+                    self.assertTrue(row.text_of["delete-help"].startswith(start), row.text_of["delete-help"])
+            with self.subTest(days=s.backup_days, page="deleted"):
+                self.assertIn(f"Your data is deleted ({backups}), and your personal link no longer works.",
+                              Tree(pages.deleted_page({}, s)).text())
 
     def test_privacy_in_four_parts_with_the_same_words(self):
         from subsync import explain, pages
@@ -1097,7 +1185,10 @@ class OtherPagesTest(unittest.TestCase):
         default = {"audio": "", "audio_answer": "", "tmdb": "",           # what settings() fills in
                    "asked": f" {sites} {explain.PRIVACY_CINEMETA} {explain.PRIVACY_LOOKUP['wikidata']}",
                    "backups": explain.BACKUP_WORDS["stored"][1], "front": explain.PRIVACY_FRONT[1],
-                   "backups_kept": explain.BACKUP_WORDS["kept"][1], "keep": "180 days"}
+                   "backups_kept": explain.BACKUP_WORDS["kept"][1], "keep": "180 days",
+                   # no Usenet, the password may be kept
+                   **{slot: words[1] for slot, words in explain.USENET_WORDS.items()},
+                   **{slot: words[0].format(every="about once a day") for slot, words in explain.KEEP_WORDS.items()}}
         for head, text in explain.PRIVACY_PARTS:
             text = text.format(**default)
             self.assertIn(head, tree.text())
@@ -1120,7 +1211,7 @@ class InstanceWordsTest(unittest.TestCase):
         kept = dict(RECORD, auto_password="x")
         return {"start": pages.signup_page(s), "signed up": pages.result_page(result(), s),
                 "settings": pages.settings_page(s, kept, USAGE, LINK, now=0), "privacy": pages.privacy_page(s),
-                "delete": pages.delete_confirm_page(settings=s), "deleted": pages.deleted_page({}, s),
+                "delete": pages.delete_confirm_page(s), "deleted": pages.deleted_page({}, s),
                 "not found": pages.not_found_page(s)}
 
     def test_no_audio_syncs_a_day_takes_the_audio_question_off_the_pages(self):
@@ -1163,6 +1254,52 @@ class InstanceWordsTest(unittest.TestCase):
                       "hours while you use it.", tree.text())
         self.assertTrue(tree.all("input", name="keep_password"))
         self.assertIn("about once a day while you use it rebuilds", Tree(pages.signup_page(settings())).text())
+
+    def test_with_the_check_off_no_page_asks_to_tick_keep_my_password(self):
+        # The box was gone, but four texts still said to tick it
+        off = settings(SUBSYNC_RECHECK_HOURS="0")
+        for name, page in self.every_kind(off).items():
+            with self.subTest(page=name):
+                self.assertNotIn("Keep my password", Tree(page).text())
+        texts = {name: Tree(page).text() for name, page in self.every_kind(off).items()}
+        self.assertIn("so opening a file opens only that file. It is not stored. You'll be asked again only if you "
+                      "refresh.", texts["start"])
+        self.assertIn("Your password is used for this sign-up only and is not stored. What AIOSubtitles reads and "
+                      "keeps: Privacy", texts["start"])
+        self.assertIn("to put AIOSubtitles back in your config if it is missing. It is not stored.", texts["settings"])
+        self.assertIn("This instance doesn't keep your AIOStreams password; one kept earlier stays until you refresh "
+                      "or press \"Stop keeping my password\" (and possibly longer in the host's encrypted backups).",
+                      texts["privacy"])
+        on = {name: Tree(page).text() for name, page in self.every_kind(settings()).items()}
+        self.assertIn("It is not stored unless you tick \"Keep my password\" below.", on["start"])
+        self.assertIn("It is not stored unless \"Keep my password\" is ticked.", on["settings"])
+
+    def test_without_usenet_the_pages_offer_none(self):
+        # With Usenet off on the instance (the default), the pages still spoke of Usenet configs and of
+        # "when you turn Usenet on"; with it offered, they keep their words
+        off, on = settings(SUBSYNC_AUDIO_ROUTE="on"), settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_USENET="on")
+        for name, page in self.every_kind(off).items():
+            with self.subTest(page=name):
+                text = Tree(page).text()
+                for words in ("Usenet config", "Usenet on", "or Usenet", "Usenet service"):
+                    self.assertNotIn(words, text)
+        texts = {name: Tree(page).text() for name, page in self.every_kind(off).items()}
+        self.assertIn("without Real-Debrid, Usenet or automatic fallback to other sources, so opening a file opens "
+                      "only that file.", texts["start"])
+        self.assertIn("That reads about 60–350 MB of it through your debrid service, and the copy is there",
+                      texts["start"])
+        self.assertIn("short parts of the file's sound through your own debrid service, about 60–350 MB a file",
+                      texts["settings"])
+        self.assertIn("Real-Debrid stays out, and your own config is never changed.", texts["settings"])
+        self.assertIn("through AIOSubtitles' own config on your AIOStreams. AIOSubtitles also searches",
+                      texts["privacy"])
+        with_usenet = {name: Tree(page).text() for name, page in self.every_kind(on).items()}
+        self.assertIn("(with Usenet on, a second one for Usenet only)", with_usenet["start"])
+        self.assertIn("through your debrid service or Usenet, and the copy is there", with_usenet["start"])
+        self.assertIn("Usenet goes only into AIOSubtitles' Usenet config,", with_usenet["settings"])
+        self.assertIn("or from your Usenet service when you turn Usenet on.", with_usenet["privacy"])
+        self.assertIn("(its Usenet config your Usenet and indexer keys), and the service can open them",
+                      with_usenet["privacy"])
 
     def test_the_hosts_own_contact_proxy_and_backups(self):
         # Every instance named the project's issues, Cloudflare and 30-day backups
@@ -1460,7 +1597,7 @@ class PartsTest(unittest.TestCase):
         self.assertEqual(named(pages.signup_page(settings())), ["Show: Your AIOStreams password"])
         self.assertEqual(named(every_page()["settings-tmdb-personal"]),
                          ["Show: Your TMDB key", "Show: Your AIOStreams password"])
-        self.assertEqual(named(pages.delete_confirm_page()), ["Show: Your AIOStreams password (optional)"])
+        self.assertEqual(named(pages.delete_confirm_page(settings())), ["Show: Your AIOStreams password (optional)"])
 
     def test_the_update_panel(self):
         from subsync import ui

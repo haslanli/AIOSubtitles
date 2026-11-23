@@ -66,7 +66,8 @@ class SignupResult:
     changes: list = field(default_factory=list)
     warning: tuple = None         # (title, text): explain.PUBLIC_REAL_DEBRID_WARNING when Real-Debrid was left out
     added: bool = False
-    manual: bool = False
+    manual: bool = False          # adding AIOSubtitles failed and nothing in their config changed: added by hand
+    unchecked: bool = False       # its change was sent but couldn't be checked: `changes` were sent, not made
     languages: list = field(default_factory=list)
     store_only: bool = False      # Real-Debrid is their only debrid service: stored copies only
     to_store_only: bool = False   # a refresh that moved them to stored copies only
@@ -454,23 +455,37 @@ def _log_fault(e, doing):
     log.warning("%s failed: %s", doing, what)
 
 
+# AiosError codes of a call that got no answer saying how it went (none at all, or one AIOSubtitles can't read): a save
+# may have gone through
+NO_VERDICT = (UNREACHABLE, UNREADABLE, BAD_ANSWER)
+
+
 def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=()):
-    """(changes, added, manual): AIOSubtitles placed in the person's own config and read back; with `clean_up`
-    (extra.cleanable_presets) the subtitle addons it asks itself are taken out of that config. Never raises: it
-    runs once the record is saved, and the page must still give the person their link (`manual`: they add it by
-    hand)."""
+    """(changes, added, manual, unchecked): AIOSubtitles placed in the person's own config and read back; with
+    `clean_up` (extra.cleanable_presets) the subtitle addons it asks itself are taken out of that config. Never
+    raises: it runs once the record is saved, and the page must still give the person their link. Not confirmed, they
+    add it by hand: `manual` when nothing in their config changed (the change couldn't be made, or AIOStreams answered
+    the save with an error); `unchecked` when the save was sent but couldn't be checked (no answer saying how it went,
+    a failed read-back, or AIOSubtitles not in it), so it may have gone through and `changes` are what was sent
+."""
+    sent = False
     try:
         new, changes = viewer_change(viewer, manifest_url, metadata, name=ADDON_NAME, clean_up=clean_up)
         if not changes:
-            return [], True, False
-        api.save_config(uuid, password, new)
+            return [], True, False, False
+        try:
+            api.save_config(uuid, password, new)
+        except AiosError as e:
+            sent = e.code in NO_VERDICT
+            raise
+        sent = True
         saved, _ = api.get_config(uuid, password)
         if any(is_subsync_preset(p, manifest_url, ()) for p in saved.get("presets") or []):
-            return changes, True, False
+            return changes, True, False, False
         log.warning("adding AIOSubtitles to a config failed: saved, but not found when read back")
     except Exception as e:
         _log_fault(e, "adding AIOSubtitles to a config")
-    return [], False, True
+    return (changes, False, False, True) if sent else ([], False, True, False)
 
 
 def sync_fingerprint(sync):
@@ -701,15 +716,16 @@ def _signup(settings, users, form, api_factory, timeout):
         # with the write, and a sign-up past it removes the configs it made
         if not users.create(token, record, settings.max_users):
             raise SignupError(FULL, 503)
-    changes, added, manual = [], False, False
+    changes, added, manual, unchecked = [], False, False, False
     if form.get("add_addon") == "on":
-        changes, added, manual = _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up)
+        changes, added, manual, unchecked = _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up)
     log.info("signed up: %d language%s%s%s", len(langs), "" if len(langs) == 1 else "s",
              ", stored copies only" if plan.stored else ", Real-Debrid left out" if plan.warning else "",
              ", Usenet on" if plan.usenet is not None else "")
     return SignupResult(token=token, manifest_url=manifest_url, changes=changes, warning=plan.warning, added=added,
-                        manual=manual, languages=langs, store_only=plan.stored, usenet=plan.usenet is not None,
-                        usenet_why=plan.why if want else None, sync_made=plan.sync is not None and not plan.stored)
+                        manual=manual, unchecked=unchecked, languages=langs, store_only=plan.stored,
+                        usenet=plan.usenet is not None, usenet_why=plan.why if want else None,
+                        sync_made=plan.sync is not None and not plan.stored)
 
 
 def refresh(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
@@ -801,9 +817,9 @@ def _refresh(settings, users, token, form, api_factory, timeout):
                 raise SignupError(NOT_SIGNED_UP)
         # the record first, as at sign-up: the person's own config is changed only once the record holds the refresh;
         # still under the record's lock, so a delete can't come in between
-        changes, added, manual = [], False, False
+        changes, added, manual, unchecked = [], False, False, False
         if form.get("add_addon") == "on":
-            changes, added, manual = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata)
+            changes, added, manual, unchecked = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata)
     for where, gone in old:   # the configs they no longer use: removed
         drop_sync(api_factory(where, timeout), gone)
     log.info("refreshed a sync config%s%s%s", ", stored copies only" if plan.stored else
@@ -811,7 +827,7 @@ def _refresh(settings, users, token, form, api_factory, timeout):
              ", on another AIOStreams" if moved and not plan.stored else "",
              ", Usenet on" if plan.usenet is not None else "")
     return SignupResult(token=token, manifest_url=manifest_url, changes=changes, warning=plan.warning, added=added,
-                        manual=manual, languages=record["languages"], store_only=plan.stored,
+                        manual=manual, unchecked=unchecked, languages=record["languages"], store_only=plan.stored,
                         to_store_only=plan.stored and not was_stored, usenet=plan.usenet is not None,
                         usenet_why=plan.why if want else None, sync_made=plan.sync is not None and not plan.stored)
 
@@ -881,10 +897,12 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
     from their own config, then their record and usage. Under the record's lock, so a refresh or the daily check can't
     make a config for a record being deleted; once the password is accepted, the record is always deleted.
     `on_confirmed`: called under the lock once the delete is certain (a typed password accepted), before anything is
-    removed: a mistyped password, which deletes nothing, leaves the person's service as it was."""
+    removed: a mistyped password, which deletes nothing, leaves the person's service as it was. Returns what
+    was removed, each config by itself so the page names the one left: "sync_removed" and "usenet_removed"
+    (also when there was none), "addon_removed"."""
     with _locked_record(users, token, "This link isn't signed up (any more): there is nothing to delete.") as record:
         api = api_factory(record["instance"], timeout)
-        outcome = {"sync_removed": False, "addon_removed": False}
+        outcome = {"sync_removed": False, "usenet_removed": False, "addon_removed": False}
         viewer = password = None
         if form.get("password"):   # checked before anything is deleted, so a mistyped password can be typed again
             password = _password(form)
@@ -897,11 +915,8 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
                                   + " Nothing was deleted.", field=_field_of(e)) from None
         if on_confirmed is not None:
             on_confirmed()
-        removed = True
         for kind in ("sync", "usenet"):          # no sync config for stored copies only or Usenet only
-            if record.get(f"{kind}_uuid"):
-                removed = drop_sync(api, config_fields(record, kind)) and removed
-        outcome["sync_removed"] = removed
+            outcome[f"{kind}_removed"] = not record.get(f"{kind}_uuid") or drop_sync(api, config_fields(record, kind))
         if viewer is not None:
             manifest_url = personal_manifest_url(settings, token)
             try:
@@ -912,6 +927,6 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
             except Exception as e:
                 _log_fault(e, "removing AIOSubtitles from a config")
         users.delete(token)
-    log.info("deleted a record (sync config removed: %s, addon removed: %s)", outcome["sync_removed"],
-             outcome["addon_removed"])
+    log.info("deleted a record (sync config removed: %s, Usenet config removed: %s, addon removed: %s)",
+             outcome["sync_removed"], outcome["usenet_removed"], outcome["addon_removed"])
     return outcome

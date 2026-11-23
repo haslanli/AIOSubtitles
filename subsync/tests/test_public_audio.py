@@ -708,12 +708,13 @@ T_A6 = ("With the audio route on, a file with no usable subtitle track can be sy
         "starts only when your day's data and audio syncs, and the service's data, likely have room; otherwise, or if it "
         "stops half-way, the file waits for another pick. The service runs a set number of these at once "
         "(SUBSYNC_AUDIO_AT_ONCE).")
+# without Usenet on the instance (the default), no "or Usenet"; with it, " or Usenet" after "service"
 T_A9 = ("A file with no subtitle track of its own can be synced from its sound, when you choose: by default only after "
-        "you pick its \"(AIOSubtitles)\" entry. That reads about 60–350 MB of it through your debrid service or Usenet, "
-        "and the copy is there the next time you open the file.")
+        "you pick its \"(AIOSubtitles)\" entry. That reads about 60–350 MB of it through your debrid service, and the "
+        "copy is there the next time you open the file.")
 T_A10 = ("; for a file with no subtitle track of its own, as you choose on your settings page (by default only after you "
          "pick its \"(AIOSubtitles)\" entry), short parts of its sound (about 60–350 MB, at most 1 GB) through your own "
-         "debrid service or Usenet, used only to time the subtitles and not kept;")
+         "debrid service, used only to time the subtitles and not kept;")
 T_A11 = ("A file with no subtitle track of its own takes one to three minutes once its sync from the sound starts (by "
          "default after you pick its \"(AIOSubtitles)\" entry; you choose on your settings page); its copy is there the "
          "next time you open it.")
@@ -752,6 +753,10 @@ class TextsTest(unittest.TestCase):
         self.assertNotIn("from its sound", text(pages.signup_page(off)))
         privacy = text(pages.privacy_page(on))
         self.assertIn("doesn't keep)" + T_A10 + " and the subtitles your AIOStreams lists", privacy)
+        usenet = self.pages_settings(SUBSYNC_USENET="on")
+        self.assertIn(T_A9.replace("debrid service,", "debrid service or Usenet,"), text(pages.signup_page(usenet)))
+        self.assertIn("doesn't keep)" + T_A10.replace("debrid service,", "debrid service or Usenet,")
+                      + " and the subtitles your AIOStreams lists", text(pages.privacy_page(usenet)))
         self.assertNotIn("short parts of its sound", text(pages.privacy_page(off)))
         half = text(pages.privacy_page(self.pages_settings(SUBSYNC_AUDIO_BUDGET_GB="0.5")))
         self.assertIn("(about 60–350 MB, at most 0.5 GB)", half)

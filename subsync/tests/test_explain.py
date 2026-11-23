@@ -426,13 +426,17 @@ class Group2Test(unittest.TestCase):
                       "AIOSubtitles to my AIOStreams config\" ticked, to add AIOSubtitles to your own config. ",
                       dict(explain.RULES)["Public mode: your AIOStreams password is used once, unless you choose to "
                                           "keep it"])
-        self.assertEqual(explain.PUBLIC_PASSWORD_TEXT,
+        # where the instance offers Usenet; without it, no Usenet config is spoken of
+        with_usenet = explain.field_help("password", Settings({"SUBSYNC_USENET": "on"}))
+        self.assertEqual(with_usenet,
                          "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams "
                          "config (if you leave \"Add AIOSubtitles to my AIOStreams config\" ticked, on the last "
                          "screen), and to make a separate AIOStreams config for AIOSubtitles without Real-Debrid, "
                          "Usenet or automatic fallback to other sources (with Usenet on, a second one for Usenet "
                          "only), so opening a file opens only that file. It is not stored unless you tick \"Keep my "
                          "password\" below. You'll be asked again only if you refresh.")
+        self.assertEqual(explain.field_help("password", Settings({})), with_usenet.replace(
+            " (with Usenet on, a second one for Usenet only)", ""))
         self.assertIs(explain.PUBLIC_FIELDS["password"], explain.PUBLIC_PASSWORD_TEXT)
         for text in (explain.PUBLIC_TEXTS["made_config"], explain.PUBLIC_PASSWORD_TEXT,
                      dict(explain.RULES)["Public mode: your AIOStreams password is used once, unless you choose to "
@@ -555,9 +559,10 @@ class Group3Test(unittest.TestCase):
         self.assertEqual(self.privacy(none_a_day), self.privacy(self.public()))
 
     def test_the_kept_password_texts_state_how_often_the_check_runs(self):
-        # "about once a day" whatever SUBSYNC_RECHECK_HOURS said; with 0 nothing uses a kept password
+        # "about once a day" whatever SUBSYNC_RECHECK_HOURS said; with 0 nothing uses a kept password; one
+        # hour read "about every 1 hour"
         for hours, every in (("24", "about once a day"), ("6", "about every 6 hours"), ("48", "about every 2 days"),
-                             ("36", "about every 36 hours"), ("1", "about every 1 hour")):
+                             ("36", "about every 36 hours"), ("1", "about every hour")):
             with self.subTest(hours=hours):
                 s = self.public(SUBSYNC_RECHECK_HOURS=hours)
                 self.assertEqual(explain.recheck_every(s), every)
@@ -654,12 +659,17 @@ class Group3Test(unittest.TestCase):
         without_gestdown = self.privacy(self.public(SUBSYNC_EXTRA_SOURCES="osv3,tsdb"))["What is read"]
         self.assertIn("itself (OpenSubtitles, TheSubtitleDB)" + tail + " To time subtitles", without_gestdown)
         self.assertNotIn("Cinemeta", without_gestdown)
-        usenet_on = " or from your Usenet service when you turn Usenet on."
-        self.assertTrue(self.privacy(self.public(SUBSYNC_EXTRA_SOURCES="osv3,tsdb", SUBSYNC_ORIGINAL_LANGUAGE="off"))
-                        ["What is read"].endswith(usenet_on + " AIOSubtitles also searches subtitle sites itself "
-                                                  "(OpenSubtitles, TheSubtitleDB)" + tail))
-        self.assertTrue(self.privacy(self.public(SUBSYNC_EXTRA_SOURCES="", SUBSYNC_ORIGINAL_LANGUAGE="off"))
-                        ["What is read"].endswith(usenet_on))
+        # the Usenet words only where the instance offers Usenet
+        for usenet, end in (("on", " through AIOSubtitles' own config on your AIOStreams, or from your Usenet service "
+                                   "when you turn Usenet on."),
+                            ("off", " through AIOSubtitles' own config on your AIOStreams.")):
+            with self.subTest(usenet=usenet):
+                some = self.public(SUBSYNC_EXTRA_SOURCES="osv3,tsdb", SUBSYNC_ORIGINAL_LANGUAGE="off",
+                                   SUBSYNC_USENET=usenet)
+                self.assertTrue(self.privacy(some)["What is read"].endswith(
+                    end + " AIOSubtitles also searches subtitle sites itself (OpenSubtitles, TheSubtitleDB)" + tail))
+                none = self.public(SUBSYNC_EXTRA_SOURCES="", SUBSYNC_ORIGINAL_LANGUAGE="off", SUBSYNC_USENET=usenet)
+                self.assertTrue(self.privacy(none)["What is read"].endswith(end))
         self.assertEqual(explain.PRIVACY_LOOKUP["off"], "")                  # no lookup: no sentence
         for kind, where in (("tmdb", "TMDB, Wikidata, and for anime AniList and Kitsu"),
                             ("personal", "TMDB with your own key if you added one, Wikidata, and for anime AniList "
@@ -754,11 +764,147 @@ class Round4Test(unittest.TestCase):
         self.assertTrue(rule.endswith(
             " press Refresh after such a change; with one, it rebuilds its configs from yours by itself, Real-Debrid "
             "always left out and Usenet kept to its Usenet config, and never changes your config."), rule[-200:])
-        keep = explain.PUBLIC_FIELDS["keep_password"]
+        keep = explain.field_help("keep_password", Settings({"SUBSYNC_USENET": "on"}))
         self.assertIn(" are followed without Refresh; Real-Debrid stays out, Usenet goes only into AIOSubtitles' Usenet "
                       "config, and your own config is never changed. The cost: ", keep)
+        # without Usenet on the instance, no Usenet config is spoken of
+        self.assertIn(" are followed without Refresh; Real-Debrid stays out, and your own config is never changed. The "
+                      "cost: ", explain.field_help("keep_password", Settings({})))
         for text in (rule, keep):
             self.assertNotIn("unless you turn it on", text)
+
+
+class OffersTest(unittest.TestCase):
+    """The texts of cycle 2's vis-explain-2, word for word: the public pages say only what the instance offers,
+    and what a sign-up, a refresh and a delete really did."""
+
+    @staticmethod
+    def public(**env):
+        return Settings(dict({"SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "https://subs.test"}, **env))
+
+    @staticmethod
+    def privacy(s):
+        from subsync.extra import asked_sources
+        return dict(explain.privacy_parts(s, asked_sources(s, "series")))
+
+    def test_with_the_check_off_no_text_asks_to_tick_keep_my_password(self):
+        # With SUBSYNC_RECHECK_HOURS 0 the box isn't there, yet four texts said to tick it
+        on, off = self.public(), self.public(SUBSYNC_RECHECK_HOURS="0")
+        for s, password, once, refresh, stored in (
+                (on, "It is not stored unless you tick \"Keep my password\" below. You'll be asked again only if you "
+                     "refresh.",
+                 "Your password is used for this sign-up only and is not stored, unless you tick \"Keep my password\".",
+                 "It is not stored unless \"Keep my password\" is ticked.",
+                 "Your AIOStreams password is stored only if you tick \"Keep my password\", in the same encrypted "
+                 "record, until you untick it (and possibly longer in the host's encrypted backups). "),
+                (off, "It is not stored. You'll be asked again only if you refresh.",
+                 "Your password is used for this sign-up only and is not stored.", "It is not stored.",
+                 "This instance doesn't keep your AIOStreams password; one kept earlier stays until you refresh or "
+                 "press \"Stop keeping my password\" (and possibly longer in the host's encrypted backups). ")):
+            with self.subTest(check=s.keeps_passwords):
+                self.assertTrue(explain.field_help("password", s).endswith(" opens only that file. " + password))
+                self.assertEqual(explain.public_text("password_once", s), once)
+                self.assertTrue(explain.field_help("refresh", s).endswith(" if it is missing. " + refresh))
+                self.assertIn(" come in. " + stored + "For each synced subtitle", self.privacy(s)["What is stored"])
+        with_days = self.public(SUBSYNC_RECHECK_HOURS="0", SUBSYNC_BACKUP_DAYS="30")
+        self.assertIn("press \"Stop keeping my password\" (and up to 30 days more in the encrypted backups). ",
+                      self.privacy(with_days)["What is stored"])
+        texts = [explain.field_help(n, off) for n in ("password", "refresh")]
+        for text in texts + [explain.public_text("password_once", off)] + list(self.privacy(off).values()):
+            self.assertNotIn("tick \"Keep my password\"", text)
+            self.assertNotIn("\"Keep my password\" is ticked", text)
+
+    def test_without_usenet_no_text_speaks_of_it_as_an_option(self):
+        # With SUBSYNC_USENET off (the default) no Usenet box is shown, yet eight texts spoke of Usenet configs
+        # and "when you turn Usenet on"; the stored-copies note already left its Usenet sentence out
+        on, off = self.public(SUBSYNC_USENET="on", SUBSYNC_AUDIO_ROUTE="on"), self.public(SUBSYNC_AUDIO_ROUTE="on")
+        self.assertEqual((on.usenet_offered, off.usenet_offered), (True, False))
+        for old, new, text in (
+                ("… without Real-Debrid, Usenet or automatic fallback to other sources (with Usenet on, a second one "
+                 "for Usenet only), so opening a file opens only that file.",
+                 "… without Real-Debrid, Usenet or automatic fallback to other sources, so opening a file opens only "
+                 "that file.", lambda s: explain.field_help("password", s)),
+                ("Real-Debrid stays out, Usenet goes only into AIOSubtitles' Usenet config, and your own config is "
+                 "never changed.", "Real-Debrid stays out, and your own config is never changed.",
+                 lambda s: explain.field_help("keep_password", s)),
+                ("…, through AIOSubtitles' own config on your AIOStreams, or from your Usenet service when you turn "
+                 "Usenet on.", "…, through AIOSubtitles' own config on your AIOStreams.",
+                 lambda s: self.privacy(s)["What is read"]),
+                ("… AIOSubtitles' own config there and its password (and its Usenet config's, with Usenet on), your "
+                 "config's id, …", "… AIOSubtitles' own config there and its password, your config's id, …",
+                 lambda s: self.privacy(s)["What is stored"]),
+                ("AIOSubtitles' own config holds your debrid keys, as your own config does (its Usenet config your "
+                 "Usenet and indexer keys), and the service can open them while your requests come in.",
+                 "AIOSubtitles' own config holds your debrid keys, as your own config does, and the service can open "
+                 "it while your requests come in.", lambda s: self.privacy(s)["What is stored"]),
+                ("AIOSubtitles reads short parts of the file's sound through your own debrid service (or Usenet, if "
+                 "you turned it on), about 60–350 MB a file…",
+                 "AIOSubtitles reads short parts of the file's sound through your own debrid service, about 60–350 MB "
+                 "a file…", explain.audio_help),
+                ("That reads about 60–350 MB of it through your debrid service or Usenet, and the copy is there the "
+                 "next time you open the file.", "That reads about 60–350 MB of it through your debrid service, and "
+                 "the copy is there the next time you open the file.", lambda s: explain.intro_parts(s)[0]),
+                ("… through your own debrid service or Usenet, used only to time the subtitles and not kept;",
+                 "… through your own debrid service, used only to time the subtitles and not kept;",
+                 lambda s: self.privacy(s)["What is read"])):
+            with self.subTest(text=new[:40]):
+                for s, words in ((on, old), (off, new)):
+                    for part in words.strip("…").split("…"):      # the words between the proposal's "…"
+                        self.assertIn(part.strip(), text(s))
+                self.assertNotIn(old.strip("…").split("…")[0].strip(), text(off))
+        for text in [explain.field_help(n, off) for n in ("password", "keep_password")] + [explain.audio_help(off)] \
+                + list(self.privacy(off).values()) + list(explain.intro_parts(off)):
+            self.assertNotIn("Usenet config", text)
+            self.assertNotIn("Usenet on", text)
+            self.assertNotIn("or Usenet", text)
+            self.assertNotIn("Usenet service", text)
+
+    def test_the_privacy_page_names_the_checks_read_of_the_config(self):
+        # A kept password lets the check read the whole config again at every check
+        for hours, every in (("24", "about once a day"), ("6", "about every 6 hours"), ("1", "about every hour")):
+            with self.subTest(hours=hours):
+                self.assertTrue(self.privacy(self.public(SUBSYNC_RECHECK_HOURS=hours))["What is read"].startswith(
+                    "your AIOStreams config, once at sign-up and when you refresh, and, if you let AIOSubtitles keep "
+                    f"your password, again {every} while you use the service; then, for each file you play, "))
+        self.assertTrue(self.privacy(self.public(SUBSYNC_RECHECK_HOURS="0"))["What is read"].startswith(
+            "your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, "))
+
+    def test_the_delete_texts_say_how_long_the_backups_keep_it(self):
+        # Every other deletion text says how long the host's backups keep it; Delete, the biggest, didn't
+        for s, backups in ((self.public(SUBSYNC_BACKUP_DAYS="30"), "the encrypted backups keep it up to 30 days more"),
+                           (self.public(), "the host's encrypted backups may keep it longer")):
+            with self.subTest(days=s.backup_days):
+                self.assertTrue(explain.field_help("delete", s).startswith(
+                    f"Deletes everything AIOSubtitles keeps about you ({backups}) and removes its own config from your "
+                    "AIOStreams; your personal link stops working at once. Optional: "))
+                self.assertTrue(explain.field_help("delete_stored", s).startswith(
+                    f"Deletes everything AIOSubtitles keeps about you ({backups}); your personal link stops working at "
+                    "once. Optional: "))
+                self.assertEqual(explain.public_text("deleted", s),
+                                 f"Your data is deleted ({backups}), and your personal link no longer works.")
+
+    def test_a_change_sent_but_not_checked_and_the_configs_a_delete_left(self):
+        # "nothing there was changed" also when the save went through;: the note named one config
+        # and debrid keys, whichever were left
+        self.assertEqual(explain.PUBLIC_TEXTS["not_added"],
+                         "AIOSubtitles couldn't add itself to your AIOStreams config, so nothing there was changed.")
+        self.assertEqual(explain.PUBLIC_UNCHECKED_LEAD,
+                         "AIOSubtitles sent its change to your AIOStreams config but couldn't check that it went "
+                         "through. If AIOSubtitles isn't among the addons there, add it yourself:")
+        self.assertEqual(explain.PUBLIC_REFRESH_UNCHECKED,
+                         "AIOSubtitles' config on your AIOStreams now matches yours, but AIOSubtitles couldn't check "
+                         "that it is back in your own config. If it isn't among the addons there, add it yourself:")
+        self.assertEqual(explain.PUBLIC_TEXTS["sync_left"],
+                         "AIOSubtitles couldn't remove its own config from your AIOStreams. It stays there unused and "
+                         "holds the same debrid keys as your config; whoever runs your AIOStreams can delete it.")
+        self.assertEqual(explain.PUBLIC_TEXTS["usenet_left"],
+                         "AIOSubtitles couldn't remove its Usenet config from your AIOStreams. It stays there unused "
+                         "and holds the same Usenet and indexer keys as your config; whoever runs your AIOStreams can "
+                         "delete it.")
+        self.assertEqual(explain.PUBLIC_TEXTS["configs_left"],
+                         "AIOSubtitles couldn't remove its two configs from your AIOStreams. They stay there unused "
+                         "and hold the same debrid, Usenet and indexer keys as your config; whoever runs your "
+                         "AIOStreams can delete them.")
 
 
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}

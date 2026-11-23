@@ -23,14 +23,15 @@ def notice_in(html):
 class AttributionTest(unittest.TestCase):
     def pages_of(self, s):
         return {"start": pages.signup_page(s), "settings": pages.settings_page(s, RECORD, USAGE, LINK, now=0),
-                "privacy": pages.privacy_page(s), "deleted": pages.deleted_page({"sync_removed": True, "addon_removed": True}),
+                "privacy": pages.privacy_page(s),
+                "deleted": pages.deleted_page({"sync_removed": True, "usenet_removed": True, "addon_removed": True}, s),
                 "not found": pages.not_found_page()}
 
     def test_shown_wherever_tmdb_is_used(self):
         for env in ({"SUBSYNC_TMDB_KEY": "k"}, {"SUBSYNC_TMDB_PERSONAL": "on"}):
             for name, html in self.pages_of(settings(**env)).items():
                 if name in ("deleted", "not found"):
-                    continue                     # pages made without the instance's settings carry no footer
+                    continue                     # a letter carries TMDB's credit only on the privacy page
                 with self.subTest(env=env, page=name):
                     self.assertTrue(notice_in(html))
 

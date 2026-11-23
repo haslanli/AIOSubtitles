@@ -1059,15 +1059,48 @@ def store_only_note(usenet):
 PUBLIC_PASSWORD_TEXT = (
     "Your AIOStreams password, used now for two things: to add AIOSubtitles to your AIOStreams config (if you leave "
     "\"Add AIOSubtitles to my AIOStreams config\" ticked, on the last screen), and to make a separate AIOStreams "
-    "config for AIOSubtitles without Real-Debrid, Usenet or automatic fallback to other sources (with Usenet on, a "
-    "second one for Usenet only), so opening a file opens only that file. It is not stored unless you tick \"Keep my "
-    "password\" below. You'll be asked again only if you refresh.")
+    "config for AIOSubtitles without Real-Debrid, Usenet or automatic fallback to other sources{usenet_second}, so "
+    "opening a file opens only that file. It is not stored{keep_below}. You'll be asked again only if you refresh.")
 
 # The project's own Questions link, on ./setup's pages (a public instance's pages show SUBSYNC_CONTACT's)
 CONTACT = f"{PROJECT}/issues"
 
-# one explanation for each field and button of the public pages; "{every}" (how often the check runs) and "{backups}"
-# (how long the host's backups keep what is deleted) take the instance's words (field_help)
+# The public pages' words on Usenet and on keeping the password that hold only where the instance offers them, each
+# (where it does, where it doesn't), by the "{…}" they fill in (instance_words). Usenet where people may turn it on
+# (Settings.usenet_offered): a record made while it was on keeps its Usenet config until it is next rebuilt,
+# but the pages describe the usual case.
+USENET_WORDS = {
+    "usenet_second": (" (with Usenet on, a second one for Usenet only)", ""),       # the sign-up's password
+    "usenet_kept": (" Usenet goes only into AIOSubtitles' Usenet config,", ""),     # "Keep my password"
+    "usenet_audio": (" (or Usenet, if you turned it on)", ""),                       # the audio question
+    "usenet_or": (" or Usenet", ""),                                                 # the audio route's intro, privacy
+    "usenet_read": (", or from your Usenet service when you turn Usenet on", ""),   # privacy: what is read
+    "usenet_password": (" (and its Usenet config's, with Usenet on)", ""),          # privacy: what is stored
+    "usenet_held": (                                                                 # privacy: what is stored
+        "AIOSubtitles' own config holds your debrid keys, as your own config does (its Usenet config your Usenet and "
+        "indexer keys), and the service can open them while your requests come in.",
+        "AIOSubtitles' own config holds your debrid keys, as your own config does, and the service can open it while "
+        "your requests come in."),
+}
+# Keeping the password where the pages offer it (Settings.keeps_passwords), and then the check's read of the
+# config ("{every}": how often it runs). Without the offer, a password kept before the host turned the check
+# off stays until the person refreshes or presses "Stop keeping my password", which shows only to them.
+KEEP_WORDS = {
+    "keep_below": (" unless you tick \"Keep my password\" below", ""),              # the sign-up's password
+    "keep_tick": (", unless you tick \"Keep my password\"", ""),                    # the note above Sign up
+    "keep_ticked": (" unless \"Keep my password\" is ticked", ""),                  # Refresh's password
+    "keep_read": (", and, if you let AIOSubtitles keep your password, again {every} while you use the service",
+                  ""),                                                               # privacy: what is read
+    "keep_stored": (                                                                 # privacy: what is stored
+        "Your AIOStreams password is stored only if you tick \"Keep my password\", in the same encrypted record, until "
+        "you untick it",
+        "This instance doesn't keep your AIOStreams password; one kept earlier stays until you refresh or press \"Stop "
+        "keeping my password\""),
+}
+
+# one explanation for each field and button of the public pages; "{every}" (how often the check runs), "{backups}"
+# (how long the host's backups keep what is deleted) and USENET_WORDS' and KEEP_WORDS' slots take the instance's words
+# (field_help)
 PUBLIC_FIELDS = {
     "link": (
         "The link of your AIOStreams config, the one your apps use: on AIOStreams' configure page, copy the install "
@@ -1097,8 +1130,8 @@ PUBLIC_FIELDS = {
     # without one) and daily count (audio_help); each answer's own words are in PUBLIC_AUDIO_ANSWERS
     "audio": (
         "Some files carry no subtitle track, so a subtitle can only be timed to them by listening to their speech: "
-        "AIOSubtitles reads short parts of the file's sound through your own debrid service (or Usenet, if you turned "
-        "it on), about 60–350 MB a file{at_most}, and works one to three minutes; the synced copy then serves everyone "
+        "AIOSubtitles reads short parts of the file's sound through your own debrid service{usenet_audio}, about "
+        "60–350 MB a file{at_most}, and works one to three minutes; the synced copy then serves everyone "
         "who plays the same file, you included next time. These syncs count in your daily data, at most {per_day} a "
         "day."),
     "invite": "The code you were given. AIOSubtitles is open only to invited people for now.",
@@ -1111,7 +1144,7 @@ PUBLIC_FIELDS = {
     "refresh": (
         "Your AIOStreams password, used now to read your config again and rebuild AIOSubtitles' own config from it, for "
         "example after you added or removed a service, to make that config again if it is gone, and to put "
-        "AIOSubtitles back in your config if it is missing. It is not stored unless \"Keep my password\" is ticked."),
+        "AIOSubtitles back in your config if it is missing. It is not stored{keep_ticked}."),
     "new_link": (
         "Optional: the link of another AIOStreams config, if you moved to a new one. AIOSubtitles reads that config "
         "with the password above, follows it from now on, and moves its own config there if it is on another "
@@ -1120,8 +1153,8 @@ PUBLIC_FIELDS = {
     "keep_password": (
         "Off by default. Ticked: AIOSubtitles keeps your AIOStreams password, encrypted so that it opens only with your "
         "personal link, and {every} while you use it rebuilds its own config from yours, so services and addons you "
-        "add or remove are followed without Refresh; Real-Debrid stays out, Usenet goes only into AIOSubtitles' "
-        "Usenet config, and your own config is never changed. The cost: that password can change your whole "
+        "add or remove are followed without Refresh; Real-Debrid stays out,{usenet_kept} and your own config is never "
+        "changed. The cost: that password can change your whole "
         "AIOStreams config, all your keys included, "
         "so if AIOSubtitles' server were broken into while you use it, it could be read. Unticked: it is used once and "
         "forgotten. Untick and refresh, or press \"Stop keeping my password\", to delete it at once; {backups}."),
@@ -1129,16 +1162,16 @@ PUBLIC_FIELDS = {
         "Deletes the AIOStreams password AIOSubtitles kept, at once ({backups}); nothing else changes. AIOSubtitles "
         "then stops following changes to your config by itself, and you press Refresh after you change it."),
     "delete": (
-        "Deletes everything AIOSubtitles keeps about you and removes its own config from your AIOStreams; your "
-        "personal link stops working at once. Optional: with your AIOStreams password it also takes itself out of "
+        "Deletes everything AIOSubtitles keeps about you ({backups}) and removes its own config from your AIOStreams; "
+        "your personal link stops working at once. Optional: with your AIOStreams password it also takes itself out of "
         "your AIOStreams config; without it, remove the AIOSubtitles addon there yourself. The password is used once "
         "and not stored. How subtitles were synced stays in the shared store: it belongs to files, not to you."),
     # the same for a person with stored copies only, who has no config of AIOSubtitles' own to remove
     "delete_stored": (
-        "Deletes everything AIOSubtitles keeps about you; your personal link stops working at once. Optional: with "
-        "your AIOStreams password it also takes itself out of your AIOStreams config; without it, remove the "
-        "AIOSubtitles addon there yourself. The password is used once and not stored. How subtitles were synced stays "
-        "in the shared store: it belongs to files, not to you."),
+        "Deletes everything AIOSubtitles keeps about you ({backups}); your personal link stops working at once. "
+        "Optional: with your AIOStreams password it also takes itself out of your AIOStreams config; without it, "
+        "remove the AIOSubtitles addon there yourself. The password is used once and not stored. How subtitles were "
+        "synced stays in the shared store: it belongs to files, not to you."),
 }
 
 # Usenet on the public pages: why a ticked box made no Usenet config, the settings
@@ -1183,7 +1216,7 @@ def audio_help(settings):
     "at most" without one) and the audio syncs a person may start a day."""
     limit = audio_limit_words(settings)
     return PUBLIC_FIELDS["audio"].format(at_most=f" and at most {limit}" if limit else "",
-                                         per_day=settings.user_audio_per_day)
+                                         per_day=settings.user_audio_per_day, **instance_words(settings))
 
 
 def audio_answer_help(answer, settings):
@@ -1213,8 +1246,10 @@ def usenet_status(on, names, used, per_day):
 
 def recheck_every(settings):
     """How often the check runs while a person uses the service (SUBSYNC_RECHECK_HOURS), as the pages say it: "about
-    once a day" at 24 hours, "about every 6 hours", "about every 2 days"."""
+    once a day" at 24 hours, "about every hour" at 1, "about every 6 hours", "about every 2 days"."""
     hours = settings.recheck_hours
+    if hours == 1:
+        return "about every hour"
     if hours == 24:
         return "about once a day"
     if hours % 24 == 0:
@@ -1243,10 +1278,26 @@ def backup_words(settings, text):
     return with_days.format(days=f"{days} {plural(days, 'day')}") if days else without
 
 
+def instance_words(settings):
+    """The words of the public pages that follow what the instance offers, by the "{…}" they fill in: how often the
+    check runs ("{every}"), and USENET_WORDS and KEEP_WORDS, each pair's first words where it lets people turn Usenet
+    on (Settings.usenet_offered) or keep their password (Settings.keeps_passwords), else its second."""
+    every = recheck_every(settings)
+    words = {slot: pair[not settings.usenet_offered] for slot, pair in USENET_WORDS.items()}
+    words.update((slot, pair[not settings.keeps_passwords].format(every=every)) for slot, pair in KEEP_WORDS.items())
+    return dict(words, every=every)
+
+
 def field_help(name, settings):
-    """A field's explanation (PUBLIC_FIELDS) with the instance's words: how often the check runs ("{every}") and how
-    long its backups keep what is deleted ("{backups}")."""
-    return PUBLIC_FIELDS[name].format(every=recheck_every(settings), backups=backup_words(settings, "field"))
+    """A field's explanation (PUBLIC_FIELDS) with the instance's words (instance_words), and how long its backups keep
+    what is deleted ("{backups}")."""
+    return PUBLIC_FIELDS[name].format(backups=backup_words(settings, "field"), **instance_words(settings))
+
+
+def public_text(name, settings):
+    """One of PUBLIC_TEXTS with the instance's words, as field_help fills a field's (the note above Sign up, the note
+    after deleting)."""
+    return PUBLIC_TEXTS[name].format(backups=backup_words(settings, "field"), **instance_words(settings))
 
 
 NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four"}
@@ -1302,16 +1353,24 @@ PUBLIC_TEXTS = {
         "lose it, sign up again. Keep it private too: anyone with it can change your settings or delete your data."),
     "not_added": (
         "AIOSubtitles couldn't add itself to your AIOStreams config, so nothing there was changed."),
-    "deleted": "Your data is deleted, and your personal link no longer works.",
+    "deleted": "Your data is deleted ({backups}), and your personal link no longer works.",       # public_text
+    # AIOSubtitles' configs a delete couldn't remove, named by those left: its own config, its Usenet
+    # config, or both
     "sync_left": (
         "AIOSubtitles couldn't remove its own config from your AIOStreams. It stays there unused and holds the same "
         "debrid keys as your config; whoever runs your AIOStreams can delete it."),
+    "usenet_left": (
+        "AIOSubtitles couldn't remove its Usenet config from your AIOStreams. It stays there unused and holds the same "
+        "Usenet and indexer keys as your config; whoever runs your AIOStreams can delete it."),
+    "configs_left": (
+        "AIOSubtitles couldn't remove its two configs from your AIOStreams. They stay there unused and hold the same "
+        "debrid, Usenet and indexer keys as your config; whoever runs your AIOStreams can delete them."),
     "addon_left": (
         "Remove the AIOSubtitles addon from your AIOStreams config yourself (Addons, then delete it and save); its "
         "link no longer works."),
     "tries": "Each try counts: {attempts} per address in an hour.",     # tries_text
     "kept_note": "For your safety, the link, password and invite code aren't kept after an error: enter them again.",
-    "password_once": "Your password is used for this sign-up only and is not stored, unless you tick \"Keep my password\".",
+    "password_once": "Your password is used for this sign-up only and is not stored{keep_tick}.",     # public_text
     "copied": ("AIOSubtitles' config on your AIOStreams was copied from yours {when}. After you add or remove a service or "
                "addon in AIOStreams, press Refresh."),
     "copied_auto": ("AIOSubtitles' config on your AIOStreams was copied from yours {when}. AIOSubtitles keeps your "
@@ -1363,23 +1422,21 @@ def tries_text(per_hour):
 # audio route's on what is read, "{asked}" the sites it searches and the lookups it makes (PRIVACY_SITES,
 # PRIVACY_CINEMETA, PRIVACY_LOOKUP), "{audio_answer}" and "{tmdb}" a person's answer for files with no subtitles of
 # their own and their own TMDB key among what is stored, "{backups}" and "{backups_kept}" how long the host's backups
-# keep a record (BACKUP_WORDS), "{front}" who sees every request (PRIVACY_FRONT), "{keep}" SUBSYNC_USER_KEEP_DAYS.
+# keep a record (BACKUP_WORDS), "{front}" who sees every request (PRIVACY_FRONT), "{keep}" SUBSYNC_USER_KEEP_DAYS, and
+# USENET_WORDS' and KEEP_WORDS' slots what the instance offers (instance_words).
 PRIVACY_PARTS = (
     ("What is read",
-     "your AIOStreams config, once at sign-up and when you refresh; then, for each file you play, its subtitle track "
-     "(about 1 MB; a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its own server and "
-     "doesn't keep){audio} and the subtitles your AIOStreams lists, through AIOSubtitles' own config on your "
-     "AIOStreams, or from your Usenet service when you turn Usenet on.{asked}"),
+     "your AIOStreams config, once at sign-up and when you refresh{keep_read}; then, for each file you play, its "
+     "subtitle track (about 1 MB; a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its "
+     "own server and doesn't keep){audio} and the subtitles your AIOStreams lists, through AIOSubtitles' own config on "
+     "your AIOStreams{usenet_read}.{asked}"),
     ("What is stored",
      "one record, encrypted so that it opens only with your personal link (your AIOStreams address, AIOSubtitles' own "
-     "config there and its password (and its Usenet config's, with Usenet on), your config's id, your languages, "
-     "{audio_answer}{tmdb}and when "
+     "config there and its password{usenet_password}, your config's id, your languages, {audio_answer}{tmdb}and when "
      "your AIOStreams was last checked), and how much was read for you each day. For up to 7 days after you play a "
      "file, the original subtitles listed for it in your languages are kept too (and, while it waits for your pick, "
-     "its title, name and size), under a key that only your personal link leads to. AIOSubtitles' own config holds "
-     "your debrid keys, as your own config does (its Usenet config your Usenet and indexer keys), and the service can "
-     "open them while your requests come in. Your AIOStreams password is stored only if you tick \"Keep "
-     "my password\", in the same encrypted record, until you untick it ({backups}). For each synced subtitle only "
+     "its title, name and size), under a key that only your personal link leads to. {usenet_held} {keep_stored} "
+     "({backups}). For each synced subtitle only "
      "its new timing (never its text), with the names and sizes of the files it fits, is shared and kept 180 days "
      "after last use, without who played them. Logs name the titles synced, never who asked."),
     ("Who else sees your requests",
@@ -1465,14 +1522,14 @@ def state_text(state, detail=None):
 # sentence, the privacy page's words on what is read ("{at_most}": the instance's audio limit, none without one), the
 # signed-up page's note; and the note under the answer "as soon as a file is opened", shown while it is the one
 # picked. Each person chooses when (PUBLIC_FIELDS["audio"]), so these name the default and leave the answers to the
-# settings page.
+# settings page. "{usenet_or}": Usenet where the instance offers it (instance_words).
 PUBLIC_AUDIO = {
     "intro": ("A file with no subtitle track of its own can be synced from its sound, when you choose: by default only "
               "after you pick its \"(AIOSubtitles)\" entry. That reads about 60–350 MB of it through your debrid "
-              "service or Usenet, and the copy is there the next time you open the file."),
+              "service{usenet_or}, and the copy is there the next time you open the file."),
     "privacy": ("; for a file with no subtitle track of its own, as you choose on your settings page (by default only "
                 "after you pick its \"(AIOSubtitles)\" entry), short parts of its sound (about 60–350 MB{at_most}) "
-                "through your own debrid service or Usenet, used only to time the subtitles and not kept;"),
+                "through your own debrid service{usenet_or}, used only to time the subtitles and not kept;"),
     "next": ("A file with no subtitle track of its own takes one to three minutes once its sync from the sound starts "
              "(by default after you pick its \"(AIOSubtitles)\" entry; you choose on your settings page); its copy is "
              "there the next time you open it."),
@@ -1493,7 +1550,7 @@ def intro_parts(settings):
     """The landing intro's two paragraphs, the audio route's sentence ending the first where the pages offer it."""
     first = PUBLIC_TEXTS["intro"]
     if audio_offered(settings):
-        first += " " + PUBLIC_AUDIO["intro"]
+        first += " " + PUBLIC_AUDIO["intro"].format(**instance_words(settings))
     return first, PUBLIC_TEXTS["intro_shared"]
 
 
@@ -1537,7 +1594,7 @@ def privacy_parts(settings, sources):
     and a person's answer for it among what is stored where the pages offer it; the subtitle sites it asks (`sources`:
     extra.asked_sources), Cinemeta only with Gestdown, and the lookups' sentence; a person's own TMDB key among what is
     stored when they may add one; who sees every request and how long backups and records are kept, by its
-    settings."""
+    settings; Usenet and the kept password as far as it offers them (instance_words)."""
     kind = lookup_kind(settings)
     audio, limit = audio_offered(settings), audio_limit_words(settings)
     sites = list(dict.fromkeys(SITE_NAMES[source] for source in sources))      # both OpenSubtitles ones named once
@@ -1548,7 +1605,10 @@ def privacy_parts(settings, sources):
         asked.append(PRIVACY_LOOKUP[kind])
     with_proxy, without = PRIVACY_FRONT
     keep = settings.user_keep_days
-    fill = {"audio": PUBLIC_AUDIO["privacy"].format(at_most=f", at most {limit}" if limit else "") if audio else "",
+    words = instance_words(settings)
+    fill = {**words,
+            "audio": PUBLIC_AUDIO["privacy"].format(at_most=f", at most {limit}" if limit else "", **words)
+            if audio else "",
             "asked": "".join(" " + sentence for sentence in asked),
             "audio_answer": PRIVACY_AUDIO_STORED if audio else "",
             "tmdb": PRIVACY_TMDB_STORED if kind == "personal" else "",
@@ -1578,6 +1638,14 @@ PUBLIC_BEFORE = (
 
 # Adding AIOSubtitles by hand: the lead line, then step by step.
 PUBLIC_MANUAL_LEAD = "Add AIOSubtitles to your AIOStreams config yourself:"
+# The lead line instead when AIOSubtitles sent its change to the person's config but couldn't check that it went
+# through, so it may have: at sign-up (and after a Refresh to stored copies, which takes the sign-up's texts),
+# and on the settings page after a Refresh that rebuilt its own config
+PUBLIC_UNCHECKED_LEAD = ("AIOSubtitles sent its change to your AIOStreams config but couldn't check that it went "
+                         "through. If AIOSubtitles isn't among the addons there, add it yourself:")
+PUBLIC_REFRESH_UNCHECKED = ("AIOSubtitles' config on your AIOStreams now matches yours, but AIOSubtitles couldn't "
+                            "check that it is back in your own config. If it isn't among the addons there, add it "
+                            "yourself:")
 PUBLIC_MANUAL_STEPS = (
     "On AIOStreams' configure page, open Addons.",
     "Add a custom addon and paste your personal link as its manifest link.",

@@ -260,6 +260,19 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         self.assertNotIn("Refreshed", text)
         self.assertIn("couldn", text)
 
+    def test_a_refresh_whose_change_was_sent_but_not_checked_says_so(self):
+        # A save sent but not checked (no answer, a failed read-back) was told as one that changed nothing
+        import html
+        from unittest import mock
+        from subsync import explain, signup
+        _, _, _, _, token = self.sign_up()
+        with mock.patch.object(signup, "_add_addon", return_value=(["adds 1 subtitle source"], False, False, True)):
+            code, _, headers = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD))
+        self.assertEqual((code, headers["Location"]), (303, "configure?done=refreshed-unchecked"))
+        text = html.unescape(http(f"{self.base}/u/{token}/configure?done=refreshed-unchecked")[1].decode())
+        self.assertIn(explain.PUBLIC_REFRESH_UNCHECKED + " " + explain.PUBLIC_MANUAL_STEPS[0], text)
+        self.assertNotIn(explain.PUBLIC_TEXTS["refresh_manual"], text)
+
     def test_refresh_over_http(self):
         uuid, _, _, _, token = self.sign_up()
         code, body, _ = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD,
