@@ -34,5 +34,6 @@ ALGO_VERSION = "v3"   # part of every stored result's key: a new version recompu
 # judged on its own against a track in the subtitle's own language, and one shift excusing a missing stretch only when
 # the subtitle's lines after it pair near the shift again; in the language check, Japanese and Korean told from
 # Chinese by their own script, a language's written forms and varieties as the language, and WebVTT's character
-# references as their characters
+# references as their characters; Chinese, Japanese and Korean UTF-16 without a byte-order mark, a subtitle with a few
+# bad bytes read in its language's old encoding, and CR CR LF line ends as one
 RULE_REVISION = 11

@@ -22,11 +22,14 @@ MAX_HOUR_DIGITS = 4   # a time with more is none: no line starts 10,000 hours in
 # byte-order marks, UTF-32's first (its little-endian mark starts with UTF-16's)
 BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"), (codecs.BOM_UTF8, "utf-8-sig"),
         (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
-# UTF-16 without a mark: in its first SNIFF_BYTES, zeros at no even place and at least UTF16_ZEROS of the odd ones
-# (little-endian), or the reverse (big-endian)
+# UTF-16 without a mark: in its first SNIFF_BYTES, zeros at UTF16_ZEROS of the odd places at least and at
+# UTF16_FEW_ZEROS of the even ones at most (little-endian), or the reverse (big-endian). The few are characters such as
+# 一 (U+4E00), 가 (U+AC00) and the ideographic space (U+3000); a text that isn't UTF-16 has no zero byte
 SNIFF_BYTES = 1024
 UTF16_ZEROS = 0.25
-UTF8_BAD_SHARE = 0.001      # a UTF-8 file with up to this share of bad bytes is still UTF-8 (each one read as U+FFFD)
+UTF16_FEW_ZEROS = 0.1
+# a file with up to this share of bad bytes is still read as UTF-8, or in its language's encoding (each one as U+FFFD)
+BAD_BYTE_SHARE = 0.001
 # the most common characters of Chinese dialogue, in both their simplified and traditional forms: a Chinese subtitle
 # read in the wrong one of GBK and Big5 comes out as rare characters
 COMMON_CHINESE = frozenset("我你的是了不他在这這个個有们們就要什么麼好那说說到会會去来來一人知道吗嗎吧啊呢想看没沒也都能"
@@ -35,31 +38,32 @@ COMMON_CHINESE = frozenset("我你的是了不他在这這个個有们們就要�
 
 
 def _utf16_without_bom(raw):
-    """"utf-16-le" or "utf-16-be" for text that is UTF-16 without a byte-order mark (a zero at every other byte), else
-    None."""
+    """"utf-16-le" or "utf-16-be" for text that is UTF-16 without a byte-order mark (zeros at many of every other byte
+    and at few of the rest), else None."""
     head = raw[:SNIFF_BYTES]
     even, odd = head[0::2], head[1::2]
     for zeros, other, enc in ((odd, even, "utf-16-le"), (even, odd, "utf-16-be")):
-        if zeros and not other.count(0) and zeros.count(0) >= UTF16_ZEROS * len(zeros):
+        if zeros and zeros.count(0) >= UTF16_ZEROS * len(zeros) and other.count(0) <= UTF16_FEW_ZEROS * len(other):
             return enc
     return None
 
 
 def _utf8_with_stray_bytes(raw):
-    """A UTF-8 file's text with its few bad bytes (UTF8_BAD_SHARE at most) each as U+FFFD, or None. A file whose other
+    """A UTF-8 file's text with its few bad bytes (BAD_BYTE_SHARE at most) each as U+FFFD, or None. A file whose other
     characters beyond ASCII are fewer than its bad bytes is no UTF-8 file (one in cp1252 with a few curly quotes)."""
     text = raw.decode("utf-8", "replace")
     bad = text.count("\ufffd") - raw.count("\ufffd".encode("utf-8"))
     beyond_ascii = sum(1 for ch in text if ch > "\x7f") - text.count("\ufffd")
-    return text if bad <= UTF8_BAD_SHARE * len(raw) and beyond_ascii > bad else None
+    return text if bad <= BAD_BYTE_SHARE * len(raw) and beyond_ascii > bad else None
 
 
 def _legacy(raw, lang):
     """A subtitle that isn't Unicode, in its language's usual Windows encoding (langs.legacy_encodings): Serbian as
     Central European (cp1250) when most of its letters are plain Latin, else as Cyrillic (cp1251); Chinese as GBK or
-    Big5, whichever gives more common Chinese characters; any other language Western (cp1252). Latin-1 last, when the
-    encoding can't read it."""
-    encodings = langs.legacy_encodings(lang)
+    Big5, whichever gives more common Chinese characters; any other language Western (cp1252). A few bytes the encoding
+    can't read (BAD_BYTE_SHARE at most: one it doesn't define, a character cut off at the end) are each read as U+FFFD
+; with more, Western, and Latin-1 last, when that can't read it either."""
+    encodings = langs.legacy_encodings(lang) or ("cp1252",)
     if langs.lang3(lang) == "srp":
         latin, cyrillic = encodings
         plain = sum(1 for b in raw if 0x41 <= b <= 0x5A or 0x61 <= b <= 0x7A)
@@ -67,18 +71,19 @@ def _legacy(raw, lang):
     elif len(encodings) == 2:   # Chinese
         texts = [raw.decode(enc, "replace") for enc in encodings]
         return max(texts, key=lambda t: sum(1 for ch in t if ch in COMMON_CHINESE))
-    for enc in (*encodings, "cp1252"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            pass
-    return raw.decode("latin-1")
+    text = raw.decode(encodings[0], "replace")   # no byte the encoding defines reads as U+FFFD: each is a bad one
+    if text.count("\ufffd") <= BAD_BYTE_SHARE * len(raw):
+        return text
+    try:
+        return raw.decode("cp1252")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
 
 
 def decode(raw, lang=""):
-    """Bytes to text: by its byte-order mark (UTF-8, UTF-16, UTF-32), as UTF-16 without one, as UTF-8 (also
-    with a stray byte or two), else in the language's usual Windows encoding (_legacy). The same subtitle in two
-    encodings reads the same, so it is one subtitle (fingerprint)."""
+    """Bytes to text: by its byte-order mark (UTF-8, UTF-16, UTF-32), as UTF-16 without one, as UTF-8, else
+    in the language's usual Windows encoding (_legacy), these two also with a stray byte or two. The same subtitle in
+    two encodings reads the same, so it is one subtitle (fingerprint)."""
     for bom, enc in BOMS:
         if raw.startswith(bom):
             return raw.decode(enc, "replace")
@@ -127,9 +132,15 @@ def is_ass(text):
     return "[Events]" in text
 
 
+# the CRs before a line feed, which end one line with it (CR CR LF: a CR LF text saved again in text mode on Windows,
+#); a run is matched from its first CR only, so a long one is read in linear time
+CRS_BEFORE_LF = re.compile(r"(?<!\r)\r+(?=\n)")
+
+
 def _normalised(text):
-    """text with "\\n" line ends and no byte-order mark in front."""
-    return text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    """text with "\\n" line ends and no byte-order mark in front: a line feed, with any CRs before it, ends a line, and
+    so does a CR alone (old Mac files)."""
+    return CRS_BEFORE_LF.sub("", text).replace("\r", "\n").lstrip("\ufeff")
 
 
 class _Event(NamedTuple):

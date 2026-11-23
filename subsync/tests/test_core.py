@@ -117,6 +117,56 @@ class SubsTest(unittest.TestCase):
                 self.assertEqual(text, srt)
                 self.assertEqual([l["text"] for l in subs.parse(text)], ["Hello there, Привет"])
 
+    def test_chinese_japanese_and_korean_utf16_without_a_mark_is_read(self):
+        # A character such as 一 (U+4E00), 가 (U+AC00) or the ideographic space (U+3000) puts a zero in the
+        # half of the bytes that had to have none, so such a file was read with a zero between the characters: no line
+        for lang, line in (("chi", "我们一起去吧"), ("jpn", "こんにちは\u3000世界"), ("kor", "내가 가자"),
+                           ("chi", "我知道\u3000但是\u3000你不能\u3000一个人去")):   # a few zeros in every cue
+            srt = "".join(f"{i}\n00:00:{i:02d},000 --> 00:00:{i:02d},500\n{line}\n\n" for i in range(1, 30))
+            for enc in ("utf-16-le", "utf-16-be"):
+                with self.subTest(line=line, enc=enc):
+                    text = subs.decode(srt.encode(enc), lang)
+                    self.assertEqual(text, srt)
+                    self.assertEqual([l["text"] for l in subs.parse(text)], [line] * 29)
+
+    def test_a_few_bytes_its_encoding_cant_read_leave_a_subtitle_in_its_language(self):
+        # One byte the language's encoding doesn't define, or a character cut off at the end, made the whole
+        # file Western (cp1252, else Latin-1): garbled, or refused by the language check
+        for lang, enc, line, bad in (("rus", "cp1251", "Привет, как дела?", b"\x98"),     # 0x98: none in cp1251
+                                     ("gre", "cp1253", "Γεια σου, τι κάνεις;", b"\xaa"),
+                                     ("jpn", "cp932", "何を言っているのか分からない。", b"\x82"),   # half a character
+                                     ("eng", "cp1252", "It’s “fine”… — €5", b"\x81")):   # 0x81: none in cp1252
+            first = f"1\n00:00:01,000 --> 00:00:01,500\n{line}\n\n"
+            rest = "".join(f"{i}\n00:00:{i:02d},000 --> 00:00:{i:02d},500\n{line}\n\n" for i in range(2, 60))
+            with self.subTest(lang=lang, where="inside"):
+                text = subs.decode(first.encode(enc) + bad + rest.encode(enc), lang)
+                self.assertEqual(text, first + "\ufffd" + rest)
+            with self.subTest(lang=lang, where="at the end"):
+                self.assertEqual(subs.decode((first + rest).encode(enc) + bad, lang), first + rest + "\ufffd")
+        # beyond BAD_BYTE_SHARE of the file, Western (and Latin-1 last, test above)
+        raw = "Привет".encode("cp1251") + b"\x98"
+        self.assertEqual(subs.decode(raw, "rus"), raw.decode("cp1252"))
+
+    def test_cr_cr_lf_line_ends_are_one_line_end(self):
+        # CR CR LF (a CR LF text saved again in text mode on Windows) was read as a line end and a blank line,
+        # so every cue lost its text, and the copy served had every cue blank
+        srt = ("1\n00:00:01,000 --> 00:00:02,000\nHello there,\nhow are you?\n\n"
+               "2\n00:00:03,000 --> 00:00:04,000\nFine.\n")
+        lines = subs.parse(srt)
+        crcrlf = srt.replace("\n", "\r\r\n")
+        self.assertEqual(subs.parse(crcrlf), lines)
+        self.assertEqual(subs.write_like(crcrlf, subs.parse(crcrlf)), subs.write_like(srt, lines))
+        self.assertEqual(subs.fingerprint(crcrlf), subs.fingerprint(srt))
+        ass = ASS.replace("\n", "\r\r\n")
+        self.assertEqual(subs.write_like(ass, subs.parse(ass)), subs.write_like(ASS, subs.parse(ASS)))
+        # a CR alone is one line end (old Mac files), so two of them are a blank line
+        self.assertEqual(subs.parse(srt.replace("\n", "\r")), lines)
+        self.assertEqual([l["text"] for l in subs.parse("1\r00:00:01,000 --> 00:00:02,000\rA\r\rB\r")], ["A"])
+        t0 = time.monotonic()   # a long run of CRs is read in linear time
+        self.assertEqual(subs.parse(srt + "\r" * 200000 + "x"), lines)
+        self.assertEqual(subs.parse(srt + "\r" * 200000 + "\nx"), lines)
+        self.assertLess(time.monotonic() - t0, 1.0)
+
     def test_a_utf8_subtitle_with_a_stray_byte_stays_utf8(self):
         # One bad byte made the whole file Latin-1 ("CafÃ©"); a file in cp1252 with a few curly quotes and no
         # other character beyond ASCII is no UTF-8 file
