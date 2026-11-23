@@ -10,6 +10,7 @@ import math
 import os
 import socket
 import struct
+from dataclasses import asdict, dataclass, fields
 
 from . import ALGO_VERSION, RULE_REVISION, digits, explain
 from .aiosconfig import MAX_LANGUAGES
@@ -178,6 +179,27 @@ def _overrides(value):
     or kitsu: and a number (origlang.parse_overrides)."""
     from .origlang import parse_overrides
     return parse_overrides(value)
+
+
+@dataclass(frozen=True)
+class Rules:
+    """The settings that change a verdict, as one value (Settings.rules), each named as its Settings field: the pipeline
+    reads them from it (pipeline.check_original, shift_sync, sync_subtitle) and Settings.rule_id hashes all of it, so no
+    setting can change a verdict without being part of the stored verdicts' rule."""
+    snap: bool                 # SUBSYNC_SNAP: each line of a re-timed copy snapped to its release line
+    snap_within: float         # SUBSYNC_SNAP_WITHIN: the share within 200 ms a snapped copy needs
+    gate_splits: bool          # SUBSYNC_GATE_SPLITS: a line that splits a release line counts as paired
+    image_ref: bool            # SUBSYNC_IMAGE_REF: image subtitle tracks as references
+    better: dict               # the "clearly better" rule's numbers (SUBSYNC_BETTER_*); None when it is off
+    audio_better: dict         # the audio route's own (SUBSYNC_AUDIO_BETTER_*); None when it is off
+    audio_lead: float          # SUBSYNC_AUDIO_LEAD_MS, in seconds
+    audio_budget: int          # SUBSYNC_AUDIO_BUDGET_GB, in bytes; None without a limit
+    audio_extra: int           # SUBSYNC_AUDIO_EXTRA_WINDOWS
+    prefer_plain: bool         # SUBSYNC_PREFER_PLAIN_TRACK
+    fallback_reference: tuple  # SUBSYNC_FALLBACK_REFERENCE
+    text_pairing: bool         # SUBSYNC_TEXT_PAIRING
+    sections: bool             # SUBSYNC_SECTIONS
+    shift_path: bool           # SUBSYNC_SHIFT_PATH (the worker's: one shift tried before alass)
 
 
 class Settings:
@@ -386,14 +408,15 @@ class Settings:
         return self.recheck_hours > 0
 
     @property
+    def rules(self):
+        """The settings that change a verdict (Rules), as they are now."""
+        return Rules(**{f.name: getattr(self, f.name) for f in fields(Rules)})
+
+    @property
     def rule_id(self):
-        """The pass rule a verdict was judged by: the code version and every setting that changes a verdict. A stored
-        "keep original" judged under another one is judged again."""
-        rule = {"algo": ALGO_VERSION, "revision": RULE_REVISION, "better": self.better, "audio_better": self.audio_better, "snap": self.snap,
-                "snap_within": self.snap_within, "gate_splits": self.gate_splits, "image_ref": self.image_ref,
-                "audio_lead": self.audio_lead, "audio_budget": self.audio_budget, "prefer_plain": self.prefer_plain,
-                "shift_path": self.shift_path, "fallback_reference": self.fallback_reference,
-                "text_pairing": self.text_pairing, "sections": self.sections, "audio_extra": self.audio_extra}
+        """The pass rule a verdict was judged by: the code version and every setting that changes a verdict (Rules). A
+        stored "keep original" judged under another one is judged again."""
+        rule = dict(asdict(self.rules), algo=ALGO_VERSION, revision=RULE_REVISION)
         return hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdigest()[:12]
 
     @property

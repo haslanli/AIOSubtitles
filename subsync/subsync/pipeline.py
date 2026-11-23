@@ -553,14 +553,18 @@ def section_checks(out, best, groups, ref, recall, snap_within, better, cross=Fa
     return True, "every section fits", results
 
 
-def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=0.95, better=None, how="", cross=False,
-               words=None, may_read=False, groups=None, one_shift=False):
+def judge_copy(out, text, lines, new, ref, gate, recall, rules, how="", cross=False, words=None, may_read=False,
+               groups=None, one_shift=False):
     """A re-timed copy (alass's, or one shift's) against the release track: passes as it is, or snapped to the release's
-    lines, or as clearly better than the original; against another language's track (`cross`), when its alignment is
-    sound (relgate.aligned; `one_shift`: `new` is the subtitle moved by one shift), snapped onto that track's lines. Else
-    the original is kept. `out` holds gate_original; `how` names the re-timing in the reason. A copy offered unsnapped is re-centred on the reference first.
-    words: a TextCheck; a pass is then confirmed by the lines' words (D2: 100 ms for the main rule, 200 ms for
-    "clearly better"), reading them when `may_read` or for a "clearly better" pass (D1: timing hasn't settled it)."""
+    lines (rules.snap, by rules.snap_within), or as clearly better than the original (rules.better); against another
+    language's track (`cross`), when its alignment is sound (relgate.aligned; `one_shift`: `new` is the subtitle moved by
+    one shift), snapped onto that track's lines. Else the original is kept. `out` holds gate_original; `how` names the
+    re-timing in the reason. A copy offered unsnapped is re-centred on the reference first. `groups`: a sectioned copy's
+    sections, each then checked on its own (section_checks).
+    words: a TextCheck; a pass is then confirmed by the lines' words (D2: WORDS_MAIN_MS for the main rule,
+    WORDS_BETTER_MS for "clearly better"), reading them when `may_read` or for a "clearly better" pass (D1: timing hasn't
+    settled it)."""
+    snap_within, better = rules.snap_within, rules.better
     dial = dialogue_starts(lines)
     new, g_new, moved_ms = recentre(new, gate)
     new_dial = dialogue_starts(new)
@@ -569,7 +573,7 @@ def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=
         out["recentred_ms"] = moved_ms
     best = new if out["gate_synced"]["pass"] else None
     snapped = None
-    if snap:
+    if rules.snap:
         snapped, st = refine.snap(new, ref["cues"])
         snap_dial = dialogue_starts(snapped)
         out["gate_snapped"] = dict(gate_lines(gate, snapped, within_share=snap_bar(ref, snap_within)), **st)
@@ -611,29 +615,28 @@ def judge_copy(out, text, lines, new, ref, gate, recall, snap=True, snap_within=
     return dict(out, outcome="synced", reason=why, body=write_like(text, best))
 
 
-def shift_sync(index, text, lang, snap=True, snap_within=0.95, splits=True, image_ref=False, better=None,
-               prefer_plain=True, fallback=FALLBACK_REFERENCE, text_pairing=False):
+def shift_sync(index, text, lang, rules):
     """The shift path: the subtitle moved by one steady offset (and a 24/25 fps scale) found from its line starts
-    (shift.best_shift), judged like an alass copy. Milliseconds, no alass: the original's own check (check_original)
-    comes first, alass later only where this keeps the original. Returns a sync_subtitle-like result, or None when there
-    is no text or image reference or the subtitle can't be judged."""
+    (shift.best_shift), judged like an alass copy, by `rules` (settings.Rules). Milliseconds, no alass: the original's
+    own check (check_original) comes first, alass later only where this keeps the original. Returns a
+    sync_subtitle-like result, or None when there is no text or image reference or the subtitle can't be judged."""
     lines = parse(text)
     dial = dialogue_starts(lines)
     if len(dial) < MIN_LINES or broken_timing(lines):
         return None
-    ref = choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
+    ref = choose_reference(index, len(dial), lang, rules.image_ref, rules.prefer_plain, rules.fallback_reference)
     if ref is None:
         return None
     cross = is_cross(ref, lang)
-    gate, recall = reference_gate(ref, len(dial), splits, cross)
+    gate, recall = reference_gate(ref, len(dial), rules.gate_splits, cross)
     scale, offset, votes = shift.best_shift(dial, [s for s, _ in ref["cues"]], cand_ends=dialogue_ends(lines),
                                             ref_ends=ref_ends(ref))
     new = [dict(l, s=l["s"] * scale + offset, e=l["e"] * scale + offset) for l in lines]
     out = {"lines": len(lines), "dialogue": len(dial), "route": ref["route"], "gate_original": gate_lines(gate, lines),
            "reference": {"track": ref["number"], "language": ref["language"], "codec": ref["codec"], "cues": len(ref["cues"])},
            "shift_fit": {"scale": round(scale, 6), "offset_s": round(offset, 3), "votes": votes}}
-    return judge_copy(out, text, lines, new, ref, gate, recall, snap, snap_within, better, how=" (one shift)",
-                      cross=cross, words=TextCheck(index, ref, lines, lang, text_pairing), one_shift=True)
+    return judge_copy(out, text, lines, new, ref, gate, recall, rules, how=" (one shift)", cross=cross,
+                      words=TextCheck(index, ref, lines, lang, rules.text_pairing), one_shift=True)
 
 
 STACKED_OVERLAP_S = 0.5   # a line that starts this long before the previous one ends is on screen with it
@@ -724,41 +727,41 @@ def consensus_guess(guess_text, texts):
     return {"index": i, "group": group, "offset_s": round(offset, 2), "scale": scale}
 
 
-def check_original(index, text, lang, splits=True, image_ref=False, prefer_plain=True, snap_within=None, better=None,
-                   fallback=FALLBACK_REFERENCE, text_pairing=False):
-    """The fast path: is this subtitle in sync as it is, against the release's own text (or image) track? A gate
-    on the original only, no alass; in sync, with snap_within the magnet copy too (`body`, `magnet`). Returns
-    {"in_sync": bool, ...} or None when there is no such reference (only the audio route could tell) or the subtitle
-    can't be judged (too few lines, broken timing)."""
+def check_original(index, text, lang, rules):
+    """The fast path: is this subtitle in sync as it is, against the release's own text (or image) track, by `rules`
+    (settings.Rules)? A gate on the original only, no alass; in sync, with rules.snap the magnet copy too (`body`,
+    `magnet`). Returns {"in_sync": bool, ...} or None when there is no such reference (only the audio route could tell)
+    or the subtitle can't be judged (too few lines, broken timing)."""
     lines = parse(text)
     dial = dialogue_starts(lines)
     if len(dial) < MIN_LINES or broken_timing(lines):
         return None
-    ref = choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
+    ref = choose_reference(index, len(dial), lang, rules.image_ref, rules.prefer_plain, rules.fallback_reference)
     if ref is None:
         return None
     cross = is_cross(ref, lang)
-    gate, recall = reference_gate(ref, len(dial), splits, cross)
+    gate, recall = reference_gate(ref, len(dial), rules.gate_splits, cross)
     g = gate_lines(gate, lines)
-    fits = original_fits(g, cross, better, recall)
+    fits = original_fits(g, cross, rules.better, recall)
     reference = {"track": ref["number"], "language": ref["language"], "codec": ref["codec"], "cues": len(ref["cues"])}
     out = {"in_sync": fits, "route": ref["route"], "reference": reference, "gate_original": g,
            "lines": len(lines), "dialogue": len(dial), "cross": cross and not g["pass"]}
     if fits:    # D2 with the words already read for this file, if any (an original in sync reads nothing)
-        chk = TextCheck(index, ref, lines, lang, text_pairing).check(lines, WORDS_MAIN_MS, False, g)
+        chk = TextCheck(index, ref, lines, lang, rules.text_pairing).check(lines, WORDS_MAIN_MS, False, g)
         if chk is not None:
             out["text"] = chk
             out["in_sync"] = fits = chk["ok"]
-    return _in_sync(out, text, lines, ref, gate, snap_within, cross) if fits else out
+    return _in_sync(out, text, lines, ref, gate, rules.snap_within if rules.snap else None, cross) if fits else out
 
 
-def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19, vad=None, ffmpeg="ffmpeg",
-                  snap=True, snap_within=0.95, splits=True, image_ref=False, audio_lock=None,
-                  better=None, audio_better=None, audio_budget=None, prefer_plain=True, fallback=FALLBACK_REFERENCE,
-                  text_pairing=False, unsettled=False, sectioned=False, audio_extra=0):
-    """One subtitle re-timed to the file. text_pairing: the lines' words confirm a pass (D2); unsettled: no
-    subtitle of this language has passed the main rule yet, so the track's words may be read (D1); sectioned: try the
-    sectioned fit (sections.py, D4) before alass, offered when it passes section by section and as a whole."""
+def sync_subtitle(index, text, lang, rules, *, alass="alass", audio=True, vad=None, ffmpeg="ffmpeg", audio_lock=None,
+                  unsettled=False):
+    """One subtitle re-timed to the file, by `rules` (settings.Rules): against the file's text or image track, the
+    original as it is, then with rules.sections the sectioned fit (sections.py D4), offered when it passes
+    section by section and as a whole, then alass; with rules.text_pairing the lines' words confirm a pass (D2). With
+    no such track, the audio route (audiofit.fit_tracks) when `audio` is on, one fit at a time under `audio_lock` when
+    one is given. unsettled: no subtitle of this language has passed the main rule yet, so the track's words may be
+    read (D1). alass, ffmpeg: the programs' paths; vad: the speech detector."""
     lines = parse(text)
     dial = dialogue_starts(lines)
     base = {"lines": len(lines), "dialogue": len(dial)}
@@ -767,17 +770,17 @@ def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19,
     broken = broken_timing(lines)
     if broken:
         return dict(base, outcome="keep_original", reason=f"broken timing: {broken}", route=None)
-    ref = choose_reference(index, len(dial), lang, image_ref, prefer_plain, fallback)
+    ref = choose_reference(index, len(dial), lang, rules.image_ref, rules.prefer_plain, rules.fallback_reference)
     if ref is not None:
         cross = is_cross(ref, lang)
-        gate, recall = reference_gate(ref, len(dial), splits, cross)
+        gate, recall = reference_gate(ref, len(dial), rules.gate_splits, cross)
         out = dict(base, route=ref["route"], reference={"track": ref["number"], "language": ref["language"],
                                                          "codec": ref["codec"], "cues": len(ref["cues"])})
         if ref.get("image"):
             out["reference"]["image"] = ref["image"]
         out["gate_original"] = gate_lines(gate, lines)
-        words = TextCheck(index, ref, lines, lang, text_pairing)
-        fits = original_fits(out["gate_original"], cross, better, recall)
+        words = TextCheck(index, ref, lines, lang, rules.text_pairing)
+        fits = original_fits(out["gate_original"], cross, rules.better, recall)
         if fits:
             chk = words.check(lines, WORDS_MAIN_MS, unsettled, out["gate_original"])
             if chk is not None:
@@ -786,16 +789,16 @@ def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19,
         if fits:
             return _in_sync(dict(out, outcome="in_sync", reason="original passes against the release track",
                                  cross=cross and not out["gate_original"]["pass"]),
-                            text, lines, ref, gate, snap_within if snap else None, cross)
-        if sectioned:
+                            text, lines, ref, gate, rules.snap_within if rules.snap else None, cross)
+        if rules.sections:
             sect = sections.fit(lines, ref["cues"], lambda: words.shifts(unsettled))
             if sect is not None:
                 if sect["lines"] is None:
                     out["sections"] = sect["summary"]
                 else:
                     r = judge_copy(dict(out, sections=sect["summary"]), text, lines, sect["lines"], ref, gate, recall,
-                                   snap, snap_within, better, how=" (sections)", cross=cross, words=words,
-                                   may_read=unsettled, groups=sect["groups"])
+                                   rules, how=" (sections)", cross=cross, words=words, may_read=unsettled,
+                                   groups=sect["groups"])
                     if r["outcome"] == "synced":
                         return r
                     out["sections"] = dict(sect["summary"], why=r.get("reason"))
@@ -811,10 +814,9 @@ def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19,
             out["alass_error"] = "line count changed"
         if new is None:
             return dict(out, outcome="keep_original", reason="alass failed")
-        return judge_copy(out, text, lines, new, ref, gate, recall, snap, snap_within, better, cross=cross, words=words,
-                          may_read=unsettled)
+        return judge_copy(out, text, lines, new, ref, gate, recall, rules, cross=cross, words=words, may_read=unsettled)
 
-    if own_track(index, len(dial), image_ref):
+    if own_track(index, len(dial), rules.image_ref):
         return dict(base, outcome="keep_original", route=None,
                     reason="more than twice the lines of the file's own track: kept, never sent to the audio route")
     if not audio:   # waits_audio: only the audio route could judge it (the worker's no-track case; never stored)
@@ -822,8 +824,9 @@ def sync_subtitle(index, text, lang, alass="alass", audio=True, audio_lead=0.19,
                     waits_audio=True)
     # one audio fit at a time when the caller gives a lock: it reads the file through a shared reader
     with audio_lock if audio_lock is not None else contextlib.nullcontext():
-        fit = fit_tracks(index, lines, vad=vad, lead=audio_lead, ffmpeg=ffmpeg, better=audio_better,
-                         original=getattr(index, "original_language", None), budget=audio_budget, extra=audio_extra)
+        fit = fit_tracks(index, lines, vad=vad, lead=rules.audio_lead, ffmpeg=ffmpeg, better=rules.audio_better,
+                         original=getattr(index, "original_language", None), budget=rules.audio_budget,
+                         extra=rules.audio_extra)
     out = dict(base, route="audio", model=fit.get("model"), gate_original=fit.get("gate_old"),
                gate_synced=fit.get("gate_new"), windows=fit.get("windows"), audio_s=fit.get("audio_s"))
     if fit.get("close_call"):                  # D5: judged again with more windows

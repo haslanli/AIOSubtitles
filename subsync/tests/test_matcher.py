@@ -11,7 +11,7 @@ import unittest
 from array import array
 from unittest import mock
 
-from helpers import AUDIO_BETTER, FakeIndex, FIXTURES, rhythm, truth_fit
+from helpers import AUDIO_BETTER, FakeIndex, FIXTURES, rhythm, rules, truth_fit
 from subsync import mkv, mp4, pipeline, sections, shift, textpair  # noqa: E402
 from subsync.audiofit import AudioFit  # noqa: E402
 from subsync.reader import CapReached, ReadFailed, Refused, Stopped  # noqa: E402
@@ -117,7 +117,7 @@ class PipelineEndsTest(unittest.TestCase):
         cues = rhythm(300, 4)
         index = FakeIndex([track(cues)])
         text = srt([(s, s + d + 0.1, f"line {i}") for i, (s, d) in enumerate(cues)])
-        chk = pipeline.check_original(index, text, "eng")
+        chk = pipeline.check_original(index, text, "eng", rules(snap=False))
         self.assertTrue(chk["in_sync"])
         self.assertAlmostEqual(chk["gate_original"]["end_median_ms"], 100, delta=2)
 
@@ -125,7 +125,7 @@ class PipelineEndsTest(unittest.TestCase):
         cues = rhythm(300, 5)
         index = FakeIndex([track(cues)])
         text = srt([(s + 7.0, s + d + 7.0, f"line {i}") for i, (s, d) in enumerate(cues)])
-        r = pipeline.shift_sync(index, text, "eng")
+        r = pipeline.shift_sync(index, text, "eng", rules())
         self.assertEqual(r["outcome"], "synced")
         self.assertLess(r["gate_synced"]["end_median_ms"], 5)
 
@@ -445,8 +445,8 @@ class PipelineFewAnchorsTest(unittest.TestCase):
                for i, (l, (s, d, _)) in enumerate(zip(lines, self.lines))]
         words = pipeline.TextCheck(self.index, ref, lines, "eng", True)
         out = {"gate_original": pipeline.gate_lines(gate, lines)}
-        return pipeline.judge_copy(out, self.text, lines, new, ref, gate, recall, snap=False, better={}, words=words,
-                                   may_read=True)
+        return pipeline.judge_copy(out, self.text, lines, new, ref, gate, recall, rules(snap=False, better={}),
+                                   words=words, may_read=True)
 
     def test_three_anchors_off_with_the_timing_sound_pass(self):
         r = self.judge({i: 0.8 for i in self.off})
@@ -596,7 +596,7 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(400, 21)
         index = WordIndex(lines)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=6.0)])
-        r = pipeline.shift_sync(index, text, "eng", text_pairing=True)
+        r = pipeline.shift_sync(index, text, "eng", rules(text_pairing=True))
         self.assertEqual(r["outcome"], "synced")
         self.assertTrue(r["reason"].startswith("passes"))
         self.assertEqual(index.asked, [])
@@ -611,14 +611,15 @@ class PipelineWordsTest(unittest.TestCase):
         index = FakeIndex([track(cues, "en", 3), track(cues[::3], "es", 4)])
         moved = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=6.0)])
         as_is = srt([(c["s"], c["e"], c["text"]) for c in timed(lines)])
-        for r in (pipeline.shift_sync(index, moved, "spa"), pipeline.sync_subtitle(index, as_is, "spa", audio=False)):
+        for r in (pipeline.shift_sync(index, moved, "spa", rules()),
+                  pipeline.sync_subtitle(index, as_is, "spa", rules(), audio=False)):
             self.assertEqual(r["reference"]["language"], "en")
             self.assertIn(r["outcome"], ("synced", "in_sync"), r.get("reason"))
             self.assertTrue(r["reason"].startswith(("passes against", "original passes against")), r["reason"])
             self.assertFalse(pipeline.settles(r, "spa"))
             self.assertTrue(pipeline.settles(r, "eng"))           # the same pass, its own language's track
         own = srt([(c["s"], c["e"], c["text"]) for c in timed(lines[::3], shift_s=6.0)])
-        r = pipeline.shift_sync(index, own, "spa")                 # 400 lines: checked against the Spanish track
+        r = pipeline.shift_sync(index, own, "spa", rules())        # 400 lines: checked against the Spanish track
         self.assertEqual((r["reference"]["language"], r["outcome"]), ("es", "synced"))
         self.assertTrue(pipeline.settles(r, "spa"))
 
@@ -630,9 +631,9 @@ class PipelineWordsTest(unittest.TestCase):
         moved = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=6.0)])
         as_is = srt([(c["s"], c["e"], c["text"]) for c in timed(lines)])
         rough = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
-        main = pipeline.shift_sync(index, moved, "eng")
-        in_sync = pipeline.sync_subtitle(index, as_is, "eng", audio=False)
-        clearly = pipeline.shift_sync(index, rough, "eng", snap=False, better={})
+        main = pipeline.shift_sync(index, moved, "eng", rules())
+        in_sync = pipeline.sync_subtitle(index, as_is, "eng", rules(), audio=False)
+        clearly = pipeline.shift_sync(index, rough, "eng", rules(snap=False, better={}))
         self.assertEqual((main["outcome"], in_sync["outcome"], clearly["outcome"]), ("synced", "in_sync", "synced"))
         self.assertIn("clearly better", clearly["reason"])
         for r in (main, in_sync):
@@ -653,13 +654,13 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(500, 22)
         index = WordIndex(lines)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
-        r = pipeline.shift_sync(index, text, "eng", text_pairing=True, snap=False, better={})
+        r = pipeline.shift_sync(index, text, "eng", rules(text_pairing=True, snap=False, better={}))
         self.assertEqual(r["outcome"], "synced", r.get("reason"))
         self.assertIn("clearly better", r["reason"])
         self.assertEqual(len(index.asked), 1)
         self.assertLessEqual(len(index.asked[0]), textpair.MAX_LINES)
         self.assertTrue(r["text"]["ok"])
-        pipeline.shift_sync(index, text, "eng", text_pairing=True, snap=False, better={})
+        pipeline.shift_sync(index, text, "eng", rules(text_pairing=True, snap=False, better={}))
         self.assertEqual(len(index.asked), 1)                  # kept on the file's index
 
     def test_words_that_disagree_refuse_a_timing_pass(self):
@@ -668,7 +669,7 @@ class PipelineWordsTest(unittest.TestCase):
         ref = pipeline.choose_reference(index, 400, "eng")
         self.assertIsNotNone(pipeline.track_words(index, ref, True))      # read earlier in this job
         wrong = [(lines[i][0] + 6.0, lines[i][0] + lines[i][1] + 6.0, lines[i + 1][2]) for i in range(len(lines) - 1)]
-        r = pipeline.shift_sync(index, srt(wrong), "eng", text_pairing=True)
+        r = pipeline.shift_sync(index, srt(wrong), "eng", rules(text_pairing=True))
         self.assertEqual(r["outcome"], "keep_original")
         self.assertIn("words", r["reason"])
 
@@ -676,11 +677,11 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(300, 24)
         index = WordIndex(lines)
         wrong = [(lines[i][0], lines[i][0] + lines[i][1], lines[i + 1][2]) for i in range(len(lines) - 1)]
-        chk = pipeline.check_original(index, srt(wrong), "eng", text_pairing=True)
+        chk = pipeline.check_original(index, srt(wrong), "eng", rules(snap=False, text_pairing=True))
         self.assertTrue(chk["in_sync"])
         self.assertEqual(index.asked, [])
         pipeline.track_words(index, pipeline.choose_reference(index, 300, "eng"), True)
-        chk = pipeline.check_original(index, srt(wrong), "eng", text_pairing=True)
+        chk = pipeline.check_original(index, srt(wrong), "eng", rules(snap=False, text_pairing=True))
         self.assertFalse(chk["in_sync"])
         self.assertFalse(chk["text"]["ok"])
 
@@ -692,7 +693,7 @@ class PipelineWordsTest(unittest.TestCase):
         for track_lang, lang in (("zh", "chi"), ("ja", "jpn")):
             with self.subTest(lang=lang):
                 index = WordIndex(lines, lang=track_lang)
-                r = pipeline.shift_sync(index, text, lang, text_pairing=True, snap=False, better={})
+                r = pipeline.shift_sync(index, text, lang, rules(text_pairing=True, snap=False, better={}))
                 self.assertEqual(r["outcome"], "synced", r.get("reason"))
                 self.assertEqual(index.asked, [])
                 ref = pipeline.choose_reference(index, 500, lang)
@@ -708,7 +709,7 @@ class PipelineWordsTest(unittest.TestCase):
                                         ("th", "tha", 1)):
             with self.subTest(lang=track_lang):
                 index = WordIndex(lines, lang=track_lang)
-                r = pipeline.shift_sync(index, text, lang, text_pairing=True, snap=False, better={})
+                r = pipeline.shift_sync(index, text, lang, rules(text_pairing=True, snap=False, better={}))
                 self.assertEqual(r["outcome"], "synced", r.get("reason"))
                 self.assertEqual(len(index.asked), reads)
                 ref = pipeline.choose_reference(index, 500, lang)
@@ -720,7 +721,7 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(500, 22)
         index = WordIndex(lines, lang="nb-NO")
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
-        r = pipeline.shift_sync(index, text, "nor", text_pairing=True, snap=False, better={})
+        r = pipeline.shift_sync(index, text, "nor", rules(text_pairing=True, snap=False, better={}))
         self.assertEqual(r["outcome"], "synced", r.get("reason"))
         self.assertEqual(len(index.asked), 1)
         self.assertTrue(r["text"]["ok"])
@@ -729,8 +730,8 @@ class PipelineWordsTest(unittest.TestCase):
         lines = dialogue(500, 25)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
         index = WordIndex(lines, lang="en")
-        pipeline.shift_sync(index, text, "rus", text_pairing=True)
-        pipeline.shift_sync(index, text, "eng", text_pairing=False)
+        pipeline.shift_sync(index, text, "rus", rules(text_pairing=True))
+        pipeline.shift_sync(index, text, "eng", rules(text_pairing=False))
         self.assertEqual(index.asked, [])
 
 
@@ -835,8 +836,8 @@ class AudioLockTest(unittest.TestCase):
             return {"decision": "keep_original", "why": "a stand-in"}
         text = srt([(s, s + d, t) for s, d, t in dialogue(40, 32)])
         with mock.patch.object(pipeline, "fit_tracks", fit_tracks):
-            locked = pipeline.sync_subtitle(FakeIndex(), text, "eng", vad=object(), audio_lock=lock)
-            unlocked = pipeline.sync_subtitle(FakeIndex(), text, "eng", vad=object())
+            locked = pipeline.sync_subtitle(FakeIndex(), text, "eng", rules(), vad=object(), audio_lock=lock)
+            unlocked = pipeline.sync_subtitle(FakeIndex(), text, "eng", rules(), vad=object())
         self.assertEqual(held, [True, False])
         self.assertFalse(lock.locked())
         for r in (locked, unlocked):
@@ -858,7 +859,7 @@ class AudioResultTest(unittest.TestCase):
 
     def judged(self, **fit):
         with mock.patch.object(pipeline, "fit_tracks", lambda index, lines, **kw: dict(self.MEASURES, **fit)):
-            return pipeline.sync_subtitle(FakeIndex(), self.text, "eng", vad=object())
+            return pipeline.sync_subtitle(FakeIndex(), self.text, "eng", rules(), vad=object())
 
     def assert_measures(self, r):
         m = self.MEASURES
@@ -961,10 +962,10 @@ def judge_sections(release, sub_lines, lang="eng", snap=True, better=None, jitte
         if kw.get("how") == " (sections)":
             seen["judged"] = got
         return got
+    judged_by = rules(snap=snap, better=better, sections=True, text_pairing=bool(texts))
     with mock.patch.object(sections, "fit", fit_seen), mock.patch.object(pipeline, "judge_copy", judge_seen), \
             mock.patch.object(pipeline.alass_mod, "run", side_effect=pipeline.alass_mod.AlassFailed("no alass here")):
-        res = pipeline.sync_subtitle(index, text, lang, audio=False, snap=snap, better=better, sectioned=True,
-                                     text_pairing=bool(texts), unsettled=bool(texts))
+        res = pipeline.sync_subtitle(index, text, lang, judged_by, audio=False, unsettled=bool(texts))
     if "sect" not in seen:
         raise AssertionError(f"sync_subtitle never tried the sectioned fit: {res['reason']}")
     return res, seen["sect"], seen.get("judged")

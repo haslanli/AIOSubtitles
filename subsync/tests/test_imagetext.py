@@ -11,7 +11,7 @@ from unittest import mock
 
 import numpy as np
 
-from helpers import FIXTURES, IMAGE_BUILD
+from helpers import FIXTURES, IMAGE_BUILD, rules
 import imagesubs as I  # noqa: E402
 from subsync import imagetext, mkv, pipeline, textpair  # noqa: E402
 from subsync.reader import CapReached, ReadFailed, Refused  # noqa: E402
@@ -438,12 +438,12 @@ class ImageWordsPipelineTest(unittest.TestCase):
         cues, index, text, ref = self.setup_film()
         pipeline.track_words(index, ref, True)
         wrong = [(cues[i][0], cues[i][0] + cues[i][1], text[cues[i + 1][0]]) for i in range(len(cues) - 1)]
-        chk = pipeline.check_original(index, srt(wrong), "eng", image_ref=True, text_pairing=True)
+        chk = pipeline.check_original(index, srt(wrong), "eng", rules(snap=False, image_ref=True, text_pairing=True))
         self.assertIsNotNone(chk)
         self.assertIn("text", chk)
         self.assertFalse(chk["text"]["ok"])
         right = [(s, s + d, text[s]) for s, d in cues]
-        chk = pipeline.check_original(index, srt(right), "eng", image_ref=True, text_pairing=True)
+        chk = pipeline.check_original(index, srt(right), "eng", rules(snap=False, image_ref=True, text_pairing=True))
         self.assertTrue(chk["text"]["ok"])
 
     def test_nothing_is_read_without_a_recogniser_for_the_language(self):

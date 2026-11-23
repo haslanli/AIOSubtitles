@@ -2,14 +2,17 @@
 explanation implies, every on/off setting on or off, the languages and the addon
 key. A value that can't work is one plain line at the start, which then stops, never a traceback or a service
 that fails far from the cause."""
+import dataclasses
+import hashlib
+import json
 import os
 import re
 import unittest
 from unittest import mock
 
 import helpers  # noqa: F401  (first: it puts the package on the import path)
-from subsync import explain, settings as settings_module  # noqa: E402
-from subsync.settings import GB, MB, Settings  # noqa: E402
+from subsync import ALGO_VERSION, RULE_REVISION, explain, settings as settings_module  # noqa: E402
+from subsync.settings import GB, MB, Rules, Settings  # noqa: E402
 
 PUBLIC = {"SUBSYNC_PUBLIC": "on"}
 
@@ -235,6 +238,48 @@ class LanguagesTest(unittest.TestCase):
         for value in ("", "xx"):
             with self.subTest(value=value):
                 self.assertEqual(Settings(dict(PUBLIC, SUBSYNC_LANGUAGES=value)).conflicts(), [])
+
+
+class RulesTest(unittest.TestCase):
+    """The settings that change a verdict are one Rules, passed whole to the pipeline and hashed whole for the
+    stored verdicts' rule (rule_id), so a setting the pipeline reads can't be left out of the rule id."""
+
+    def test_the_rules_are_the_settings_of_the_same_names(self):
+        s = Settings({"SUBSYNC_SNAP_WITHIN": "0.97", "SUBSYNC_FALLBACK_REFERENCE": "pt,en", "SUBSYNC_BETTER": "off",
+                      "SUBSYNC_AUDIO_LEAD_MS": "150"})
+        r = s.rules
+        for f in dataclasses.fields(Rules):
+            self.assertEqual(getattr(r, f.name), getattr(s, f.name), f.name)
+        self.assertEqual((r.snap_within, r.fallback_reference, r.better, r.audio_lead),
+                         (0.97, ("por", "eng"), None, 0.15))
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            r.snap = False
+
+    def test_each_rule_changes_the_rule_id(self):
+        base = Settings({}).rule_id
+        changed = {"snap": False, "snap_within": 0.9, "gate_splits": False, "image_ref": False, "better": None,
+                   "audio_better": None, "audio_lead": 0.0, "audio_budget": None, "audio_extra": 0,
+                   "prefer_plain": False, "fallback_reference": ("por",), "text_pairing": False, "sections": False,
+                   "shift_path": False}
+        self.assertEqual(set(changed), {f.name for f in dataclasses.fields(Rules)})
+        for name, value in changed.items():
+            s = Settings({})
+            setattr(s, name, value)
+            self.assertNotEqual(s.rule_id, base, name)
+
+    def test_the_rule_ids_of_stored_verdicts_are_kept(self):
+        # the same keys and values hashed as when rule_id listed the settings by hand: no stored verdict is judged
+        # again for the change
+        for env in ({}, {"SUBSYNC_BETTER": "off", "SUBSYNC_AUDIO_BUDGET_GB": "0", "SUBSYNC_FALLBACK_REFERENCE": "pt"}):
+            s = Settings(env)
+            listed = {"algo": ALGO_VERSION, "revision": RULE_REVISION, "better": s.better,
+                      "audio_better": s.audio_better, "snap": s.snap, "snap_within": s.snap_within,
+                      "gate_splits": s.gate_splits, "image_ref": s.image_ref, "audio_lead": s.audio_lead,
+                      "audio_budget": s.audio_budget,
+                      "prefer_plain": s.prefer_plain, "shift_path": s.shift_path,
+                      "fallback_reference": s.fallback_reference, "text_pairing": s.text_pairing,
+                      "sections": s.sections, "audio_extra": s.audio_extra}
+            self.assertEqual(s.rule_id, hashlib.sha256(json.dumps(listed, sort_keys=True).encode()).hexdigest()[:12])
 
 
 class AddonKeyTest(unittest.TestCase):

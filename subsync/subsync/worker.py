@@ -2426,9 +2426,7 @@ class LanguageSync:
         """The fast path for one download: its original against the release track (a gate, no alass). In sync?"""
         s, lang = self.s, self.lang
         t0 = time.time()
-        chk = pipeline.check_original(self.index, self._text(e), lang, splits=s.gate_splits, image_ref=s.image_ref,
-                                      prefer_plain=s.prefer_plain, snap_within=s.snap_within if s.snap else None,
-                                      better=s.better, fallback=s.fallback_reference, text_pairing=s.text_pairing)
+        chk = pipeline.check_original(self.index, self._text(e), lang, rules=s.rules)
         e["checked"] = chk is not None
         if chk is not None:   # for a pick's answer when nothing passes
             self.w._note_measure(self.job.alias, lang, e["cand"]["id"],
@@ -2446,9 +2444,7 @@ class LanguageSync:
         still fit the subtitle better (_record_fit)."""
         s = self.s
         t0 = time.time()
-        r = pipeline.shift_sync(self.index, self._text(e), self.lang, snap=s.snap, snap_within=s.snap_within,
-                                splits=s.gate_splits, image_ref=s.image_ref, better=s.better,
-                                prefer_plain=s.prefer_plain, fallback=s.fallback_reference, text_pairing=s.text_pairing)
+        r = pipeline.shift_sync(self.index, self._text(e), self.lang, rules=s.rules)
         if not (r and r["outcome"] == "synced"):
             return False
         self._record(e, dict(r, fast=True), t0)
@@ -2462,15 +2458,9 @@ class LanguageSync:
         """alass (or the audio route) on one download: (result, start time)."""
         s, w = self.s, self.w
         t0 = time.time()
-        return pipeline.sync_subtitle(self.index, self._text(e), self.lang, alass=s.alass, audio=self.audio,
-                                      audio_lead=s.audio_lead, vad=w.vad() if self.audio else None,
-                                      ffmpeg=s.ffmpeg, snap=s.snap, snap_within=s.snap_within,
-                                      splits=s.gate_splits, image_ref=s.image_ref,
-                                      audio_lock=w.audio_lock, better=s.better,
-                                      audio_better=s.audio_better, audio_budget=s.audio_budget,
-                                      prefer_plain=s.prefer_plain, fallback=s.fallback_reference,
-                                      text_pairing=s.text_pairing, unsettled=not self.settled,
-                                      sectioned=s.sections, audio_extra=s.audio_extra), t0
+        return pipeline.sync_subtitle(self.index, self._text(e), self.lang, rules=s.rules, alass=s.alass,
+                                      audio=self.audio, vad=w.vad() if self.audio else None, ffmpeg=s.ffmpeg,
+                                      audio_lock=w.audio_lock, unsettled=not self.settled), t0
 
     def _in_sync_result(self, e, base):
         """An original in sync as it is: listed (when listing is on) as its magnet copy, else unchanged, with the

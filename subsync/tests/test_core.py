@@ -6,7 +6,7 @@ import struct
 import time
 import unittest
 
-from helpers import AUDIO_BETTER, FakeIndex, realistic, rhythm, timeline_fit
+from helpers import AUDIO_BETTER, FakeIndex, realistic, rhythm, rules, timeline_fit
 from subsync import choose, imageref, langs, pipeline, refine, shift, subs
 from subsync import relgate as relgate_mod
 from subsync.addon import as_srt
@@ -1170,18 +1170,18 @@ class CrossMissingSceneTest(unittest.TestCase):
 
     def test_the_shift_path_offers_it_across_languages_only(self):
         text = self.srt(self.translation(0.05), shift_s=5.0)
-        r = pipeline.shift_sync(self.index(), text, "rus", better={})
+        r = pipeline.shift_sync(self.index(), text, "rus", rules(better={}))
         self.assertEqual(r["outcome"], "synced", r.get("reason"))
         self.assertTrue(r["reason"].startswith("aligned to another language's track (one shift)"), r["reason"])
-        r = pipeline.shift_sync(self.index(), text, "eng", better={})       # against its own language's track
+        r = pipeline.shift_sync(self.index(), text, "eng", rules(better={}))     # against its own language's track
         self.assertEqual(r["outcome"], "keep_original")
         self.assertTrue(r["gate_synced"]["missing_scene"])
 
     def test_an_original_in_place_is_in_sync_across_languages_only(self):
         text = self.srt(self.translation(0.05))
         rule = dict(relgate_mod.BETTER)
-        self.assertTrue(pipeline.check_original(self.index(), text, "rus", better=rule)["in_sync"])
-        self.assertFalse(pipeline.check_original(self.index(), text, "eng", better=rule)["in_sync"])
+        self.assertTrue(pipeline.check_original(self.index(), text, "rus", rules(snap=False, better=rule))["in_sync"])
+        self.assertFalse(pipeline.check_original(self.index(), text, "eng", rules(snap=False, better=rule))["in_sync"])
 
     def test_a_scene_a_denser_stretch_hid_is_refused_against_the_subtitles_own_language_only(self):
         # through the shift path: the track has an untranslated song (30 lines over 80 s) and a scene (22 lines
@@ -1198,13 +1198,13 @@ class CrossMissingSceneTest(unittest.TestCase):
                                  "cues": cues}])
         text = self.srt(sub, shift_s=5.0)
         for snap in (True, False):
-            r = pipeline.shift_sync(index, text, "eng", snap=snap, better={})
+            r = pipeline.shift_sync(index, text, "eng", rules(snap=snap, better={}))
             self.assertEqual(r["outcome"], "keep_original", r.get("reason"))
             self.assertEqual(r["better"]["why"], "a scene of the release is missing (another cut)")
             self.assertEqual((r["gate_synced"]["missing_scene"], r["gate_synced"]["missing_lines"]), (True, 22))
-        r = pipeline.shift_sync(index, text, "rus", better={})
+        r = pipeline.shift_sync(index, text, "rus", rules(better={}))
         self.assertEqual((r["outcome"], r["reason"]), ("synced", "passes against the release track (one shift) (snapped)"))
-        r = pipeline.shift_sync(index, text, "rus", snap=False, better={})
+        r = pipeline.shift_sync(index, text, "rus", rules(snap=False, better={}))
         self.assertEqual((r["outcome"], r["reason"]), ("synced", "aligned to another language's track (one shift)"))
         self.assertEqual((r["gate_synced"]["missing_scene"], r["gate_synced"]["missing_lines"]), (False, 30))
 
@@ -1222,11 +1222,11 @@ class CrossMissingSceneTest(unittest.TestCase):
         self.cues = sorted([(s + (300.0 if s >= cut else 0.0), d) for s, d in film] + scene)
         self.ref = [s for s, _ in self.cues]
         for shift_s in (5.0, 0.0):
-            res = pipeline.shift_sync(self.index(), self.srt(theatrical, shift_s), "rus", better={})
+            res = pipeline.shift_sync(self.index(), self.srt(theatrical, shift_s), "rus", rules(better={}))
             self.assertEqual(res["outcome"], "keep_original", res.get("reason"))
             self.assertLess(res["gate_synced"]["paired"], relgate_mod.ONE_SHIFT_PAIRED)   # one shift: the cut breaks it
         self.assertFalse(pipeline.check_original(self.index(), self.srt(theatrical), "rus",
-                                                 better=dict(relgate_mod.BETTER))["in_sync"])
+                                                 rules(snap=False, better=dict(relgate_mod.BETTER)))["in_sync"])
 
     def test_one_shift_excuses_a_stretch_only_when_half_of_the_lines_after_it_pair_near_the_shift(self):
         # Under one shift, a missing stretch inside the subtitle's span is excused only when at least half of

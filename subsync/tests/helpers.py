@@ -9,6 +9,7 @@ image's own copy (see IMAGE_BUILD). It is also the one place that keeps the whol
 What more than one module uses lives here, never in a test module: no test module imports another, so none
 runs another's top level or collects its TestCase classes. A harness here is a plain class, never a TestCase: a TestCase
 takes it as its first base and its tearDown closes it; ServerHarness can also be held as a plain object."""
+import dataclasses
 import html.parser
 import io
 import json
@@ -65,6 +66,16 @@ from subsync.subs import to_srt, ts  # noqa: E402
 # rule follows it when its numbers change; one meant for another rule says so with its own numbers
 BETTER = Settings({}).better
 AUDIO_BETTER = Settings({}).audio_better
+
+# the features a pipeline test turns on itself (image references, word pairing, the sectioned fit, both "clearly better"
+# rules, the audio budget and its extra windows): off, as the pipeline's functions had them before they took one Rules
+RULES_OFF = {"image_ref": False, "text_pairing": False, "sections": False, "better": None, "audio_better": None,
+             "audio_budget": None, "audio_extra": 0}
+
+
+def rules(**kw):
+    """The rules a pipeline test judges by (settings.Rules): the settings' defaults, with RULES_OFF and then `kw`."""
+    return dataclasses.replace(Settings({}).rules, **{**RULES_OFF, **kw})
 
 # public mode keeps each person's record encrypted: its tests need the cryptography package, which the image has
 try:
