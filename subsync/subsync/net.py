@@ -6,16 +6,19 @@ network next to subsync.
 Public mode: what people type and what their listings contain decides where the service connects, so it connects only
 to public internet addresses. A name is looked up once and refused when any of its addresses is private, loopback,
 link-local (the cloud's own metadata service among them), site-local, shared, multicast or reserved; the connection
-goes to the addresses checked, and the address it really reached is checked again. An IPv6 address that stands for an
-IPv4 one (IPv4-mapped, or a translator's prefix such as NAT64's) is judged as that IPv4 address. Redirects are opened
-through the same connections. Only http and https are opened, and proxies from the environment are not used.
+goes to the addresses checked (the two families taking turns, within twice the connect's wait in all), and the address
+it really reached is checked again. An IPv6 address that stands for an IPv4 one (IPv4-mapped, or a translator's prefix
+such as NAT64's) is judged as that IPv4 address. Redirects are opened through the same connections, and proxies from
+the environment are not used.
 
-Both modes: a request held within a Deadline has one bound for the whole of it, its connections and every read.
+Both modes: only http and https are opened (urllib would read a file: address from this machine's own disk), and a
+request held within a Deadline has one bound for the whole of it, its connections and every read.
 
 Standard library only, so ./setup can import it.
 """
 import http.client
 import ipaddress
+import itertools
 import math
 import socket
 import threading
@@ -33,6 +36,13 @@ _local = threading.local()   # .deadline: this thread's request bound (Deadline)
 # NAT64 well-known prefix (RFC 6052) and the old IPv4-compatible form; Python counts the last three as global whatever
 # IPv4 address they carry
 _CARRY_IPV4 = tuple(ipaddress.ip_network(p) for p in ("::ffff:0:0/96", "::ffff:0:0:0/96", "64:ff9b::/96", "::/96"))
+# public mode: a name's addresses share this many connect waits in all. The first address gets the whole wait
+# and the next (the other family's first) what is left, so a host whose IPv6 address never answers is still reached
+# over IPv4, and a name answering dozens of addresses that never answer holds a request for two waits, not dozens.
+CONNECT_WAITS = 2
+# one TLS context for every opener, made as urllib's HTTPSHandler makes its own (certificates and names checked, ALPN
+# http/1.1): each new one loads the system's CA store again
+_TLS = http.client._create_https_context(http.client.HTTPSConnection._http_vsn)
 
 
 class Refused(OSError):
@@ -82,22 +92,20 @@ def check_host(host, port=None):
 
 
 def check_scheme(url):
-    """In public mode, refuses anything but http and https."""
-    if not _public_only:
-        return
+    """Refuses anything but http and https, in both modes: nothing here opens another kind, and urllib would
+    read a file: address, a subtitle a third party lists among them, from this machine's own disk."""
     scheme = urllib.parse.urlsplit(url).scheme
     if scheme not in ("http", "https"):
         raise Refused(f"a {scheme or 'schemeless'} address")
 
 
 def check_url(url):
-    """In public mode, refuses anything but http and https to public hosts, before any connection (a redirect target is
-    checked this way first; the connection checks it again)."""
-    if not _public_only:
-        return
+    """Refuses anything but http and https and, in public mode, a host that isn't public, before any connection (a
+    redirect target is checked this way first; the connection checks it again)."""
     check_scheme(url)
-    parts = urllib.parse.urlsplit(url)
-    check_host(parts.hostname, parts.port)
+    if _public_only:
+        parts = urllib.parse.urlsplit(url)
+        check_host(parts.hostname, parts.port)
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -215,17 +223,36 @@ def _connect(address, timeout, *args, **kwargs):
     return sock
 
 
+def _families_in_turn(ips):
+    """The addresses in RFC 8305's order: the two families take turns, the first address's family first, and each
+    family keeps the lookup's order."""
+    if not ips:
+        return ips
+    first = [ip for ip in ips if (":" in ip) == (":" in ips[0])]
+    other = [ip for ip in ips if (":" in ip) != (":" in ips[0])]
+    return [ip for pair in itertools.zip_longest(first, other) for ip in pair if ip is not None]
+
+
 def _guarded_create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *args, **kwargs):
     """socket.create_connection through the check: in public mode the name is looked up once, and the connection goes
-    to the addresses checked, in the lookup's order, as create_connection's own would (the last error when none
-    answers); the address it really reached is checked again. Within a request's bound (Deadline) when one is held."""
+    to the addresses checked, the two families taking turns, within CONNECT_WAITS connect waits in all (the last error
+    when none answers); the address it really reached is checked again. Within a request's bound (Deadline) when one
+    is held."""
     if not _public_only:
         return _connect(address, timeout, *args, **kwargs)
     host, port = address[0], address[1]
+    if timeout is socket._GLOBAL_DEFAULT_TIMEOUT:
+        timeout = socket.getdefaulttimeout()
+    end = None if timeout is None else time.monotonic() + CONNECT_WAITS * timeout
     error = OSError("getaddrinfo returns an empty list")
-    for ip in _public_addresses(host, port):
+    for n, ip in enumerate(_families_in_turn(_public_addresses(host, port))):
+        wait = timeout
+        if n and end is not None:
+            wait = min(timeout, end - time.monotonic())
+            if wait <= 0:
+                break   # the connect's time is up: the last address's error
         try:
-            sock = _connect((ip, port), timeout, *args, **kwargs)
+            sock = _connect((ip, port), wait, *args, **kwargs)
         except OSError as e:
             error = e
             continue
@@ -264,13 +291,11 @@ class _HTTPSHandler(urllib.request.HTTPSHandler):
 
 
 class _OtherSchemes(urllib.request.BaseHandler):
-    """Ahead of urllib's own handlers: in public mode, file, ftp and data addresses are refused."""
+    """Ahead of urllib's own handlers: file, ftp and data addresses are refused, in both modes (check_scheme)."""
     handler_order = 100
 
     def _refuse(self, req):
-        if _public_only:
-            raise Refused(f"a {req.type} address")
-        return None   # off: urllib's own handler opens it, as before
+        raise Refused(f"a {req.type} address")
 
     file_open = ftp_open = data_open = _refuse
 
@@ -296,5 +321,5 @@ class _NoEnvironmentProxies(urllib.request.ProxyHandler):
 def build_opener(*handlers):
     """An opener whose every connection passes the check above, with the Real-Debrid redirect guard."""
     from .realdebrid import GuardedRedirects   # realdebrid imports this module
-    return urllib.request.build_opener(_NoEnvironmentProxies(), _HTTPHandler(), _HTTPSHandler(), _OtherSchemes(),
-                                       GuardedRedirects(), *handlers)
+    return urllib.request.build_opener(_NoEnvironmentProxies(), _HTTPHandler(), _HTTPSHandler(context=_TLS),
+                                       _OtherSchemes(), GuardedRedirects(), *handlers)

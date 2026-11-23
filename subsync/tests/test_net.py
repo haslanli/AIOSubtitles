@@ -2,7 +2,10 @@
 on the name's lookup and again on the address the connection really reached, redirects included. No test here looks a
 name up or connects anywhere but this machine."""
 import os
+import pathlib
 import socket
+import ssl
+import tempfile
 import time
 import unittest
 import urllib.error
@@ -235,6 +238,20 @@ class GateTest(unittest.TestCase):
             with self.subTest(url=url):
                 refused(self, lambda: realdebrid.urlopen(url, timeout=5))
 
+    def test_other_schemes_are_refused_off_public_mode_too(self):
+        # A subtitle listed as file:///proc/self/environ by a third-party addon was read from this machine's
+        # disk (its secrets among it) on an install of your own; nothing here opens anything but http and https
+        net.configure(public_only=False)
+        with tempfile.NamedTemporaryFile("w", suffix=".srt") as local:
+            local.write("SUBSYNC_SOURCE_PASSWORD=secret\n")
+            local.flush()
+            for url in (pathlib.Path(local.name).as_uri(), "ftp://127.0.0.1:9/x", "data:text/plain,hello"):
+                with self.subTest(url=url):
+                    refused(self, lambda: realdebrid.urlopen(url, timeout=5))
+                    refused(self, lambda: net.build_opener().open(url, timeout=5))     # any opener of the gate
+            refused(self, lambda: realdebrid.GuardedRedirects().redirect_request(          # and a redirect to one
+                urllib.request.Request("http://files.test/"), _Closable(), 302, "Found", {}, "ftp://127.0.0.1:9/x"))
+
     def test_policy_off_reaches_local_servers(self):
         server = Server()
         try:
@@ -312,6 +329,57 @@ class DeadlineTest(unittest.TestCase):
                     with self.assertRaises(TimeoutError):            # still open within its bound
                         sock.recv(1)
                 self.assertFalse(bound.passed)
+
+
+class ConnectSpanTest(unittest.TestCase):
+    """In public mode a name's addresses share twice the connect's wait; each had the whole wait, so a name
+    answering dozens of addresses that never answer held a request for dozens of waits."""
+
+    def tearDown(self):
+        net.configure(public_only=False)
+
+    def test_many_silent_addresses_share_twice_the_wait(self):
+        ips = [f"93.184.216.{n}" for n in range(1, 13)]
+        net.configure(public_only=True, resolver=resolver_answering(*ips))
+        waits = []
+
+        def silent(address, timeout, *a, **k):     # an address that never answers: the whole wait, then timed out
+            waits.append(timeout)
+            time.sleep(timeout)
+            raise TimeoutError("timed out")
+        t0 = time.monotonic()
+        with unittest.mock.patch("socket.create_connection", silent), self.assertRaises(TimeoutError):
+            net._guarded_create_connection(("many.test", 443), 0.05)
+        self.assertEqual(waits[0], 0.05)                               # the first address: the whole wait, as before
+        self.assertLessEqual(sum(waits), 2 * 0.05 + 1e-6, waits)
+        self.assertLess(len(waits), len(ips))
+        self.assertLess(time.monotonic() - t0, 0.5)
+
+    def test_the_families_take_turns(self):
+        # RFC 8305's order: the lookup's IPv6 addresses that never answer use up the time no more than their turn, so
+        # the IPv4 one is tried second; each family keeps the lookup's order, and the last error is raised
+        net.configure(public_only=True, resolver=resolver_answering("2606:4700::1", "2606:4700::2", "93.184.216.34",
+                                                                    "93.184.216.35"))
+        tried = []
+
+        def refuses(address, *a, **k):
+            tried.append(address[0])
+            raise ConnectionRefusedError(address[0])
+        with unittest.mock.patch("socket.create_connection", refuses), self.assertRaises(ConnectionRefusedError) as e:
+            net._guarded_create_connection(("both.test", 443), 5)
+        self.assertEqual(tried, ["2606:4700::1", "93.184.216.34", "2606:4700::2", "93.184.216.35"])
+        self.assertEqual(str(e.exception), "93.184.216.35")
+
+
+class TlsContextTest(unittest.TestCase):
+    def test_openers_share_one_tls_context(self):
+        # Each opener made its own TLS context, loading the system's CA store again (about 8 ms of CPU, two
+        # openers per AIOStreams client); the shared one checks certificates and names as urllib's own does
+        with unittest.mock.patch.object(ssl.SSLContext, "load_default_certs") as load:
+            net.build_opener()
+            net.build_opener(net.NoRedirects())
+        load.assert_not_called()
+        self.assertEqual((net._TLS.verify_mode, net._TLS.check_hostname), (ssl.CERT_REQUIRED, True))
 
 
 class RetryAfterTest(unittest.TestCase):
