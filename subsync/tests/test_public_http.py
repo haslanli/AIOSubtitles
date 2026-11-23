@@ -759,6 +759,20 @@ class AudioChoiceHttpTest(ServerHarness, unittest.TestCase):
         self.assertIn('href="#audio"', body.decode())
         self.assertEqual(self.users.open(token)["audio"], "off")
 
+    def test_the_settings_page_counts_the_audio_syncs_started_today(self):
+        # The Today band showed new files, MB read and Usenet searches, never the audio syncs a person had
+        # started, so a reached audio limit couldn't be seen; the page reads the person's own count of the day
+        _, code, text, _, token = self.sign_up(audio="open")
+        self.assertEqual(code, 200, text)
+        page = self.page(token)
+        self.assertIn("<p><b>0 of 20</b><span>audio syncs</span></p>", page)
+        self.assertIn("<p><b>0 of 5</b><span>started on opening</span></p>", page)
+        self.users.add_audio(token, opened=True)
+        self.users.add_audio(token)
+        page = self.page(token)
+        self.assertIn("<p><b>2 of 20</b><span>audio syncs</span></p>", page)
+        self.assertIn("<p><b>1 of 5</b><span>started on opening</span></p>", page)
+
     def test_an_answer_not_offered_at_sign_up_is_refused_before_anything_is_made(self):
         uuid, code, text, _, token = self.sign_up(audio="loud")
         self.assertEqual(code, 400)

@@ -52,8 +52,10 @@ UI_WORDS = (
     "Privacy (opens in a new tab)",
     # Usenet
     "Sync Usenet files too", "Usenet", "searches used today", "search used today",
-    # files with no subtitles of their own: the question, its answers, the settings row's button
-    AUDIO_LABEL, *(answer + tag for _, answer, tag in AUDIO_ANSWERS), "Save answer",
+    # files with no subtitles of their own: the question, its answers, the settings row's button, and the Today
+    # band's units for the audio syncs started today and those started as soon as a file was opened
+    AUDIO_LABEL, *(answer + tag for _, answer, tag in AUDIO_ANSWERS), "Save answer", "audio syncs", "audio sync",
+    "started on opening",
     # a person's own TMDB key (when the instance asks each person for one), and TMDB's logo's name
     "Original languages", "Your TMDB key", "Save key", "Remove key", "TMDB",
     # the Show/Hide buttons' spoken names, each before its box's label
@@ -75,14 +77,19 @@ def audio_answers(settings):
                  if value != "open" or settings.user_opened_per_day > 0)
 
 
+def _answer(settings, chosen):
+    """The answer a person is on: `chosen` when the instance offers it, else "pick" (as public.person_audio reads a
+    record: no answer, an unknown one, or "open" while it isn't offered)."""
+    return chosen if chosen in dict(audio_answers(settings)) else "pick"
+
+
 def _audio_group(settings, chosen, labelled=True, error_id=None):
-    """The answers as radio rows, `chosen` picked when the instance offers it, else "pick" (as public.person_audio
-    reads a record: no answer, an unknown one, or "open" while it isn't offered). `labelled`: under its own question
-    and explanation (the sign-up); otherwise named by the settings row's heading, its explanation beside it.
-    `error_id`: the id of the answer's problem message, as the other fields have it: the answers are marked by it and
-    their group described by it."""
+    """The answers as radio rows, the one the person is on (_answer) picked. `labelled`: under its own question and
+    explanation (the sign-up); otherwise named by the settings row's heading, its explanation beside it. `error_id`:
+    the id of the answer's problem message, as the other fields have it: the answers are marked by it and their group
+    described by it."""
     answers = audio_answers(settings)
-    chosen = chosen if chosen in dict(answers) else "pick"
+    chosen = _answer(settings, chosen)
     rows = [ui.radio_row("audio", value, answer, explain.audio_answer_help(value, settings), checked=value == chosen,
                          note=explain.PUBLIC_AUDIO["opened_note"] if value == "open" else None, invalid=bool(error_id))
             for value, answer in answers]
@@ -290,12 +297,14 @@ def result_page(result, settings=None):
 # ------------------------------------------------------------------------------------------- settings
 
 def _megabytes(nbytes):
-    """A read amount in the unit of SUBSYNC_USER_DAILY_MB (settings.MB): one decimal under 10 MB (at least 0.1 when
-    anything was read), whole MB from 10 MB, with thousands separators as setup writes them ("9,500")."""
+    """A read amount in the unit of SUBSYNC_USER_DAILY_MB (settings.MB): one decimal while it rounds to under 10 MB (at
+    least 0.1 when anything was read), whole MB from there, with thousands separators as setup writes them ("9,500",
+). Rounded before the format is chosen, so 9.97 MB is "10" as 10 MB is, never "10.0"."""
     mb = nbytes / MB
     if nbytes <= 0:
         return "0"
-    return f"{max(mb, 0.1):.1f}" if mb < 10 else f"{mb:,.0f}"
+    shown = round(max(mb, 0.1), 1)
+    return f"{shown:.1f}" if shown < 10 else f"{mb:,.0f}"
 
 
 def reset_in(now):
@@ -312,6 +321,12 @@ def _share(used, limit):
     if used <= 0 or limit <= 0:
         return 0
     return max(0.015, min(1.0, used / limit))
+
+
+def _count(used, limit, unit):
+    """The Today band's gauge of a count against its daily limit ("3 of 200" new files), marked full when it is
+    reached; the figures with thousands separators, as setup writes them."""
+    return ui.gauge(f"{used:,} of {limit:,}", unit, _share(used, limit), used >= limit)
 
 
 def _text(key):
@@ -360,10 +375,12 @@ def done_message(code, record):
 
 
 def days_ago(then, now):
-    """When something happened, in plain words: "today", "yesterday", "5 days ago"; "at sign-up" when unknown."""
+    """When something happened, in plain words, by the whole days gone since: "today" under 24 hours, "yesterday" under
+    48, then "5 days ago"; "at sign-up" when unknown. Not by UTC calendar days: something done at 23:59 UTC read
+    "yesterday" two minutes later."""
     if not then:
         return "at sign-up"
-    days = int(now // 86400) - int(then // 86400)
+    days = int((now - then) // 86400)
     return "today" if days <= 0 else "yesterday" if days == 1 else f"{days} days ago"
 
 
@@ -440,12 +457,16 @@ def _audio_row(settings, record, error=None):
 
 
 def settings_page(settings, record, usage, manifest_url, message=None, error=None, notice=None, now=0, field=None,
-                  state=None, usenet_usage=None):
+                  state=None, usenet_usage=None, audio_usage=None):
     texts = explain.PUBLIC_TEXTS
     stored = record.get("store_only") is True
     limit = settings.max_languages      # 1 to aiosconfig.MAX_LANGUAGES: the service doesn't start with another value
     usenet_usage = usenet_usage or {"listings": 0, "stopped": False}
     usenet_on = usenet_allowed(settings) and bool(record.get("usenet_uuid"))
+    # The audio syncs the person started today (users.audio_usage), shown while the instance offers them and
+    # their answer isn't Off; those started as soon as a file was opened too, with that answer
+    audio_usage = audio_usage or {"syncs": 0, "opened": 0}
+    audio = _answer(settings, record.get("audio")) if audio_answers(settings) else "off"
     files_limit, bytes_limit = settings.user_files_per_day, settings.user_daily_bytes
     full = usage["files"] >= files_limit or usage["bytes"] >= bytes_limit
     store_title, store_text = explain.store_only_note(usenet_allowed(settings))
@@ -459,17 +480,19 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
         + (ui.note("warn", texts["limit_reached"], "Today's limit is reached") if full and not stored else "") \
         + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages")
                    + (("audio",) if audio_answers(settings) else ()) + (("tmdb_key",) if personal_tmdb(settings) else ()))
-    # the figures with thousands separators, as setup writes them
+    # the figures with thousands separators, as setup writes them. A reached audio limit stops audio syncs
+    # only, so it isn't "Today's limit is reached" (`full`): other files still sync
     today = "" if stored else (
         "<section class=\"today\" aria-labelledby=\"today-h\"><h2 id=\"today-h\">Today</h2>"
-        + ui.gauge(f"{usage['files']:,} of {files_limit:,}", "new files", _share(usage["files"], files_limit),
-                   usage["files"] >= files_limit)
+        + _count(usage["files"], files_limit, "new files")
         + ui.gauge(f"{_megabytes(usage['bytes'])} MB of {bytes_limit / MB:,.0f} MB", "read",
                    _share(usage["bytes"], bytes_limit), usage["bytes"] >= bytes_limit)
-        + (ui.gauge(f"{usenet_usage['listings']:,} of {settings.usenet_listings_per_day:,}",
-                    f"{explain.plural(settings.usenet_listings_per_day, 'search', 'searches')} used today",
-                    _share(usenet_usage["listings"], settings.usenet_listings_per_day),
-                    usenet_usage["listings"] >= settings.usenet_listings_per_day)
+        + (_count(audio_usage["syncs"], settings.user_audio_per_day,
+                  explain.plural(settings.user_audio_per_day, "audio sync")) if audio != "off" else "")
+        + (_count(audio_usage["opened"], settings.user_opened_per_day, "started on opening")
+           if audio == "open" else "")
+        + (_count(usenet_usage["listings"], settings.usenet_listings_per_day,
+                  f"{explain.plural(settings.usenet_listings_per_day, 'search', 'searches')} used today")
            if usenet_on else "")
         + f"<p class=\"help\">{e(texts['reset'].format(when=reset_in(now)))}</p></section>")
     link = (f"<section class=\"key\" aria-labelledby=\"personal-l\">"

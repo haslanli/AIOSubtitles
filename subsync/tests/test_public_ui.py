@@ -145,6 +145,9 @@ def every_page():
                                                     message=pages.done_message("audio", dict(RECORD, audio="off"))[0]),
         "settings-audio-error": pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on"), RECORD, USAGE, LINK, now=0,
                                                     error="Wrong.", field="audio"),
+        # The day's audio syncs used
+        "settings-audio-used": pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on"), dict(RECORD, audio="open"),
+                                                   USAGE, LINK, now=0, audio_usage={"syncs": 20, "opened": 5}),
         # No audio limit, and no audio syncs a day (the pages then treat the audio route as off)
         "privacy-audio-no-limit": pages.privacy_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")),
         "signup-audio-no-limit": pages.signup_page(settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_AUDIO_BUDGET_GB="0")),
@@ -877,6 +880,41 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual(pages._megabytes(9500 * 1024 * 1024), "9,500")
         self.assertEqual(pages._megabytes(5 * 1024 * 1024), "5.0")              # under 10 MB: one decimal, as before
 
+    def test_the_mb_read_is_rounded_before_its_format_is_chosen(self):
+        # From 9.95 to 9.99 MB the gauge read "10.0 MB of 10,000 MB", from 10 MB "10 MB of 10,000 MB": the same
+        # amount written two ways. One decimal only while the rounded figure is under 10
+        from subsync import pages
+        from subsync.settings import MB
+        for mb, shown in ((0.01, "0.1"), (5, "5.0"), (9.94, "9.9"), (9.96, "10"), (9.99, "10"), (10, "10"),
+                          (10.6, "11"), (9500, "9,500")):
+            with self.subTest(mb=mb):
+                self.assertEqual(pages._megabytes(round(mb * MB)), shown)
+        self.assertEqual(pages._megabytes(0), "0")
+        page = self.page(usage={"files": 3, "bytes": round(9.97 * MB)})
+        self.assertIn("<b>10 MB of 10,000 MB</b>", page)
+        self.assertNotIn("10.0", page)
+
+    def test_the_copy_time_counts_whole_days_gone_by(self):
+        # Counted in UTC calendar days, a copy made at 23:59 UTC read "yesterday" two minutes later, and one
+        # made 23 hours before, on the same UTC day, "today"; the words don't say UTC. Now: under 24 hours "today",
+        # under 48 "yesterday", then the whole days gone by
+        from subsync import explain
+        from subsync.pages import days_ago
+        midnight, hour = 86400 * 20000, 3600
+        for then, now, said in ((midnight - 60, midnight + 60, "today"),                # across 00:00 UTC
+                                (midnight + 60, midnight + 23 * hour, "today"),
+                                (midnight - hour, midnight + 23 * hour - 1, "today"),   # 24 h less a second
+                                (midnight - hour, midnight + 23 * hour, "yesterday"),   # 24 h
+                                (midnight - 23 * hour, midnight + 25 * hour - 1, "yesterday"),
+                                (midnight, midnight + 48 * hour, "2 days ago"),
+                                (midnight, midnight + 5 * 86400 + hour, "5 days ago"),
+                                (midnight + 60, midnight, "today"),                     # a clock set back
+                                (None, midnight, "at sign-up"), (0, midnight, "at sign-up")):
+            with self.subTest(then=then, now=now):
+                self.assertEqual(days_ago(then, now), said)
+        page = Tree(self.page(record=dict(RECORD, synced_at=midnight - 60), now=midnight + 60)).text()
+        self.assertIn(explain.PUBLIC_TEXTS["copied"].format(when="today"), page)
+
     def test_the_delete_button_lines_up_with_its_heading(self):
         # The rule that lines a row's buttons up with its heading never matched a settings form, which starts
         # with its hidden action: "Delete my data…" sat 28 px lower
@@ -1162,6 +1200,50 @@ class AudioChoiceTest(unittest.TestCase):
                 self.assertEqual(pages.done_message("audio", dict(RECORD, audio=audio)),
                                  (explain.PUBLIC_TEXTS["audio_saved"].format(answer=answer), None))
         self.assertIn("audio", pages.DONE)
+
+    def test_the_today_band_counts_the_audio_syncs_started_today(self):
+        # Once the day's audio syncs were used, a picked file without subtitles kept its original while the
+        # Today band still showed plenty of room. With any answer but Off a gauge counts them against the day's limit,
+        # with "as soon as a file is opened" a second one those started on opening against theirs; a reached one is
+        # marked full, but isn't "Today's limit is reached": other files still sync
+        from subsync import pages
+
+        def gauges(s, record, used=None, **kw):
+            text = pages.settings_page(s, record, USAGE, LINK, now=0, audio_usage=used, **kw)
+            return re.findall(r'<div class="(gauge(?: full)?)"><p><b>([^<]*)</b><span>([^<]*)</span>', text)
+        day = [("gauge", "3 of 200", "new files"), ("gauge", "0.3 MB of 10,000 MB", "read")]
+        on = self.on()
+        self.assertEqual(gauges(on, dict(RECORD, audio="open"), {"syncs": 3, "opened": 1}),
+                         day + [("gauge", "3 of 20", "audio syncs"), ("gauge", "1 of 5", "started on opening")])
+        for audio in ("pick", None, "loud"):                                  # no answer, or an unknown one: pick
+            with self.subTest(audio=audio):
+                self.assertEqual(gauges(on, dict(RECORD, audio=audio), {"syncs": 3, "opened": 1}),
+                                 day + [("gauge", "3 of 20", "audio syncs")])
+        self.assertEqual(gauges(on, RECORD), day + [("gauge", "0 of 20", "audio syncs")])   # none yet
+        self.assertEqual(gauges(on, dict(RECORD, audio="off"), {"syncs": 3, "opened": 1}), day)
+        # reached: marked full, and no "Today's limit is reached"
+        text = pages.settings_page(on, dict(RECORD, audio="open"), USAGE, LINK, now=0,
+                                   audio_usage={"syncs": 20, "opened": 5})
+        self.assertEqual(re.findall(r'<div class="(gauge(?: full)?)"><p><b>([^<]*)</b><span>([^<]*)</span>', text),
+                         day + [("gauge full", "20 of 20", "audio syncs"),
+                                ("gauge full", "5 of 5", "started on opening")])
+        self.assertNotIn("Today's limit is reached", text)
+        self.assertNotIn("Today's limit is reached", every_page()["settings-audio-used"])
+        # one a day: "audio sync"; "open" while no opened syncs are allowed is "pick" (public.person_audio)
+        self.assertEqual(gauges(self.on(SUBSYNC_USER_AUDIO_PER_DAY="1"), RECORD),
+                         day + [("gauge", "0 of 1", "audio sync")])
+        self.assertEqual(gauges(self.on(SUBSYNC_USER_OPENED_PER_DAY="0"), dict(RECORD, audio="open")),
+                         day + [("gauge", "0 of 20", "audio syncs")])
+        # none where the instance offers no audio syncs, nor for stored copies only (no Today band at all)
+        for s in (settings(), self.on(SUBSYNC_USER_AUDIO_PER_DAY="0")):
+            with self.subTest(audio_route=s.audio_route, per_day=s.user_audio_per_day):
+                self.assertEqual(gauges(s, dict(RECORD, audio="open"), {"syncs": 3, "opened": 1}), day)
+        self.assertEqual(gauges(on, dict(RECORD, store_only=True, audio="open"), {"syncs": 3, "opened": 1}), [])
+        # after the MB read, before the Usenet searches
+        record = dict(RECORD, audio="pick", usenet_uuid="u")
+        self.assertEqual([unit for *_, unit in gauges(self.on(SUBSYNC_USENET="on"), record,
+                                                      usenet_usage={"listings": 0, "stopped": False})],
+                         ["new files", "read", "audio syncs", "searches used today"])
 
 
 class OtherPagesTest(unittest.TestCase):
@@ -1529,6 +1611,40 @@ class ScriptTest(unittest.TestCase):
         self.assertRegex(APP_JS, r"var added = depth\(\);\s*close\(\);\s*if \(added\) history\.go\(-added\);")
         self.assertRegex(APP_JS, r"var earlier = depth\(\);\s*if \(earlier\) history\.replaceState\(null, \"\"\);")
         self.assertIn("if (earlier) history.go(-earlier);", APP_JS)
+
+    def test_a_problems_link_focuses_the_field_it_names(self):
+        # The sign-up summary's link opened its field's screen but focused the screen's heading: for the answer
+        # for files with no subtitles of their own, "Your AIOStreams config", above one to three boxes. It focuses the
+        # box the link names now (the languages' first), a group of answers at its picked one, else its first,
+        # scrolling it into view; any other way to a screen focuses as before
+        from subsync import pages
+        from subsync.ui import APP_JS
+        handler = re.search(r"each\(\"#problem a\[href\^='#'\]\", function \(a\) \{(?P<body>.*?)\n    \}\);", APP_JS,
+                            re.S)
+        self.assertIsNotNone(handler, "the summary's links have no handler")
+        self.assertIn('enter(screens.indexOf(screen));\n        paint(false, false, field.matches("input, select") ? '
+                      'field\n          : field.querySelector("input:checked") || field.querySelector("input"));',
+                      handler["body"])
+        self.assertIn('var paint = function (back, focusProblem, box) {', APP_JS)
+        self.assertIn('var target = (focusProblem && problem) || box || screen.querySelector("input.input, h2.q");\n'
+                      '      if (target && target.classList.contains("q")) target.tabIndex = -1;\n'
+                      '      if (target) later(function () { target.focus({ preventScroll: target !== box }); });',
+                      APP_JS)
+        self.assertEqual(len(re.findall(r"\bpaint\(\w+, \w+, ", APP_JS)), 1)          # the link's is the one with a box
+        # what each of the sign-up's links names: a box, or the answers' group holding the picked answer
+        s = settings(SUBSYNC_AUDIO_ROUTE="on", SUBSYNC_PUBLIC_INVITE="code")
+        for field, tag, box in (("invite", "input", "invite"), ("link", "input", "link"),
+                                ("password", "input", "password"), ("languages", "select", "lang-1"),
+                                ("audio", "fieldset", "audio")):
+            with self.subTest(field=field):
+                tree = Tree(pages.signup_page(s, error="Wrong.", field=field, audio="open"))
+                self.assertEqual([a["href"] for a in tree.all("a") if a.get("href", "").startswith("#")
+                                  and a["href"] != "#signup"], [f"#{box}"])
+                self.assertEqual(len(tree.all(tag, id=box)), 1)
+        group = re.search(r'<fieldset class="ways" id="audio".*?</fieldset>',
+                          pages.signup_page(s, error="Wrong.", field="audio", audio="open"), re.S).group(0)
+        self.assertEqual(re.findall(r'<input type="radio" name="audio" id="([^"]+)" value="[^"]+"( checked)?', group),
+                         [("audio-off", ""), ("audio-pick", ""), ("audio-open", " checked")])
 
     def test_a_show_button_says_what_it_does_next(self):
         # The script switched the visible word only; the spoken name follows it, both from the page's words

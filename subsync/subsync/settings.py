@@ -127,14 +127,14 @@ def _whole(value, least=1, most=None):
     return n if n is not None and n >= least and (most is None or n <= most) else None
 
 
-def _number(value, above_zero=False, scale=1):
-    """A number from 0 (above 0 with `above_zero`) times `scale`, finite, written in ASCII (digits.decimal); None
-    otherwise ("nan", "inf", another script's digits, or a value too large to count in `scale`'s unit)."""
+def _number(value, above_zero=False, scale=1, most=None):
+    """A number from 0 (above 0 with `above_zero`; to `most`) times `scale`, finite, written in ASCII (digits.decimal);
+    None otherwise ("nan", "inf", another script's digits, or a value too large to count in `scale`'s unit)."""
     n = digits.decimal(str(value).strip())
     if n is None:
         return None
     n *= scale
-    return n if math.isfinite(n) and (n > 0 if above_zero else n >= 0) else None
+    return n if math.isfinite(n) and (n > 0 if above_zero else n >= 0) and (most is None or n <= most) else None
 
 
 def _like(name):
@@ -158,6 +158,11 @@ class _Reader:
         """The number times `scale` (a size's unit, or a time's)."""
         words = ("a number above 0" if above_zero else "a number from 0") + _like(name)
         return self._read(name, lambda v: _number(v, above_zero, scale), words)
+
+    def share(self, name):
+        """A share from 0 to 1, as its explanation writes it (0.95 = 95 %): a percentage (95) would make its rule one
+        never met, or always met."""
+        return self._read(name, lambda v: _number(v, most=1), "a number from 0 to 1" + _like(name))
 
     def switch(self, name):
         return self._read(name, _switch, "on or off")
@@ -248,7 +253,8 @@ class Settings:
         # the codes there that name no language: a self-hosted install doesn't start with one (conflicts)
         self.unknown_languages = [c.strip() for c in languages.split(",") if c.strip() and not known(c)]
         self.max_tries = read.whole("SUBSYNC_MAX_TRIES", 1)  # subtitles tried per language and file
-        self.cap_bytes = int(read.number("SUBSYNC_STORE_CAP_MB", scale=MB))
+        # above 0: with 0 every copy was deleted as soon as it was stored, its result with it
+        self.cap_bytes = int(read.number("SUBSYNC_STORE_CAP_MB", above_zero=True, scale=MB))
         self.daily_budget = int(read.number("SUBSYNC_DAILY_BUDGET_GB", scale=GB))
         self.backoff_s = read.whole("SUBSYNC_403_BACKOFF_S", 1)
         self.retry_stopped_s = read.whole("SUBSYNC_RETRY_STOPPED_S", 1)
@@ -323,22 +329,22 @@ class Settings:
         self.ffmpeg = g("SUBSYNC_FFMPEG")
         self.vad_model = g("SUBSYNC_VAD_MODEL")   # the speech model's file; empty: the image's (vad.model_path)
         self.snap = read.switch("SUBSYNC_SNAP")                # per-line snap after alass
-        self.snap_within = read.number("SUBSYNC_SNAP_WITHIN")  # a snapped copy's bar for "within 200 ms"
+        self.snap_within = read.share("SUBSYNC_SNAP_WITHIN")   # a snapped copy's bar for "within 200 ms"
         # the second way to pass: a re-timed copy clearly closer to the release's track than the original
-        self.better = {"paired": read.number("SUBSYNC_BETTER_PAIRED"),
+        self.better = {"paired": read.share("SUBSYNC_BETTER_PAIRED"),
                        "median_ms": read.number("SUBSYNC_BETTER_MEDIAN_MS"),
-                       "ratio": read.number("SUBSYNC_BETTER_RATIO"),
+                       "ratio": read.share("SUBSYNC_BETTER_RATIO"),
                        # against another language's track: the alignment's median error (relgate.aligned)
                        "cross_median_ms": read.number("SUBSYNC_BETTER_CROSS_MEDIAN_MS"),
-                       "cross_paired": read.number("SUBSYNC_BETTER_CROSS_PAIRED")} \
+                       "cross_paired": read.share("SUBSYNC_BETTER_CROSS_PAIRED")} \
             if read.switch("SUBSYNC_BETTER") else None
         # with no track in a subtitle's language, a track in one of these languages is its reference first
         self.fallback_reference = tuple(lang_list(g("SUBSYNC_FALLBACK_REFERENCE")))
         # the audio route's second way to pass: a re-timed copy clearly closer to the speech than the original
         self.audio_better = {"matched": read.whole("SUBSYNC_AUDIO_BETTER_MATCHED"),
-                             "miss": read.number("SUBSYNC_AUDIO_BETTER_MISS"),
+                             "miss": read.share("SUBSYNC_AUDIO_BETTER_MISS"),
                              "median_ms": read.number("SUBSYNC_AUDIO_BETTER_MEDIAN_MS"),
-                             "within": read.number("SUBSYNC_AUDIO_BETTER_WITHIN"),
+                             "within": read.share("SUBSYNC_AUDIO_BETTER_WITHIN"),
                              "min_shift_s": read.number("SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S")} \
             if read.switch("SUBSYNC_AUDIO_BETTER") else None
         # a line that splits a release line counts as paired

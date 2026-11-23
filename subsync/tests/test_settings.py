@@ -21,8 +21,9 @@ def settings_source():
 
 
 def number_settings():
-    """{name: "whole" or "number"} of every setting Settings reads as a number through its one reader."""
-    return {name: kind for kind, name in re.findall(r'read\.(whole|number)\("(SUBSYNC_[A-Z0-9_]+)"', settings_source())}
+    """{name: "whole", "number" or "share"} of every setting Settings reads as a number through its one reader."""
+    return {name: kind for kind, name in re.findall(r'read\.(whole|number|share)\("(SUBSYNC_[A-Z0-9_]+)"',
+                                                   settings_source())}
 
 
 class NumbersTest(unittest.TestCase):
@@ -37,7 +38,7 @@ class NumbersTest(unittest.TestCase):
                 ("SUBSYNC_PORT", "", "SUBSYNC_PORT must be a whole number from 1 to 65535."),
                 ("SUBSYNC_READ_TIMEOUT_S", "nan", "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60."),
                 ("SUBSYNC_DAILY_BUDGET_GB", "inf", "SUBSYNC_DAILY_BUDGET_GB must be a number from 0, like 100."),
-                ("SUBSYNC_STORE_CAP_MB", "lots", "SUBSYNC_STORE_CAP_MB must be a number from 0, like 2048."),
+                ("SUBSYNC_STORE_CAP_MB", "lots", "SUBSYNC_STORE_CAP_MB must be a number above 0, like 2048."),
                 ("SUBSYNC_403_BACKOFF_S", "1e3", "SUBSYNC_403_BACKOFF_S must be a whole number from 1, like 900."),
                 ("SUBSYNC_BACKUP_DAYS", "a month", "SUBSYNC_BACKUP_DAYS must be a whole number from 0.")):
             with self.subTest(name=name, value=value):
@@ -78,6 +79,54 @@ class NumbersTest(unittest.TestCase):
             "Days without a single request before a person's record is deleted (a whole number from 1). Their sync "
             "config can't be removed "))
 
+    def test_a_store_cap_of_0_stops_the_start(self):
+        # 0 was taken, and then every copy was deleted as soon as it was stored, its result with it: nothing
+        # synced was ever listed and files were read again each day; the owner's start line, word for word
+        line = "SUBSYNC_STORE_CAP_MB must be a number above 0, like 2048."
+        for value in ("0", "0.0", "-1"):
+            for env in ({}, PUBLIC):
+                with self.subTest(value=value, public=bool(env)):
+                    s = Settings(dict(env, SUBSYNC_STORE_CAP_MB=value))
+                    self.assertEqual((s.conflicts(), s.cap_bytes), ([line], 2048 * MB))   # its default meanwhile
+        for value, cap in (("0.5", MB // 2), ("1", MB), (" 2048 ", 2048 * MB)):
+            with self.subTest(value=value):
+                s = Settings({"SUBSYNC_STORE_CAP_MB": value})
+                self.assertEqual((s.conflicts(), s.cap_bytes), ([], cap))
+        env = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": helpers.KEY, "SUBSYNC_PUBLIC_BASE": "https://subs.test",
+               "SUBSYNC_STORE_CAP_MB": "0"}
+        self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:not started: " + line])   # exit code 2
+
+    def test_a_share_is_a_number_from_0_to_1(self):
+        # Each is explained as a share ("0.95 = 95 %"), yet 95 was taken: SUBSYNC_SNAP_WITHIN=95 started a
+        # service whose snapped copies never passed, SUBSYNC_BETTER_RATIO=50 one where every copy passed that test. The
+        # owner's start lines, word for word, "like" each one's default
+        shares = {"SUBSYNC_SNAP_WITHIN": ("0.95", lambda s: s.snap_within),
+                  "SUBSYNC_BETTER_PAIRED": ("0.85", lambda s: s.better["paired"]),
+                  "SUBSYNC_BETTER_RATIO": ("0.5", lambda s: s.better["ratio"]),
+                  "SUBSYNC_BETTER_CROSS_PAIRED": ("0.75", lambda s: s.better["cross_paired"]),
+                  "SUBSYNC_AUDIO_BETTER_MISS": ("0.30", lambda s: s.audio_better["miss"]),
+                  "SUBSYNC_AUDIO_BETTER_WITHIN": ("0.55", lambda s: s.audio_better["within"])}
+        self.assertEqual({name for name, kind in number_settings().items() if kind == "share"}, set(shares))
+        for name, (like, read) in shares.items():
+            line = f"{name} must be a number from 0 to 1, like {like}."
+            for value in ("95", "1.01", "50", "-0.5", "95 %", ""):
+                with self.subTest(name=name, value=value):
+                    s = Settings({name: value})
+                    self.assertEqual((s.conflicts(), read(s)), ([line], float(like)))     # its default meanwhile
+            for value, number in (("0", 0.0), ("1", 1.0), ("0.9", 0.9), (" .5 ", 0.5), (like, float(like))):
+                with self.subTest(name=name, value=value):
+                    s = Settings({name: value})
+                    self.assertEqual((s.conflicts(), read(s)), ([], number))
+        # as before, the "clearly better" ones are read only while their rule is on
+        for rule, name in (("SUBSYNC_BETTER", "SUBSYNC_BETTER_RATIO"),
+                           ("SUBSYNC_AUDIO_BETTER", "SUBSYNC_AUDIO_BETTER_MISS")):
+            with self.subTest(rule=rule):
+                self.assertEqual(Settings({rule: "off", name: "50"}).conflicts(), [])
+        env = {"SUBSYNC_SOURCE_MANIFEST": "https://aios.test/stremio/x/manifest.json", "SUBSYNC_SOURCE_PASSWORD": "p",
+               "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_SNAP_WITHIN": "95"}
+        self.assertEqual(helpers.run_main(self, env, "INFO"),
+                         ["ERROR:subsync:not started: SUBSYNC_SNAP_WITHIN must be a number from 0 to 1, like 0.95."])
+
     def test_a_number_in_another_scripts_digits_is_written_wrong(self):
         # Int and float read every script's decimal digits as if they were ASCII ones, so these were read
         # as 6, 8791, 1.5 GB, 1024 MB and 60 s
@@ -86,7 +135,7 @@ class NumbersTest(unittest.TestCase):
                 ("SUBSYNC_PORT", "８７９１", "SUBSYNC_PORT must be a whole number from 1 to 65535."),
                 ("SUBSYNC_DAILY_BUDGET_GB", "١.٥", "SUBSYNC_DAILY_BUDGET_GB must be a number from 0, like 100."),
                 ("SUBSYNC_STORE_CAP_MB", "\uff11\uff10\uff12\uff14",
-                 "SUBSYNC_STORE_CAP_MB must be a number from 0, like 2048."),
+                 "SUBSYNC_STORE_CAP_MB must be a number above 0, like 2048."),
                 ("SUBSYNC_READ_TIMEOUT_S", "６０", "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60.")):
             with self.subTest(name=name, value=value):
                 s = Settings({name: value})
@@ -99,7 +148,7 @@ class NumbersTest(unittest.TestCase):
         for name, value, line, default in (
                 ("SUBSYNC_DAILY_BUDGET_GB", "1_5", "SUBSYNC_DAILY_BUDGET_GB must be a number from 0, like 100.",
                  ("daily_budget", 100 * GB)),
-                ("SUBSYNC_STORE_CAP_MB", "1_000", "SUBSYNC_STORE_CAP_MB must be a number from 0, like 2048.",
+                ("SUBSYNC_STORE_CAP_MB", "1_000", "SUBSYNC_STORE_CAP_MB must be a number above 0, like 2048.",
                  ("cap_bytes", 2048 * MB)),
                 ("SUBSYNC_READ_TIMEOUT_S", "6_0", "SUBSYNC_READ_TIMEOUT_S must be a number above 0, like 60.",
                  ("read_timeout", 60))):

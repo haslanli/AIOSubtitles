@@ -35,7 +35,7 @@
     var earlier = depth();
     if (earlier) history.replaceState(null, "");
 
-    var paint = function (back, focusProblem) {
+    var paint = function (back, focusProblem, box) {
       screens.forEach(function (s, i) { s.hidden = i !== at; });
       var screen = screens[at], step = +screen.getAttribute("data-step"), fill = screen.getAttribute("data-fill");
       if (!still) {
@@ -52,10 +52,11 @@
       });
       form.scrollTop = 0;
       var problem = document.getElementById("problem");
-      // the screen's field, or its heading when it asks with choices (as the approved pieces do)
-      var target = (focusProblem && problem) || screen.querySelector("input.input, h2.q");
+      // the box a problem's link names, scrolled into view as it takes focus; else the screen's field, or its heading
+      // when it asks with choices (as the approved pieces do)
+      var target = (focusProblem && problem) || box || screen.querySelector("input.input, h2.q");
       if (target && target.classList.contains("q")) target.tabIndex = -1;
-      if (target) later(function () { target.focus({ preventScroll: true }); });
+      if (target) later(function () { target.focus({ preventScroll: target !== box }); });
     };
     var open = function (from, name, focusProblem) {
       opener = from || opener;
@@ -118,7 +119,8 @@
       screens.forEach(function (s, i) { s.hidden = i !== 0; });
       if (earlier) history.go(-earlier);      // back past the entries an earlier sign-up on this page added
     }
-    // a link in the problem summary goes to the screen with its field
+    // a link in the problem summary goes to the screen with its field and focuses it: a box itself, a group of answers
+    // at its picked one, else its first
     each("#problem a[href^='#']", function (a) {
       a.addEventListener("click", function (e) {
         var field = document.getElementById(a.getAttribute("href").slice(1));
@@ -126,7 +128,8 @@
         if (!screen) return;
         e.preventDefault();
         enter(screens.indexOf(screen));
-        paint(false);
+        paint(false, false, field.matches("input, select") ? field
+          : field.querySelector("input:checked") || field.querySelector("input"));
       });
     });
   }

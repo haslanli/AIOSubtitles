@@ -645,7 +645,8 @@ class PublicHandler(Handler):
                                                         message=message, error=error, notice=notice,
                                                         now=svc.clock(), field=field,
                                                         state="reads_refused" if refused else None,
-                                                        usenet_usage=svc.users.usenet_usage(token)), personal=True)
+                                                        usenet_usage=svc.users.usenet_usage(token),
+                                                        audio_usage=svc.users.audio_usage(token)), personal=True)
         if method == "GET":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             message, notice = pages.done_message((query.get("done") or [None])[0], record)
