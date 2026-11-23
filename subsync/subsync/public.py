@@ -701,7 +701,7 @@ class PublicHandler(Handler):
                 def forget():                 # their service stops, and writes nothing more of theirs (Pool.stop)
                     svc.pool.stop(token, forget=True)
                     svc.checker.forget(token)
-                try:                          # forgotten once the delete is certain, not before the password is
+                try:                          # forgotten once the delete is certain: never for a mistyped password
                     outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
                                      api_factory=svc.api_factory, timeout=svc.timeout, on_confirmed=forget)
                 except SignupError as e:      # back to the delete step, not the settings page
