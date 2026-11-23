@@ -116,6 +116,48 @@ class ReaderTest(unittest.TestCase):
         with self.assertRaises(ReadFailed):
             RangeReader(self.srv.url("nope.mkv"), "test").get(0, 10)
 
+    def test_an_error_status_is_a_refusal_or_a_failed_read_for_both_reads(self):
+        # Stream (audio windows, the judging pipe) mapped an error status by its own copy, which no test
+        # ran: 403 and 429 are refusals (the worker backs off), any other a failed read that is not one; each is one
+        # request that received nothing, its reservation given back
+        def answering(status):
+            def opener(request, timeout):
+                raise urllib.error.HTTPError(request.full_url, status, "X", {}, None)
+            return opener
+        for status, refusal in ((403, True), (429, True), (404, False), (500, False)):
+            for name, read in ReplyCheckTest.reads():
+                with self.subTest(status=status, read=name):
+                    guard = mock.Mock()
+                    r = RangeReader("http://127.0.0.1:9/f.mkv", "t", guard, opener=answering(status))
+                    with self.assertRaises(ReadFailed) as caught:
+                        read(r, 0, 10)
+                    self.assertIs(isinstance(caught.exception, Refused), refusal)
+                    self.assertEqual(str(caught.exception), f"HTTP {status}")
+                    self.assertFalse(caught.exception.connection)
+                    self.assertEqual((r.requests, r.bytes, r.finished), (1, 0, 0))
+                    guard.after_read.assert_called_once_with(0, 10)
+        for fault, name, kind in (("403", "tiny.mkv", Refused), (None, "nope.mkv", ReadFailed)):   # end to end
+            self.srv.fault = fault
+            for read_name, read in ReplyCheckTest.reads():
+                with self.subTest(fault=fault, read=read_name):
+                    with self.assertRaises(kind) as caught:
+                        read(RangeReader(self.srv.url(name), "test"), 0, 10)
+                    self.assertIs(isinstance(caught.exception, Refused), kind is Refused)
+
+    def test_a_read_past_the_end_or_of_nothing_asks_for_nothing(self):
+        # Stream's own early returns, which no test ran
+        size = os.path.getsize(TINY)
+        for name, read in ReplyCheckTest.reads():
+            with self.subTest(read=name):
+                g = Guard()
+                r = RangeReader(self.srv.url("tiny.mkv"), "test", g, size=size)
+                self.assertEqual(read(r, 100, 0), b"")
+                with self.assertRaises(ReadFailed) as caught:
+                    read(r, size, 10)
+                self.assertEqual(str(caught.exception), "range past the end")
+                self.assertEqual((g.calls, r.requests), (0, 0))
+        self.assertEqual(self.srv.log, [])
+
     def test_a_streamed_read_is_one_request_and_counts_only_what_was_taken(self):
         g = Guard()
         r = RangeReader(self.srv.url("tiny.mkv"), "test", g)
@@ -2011,6 +2053,71 @@ class ReadTimeLimitTest(unittest.TestCase):
             self.assertEqual(r.get(0, 20), b"x" * 20)               # sent in 2 s
 
 
+class TrickleHead:
+    """A local server whose answer's status line and headers come one byte every `gap` seconds, its body then at once
+; /hop answers so with a redirect to /fast, which answers at once."""
+
+    def __init__(self, size, gap):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                a, _, b = self.headers["Range"][6:].partition("-")
+                n = int(b) - int(a) + 1
+                head = (f"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{b}/{size}\r\n"
+                        f"Content-Length: {n}\r\n\r\n")
+                if self.path == "/hop":
+                    head, n = "HTTP/1.1 302 Found\r\nLocation: /fast\r\nContent-Length: 0\r\n\r\n", 0
+                try:
+                    for byte in head.encode():
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        if self.path != "/fast":
+                            time.sleep(gap)
+                    self.wfile.write(b"x" * n)
+                except OSError:              # the reader gave up: so does the connection
+                    pass
+                self.close_connection = True
+        self.server = start_server(ThreadingHTTPServer(("127.0.0.1", 0), H))
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        stop_server(self.server)
+
+
+class WholeReadLimitTest(unittest.TestCase):
+    """The time limit started at the reply's body, so a status line, headers or a redirect sent a byte now and
+    then, each within a read's own wait, held the read (and its job's sync place) as long as the server liked; each
+    request of a read is now bounded from before it connects."""
+
+    def setUp(self):
+        self.srv = TrickleHead(10_000, 0.1)
+        self.addCleanup(self.srv.close)
+
+    def test_a_trickled_head_or_redirect_fails_as_too_slow(self):
+        for path in ("/f.mkv", "/hop"):
+            for name, read in ReplyCheckTest.reads():
+                with self.subTest(path=path, read=name):
+                    r = RangeReader(self.srv.url + path, "t", timeout=0.5)
+                    t0 = time.monotonic()
+                    with self.assertRaises(ReadFailed) as caught:
+                        read(r, 0, 10)                      # its head alone takes 6 s at this pace
+                    self.assertLess(time.monotonic() - t0, 2.0)
+                    self.assertEqual(str(caught.exception), "too slow")
+                    self.assertTrue(caught.exception.connection)
+                    self.assertEqual(r.requests, 1)
+
+    def test_a_first_look_up_has_its_own_longer_wait(self):
+        # a Usenet file's first look-up waits longer (the service opens the NZB first): its bound is that wait's
+        srv = TrickleHead(10_000, 0.03)                     # the redirect's head in about 1.5 s
+        self.addCleanup(srv.close)
+        r = RangeReader(srv.url + "/hop", "t", timeout=0.5, first_timeout=10)
+        self.assertEqual(r.get(0, 10), b"x" * 10)
+
+
 class StallAfter:
     """A local server that answers a range with 206, sends its first `sent` bytes and then nothing for `gap` seconds, as
     a service whose connection breaks off does."""
@@ -2103,6 +2210,24 @@ class ReplyCheckTest(unittest.TestCase):
                 self.assertEqual(str(caught.exception), "range differs")
                 self.assertFalse(caught.exception.connection)
                 self.assertEqual(read(RangeReader(self.link, "t"), 8192, 64), self.data[8192:8256])   # a block's own
+
+    def test_a_reply_that_fails_its_checks_is_not_read(self):
+        # Get read a reply's body (up to the length asked: 32 MiB for the Cues) and charged it to the guard
+        # (the day's budget, the job's cap, the person's data) before it checked the status, range and size its
+        # headers gave; stream() checked first
+        size = len(self.data)
+        for fault, start, why in (("aligned", 5000, "range differs"), ("ignore-range", 5000, "range ignored"),
+                                  ("wrong-size", 0, "size differs")):
+            self.srv.fault = fault
+            for name, read in self.reads():
+                with self.subTest(fault=fault, read=name):
+                    guard = mock.Mock()
+                    r = RangeReader(self.link, "t", guard=guard, size=size)
+                    with self.assertRaises(ReadFailed) as caught:
+                        read(r, start, 64 * 1024)
+                    self.assertEqual(str(caught.exception), why)
+                    self.assertEqual((r.bytes, r.requests, r.finished), (0, 1, 0))
+                    guard.after_read.assert_called_once_with(0, 64 * 1024)
 
     def test_stream_checks_the_size_as_get_does(self):
         # Stream had its own copy of the checks, without the rule for a size not known yet (a Usenet

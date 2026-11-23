@@ -11,17 +11,18 @@ at the download address had made 50 calls). The Real-Debrid guard checks every a
 (HTTP 403, most likely a debrid per-account download limit) raises Refused so the worker can back off; a
 reply whose total size differs from the file's, or whose bytes start elsewhere than asked, raises ReadFailed. A read
 that got no answer (no connection, a reset, a timeout, a reply cut short), or one that goes on past its time (the
-timeout plus a second for every READ_BYTES_PER_S bytes asked for: "too slow"), raises ReadFailed with
-`connection` set, so the worker can try a file's first read once more. Before each read the guard
-(budget, pause) may stop the job; after each, one that failed too, it is told the bytes received and the length the
-read asked for (guard.after_read). The bytes a read received are counted also when it fails: a reply is read
-a CHUNK at a time, so what arrived before it broke off is known.
+timeout plus a second for every READ_BYTES_PER_S bytes asked for, from before it connects, its redirects, status line
+and headers included: "too slow"), raises ReadFailed with `connection` set, so the worker can try a
+file's first read once more. Before each read the guard (budget, pause) may stop the job; after each,
+one that failed too, it is told the bytes received and the length the read asked for (guard.after_read). The bytes a
+read received are counted also when it fails: a reply is read a CHUNK at a time, so what arrived before it
+broke off is known.
 """
+import contextlib
 import http.client
 import io
 import logging
 import re
-import socket
 import threading
 import time
 import urllib.error
@@ -102,42 +103,34 @@ class IndexTooLarge(CapReached):
 
 
 class _TimeLimit:
-    """Ends a read that goes on past `seconds`: the reader's timeout bounds each wait for data only, so a
-    service that sends a byte now and then would hold a read for hours. A timer shuts the reply's connection down,
-    which makes the read in progress return; `passed` then says so. A reply that has no connection of its own (one made
-    in memory) has no limit."""
+    """The time limit of one read of `length` bytes: the reader's timeout bounds each wait for data
+    only, so a service that sends a byte now and then, of its status line, its headers or its body, would hold a read
+    for hours. Each request the read makes (a second one asks the link again after the address it pointed to failed)
+    has a bound of its own (net.Deadline): its wait plus a second for every READ_BYTES_PER_S bytes asked for, from
+    before it connects to the end of the read. At the bound every connection the request opened, a redirect's too, is
+    shut down, which makes the wait in progress return; `passed` then says so. A reply made in memory (a test's) has
+    no connection to shut down."""
 
-    def __init__(self, reply, seconds):
-        self.passed = False
-        self._lock = threading.Lock()
-        try:   # a duplicate of the reply's socket: while it is held, the connection's number can't go to another one
-            self._sock = socket.fromfd(reply.fileno(), socket.AF_INET, socket.SOCK_STREAM)
-        except (AttributeError, OSError, TypeError, ValueError):
-            self._sock = None
-        self._timer = threading.Timer(seconds, self._end) if self._sock is not None else None
+    def __init__(self, length):
+        self.length, self._bound = length, None
 
-    def _end(self):
-        with self._lock:
-            if self._sock is not None:
-                self.passed = True
-                try:
-                    self._sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+    @contextlib.contextmanager
+    def request(self, wait):
+        """Around one request of the read, which waits up to `wait` seconds for data: its bound starts (the one of a
+        request before it, which failed, ends) and holds the connections it opens."""
+        self.end()
+        self._bound = net.Deadline(wait + self.length / READ_BYTES_PER_S).start()
+        with self._bound.opening():
+            yield
 
-    def __enter__(self):
-        if self._timer is not None:
-            self._timer.daemon = True
-            self._timer.start()
-        return self
+    @property
+    def passed(self):
+        """Whether the bound of the read's last request ended it."""
+        return self._bound is not None and self._bound.passed
 
-    def __exit__(self, *exc):
-        if self._timer is not None:
-            self._timer.cancel()
-        with self._lock:
-            if self._sock is not None:
-                self._sock.close()
-                self._sock = None
+    def end(self):
+        if self._bound is not None:
+            self._bound.end()
 
 
 class RangeReader:
@@ -171,22 +164,27 @@ class RangeReader:
         self.redirects = bool(resolved)   # the link has redirected once: its look-ups are then counted
         self._resolving = threading.Lock()   # parallel first reads wait for one look-up of the link
 
-    def _request(self, url, start, length):
-        return urllib.request.Request(url, headers={
+    def _send(self, url, start, length, limit, wait=None):
+        """One range request to `url`, within its own bound (`limit`, _TimeLimit), waiting up to `wait` seconds for
+        data (the reader's timeout unless given)."""
+        wait = wait or self.timeout
+        request = urllib.request.Request(url, headers={
             "Range": f"bytes={start}-{start + length - 1}", "Connection": "close", "User-Agent": USER_AGENT})
+        with limit.request(wait):
+            return self.open(request, timeout=wait)
 
-    def _open(self, start, length):
+    def _open(self, start, length, limit):
         """The response to one range request and its start time: to the address the link pointed to last time,
         else to the link, which is then followed and the address it pointed to kept; reads started together wait for one
         look-up. When that address doesn't answer (an error status other than 429, no connection, a garbled reply), it is
         dropped and the link asked once more, while look-ups are left (`used_up`); a 429 there, or a failure when none
         are left, reaches the caller like the link's own errors (urllib.error.HTTPError, OSError,
-        http.client.HTTPException), so the worker backs off."""
+        http.client.HTTPException), so the worker backs off. Each request is bounded by `limit` (_TimeLimit)."""
         resolved = self.resolved
         if resolved:
             t0 = time.time()
             try:
-                return self.open(self._request(resolved, start, length), timeout=self.timeout), t0
+                return self._send(resolved, start, length, limit), t0
             except realdebrid.Blocked:
                 raise
             except urllib.error.HTTPError as e:
@@ -208,23 +206,18 @@ class RangeReader:
         with self._resolving:     # one look-up at a time: reads started together use the first one's answer
             if self.resolved:
                 t0 = time.time()
-                return self.open(self._request(self.resolved, start, length), timeout=self.timeout), t0
+                return self._send(self.resolved, start, length, limit), t0
             if self.used_up():
                 self._log(start, length, 0, None, time.time(), "the link was asked too often: not asked again")
                 raise LinkUsedUp("the link was asked too often")
             t0 = time.time()
             first = self.lookups == 0
             self.lookups += 1
-            r = self.open(self._request(self.url, start, length),
-                          timeout=self.first_timeout if first and self.first_timeout else self.timeout)
+            r = self._send(self.url, start, length, limit, self.first_timeout if first else None)
             final = r.geturl() if hasattr(r, "geturl") else None
             if final and final != self.url:
                 self.resolved, self.redirects = final, True
             return r, t0
-
-    def _time_limit(self, reply, length):
-        """The limit of a read of `length` bytes, from its reply on (_TimeLimit)."""
-        return _TimeLimit(reply, self.timeout + length / READ_BYTES_PER_S)
 
     def used_up(self):
         """The link has redirected and been asked 1 + max_re_resolve times: it isn't asked again."""
@@ -239,13 +232,14 @@ class RangeReader:
             length = min(length, self.size - start)
         if self.guard:
             self.guard.before_read(length)
-        t0 = time.time()
-        data, got, status, first, total, sent, limit = b"", 0, 0, None, None, True, None
+        t0, limit = time.time(), _TimeLimit(length)
+        r, data, got, status, sent, error = None, b"", 0, 0, True, None
         try:
-            r, t0 = self._open(start, length)
-            with r, self._time_limit(r, length) as limit:
+            r, t0 = self._open(start, length, limit)
+            with r:
                 status = getattr(r, "status", 200)
-                first, total = reply_range(r.headers, status)
+                # its status, range and size before any of its body: a reply that fails them isn't read
+                self._check(status, start, *reply_range(r.headers, status))
                 # read at most what was asked, even when a server ignores the range (status 200), a CHUNK at a time so
                 # what arrived is counted if the read breaks off, into one buffer whose bytes are taken
                 # without a copy, so a large read (a moov, the Cues, an audio window) isn't held twice
@@ -263,20 +257,22 @@ class RangeReader:
             status = e.code
             e.close()
         except (OSError, ValueError, http.client.HTTPException) as e:
-            slow = limit is not None and limit.passed
-            self._log(start, length, got, status, t0, "too slow" if slow else type(e).__name__)
-            raise ReadFailed("too slow" if slow else type(e).__name__, connection=slow or connection_fault(e)) from None
+            error = "too slow" if limit.passed else type(e).__name__
+            raise ReadFailed(error, connection=limit.passed or connection_fault(e)) from None
         finally:
+            limit.end()
             # also when it failed: what it received is counted, and the length it asked for is no longer reserved
             # (worker.JobGuard)
             self._count(got=got, requests=1 if sent else 0)
             if self.guard:
                 self.guard.after_read(got, length)
-        self._log(start, length, got, status, t0, None)
-        self._check(status, start, first, total)
+            if sent:
+                self._log(start, length, got, status, t0, error)
+        if r is None:                   # an HTTPError's status: Refused or ReadFailed
+            self._check(status, start, None, None)
         expected = min(length, self.size - start) if self.size is not None else length
         if got < expected:
-            if limit is not None and limit.passed:
+            if limit.passed:
                 raise ReadFailed("too slow", connection=True)
             raise ReadFailed("short reply")
         self._count(finished=1)
@@ -314,50 +310,50 @@ class RangeReader:
             length = min(length, self.size - start)
         if self.guard:
             self.guard.before_read(length)
-        t0, opened = time.time(), False
+        t0, limit = time.time(), _TimeLimit(length)
+        r, got, status, sent, error = None, 0, 0, True, None
         try:
-            r, t0 = self._open(start, length)
-            opened = True
-        except urllib.error.HTTPError as e:
-            self._count(requests=1)
-            e.close()
-            self._log(start, length, 0, e.code, t0, None)
-            if e.code in (403, 429):
-                raise Refused(f"HTTP {e.code}") from None
-            raise ReadFailed(f"HTTP {e.code}") from None
-        except (OSError, ValueError, http.client.HTTPException) as e:
-            self._count(requests=1)
-            self._log(start, length, 0, 0, t0, type(e).__name__)
-            raise ReadFailed(type(e).__name__, connection=connection_fault(e)) from None
-        finally:
-            if not opened and self.guard:   # nothing read: the length it asked for is no longer reserved (JobGuard)
-                self.guard.after_read(0, length)
-        self._count(requests=1)
-        got, status, error = 0, getattr(r, "status", 200), None
-        try:
-            self._check(status, start, *reply_range(r.headers, status))
-            with self._time_limit(r, length) as limit:
-                left = length
-                while left > 0:
-                    try:
-                        data = r.read(min(chunk, left))
-                    except (OSError, ValueError, http.client.HTTPException) as e:   # a reset or a timeout in the body
-                        error = "too slow" if limit.passed else type(e).__name__
-                        raise ReadFailed(error, connection=limit.passed or connection_fault(e)) from None
-                    if not data:
-                        if limit.passed:
-                            error = "too slow"
-                        raise ReadFailed(error or "short reply", connection=limit.passed)
-                    got += len(data)
-                    left -= len(data)
-                    yield data
+            try:
+                r, t0 = self._open(start, length, limit)
+                status = getattr(r, "status", 200)
+            except LinkUsedUp:
+                sent = False
+                raise
+            except urllib.error.HTTPError as e:
+                status = e.code
+                e.close()
+            except (OSError, ValueError, http.client.HTTPException) as e:
+                error = "too slow" if limit.passed else type(e).__name__
+                raise ReadFailed(error, connection=limit.passed or connection_fault(e)) from None
+            # an HTTPError's status (Refused or ReadFailed), else the reply's, before any of its body
+            first, total = reply_range(r.headers, status) if r is not None else (None, None)
+            self._check(status, start, first, total)
+            left = length
+            while left > 0:
+                try:
+                    data = r.read(min(chunk, left))
+                except (OSError, ValueError, http.client.HTTPException) as e:   # a reset or a timeout in the body
+                    error = "too slow" if limit.passed else type(e).__name__
+                    raise ReadFailed(error, connection=limit.passed or connection_fault(e)) from None
+                if not data:
+                    if limit.passed:
+                        error = "too slow"
+                    raise ReadFailed(error or "short reply", connection=limit.passed)
+                got += len(data)
+                left -= len(data)
+                yield data
             self._count(finished=1)
         finally:
-            r.close()
-            self._count(got=got)
+            limit.end()
+            if r is not None:
+                r.close()
+            # also when it failed or stopped early: what it received is counted, and the length it asked for is no
+            # longer reserved (worker.JobGuard)
+            self._count(got=got, requests=1 if sent else 0)
             if self.guard:
                 self.guard.after_read(got, length)
-            self._log(start, length, got, status, t0, error)
+            if sent:
+                self._log(start, length, got, status, t0, error)
 
     def _count(self, got=0, requests=0, finished=0):
         with self._lock:

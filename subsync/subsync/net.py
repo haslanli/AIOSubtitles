@@ -16,6 +16,7 @@ request held within a Deadline has one bound for the whole of it, its connection
 
 Standard library only, so ./setup can import it.
 """
+import contextlib
 import http.client
 import ipaddress
 import itertools
@@ -162,16 +163,36 @@ class Deadline:
         self._end_at = self._timer = self._outer = None
 
     def __enter__(self):
-        self._end_at = time.monotonic() + self.seconds
+        self.start()
         self._outer, _local.deadline = getattr(_local, "deadline", None), self
+        return self
+
+    def __exit__(self, *exc):
+        _local.deadline = self._outer
+        self.end()
+
+    def start(self):
+        """Starts the bound's time; `with` also holds it, for the whole block. Started alone, it is held only while its
+        request opens (opening()) and ended by end(): for an answer read across a generator's yields, where the
+        thread's work between them is not the request's (reader.RangeReader.stream)."""
+        self._end_at = time.monotonic() + self.seconds
         self._timer = threading.Timer(self.seconds, self._end)
         self._timer.daemon = True
         self._timer.start()
         return self
 
-    def __exit__(self, *exc):
+    @contextlib.contextmanager
+    def opening(self):
+        """Holds a started bound for the block: the connections this thread opens in it are held to it."""
+        outer, _local.deadline = getattr(_local, "deadline", None), self
+        try:
+            yield self
+        finally:
+            _local.deadline = outer
+
+    def end(self):
+        """Ends the bound: its timer stops, and the connections' sockets it held are let go."""
         self._timer.cancel()
-        _local.deadline = self._outer
         with self._lock:
             for sock in self._held:
                 sock.close()
