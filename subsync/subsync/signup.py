@@ -394,26 +394,23 @@ class ConfigPlan:
     warning: tuple = None
 
 
-def _configs_for(settings, viewer, manifest_url, want, judged=None):
-    """The ConfigPlan for a viewer's config: a sync config when it has a debrid service AIOSubtitles may read; with
-    `want` (the Usenet box) a Usenet config when it has a Usenet route; stored copies only when Real-Debrid is its only
-    debrid service and there is no Usenet config. `judged`: the config they are made from, when not the viewer's
-    own (sign-up's clean-up, which takes out only subtitle addons: none of them is a debrid service or a stream
-    source, so it is judged as the viewer's own). Raises SignupError (`unusable`) when there is no file AIOSubtitles
-    could read."""
-    judged = viewer if judged is None else judged
-    real_debrid_only = realdebrid.real_debrid_only(judged)
-    sync = sync_config(judged, manifest_url, names=OWN_NAMES)
+def _configs_for(settings, viewer, manifest_url, want):
+    """The ConfigPlan for a viewer's config, the one AIOSubtitles' configs are made from: a sync config when it has a
+    debrid service AIOSubtitles may read; with `want` (the Usenet box) a Usenet config when it has a Usenet route;
+    stored copies only when Real-Debrid is its only debrid service and there is no Usenet config. Raises
+    SignupError (`unusable`) when there is no file AIOSubtitles could read."""
+    real_debrid_only = realdebrid.real_debrid_only(viewer)
+    sync = sync_config(viewer, manifest_url, names=OWN_NAMES)
     # `usenet`: this instance reads Usenet files too, so the reason a config can't be used names both
     problems = sync_config_problems(sync, usenet=settings.usenet)
     if real_debrid_only or problems:
         sync = None
-    usenet, services, why = _usenet_for(judged, manifest_url, sync is None) if want else (None, [], None)
+    usenet, services, why = _usenet_for(viewer, manifest_url, sync is None) if want else (None, [], None)
     stored = real_debrid_only and usenet is None
     if sync is None and usenet is None and not stored:      # so not Real-Debrid-only: `problems` says why
         raise SignupError("AIOSubtitles can't find any file it could read through your AIOStreams: "
                           + "; ".join(problems) + ".", unusable=True)
-    left_out = not stored and realdebrid.SERVICE in realdebrid.debrid_in_use(judged)
+    left_out = not stored and realdebrid.SERVICE in realdebrid.debrid_in_use(viewer)
     return ConfigPlan(sync=sync, usenet=usenet, services=services, why=why, stored=stored,
                       warning=explain.PUBLIC_REAL_DEBRID_WARNING if left_out else None)
 
@@ -675,9 +672,11 @@ def _signup(settings, users, form, api_factory, timeout):
     if audio:
         record["audio"] = audio
     base = without_builtin_twins(viewer, clean_up)[0] if clean_up else viewer
-    # with Real-Debrid as the only debrid service and no Usenet config, stored copies only: no sync config,
-    # nothing of theirs read; the clean-up is left out, since AIOSubtitles then asks no subtitle site for them
-    plan = _configs_for(settings, viewer, manifest_url, want, judged=base)
+    # judged on what the configs are made from: the clean-up takes out only subtitle addons, none of them a debrid
+    # service or a stream source, so the answer is the one for their own config. With Real-Debrid as the only debrid
+    # service and no Usenet config, stored copies only: no sync config, nothing of theirs read; the clean-up is
+    # left out, since AIOSubtitles then asks no subtitle site for them
+    plan = _configs_for(settings, base, manifest_url, want)
     # nothing left behind: a config made here is removed again when a later step, or saving the record, fails
     with _removed_on_failure(api, []) as made:
         if plan.stored:
