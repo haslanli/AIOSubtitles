@@ -118,6 +118,24 @@ def day_of(t=None):
     return time.strftime("%Y-%m-%d", time.gmtime(t if t is not None else time.time()))
 
 
+@contextlib.contextmanager
+def transaction(db, lock):
+    """Statements on `db` (opened with isolation_level=None) as one transaction, under `lock`: one commit, and all of
+    them or none; inside another, they are part of it. The store's (Store._tx) and the people's records' (users.py)."""
+    with lock:
+        if db.in_transaction:
+            yield
+            return
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            if db.in_transaction:   # SQLite may have rolled it back itself (a full disk)
+                db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+
+
 def _discard(path):
     with contextlib.suppress(FileNotFoundError):
         os.remove(path)
@@ -182,22 +200,9 @@ class Store:
     def __exit__(self, *exc):
         self.close()
 
-    @contextlib.contextmanager
     def _tx(self):
-        """Statements as one transaction, under the lock: one commit, and all of them or none; inside another, they
-        are part of it."""
-        with self.lock:
-            if self.db.in_transaction:
-                yield
-                return
-            self.db.execute("BEGIN IMMEDIATE")
-            try:
-                yield
-            except BaseException:
-                if self.db.in_transaction:   # SQLite may have rolled it back itself (a full disk)
-                    self.db.execute("ROLLBACK")
-                raise
-            self.db.execute("COMMIT")
+        """The store's statements as one transaction, under its lock (transaction())."""
+        return transaction(self.db, self.lock)
 
     # -- bodies ------------------------------------------------------------------------------------------------
     def _body_path(self, key):

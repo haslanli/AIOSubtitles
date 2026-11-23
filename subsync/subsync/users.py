@@ -30,7 +30,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, AESSIV
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .store import DAY, day_of
+from .store import DAY, day_of, transaction
 
 TOKEN = r"[A-Za-z0-9_-]{43}"     # a personal token: secrets.token_urlsafe(32), 43 base64url characters
 TOKEN_RE = re.compile(f"^{TOKEN}$")
@@ -90,6 +90,11 @@ class Users:
     def close(self):
         with self.lock:
             self.db.close()
+
+    def _tx(self):
+        """Statements as one transaction, under the lock (store.transaction): one commit, so one disk sync, and all of
+        them or none."""
+        return transaction(self.db, self.lock)
 
     # -- ids and keys ------------------------------------------------------------------------------------------
     def user_id(self, token):
@@ -168,7 +173,7 @@ class Users:
 
     def delete(self, token):
         uid = self.user_id(token)
-        with self.lock:
+        with self._tx():
             cur = self.db.execute("DELETE FROM users WHERE id=?", (uid,))
             for table in DAY_TABLES:
                 self.db.execute(f"DELETE FROM {table} WHERE id=?", (uid,))
@@ -188,16 +193,13 @@ class Users:
         everyone."""
         if not isinstance(keep_days, int) or keep_days < 1:
             raise ValueError("keep_days must be a whole number from 1")
-        cutoff = day_of(self.clock() - keep_days * DAY)
-        with self.lock:
-            gone = [uid for (uid,) in self.db.execute("SELECT id FROM users WHERE seen_day < ?", (cutoff,))]
-            for uid in gone:
-                self.db.execute("DELETE FROM users WHERE id=?", (uid,))
-                for table in DAY_TABLES:
-                    self.db.execute(f"DELETE FROM {table} WHERE id=?", (uid,))
-            for table in DAY_TABLES:
-                self.db.execute(f"DELETE FROM {table} WHERE day < ?", (day_of(self.clock() - 40 * DAY),))
-        return len(gone)
+        now = self.clock()
+        cutoff, old_usage = day_of(now - keep_days * DAY), day_of(now - 40 * DAY)
+        with self._tx():   # one statement per table, one commit, however many records go
+            for table in DAY_TABLES:   # the usage of the records that go, and usage past 40 days
+                self.db.execute(f"DELETE FROM {table} WHERE id IN (SELECT id FROM users WHERE seen_day < ?) OR day < ?",
+                                (cutoff, old_usage))
+            return self.db.execute("DELETE FROM users WHERE seen_day < ?", (cutoff,)).rowcount
 
     # -- usage per UTC day -------------------------------------------------------------------------------------
     def add_usage(self, token, files=0, nbytes=0):

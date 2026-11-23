@@ -5,6 +5,7 @@ import os
 import sqlite3
 import threading
 import unittest
+from unittest import mock
 
 from helpers import Clock, files_bytes, HAVE_CRYPTOGRAPHY, NEEDS, TempDir  # noqa: E402
 
@@ -125,6 +126,55 @@ class UsersTest(unittest.TestCase):
         self.assertEqual(self.users.expire(180), 1)
         self.assertIsNone(self.users.open(old))
         self.assertIsNotNone(self.users.open(recent))
+
+    def test_expire_deletes_in_one_transaction_however_many_go(self):
+        # Each record that went took four statements, each its own commit and disk sync, all under the lock
+        # every usage count waits on
+        tables = self.users_module.DAY_TABLES
+        gone = [self.users_module.new_token() for _ in range(5)]
+        for token in gone:
+            self.users.create(token, RECORD)
+            self.users.add_usage(token, files=1, nbytes=1)
+            self.users.add_usenet_listing(token)
+            self.users.add_audio(token)
+        self.clock.t += 100 * DAY
+        self.users.create(self.token, RECORD)
+        self.users.add_usage(self.token, files=1, nbytes=1)        # past 40 days when expire runs: goes too
+        self.clock.t += 85 * DAY                                    # the five: seen 185 days ago; this one: 85
+        self.users.add_usage(self.token, files=2, nbytes=2)        # today's: kept
+        self.users.add_audio(self.token)
+        statements = []
+        self.users.db.set_trace_callback(statements.append)
+        self.assertEqual(self.users.expire(180), 5)
+        self.users.db.set_trace_callback(None)
+        self.assertEqual([s.split()[0] for s in statements], ["BEGIN"] + ["DELETE"] * (len(tables) + 1) + ["COMMIT"])
+        self.assertEqual([self.users.open(t) for t in gone], [None] * 5)
+        self.assertIsNotNone(self.users.open(self.token))
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual({t: db.execute(f"SELECT id, day FROM {t}").fetchall() for t in tables},
+                             {"usage": [(self.users.user_id(self.token), self.users_module.day_of(self.clock.t))],
+                              "usenet_usage": [],
+                              "audio_usage": [(self.users.user_id(self.token), self.users_module.day_of(self.clock.t))]})
+        self.assertEqual(self.users.usage(self.token), {"files": 2, "bytes": 2})
+        self.assertEqual(self.users.expire(180), 0)
+
+    def test_delete_removes_all_of_a_record_or_nothing(self):
+        # Delete committed each of its statements on its own, so one that failed left the rest done
+        self.users.create(self.token, RECORD)
+        self.users.add_usage(self.token, files=2, nbytes=10)
+        tables = self.users_module.DAY_TABLES
+        with mock.patch.object(self.users_module, "DAY_TABLES", tables + ("no_such_table",)):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.users.delete(self.token)
+        self.assertFalse(self.users.db.in_transaction)
+        self.assertEqual(self.users.open(self.token), RECORD)
+        self.assertEqual(self.users.usage(self.token), {"files": 2, "bytes": 10})
+        statements = []
+        self.users.db.set_trace_callback(statements.append)
+        self.assertTrue(self.users.delete(self.token))
+        self.users.db.set_trace_callback(None)
+        self.assertEqual([s.split()[0] for s in statements], ["BEGIN"] + ["DELETE"] * (len(tables) + 1) + ["COMMIT"])
+        self.assertIsNone(self.users.open(self.token))
 
     def test_a_keep_days_below_1_deletes_nothing(self):
         # 0 deleted every record not used today, less than 0 every record, a sign-up of a minute ago included
