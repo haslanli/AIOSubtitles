@@ -3,6 +3,7 @@ and limits."""
 import base64
 import re
 import os
+import threading
 import unittest
 
 from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, wait_until  # noqa: E402
@@ -842,6 +843,29 @@ class PoolTest(unittest.TestCase):
         self.clock.t += self.settings.worker_idle_s + 10
         self.assertEqual(self.pool.reap(), 0)
         a.worker.jobs.clear()
+
+    def test_a_worker_taking_or_running_a_job_is_not_reaped(self):
+        # Reap read the worker's queue and running jobs without its cv, which a lane holds while it takes a
+        # job off the queue and then marks it running: in between, a worker taking a job looked idle
+        from subsync.worker import Job
+        a = self.pool.app(self.tokens[0])
+        self.clock.t += self.settings.worker_idle_s + 10
+        job = Job("movie", "tt1", {"filename": "x.mkv"})
+        for lane in ("current", "current_audio"):           # running in either lane
+            with self.subTest(lane=lane):
+                setattr(a.worker, lane, job)
+                self.assertEqual(self.pool.reap(), 0)
+                setattr(a.worker, lane, None)
+        reaped = []
+        with a.worker.cv:                                    # a lane taking its job: off the queue, not running yet
+            reaping = threading.Thread(target=lambda: reaped.append(self.pool.reap()))
+            reaping.start()
+            reaping.join(0.3)                                # reap waits for the lane's step to end
+            a.worker.current = job
+        reaping.join(5)
+        self.assertEqual(reaped, [0])
+        a.worker.current = None
+        self.assertEqual(self.pool.reap(), 1)                # idle now: stopped
 
     def test_past_the_active_cap_answers_from_the_store(self):
         from subsync.worker import Job

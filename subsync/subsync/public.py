@@ -335,11 +335,10 @@ class Pool:
         stopped = []
         with self.lock:
             for uid, entry in list(self.entries.items()):
-                worker = entry["app"].worker
-                if entry["last"] < cutoff and not worker.jobs and worker.current is None and worker.current_audio is None:
+                if entry["last"] < cutoff and entry["app"].worker.idle():
                     del self.entries[uid]
                     self._keep_seen(uid, entry["app"])
-                    stopped.append(worker)
+                    stopped.append(entry["app"].worker)
             self.seen = {uid: kept for uid, kept in self.seen.items() if kept[0] > now}
             self.safeties = {uid: safety for uid, safety in self.safeties.items()
                              if uid in self.entries or _refusing(safety)}

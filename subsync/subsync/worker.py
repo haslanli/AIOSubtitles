@@ -926,6 +926,12 @@ class Worker(threading.Thread):
         with self.cv:
             return self._busy(alias)
 
+    def idle(self):
+        """Nothing queued and nothing running in either lane (public.Pool.reap stops such a worker). Read under the cv:
+        a lane takes a job off the queue and marks it running in two steps (_next)."""
+        with self.cv:
+            return not self.jobs and self.current is None and self.current_audio is None
+
     def _busy(self, alias):
         """A job of the file is queued or running (cv held)."""
         return alias in self.jobs or self._running(alias) is not None
