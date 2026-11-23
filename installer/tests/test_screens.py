@@ -245,6 +245,25 @@ class Structure(unittest.TestCase):
                         for ref in (attrs.get('aria-describedby') or '').split():
                             self.assertIn(ref, ids)
 
+    def test_no_screen_has_an_empty_explanation_or_an_empty_list(self):
+        # A box without an explanation ("Remove the saved key", the host's "Delete everyone's records and
+        # stored copies") got an empty one, 6 px of space, and was described by it;: a config without change
+        # lines got an empty list, a 10 px gap and "list, 0 items"
+        states = samples.every_state()
+        for name, (html, _) in states.items():
+            with self.subTest(screen=name):
+                self.assertNotRegex(html, r'<(span|p)[^>]* id="[^"]*-help"></\1>')
+                self.assertNotIn('<ul></ul>', html)
+                self.assertNotIn('aria-describedby=""', html)
+        # the screens that had them: the boxes and cards are there, with nothing empty
+        for name, there in (('choices-saved-keys', 'id="remove-subdl_key"'), ('host-choices-saved-keys',
+                                                                             'id="remove-tmdb_key"'),
+                            ('after-host', 'id="confirm"'), ('review-sign-in', "<h2>subsync&#x27;s own config")):
+            with self.subTest(screen=name):
+                self.assertIn(there, states[name][0])
+        box = re.search(r'<input type="checkbox" id="remove-subdl_key"[^>]*>', states['choices-saved-keys'][0]).group(0)
+        self.assertNotIn('aria-describedby', box)
+
     def test_every_question_shows_its_explanation(self):
         # test_flow's typed "?" (it showed the explanation again): on the page, each field has it under it
         html, _ = samples.every_state()['config']
@@ -589,7 +608,7 @@ class Removal(unittest.TestCase):
     def test_the_unticked_box_says_so_and_is_tied_to_its_problem(self):
         html, _ = samples.every_state()['after-host-not-ticked']
         box = re.search(r'<input type="checkbox" id="confirm"[^>]*>', html).group(0)
-        self.assertIn('aria-describedby="confirm-error confirm-help" aria-invalid="true"', box)
+        self.assertIn('aria-describedby="confirm-error" aria-invalid="true"', box)     # no explanation
         self.assertIn('<p class="field-error" id="confirm-error">Tick &quot;Delete everyone&#x27;s records and stored '
                       'copies&quot; to remove AIOSubtitles.</p>', html)
         self.assertNotIn('aria-invalid', samples.every_state()['after-host'][0])
@@ -795,7 +814,7 @@ class RefusedAnswerSummary(unittest.TestCase):
                 ('config-wrong-password', 'aios_config_password', samples.aios_error(
                     samples.PUBLIC, lambda aios: aios.get_config(samples.CONFIG_ID, 'x'),
                     samples.Offline(401, {'error': {'code': 'USER_INVALID_PASSWORD'}})).message),
-                ('choices-problem', 'languages', plan.parse_languages('Klingon')[1]),
+                ('choices-problem', 'LANGUAGES-1', plan.parse_languages('Klingon')[1]),    # the first box
                 ('limits-problem', 'SUBSYNC_DAILY_BUDGET_GB', limits.check(limits.DAILY, '0')[1]),
                 ('host-limits-languages-problem', 'SUBSYNC_MAX_LANGUAGES', 'Choose 1, 2, 3 or 4.'),
                 ('host-address-problem', 'host_address', screens.hosting.ADDRESS_REFUSED)):
@@ -836,7 +855,9 @@ class RefusedAnswerSummary(unittest.TestCase):
                     html = draw((key, 'Refused.'))
                     # (a row of buttons' message is the page's own: limits.choose)
                     field = re.search(r'<p id="problem-message"><a href="#([^"]+)">[^<]+</a></p>', html).group(1)
-                    self.assertEqual(field, key if name.endswith('limits') else key.lower())
+                    # the languages' is their first box: their group can't take focus
+                    self.assertEqual(field, key if name.endswith('limits') else
+                                     'LANGUAGES-1' if key == 'LANGUAGES' else key.lower())
                     self.assertEqual(html.count(f' id="{field}"'), 1)
 
     def test_only_a_field_the_step_drew_for_the_question_is_linked(self):

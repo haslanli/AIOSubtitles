@@ -92,6 +92,9 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .reveal:hover{background:#1E1E1E}
 .help{margin-top:10px;font-size:15px;line-height:1.55;color:var(--text-3);max-width:34em}
 .field-error{display:block;margin-top:10px;font-weight:700;font-size:16px;line-height:1.45;color:var(--danger-text);max-width:34em}
+/* a problem's link to a box scrolls the field's label and error, above the box, into view with it: room for two lines
+   of label and three of error */
+input:target,select:target{scroll-margin-top:144px}
 
 /* ---------- choice rows: the whole row is the control; a ticked row takes the chosen blue ---------- */
 .choices{display:grid;gap:12px}
@@ -321,6 +324,9 @@ body.open .sheet,.layer:target .sheet{transform:none}
 .steparea h1{font-size:clamp(44px,4.2vw,60px);line-height:1.02;letter-spacing:-.032em;margin-top:clamp(56px,8vh,88px)}
 .steparea .body{margin-top:28px;display:grid;gap:32px}
 .steparea .actions{position:sticky;bottom:0;z-index:5;margin-top:40px;padding:20px 0 28px;background:var(--ground)}
+/* the room a pinned bar takes, so the browser scrolls a box keyboard focus moves to clear of it: here its padding and
+   a 54 px button, and 8 px for the focus ring */
+html:has(.steparea .actions){scroll-padding-bottom:110px}
 .fbar,.segs{display:none}
 .segs{grid-auto-flow:column;grid-auto-columns:minmax(0,1fr)}
 
@@ -440,6 +446,9 @@ html:not(.js) .screens{margin-top:24px}
   .dock{display:block;position:fixed;left:0;right:0;bottom:0;z-index:10;padding:12px var(--page) max(16px,env(safe-area-inset-bottom));
     background:var(--ground)}
   .dock .btn{width:100%;height:56px}
+  /* the room a pinned bar takes, as on desktop: its padding, a 56 px button and 8 px for the focus ring (the top bar's:
+     its 60 px) */
+  html:has(.dock){scroll-padding-bottom:calc(76px + max(16px,env(safe-area-inset-bottom)))}
   .page-end{height:112px}
   .sheet{width:100%;padding:8px var(--page) 0;background:var(--ground)}
   .sheet-top{top:-8px;margin:-8px calc(var(--page) * -1) 0;padding:8px var(--page) 8px;background:var(--ground)}
@@ -461,6 +470,7 @@ html:not(.js) .screens{margin-top:24px}
     padding:0 0 max(28px,env(safe-area-inset-bottom));align-items:stretch;flex-direction:column}
   .slot{grid-template-columns:minmax(0,1fr) 44px;row-gap:8px;column-gap:8px}
   .slot label{grid-column:1/-1}
+  .slot select:target{scroll-margin-top:180px}     /* and the slot's own label, over its box here */
   .add,.row .slots+.add{align-self:flex-start;width:calc(100% - 52px);height:52px;margin-left:0}
   /* the personal link's card, on the signed-up and the settings page alike: it reaches into the page's margins on
      purpose, to 4 px from the screen's edges */
@@ -478,12 +488,14 @@ html:not(.js) .screens{margin-top:24px}
   .frame .rail{display:none}
   .fbar{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:12px;height:60px;margin:0 calc(var(--page) * -1);
     padding:0 var(--page);background:var(--ground)}
+  html:has(.fbar){scroll-padding-top:60px}
   .segs{display:grid;flex:1;gap:4px;list-style:none;padding:0}
   .segs li{height:3px;border-radius:2px;background:var(--track)}
   .segs li.done{background:var(--accent-link)}
   .segs li[aria-current=step]{background:var(--accent)}
   .steparea h1{font-size:36px;margin-top:16px}
   .steparea .actions{margin:32px calc(var(--page) * -1) 0;padding:12px var(--page) max(16px,env(safe-area-inset-bottom))}
+  html:has(.steparea .actions){scroll-padding-bottom:calc(76px + max(16px,env(safe-area-inset-bottom)))}
   /* the Back link only (the top bar has the back arrow): a secondary button there, like Check again, stays */
   .steparea .actions a.secondary{display:none}
   .steparea .actions .primary{width:100%;height:56px}
@@ -511,5 +523,6 @@ html:not(.js) .screens{margin-top:24px}
   .go{display:flex}
   .sheet-top,.fbar{position:static}
   .js .sheet .actions,.steparea .actions{position:static;margin:28px 0 0;padding:0 0 max(24px,env(safe-area-inset-bottom))}
+  html:has(.fbar),html:has(.steparea .actions),html:has(.dock){scroll-padding:0}
   .steparea h1{font-size:30px;margin-top:4px}
 }

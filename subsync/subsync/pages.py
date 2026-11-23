@@ -111,8 +111,10 @@ def _choices(*rows):
 
 
 def _problem(error, field, title, fields=(), extra=""):
-    """The summary of a problem, with a link to the field it is about when the page has it (`fields`)."""
-    return ui.problem_summary(error, title, field if field in fields else None, extra)
+    """The summary of a problem, with a link to the field it is about when the page has it (`fields`): to its box, the
+    languages' first (their group can't take focus)."""
+    box = ui.slot_id(1) if field == "languages" else field
+    return ui.problem_summary(error, title, box if field in fields else None, extra)
 
 
 # ------------------------------------------------------------------------------------------- the start page and sign-up
@@ -447,8 +449,11 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
     files_limit, bytes_limit = settings.user_files_per_day, settings.user_daily_bytes
     full = usage["files"] >= files_limit or usage["bytes"] >= bytes_limit
     store_title, store_text = explain.store_only_note(usenet_allowed(settings))
-    notes = (ui.note("ok", message, role="status") if message else "") \
-        + (ui.note("warn", notice, role="status") if notice else "") \
+    # the note a save came back with (its message, else its notice) is focused by the script, as a problem's summary
+    # is, so a screen reader reads it first: words already on a page as it loads are never announced
+    saved = {"id": "saved", "focus": True}
+    notes = (ui.note("ok", message, role="status", **saved) if message else "") \
+        + (ui.note("warn", notice, role="status", **({} if message else saved)) if notice else "") \
         + (ui.note("warn", store_text, store_title) if stored else "") \
         + _state_note(record, state) \
         + (ui.note("warn", texts["limit_reached"], "Today's limit is reached") if full and not stored else "") \
@@ -509,7 +514,7 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                   _form("delete-confirm", "<div class=\"actions\">" + ui.button(
                       "Delete my data…", "danger", type="submit", attrs="aria-describedby=\"delete-help\"") + "</div>"))
     body = (f"<div class=\"wrap\">{_top(settings)}<main><h1>Your AIOSubtitles</h1>"
-            + (f"<div class=\"notes\" aria-live=\"polite\">{notes}</div>" if notes else "")
+            + (f"<div class=\"notes\">{notes}</div>" if notes else "")
             + f"<div class=\"grid12 band\">{link}{today}</div>"
             f"<div class=\"rows\">{languages}{_audio_row(settings, record, error if field == 'audio' else None)}"
             f"{_usenet_row(settings, record, usenet_usage)}"

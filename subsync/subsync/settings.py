@@ -80,6 +80,20 @@ def unknown_proxies(value):
     return unknown
 
 
+def _ipv4(value):
+    """Whether `value` is an IPv4 address: the only kind subsync can listen on (addon.Server is an IPv4 server)."""
+    try:
+        ipaddress.IPv4Address(value)
+    except ValueError:
+        return False
+    return True
+
+
+# what a public instance's Questions link (SUBSYNC_CONTACT) may start with: anything else is a link relative to the
+# page, to "This page doesn't exist"
+CONTACT_SCHEMES = ("https://", "http://", "mailto:")
+
+
 def _cpu_limit(cpu_max, cfs_dir):
     """The container's processor limit as (quota, period): cgroup v2's cpu.max, or on a cgroup v1 host (no cpu.max) its
     two files; the quota is "max" or "-1" when there is none."""
@@ -475,6 +489,8 @@ class Settings:
     def conflicts(self):
         """Settings written wrong or that can't go together, in plain sentences (empty: none)."""
         out = list(self.written_wrong)
+        if not _ipv4(self.bind):        # a name or an IPv6 address ended the start in a traceback
+            out.append(f"SUBSYNC_BIND must be an IPv4 address{_like('SUBSYNC_BIND')}.")
         if self.audio_when is None:
             out.append("SUBSYNC_AUDIO_WHEN must be pick or open.")
         if self.audio_at_once is None:
@@ -499,6 +515,8 @@ class Settings:
         if self.public:
             out += [f"SUBSYNC_TRUSTED_PROXY must be gateway or IP addresses separated by commas, like 172.18.0.1: "
                     f"{entry} isn't one." for entry in self.unknown_proxies]
+        if self.public and self.contact and not self.contact.lower().startswith(CONTACT_SCHEMES):
+            out.append("SUBSYNC_CONTACT must start with https://, http:// or mailto:, like mailto:you@example.com.")
         if not self.public:     # a public instance uses each person's own languages and configs, and no addon key
             out += self._own_conflicts()
         return out

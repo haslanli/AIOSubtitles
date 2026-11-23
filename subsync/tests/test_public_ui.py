@@ -355,6 +355,50 @@ class LookTest(unittest.TestCase):
         self.assertRegex(APP_CSS, r"prefers-reduced-motion:reduce\)\{\s*\*,\*::before,\*::after\{transition:none!important;"
                                   r"animation:none!important")
 
+    def test_the_pinned_bars_keep_their_room_and_a_problems_link_shows_the_label(self):
+        # Setup's pinned Back/Continue bar (on phones also the start page's Continue and setup's top bar) hid
+        # the box keyboard focus moved to: the browser scrolled it to the screen's edge only, under the opaque bar.
+        # A problem's link scrolled its box to the very top, under the phone's top bar, with the label and the
+        # error above the box out of view. The page tells the browser the room each bar takes, from the bar's own sizes
+        # (and 8 px for a focused box's ring), and the room a label and its error take above a linked box
+        def rules(block, selector):
+            """A rule's declarations, the rule written at the start of a line: in the stylesheet itself (`block` None,
+            outside every @media block, whose rules are indented) or in an @media block."""
+            found = re.search(r"(?m)^" + (r"\s*" if block else "") + re.escape(selector) + r"\{([^}]*)\}",
+                              block or APP_CSS)
+            self.assertIsNotNone(found, selector)
+            return dict((part.strip() for part in d.split(":", 1)) for d in found.group(1).split(";") if d.strip())
+
+        def px(value):
+            return float(re.fullmatch(r"([\d.]+)px", value).group(1))
+        from subsync.ui import APP_CSS
+        base, phone = None, css_media("(max-width:1023px),(max-height:599px)")
+        ring = 8
+        over, _, under = rules(base, ".steparea .actions")["padding"].split()
+        self.assertEqual(rules(base, "html:has(.steparea .actions)"),
+                         {"scroll-padding-bottom": f"{px(over) + px(rules(base, '.btn')['height']) + px(under) + ring:.0f}px"})
+        for bar, button in ((".steparea .actions", ".steparea .actions .primary"), (".dock", ".dock .btn")):
+            with self.subTest(bar=bar):
+                over, _, under = rules(phone, bar)["padding"].split(" ", 2)
+                self.assertEqual(rules(phone, f"html:has({bar})"), {
+                    "scroll-padding-bottom": f"calc({px(over) + px(rules(phone, button)['height']) + ring:.0f}px + {under})"})
+        self.assertEqual(rules(phone, "html:has(.fbar)"), {"scroll-padding-top": rules(phone, ".fbar")["height"]})
+        # under 500 px tall nothing is pinned, so no room is kept
+        self.assertEqual(rules(css_media("(max-height:500px)"), "html:has(.fbar),html:has(.steparea .actions),"
+                                                                "html:has(.dock)"), {"scroll-padding": "0"})
+        # a linked box keeps its label (two lines, as phones wrap it) and three lines of its error in view: they sit
+        # above it (ui.field); on phones a language slot's own label sits over its box too
+        line = float(rules(base, "body")["font"].split("/")[1].split()[0])         # the labels' line height
+        error = rules(base, ".field-error")
+        above = (2 * px(rules(base, ".field label,.field .label")["font-size"]) * line + px(error["margin-top"])
+                 + 3 * px(error["font-size"]) * float(error["line-height"]) + px(rules(base, ".input")["margin-top"]))
+        margin = px(rules(base, "input:target,select:target")["scroll-margin-top"])
+        self.assertLessEqual(above, margin)
+        self.assertLess(margin, above + 24)                     # and little more: the box stays near the top
+        slot = above + px(rules(base, ".slot label")["font-size"]) * line + px(rules(phone, ".slot")["row-gap"])
+        self.assertLessEqual(slot, px(rules(phone, ".slot select:target")["scroll-margin-top"]))
+        self.assertLess(px(rules(phone, ".slot select:target")["scroll-margin-top"]), slot + 24)
+
     def test_the_breakpoints_of_the_16_shapes(self):
         from subsync.ui import APP_CSS
         self.assertIn("@media (max-width:1023px),(max-height:599px)", APP_CSS)
@@ -683,9 +727,11 @@ class SignupPageTest(unittest.TestCase):
                     tree = Tree(pages.signup_page(s, error="Wrong.", field=field))
                     self.assertEqual(tree.all("body")[0]["data-open-at"], first)
                     self.assertIn("open", tree.all("body")[0]["class"])
-                    # the summary on top, its link to the field with the problem
+                    # the summary on top, its link to the field with the problem (the languages': their first box,
+                    #)
                     self.assertEqual([a["href"] for a in tree.all("a") if a.get("href", "").startswith("#")
-                                      and a["href"] != "#signup"], [f"#{field}"] if field else [])
+                                      and a["href"] != "#signup"],
+                                     [f"#{'lang-1' if field == 'languages' else field}"] if field else [])
         self.assertNotIn("data-open-at", self.page())                             # a fresh page: the layer closed
 
     def test_the_enter_them_again_note_only_where_trying_again_makes_sense(self):
@@ -854,6 +900,47 @@ class SettingsPageTest(unittest.TestCase):
         full = every_page()["settings-full"]              # so the every-page checks see this state too
         self.assertIn("Today's limit is reached", Tree(full).text())
         self.assertIn('class="gauge full"', full)
+
+    def test_the_note_a_save_comes_back_with_is_focused_so_it_is_read_first(self):
+        # After Save languages, Save answer, Save key, Refresh or Stop keeping my password the page loaded with
+        # its note near the top, in a live region, which announces only what changes after the page has loaded: nothing
+        # was read, and a screen reader started at the top of the page. The note is focused now, as a problem's
+        # summary is: the first one the save came back with (its message, else its notice), when there is no problem
+        from subsync import pages, ui
+        for kw, kind, words in (({"message": "Saved."}, "ok", "Saved."), ({"notice": "Careful."}, "warn", "Careful."),
+                                ({"message": "Saved.", "notice": "Careful."}, "ok", "Saved.")):
+            with self.subTest(**kw):
+                text = self.page(**kw)
+                tree = Tree(text)
+                self.assertEqual(tree.all("div", id="saved"), [{"class": f"note {kind}", "role": "status",
+                                                                "id": "saved", "tabindex": "-1"}])
+                self.assertEqual(tree.text_of["saved"], words)
+                self.assertNotIn("aria-live", text)                  # the notes are no live region
+                self.assertIn('<main><h1>Your AIOSubtitles</h1><div class="notes"><div class="note', text)
+        self.assertEqual([len(Tree(self.page(**kw)).all("div", tabindex="-1")) for kw in (
+            {}, {"error": "Wrong.", "field": "refresh"})], [0, 1])  # none without a save; a problem: its summary only
+        self.assertNotIn('id="saved"', self.page(error="Wrong.", field="refresh"))
+        self.assertTrue(Tree(every_page()["settings-saved"]).text_of["saved"].startswith("Languages saved: "))
+        message, notice = pages.done_message("refreshed-manual", RECORD)    # a Refresh it couldn't finish itself
+        self.assertEqual((message, Tree(self.page(notice=notice)).text_of["saved"]), (None, notice))
+        # the script focuses it when the page has no problem summary
+        self.assertIn('var problem = document.getElementById("problem");\n  if (problem && !(layer && '
+                      'layer.contains(problem))) problem.focus();\n  // without one, the note a save came back with: '
+                      'focused too, so a screen reader reads it first\n  var saved = !problem && '
+                      'document.getElementById("saved");\n  if (saved) saved.focus();\n', ui.APP_JS)
+
+    def test_a_languages_problem_links_to_the_first_language_box(self):
+        # The summary linked to the slots' group, which can't take focus, so focus fell to the page
+        from subsync import pages, ui
+        for text in (self.page(error="Wrong.", field="languages"),
+                     pages.signup_page(settings(), error="Wrong.", field="languages")):
+            tree = Tree(text)
+            self.assertEqual([a["href"] for a in tree.all("a") if a.get("href", "").startswith("#")
+                              and a["href"] != "#signup"], ["#lang-1"])
+            self.assertEqual(len(tree.all("select", id="lang-1")), 1)
+        self.assertEqual((ui.slot_id(1), ui.slot_id(2, "LANGUAGES")), ("lang-1", "LANGUAGES-2"))
+        self.assertIn('<label for="LANGUAGES-2">Second</label><div class="sel"><select id="LANGUAGES-2" '
+                      'name="LANGUAGES"', ui.language_slots([("English", "eng")], ["eng"], 2, "l", "h", name="LANGUAGES"))
 
     def test_success_warning_and_problem_each_look_different(self):
         text = self.page(message="Saved.", notice="Careful.", error="Wrong.", field="refresh")

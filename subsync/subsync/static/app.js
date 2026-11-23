@@ -246,6 +246,9 @@
   // ---------------------------------------------------------------------------------------------- a problem after a form
   var problem = document.getElementById("problem");
   if (problem && !(layer && layer.contains(problem))) problem.focus();
+  // without one, the note a save came back with: focused too, so a screen reader reads it first
+  var saved = !problem && document.getElementById("saved");
+  if (saved) saved.focus();
 
   // ---------------------------------------------------------------------------------------------- work as it goes
   // A setup page whose work runs (data-refresh) loads itself again every few seconds without the script. With it, the
@@ -258,11 +261,10 @@
     said.setAttribute("role", "status");
     body.appendChild(said);
     var lines = function (scope) {
-      return Array.prototype.map.call(scope.querySelectorAll(".progress .tx, .checks .tx"),
-                                      function (line) { return line.textContent; });
+      return Array.prototype.slice.call(scope.querySelectorAll(".progress .tx, .checks .tx"));
     };
     var swap = function (fresh) {
-      var known = lines(document);
+      var known = lines(document).map(function (line) { return line.textContent; });
       ["main .fbar", "main .body", "main .actions"].forEach(function (selector) {
         var old = document.querySelector(selector), now = fresh.querySelector(selector);
         if (old && now && old.isEqualNode(now)) return;   // unchanged: kept, with a reader's place and focus in it
@@ -271,13 +273,17 @@
         else if (old) old.remove();
         else if (now) document.querySelector("main .body").after(now);     // the actions, once the work has ended
       });
-      var news = lines(document).filter(function (line) { return known.indexOf(line) < 0; });
+      var news = lines(document).filter(function (line) { return known.indexOf(line.textContent) < 0; });
       if (!news.length) return;
       said.textContent = "";
+      // a line and the note under it are read apart, each a sentence of its own: the line's whole text runs them
+      // together, a version into the note's first word ("1.4.0Version")
       news.forEach(function (line) {
-        var p = document.createElement("p");
-        p.textContent = line;
-        said.appendChild(p);
+        Array.prototype.forEach.call(line.childNodes, function (part) {
+          var p = document.createElement("p");
+          p.textContent = part.textContent;
+          said.appendChild(p);
+        });
       });
     };
     var poll = function () {

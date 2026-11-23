@@ -45,7 +45,30 @@ class UiAdditions(unittest.TestCase):
                                      ("subsync's own config (new)", [], '')])
         self.assertIn('<li><span class="sign" aria-hidden="true">+</span>adds subsync</li></ul><p>One &amp; two.</p>'
                       '<p>Three &lt;four&gt;.</p></section>', changes)
-        self.assertIn("<h2>subsync&#x27;s own config (new)</h2><ul></ul></section>", changes)
+        self.assertIn("<h2>subsync&#x27;s own config (new)</h2></section>", changes)
+
+    def test_a_config_with_no_change_lines_has_no_list(self):
+        # subsync's own configs (and an unchanged one) got an empty list: a 20 px gap between heading and note
+        # where the others have 10, and "list, 0 items" to a screen reader
+        changes = ui.config_changes([("subsync's own config (new)", [], 'a copy of yours'),
+                                     ('Your config', [('+', 'adds subsync')], None)])
+        self.assertEqual(changes, '<div class="changes"><section><h2>subsync&#x27;s own config (new)</h2>'
+                                  '<p>a copy of yours</p></section><section><h2>Your config</h2><ul><li><span '
+                                  'class="sign" aria-hidden="true">+</span>adds subsync</li></ul></section></div>')
+
+    def test_a_choice_without_an_explanation_writes_none(self):
+        # "Remove the saved key" and "Delete everyone's records and stored copies" got an empty explanation:
+        # 6 px of empty space under the title, and a description pointing at nothing (as radio_row already avoided)
+        self.assertEqual(ui.choice('remove-subdl_key', 'Remove the saved key', '', name='REMOVE_SUBDL_KEY', value='yes'),
+                         '<label class="choice"><input type="checkbox" id="remove-subdl_key" name="REMOVE_SUBDL_KEY" '
+                         'value="yes" aria-labelledby="remove-subdl_key-title"><span><b id="remove-subdl_key-title">'
+                         'Remove the saved key</b></span></label>')
+        box = ui.choice('confirm', 'Delete', '', error_id='confirm-error')
+        self.assertIn('aria-labelledby="confirm-title" aria-describedby="confirm-error" aria-invalid="true">', box)
+        self.assertNotIn('confirm-help', box)
+        with_help = ui.choice('c', 'Title', 'Help.', error_id='e')      # one with an explanation: as before
+        self.assertIn('aria-describedby="e c-help" aria-invalid="true"><span><b id="c-title">Title</b>'
+                      '<span id="c-help">Help.</span></span></label>', with_help)
 
     def test_a_long_address_in_a_check_row_wraps(self):
         # the 16-shape check at 360 x 640: an address in a check row pushed the page sideways

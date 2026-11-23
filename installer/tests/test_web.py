@@ -148,8 +148,26 @@ class ProgressPages(unittest.TestCase):
         self.assertIn('}).catch(function () { location.reload(); });', js)       # as without the script
         self.assertIn('} else if (every) {\n    setTimeout(function () { location.reload(); }, every);', js)
         self.assertIn('said.setAttribute("role", "status");', js)               # one polite region, the new lines only
-        self.assertIn('return known.indexOf(line) < 0;', js)
-        self.assertIn('p.textContent = line;', js)
+        self.assertIn('return known.indexOf(line.textContent) < 0;', js)
+        self.assertIn('p.textContent = part.textContent;', js)          # a line and its note apart
+
+    def test_a_new_line_and_its_note_are_read_out_apart(self):
+        # Each new line's whole text was read out as one paragraph, which runs it into the note under it:
+        # "Switched to version 1.4.0Version 1.3.0 is kept for a rollback" ("1.4.0Version" one word). Each part of the
+        # line is a paragraph of the read-out now: its own words, then its note
+        js = ui.APP_JS.split(' work as it goes\n', 1)[1]
+        news = re.search(r'news\.forEach\(function \(line\) \{(?P<body>.*?)\n      \}\);', js, re.S)
+        self.assertIsNotNone(news, 'the new lines are not read out')
+        body = re.sub(r'//[^\n]*', '', news['body'])
+        self.assertRegex(body, r'^\s*Array\.prototype\.forEach\.call\(line\.childNodes, function \(part\) \{\s*'
+                               r'var p = document\.createElement\("p"\);\s*p\.textContent = part\.textContent;\s*'
+                               r'said\.appendChild\(p\);\s*\}\);\s*$')
+        self.assertNotIn('p.textContent = line', js)
+        # the parts it reads: a line's words and the note under them are the two children of its .tx (as check rows')
+        self.assertIn('<span class="tx">Switched to version 1.4.0<span class="more">Version 1.3.0 is kept.</span></span>',
+                      ui.progress_list([('done', 'Switched to version 1.4.0', 'Version 1.3.0 is kept.')]))
+        self.assertIn('<span class="tx">Checked<span class="more">All good.</span></span>',
+                      ui.check_rows([('ok', 'Checked', 'All good.')]))
 
 
 class Security(unittest.TestCase):
@@ -1594,7 +1612,7 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertIn('Tick "Delete everyone\'s records and stored copies" to remove AIOSubtitles.', text)
         self.assertNotIn('Its password', text)
         box = re.search(r'<input type="checkbox" id="confirm"[^>]*>', b.pages[-1]).group(0)
-        self.assertIn('aria-describedby="confirm-error confirm-help" aria-invalid="true"', box)
+        self.assertIn('aria-describedby="confirm-error" aria-invalid="true"', box)     # no explanation
         self.assertIn('<p class="field-error" id="confirm-error">', b.pages[-1])
         self.assertTrue((self.state / 'subsync.env').exists())                          # nothing removed
         _, _, text = b.post('remove', {'REMOVE': 'yes'})

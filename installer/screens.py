@@ -168,9 +168,9 @@ def _error(problem, key):
 
 def _field_id(key):
     """A question's field id on the setup page: its answers-file key in small letters (_input, _choice, the audio
-    answers; ui.language_slots draws "languages", the same). A limit's is its setting (_limit_ids). A refused answer's
-    summary links to it (_summary)."""
-    return key.lower()
+    answers); the languages' is their first box (ui.language_slots: their group can't take focus). A limit's is
+    its setting (_limit_ids). A refused answer's summary links to it (_summary)."""
+    return ui.slot_id(1, key) if key == 'LANGUAGES' else key.lower()
 
 
 def _ids(*keys):

@@ -284,6 +284,45 @@ class RulesTest(unittest.TestCase):
             self.assertEqual(s.rule_id, hashlib.sha256(json.dumps(listed, sort_keys=True).encode()).hexdigest()[:12])
 
 
+class ListeningAddressTest(unittest.TestCase):
+    def test_an_address_subsync_cant_listen_on_stops_the_start_in_one_line(self):
+        # SUBSYNC_BIND was only stripped, and subsync listens on IPv4 only, so an IPv6 address, a name or a typo
+        # ended the start in a traceback (socket.gaierror) instead of the line every other setting gives; both modes
+        line = "SUBSYNC_BIND must be an IPv4 address, like 0.0.0.0."
+        for value in ("::", "::1", "localhost", "", "0.0.0", "127.0.0.256", "0.0.0.0:8790"):
+            for env in ({}, PUBLIC):
+                with self.subTest(value=value, public=bool(env)):
+                    self.assertEqual(Settings(dict(env, SUBSYNC_BIND=value)).conflicts(), [line])
+        for value in (" 127.0.0.1 ", "0.0.0.0", "192.168.1.5"):
+            with self.subTest(value=value):
+                self.assertEqual(Settings({"SUBSYNC_BIND": value}).conflicts(), [])
+        self.assertEqual((Settings({}).bind, Settings({}).conflicts()), ("0.0.0.0", []))       # the default
+        env = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": helpers.KEY, "SUBSYNC_PUBLIC_BASE": "https://subs.test",
+               "SUBSYNC_BIND": "::"}
+        self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:not started: " + line])   # exit code 2
+        env = {"SUBSYNC_SOURCE_MANIFEST": "https://aios.test/stremio/x/manifest.json", "SUBSYNC_SOURCE_PASSWORD": "p",
+               "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_BIND": "localhost"}
+        self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:not started: " + line])
+
+
+class ContactTest(unittest.TestCase):
+    def test_a_public_contact_that_isnt_a_whole_address_stops_the_start(self):
+        # Written as people write an address (help@example.org, example.org/help) it became a link relative to
+        # the page, so the Questions link of every page and the privacy page's led to "This page doesn't exist"
+        line = "SUBSYNC_CONTACT must start with https://, http:// or mailto:, like mailto:you@example.com."
+        for value in ("help@example.org", "example.org/help", "www.example.org", "/issues", "ftp://example.org"):
+            with self.subTest(value=value):
+                self.assertEqual(Settings(dict(PUBLIC, SUBSYNC_CONTACT=value)).conflicts(), [line])
+                self.assertEqual(Settings({"SUBSYNC_CONTACT": value}).conflicts(), [])      # self-hosted: unused
+        for value in ("https://github.com/you/project/issues", "http://example.org", "mailto:you@example.com",
+                      "MAILTO:you@example.com", " https://example.org ", ""):
+            with self.subTest(value=value):
+                self.assertEqual(Settings(dict(PUBLIC, SUBSYNC_CONTACT=value)).conflicts(), [])
+        env = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": helpers.KEY, "SUBSYNC_PUBLIC_BASE": "https://subs.test",
+               "SUBSYNC_CONTACT": "help@example.org"}
+        self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:not started: " + line])   # exit code 2
+
+
 class AddonKeyTest(unittest.TestCase):
     def test_a_key_with_a_slash_stops_a_self_hosted_start(self):
         # It can't be one part of an address, so every keyed route answered "not found" for good
