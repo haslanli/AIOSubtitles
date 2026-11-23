@@ -82,11 +82,13 @@ class QuestionTexts(unittest.TestCase):
 
     def test_removing_and_restoring_ask_their_own_yes(self):
         # CONFIRM answered "Save these changes?", "Remove subsync?" and the restore question alike, and the
-        # example's CONFIRM=yes removed subsync; each now has its own key, its approved text and the example "no"
+        # example's CONFIRM=yes removed subsync; each now has its own key, its approved text and the example "no".
+        # On a public instance the database copies made before updates, which hold everyone's records, stay
         self.assertEqual(explain.QUESTIONS['REMOVE'],
                          ('no', "Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your "
                                 "config, deletes its own config and removes its container with its stored copies; on a "
-                                "public instance, everyone's records go too. No changes nothing. It is kept apart from "
+                                "public instance, everyone's records go too, except in the database copies made before "
+                                "updates, which stay in state/backups/. No changes nothing. It is kept apart from "
                                 "CONFIRM, so an answers file made for installing never removes anything."))
         self.assertEqual(explain.QUESTIONS['RESTORE'],
                          ('no', "Asked by ./setup --restore FILE before the saved copy is put back into your config. "
@@ -114,7 +116,9 @@ class QuestionTexts(unittest.TestCase):
             "Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again"))
 
     def test_setup_names_the_program_without_the_command(self):
-        self.assertIn("Asked only when setup can't find AIOStreams", explain.QUESTIONS['AIOS_URL'][1])
+        # It is also asked when setup finds the container but can't reach it (engine.reach_aios)
+        self.assertTrue(explain.QUESTIONS['AIOS_URL'][1].startswith(
+            "Asked only when setup can't find or can't reach AIOStreams running in Docker on this machine: "))
         self.assertIn("setup takes the ID out of it", explain.QUESTIONS['AIOS_CONFIG_ID'][1])
         self.assertIn("You can paste the whole install link, or its alias link (…/stremio/u/<name>/…): setup takes the "
                       "ID out of it", explain.QUESTIONS['AIOS_CONFIG_ID'][1])
@@ -156,6 +160,16 @@ class Documents(unittest.TestCase):
         readme = (REPO / 'README.md').read_text(encoding='utf-8')
         self.assertIn(docs.readme_section(), readme, 'run: python3 -I installer/docs.py')
         self.assertEqual(readme.count(docs.START), 1)
+
+    def test_the_readme_escapes_each_placeholder_and_the_example_keeps_it(self):
+        # The texts went into README as written, and Markdown took "(…/stremio/<ID>/…)" for an HTML tag,
+        # which GitHub drops; docs/answers.example is plain text and shows them as written
+        self.assertEqual(docs.markdown('a "<Language> (synced)" entry'), 'a "\\<Language> (synced)" entry')
+        section = docs.readme_section()
+        self.assertEqual(re.findall(r'(?<!\\)<[A-Za-z]', section), [])
+        self.assertIn('(…/stremio/\\<ID>/…)', section)
+        self.assertIn('as "\\<Language> (original)"', section)
+        self.assertIn('(…/stremio/<ID>/…)', docs.answers_example())
 
     def test_the_settings_intro_says_what_setup_writes_and_how_a_change_is_applied(self):
         # it said only the first group is rewritten, and that a change needs docker compose on the machine

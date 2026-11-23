@@ -15,9 +15,9 @@ ROUTE=yourself
 # Pick the one whose address your apps use.
 AIOS_CONTAINER=
 
-# Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams'
-# configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to
-# AIOStreams at this address, so it must work from this machine.
+# Asked only when setup can't find or can't reach AIOStreams running in Docker on this machine: the address of
+# AIOStreams' configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync
+# talks to AIOStreams at this address, so it must work from this machine.
 AIOS_URL=
 
 # The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page
@@ -291,8 +291,9 @@ SUBSYNC_MAX_CONNECTIONS=256
 # instance only REMOVE.
 
 # Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your config, deletes its own
-# config and removes its container with its stored copies; on a public instance, everyone's records go too. No
-# changes nothing. It is kept apart from CONFIRM, so an answers file made for installing never removes anything.
+# config and removes its container with its stored copies; on a public instance, everyone's records go too, except
+# in the database copies made before updates, which stay in state/backups/. No changes nothing. It is kept apart
+# from CONFIRM, so an answers file made for installing never removes anything.
 REMOVE=no
 
 # Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, leaving

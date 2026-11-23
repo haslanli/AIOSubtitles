@@ -29,4 +29,6 @@ approved by TMDB. Titles' original languages also come from Wikidata (CC0) and, 
 title's id is sent to them.
 
 AIOStreams is a separate project (viren070/AIOStreams); subsync talks to it over HTTP and doesn't include any of it.
-Subtitles come from the sources in your own AIOStreams config (for example OpenSubtitles) under their own terms.
+Subtitles come from the sources in your own AIOStreams config (for example OpenSubtitles) and from the sites
+AIOSubtitles searches itself (OpenSubtitles, TheSubtitleDB and Gestdown; with their keys, SubDL, SubSource and Wyzie
+Subs), under their own terms.

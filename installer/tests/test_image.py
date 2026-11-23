@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 import installer  # noqa: F401  (its __init__ puts subsync's folder on the import path)
-from subsync import ui
+from subsync import explain, ui
 
 REPO = Path(__file__).resolve().parent.parent.parent
 DOCKERFILE = REPO / 'subsync' / 'Dockerfile'
@@ -187,6 +187,15 @@ class Notice(unittest.TestCase):
                     'licences | |'):
             self.assertIn('\n' + row + '\n', self.notice)
         self.assertNotIn('| Python 3.13 base image | PSF | |', self.notice)
+
+    def test_the_sites_it_searches_itself_are_named(self):
+        # It named only the sources in your AIOStreams config; by default AIOSubtitles also searches
+        # OpenSubtitles (twice), TheSubtitleDB and Gestdown itself, and with their keys SubDL, SubSource and Wyzie Subs
+        self.assertEqual(explain.SETTINGS['SUBSYNC_EXTRA_SOURCES'][0], 'osv3,osv3plus,tsdb,gestdown')
+        self.assertIn('Subtitles come from the sources in your own AIOStreams config (for example OpenSubtitles) and '
+                      'from the sites AIOSubtitles searches itself (OpenSubtitles, TheSubtitleDB and Gestdown; with '
+                      'their keys, SubDL, SubSource and Wyzie Subs), under their own terms.',
+                      ' '.join(self.notice.split()))
 
     def test_the_image_carries_the_notices_and_the_licences(self):
         self.assertIn("|\n\nThe image carries this file and these licences' texts in /opt/aiosubtitles/licences/.\n\n",

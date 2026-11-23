@@ -162,14 +162,18 @@ class CommandLine(FlowFixture):
                       'instance.', ' '.join(out.getvalue().split()))
 
     def test_the_readme_says_what_uninstall_deletes(self):
-        # it left out the Usenet config, the stored copies and a public instance's records
+        # it left out the Usenet config, the stored copies and a public instance's records; and, on a public instance,
+        # the database copies made before updates, which stay and hold everyone's records (engine.remove_host)
         readme = ' '.join((REPO / 'README.md').read_text().split())
         self.assertIn("```bash ./setup --uninstall ``` Takes subsync out of your config, deletes subsync's own configs "
                       'on your AIOStreams (its Usenet config too) and removes the container with its stored copies. It '
                       "then lists what stays: the subsync image, your web server's rule for subsync, and this folder "
                       'with the copies of your config. On a public instance it removes AIOSubtitles with everyone\'s '
                       "records and stored copies, after you confirm; the sync configs it made on people's AIOStreams "
-                      'stay.', readme)
+                      'stay, and so do the copies of the databases made before updates, in `state/backups/`, which hold '
+                      "everyone's records: delete them yourself when you no longer need them. ```bash", readme)
+        self.assertIn("the database copies made before updates in state/backups/, which hold everyone's records",
+                      (REPO / 'installer' / 'engine.py').read_text())
 
     def test_the_readme_says_how_setup_and_updates_work_now(self):
         readme = (REPO / 'README.md').read_text()
@@ -196,10 +200,17 @@ class CommandLine(FlowFixture):
         self.assertNotIn('Python 3', readme.split('## What you need', 1)[1].split('\n## ', 1)[0])
 
     def test_the_readme_says_an_answers_file_goes_in_state(self):
-        # setup sees the folder's state/ on both routes; the source route mounts nothing else
+        # setup sees the folder's state/ on both routes; the source route mounts nothing else. The image route's
+        # ./setup is written only once setup has installed AIOSubtitles, so a first install gives the answers to the
+        # docker run command (it said "After this first run", and sent a first install to ./setup)
         install = ' '.join((REPO / 'README.md').read_text().split('## Install', 1)[1].split('\n## ', 1)[0].split())
         self.assertIn('To set it up without the page, give the answers in a file in `state/`: '
-                      '`./setup --answers state/FILE --yes` (see `docs/answers.example`).', install)
+                      '`./setup --answers state/FILE --yes` (see `docs/answers.example`). Before the first install '
+                      'there is no `./setup` yet: make `state/`, put the file in it, and add `--answers state/FILE '
+                      '--yes` after `setup` at the end of the command above.', install)
+        self.assertIn('Once setup has installed AIOSubtitles, the folder has a `./setup` that runs the same command: '
+                      'use it from then on.', install)
+        self.assertNotIn('After this first run', install)
         self.assertNotIn('`./setup --answers FILE --yes`', install)
 
     def test_the_readme_says_to_change_only_the_first_port_number(self):

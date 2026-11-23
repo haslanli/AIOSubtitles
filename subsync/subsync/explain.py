@@ -257,9 +257,9 @@ QUESTIONS = {
         "you play. Pick the one whose address your apps use."),
     "AIOS_URL": (
         "",
-        "Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' "
-        "configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to "
-        "AIOStreams at this address, so it must work from this machine."),
+        "Asked only when setup can't find or can't reach AIOStreams running in Docker on this machine: the address of "
+        "AIOStreams' configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. "
+        "subsync talks to AIOStreams at this address, so it must work from this machine."),
     "AIOS_CONFIG_ID": (
         "",
         "The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure "
@@ -369,8 +369,8 @@ QUESTIONS = {
         "no",
         "Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your config, deletes its "
         "own config and removes its container with its stored copies; on a public instance, everyone's records go "
-        "too. No changes nothing. It is kept apart from CONFIRM, so an answers file made for installing never removes "
-        "anything."),
+        "too, except in the database copies made before updates, which stay in state/backups/. No changes nothing. It "
+        "is kept apart from CONFIRM, so an answers file made for installing never removes anything."),
     "RESTORE": (
         "no",
         "Asked by ./setup --restore FILE before the saved copy is put back into your config. Yes replaces your config "
@@ -790,9 +790,9 @@ GROUPS = [
             "Recommended: 150. " + _THRESHOLD),
         "SUBSYNC_AUDIO_BETTER_WITHIN": (
             "0.55",
-            "Audio route, \"clearly closer\": at least this share of lines must start within 200 ms of the speech "
-            "(0.55 = 55 %), lower than for a subtitle track because speech detection is less exact. Recommended: 0.55. "
-            + _THRESHOLD),
+            "Audio route, \"clearly closer\": at least this share of the lines that match speech must start within "
+            "200 ms of it (0.55 = 55 %), lower than for a subtitle track because speech detection is less exact. "
+            "Recommended: 0.55. " + _THRESHOLD),
         "SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S": (
             "1.0",
             "Audio route, \"clearly closer\": the copy must have moved the lines by at least this many seconds; a "

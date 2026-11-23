@@ -60,6 +60,12 @@ def comment(text):
     return ['# ' + line for line in textwrap.wrap(text, WIDTH - 2, break_on_hyphens=False, break_long_words=False)]
 
 
+def markdown(text):
+    """A text as README's Markdown shows it as written: each "<" escaped, so a placeholder like "<Language>" is not
+    taken for an HTML tag, which GitHub drops. docs/answers.example is plain text and keeps it as written."""
+    return text.replace('<', '\\<')
+
+
 def _default(default):
     if default is None:
         return 'required'
@@ -77,7 +83,8 @@ def readme_section():
            f'is a line `KEY=value`; see [docs/answers.example]({EXAMPLE_ON_GITHUB}). Also asked, under their setting '
            f'names explained below: for your own install {limits.DAILY.setting} and, with Usenet on, '
            f'{limits.USENET.setting}; for a public instance {", ".join(HOSTING_SETTINGS)} and its limits.', '']
-    out += [f'- **`{key}`**: {text}' for key, (_, text) in explain.QUESTIONS.items() if key not in explain.SETTINGS]
+    out += [f'- **`{key}`**: {markdown(text)}' for key, (_, text) in explain.QUESTIONS.items()
+            if key not in explain.SETTINGS]
     out += ['', "### subsync's settings", '',
             './setup writes the first group into `state/subsync.env` from your answers, each line with its explanation '
             'above it, and the limits it asks; for a public instance, also the public mode settings it asks. A limit '
@@ -88,10 +95,10 @@ def readme_section():
             "every line it doesn't write."]
     for title, group in explain.GROUPS:
         out += ['', f'#### {title}', '']
-        out += [f'- **`{name}`** ({_default(default)}): {text}' for name, (default, text) in group.items()]
+        out += [f'- **`{name}`** ({_default(default)}): {markdown(text)}' for name, (default, text) in group.items()]
     out += ['', '### Fixed rules', '',
             'These are not settings: AIOSubtitles always works this way.', '']
-    out += [f'- **{title}.** {text}' for title, text in explain.RULES]
+    out += [f'- **{markdown(title)}.** {markdown(text)}' for title, text in explain.RULES]
     out += ['', END]
     return '\n'.join(out)
 

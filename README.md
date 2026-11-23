@@ -8,8 +8,9 @@
 > see").
 
 **subsync** makes copies of your subtitles timed to the exact file you are playing, and lists them next to the originals
-as **"English (synced)"** (or any language you pick). It checks every copy against the file's own subtitle track, so a
-copy that doesn't fit is never offered: you get the originals as before.
+as **"English (synced)"** (or any language you pick). It checks every copy against the file's own subtitle track (or,
+for a file without one, against its speech), so a copy that doesn't fit is never offered: you get the originals as
+before.
 
 `./setup` adds subsync to the AIOStreams you already run. It installs nothing else.
 
@@ -48,7 +49,7 @@ What each part does:
   like `-p 127.0.0.1:9000:8789`.
 - `--rm`: the setup container is removed when the page stops; AIOSubtitles itself keeps running in its own container.
 
-After this first run the folder has a `./setup` that runs the same command: use it from then on.
+Once setup has installed AIOSubtitles, the folder has a `./setup` that runs the same command: use it from then on.
 
 Setup runs in your browser: it prints the address to open on this machine, and an `ssh -L` line for opening it from
 another computer (run that line on the other computer first, then open the same address there). The page stops when
@@ -61,7 +62,8 @@ a copy of your config is saved first. Every question, with its explanation, is a
 first run downloads the image (about 1 GB).
 
 To set it up without the page, give the answers in a file in `state/`: `./setup --answers state/FILE --yes` (see
-`docs/answers.example`).
+`docs/answers.example`). Before the first install there is no `./setup` yet: make `state/`, put the file in it, and add
+`--answers state/FILE --yes` after `setup` at the end of the command above.
 
 ### Why setup needs Docker's socket
 
@@ -98,13 +100,14 @@ AIOMetadata or any other app.
 subsync reads only files your apps ask subtitles for:
 
 - **The file you play:** about 1 MB, made up of the start of the file, its index, and 64 KB at each end (up to 32 MB
-  for a file with very many subtitle tracks). That is enough when the file has its own subtitle track, which most
-  files do. MKV and MP4.
+  for a file with very many subtitle tracks); where timing alone can't settle the check, also the words of up to 120 of
+  its track's lines (up to 240 KB, a few MB when the track's lines are pictures). That is enough when the file has its
+  own subtitle track, which most files do. MKV and MP4.
 - **With AIOMetadata, also the first version listed for a title you open,** even if you then play another one: stock
   AIOMetadata asks for the subtitles of the first listed version when it shows the versions. subsync reads only that
   file's index (about 1 MB), and its audio only with the audio option's answer "as soon as a file is opened".
 - **Files without their own subtitle track:** only with the audio option on. With "when I pick the file" (recommended),
-  only after you pick the "<Language> (Subsync)" entry for that file in your app: it plays the original subtitle at
+  only after you pick the "\<Language> (Subsync)" entry for that file in your app: it plays the original subtitle at
   once, and subsync then reads short parts of the file's audio (about 60–350 MB, at most the audio limit you choose per
   file, 1 GB recommended) through your debrid service or Usenet, to make a synced copy for the next time you open it;
   files you only browse are never read this way. With "as soon as a file is opened", the same starts when your app
@@ -124,9 +127,9 @@ subsync reads only files your apps ask subtitles for:
 
 | App | What shows |
 |---|---|
-| **Stremio** | Opening or playing a file starts subsync on it, which takes a few seconds. Meanwhile a "<Language> (Subsync)" entry is listed: choosing it gives the synced copy once it is ready, else the original. From the next time you open that file the copy is listed as "<Language> (synced)"; without the cache change, that can take up to 5 minutes. |
+| **Stremio** | Opening or playing a file starts subsync on it, which takes a few seconds. Meanwhile a "\<Language> (Subsync)" entry is listed: choosing it gives the synced copy once it is ready, else the original. From the next time you open that file the copy is listed as "\<Language> (synced)"; without the cache change, that can take up to 5 minutes. A language with subtitles but no synced copy is listed once as "\<Language> (original)"; up to 3 synced copies of your first language are listed, best first, as "(synced)", "(synced 2)" and "(synced 3)". |
 | **AIOStreams' Jellyfin server** | The same, named "(synced)". |
-| **AIOMetadata**, stock | It shows plain language names ("English (external)") instead of "(Subsync)" or "(synced)". It keeps each title's subtitle list and text for an hour, also its "no subtitles" answer: restart it once after setup (`docker restart aiometadata`), and set `JELLYFIN_SUBTITLE_TTL=300` in its environment to see synced copies within 5 minutes. A copy made when you first open a file is usually there at once if you pick the first subtitle of your language. |
+| **AIOMetadata**, stock | It shows plain language names ("English (external)") instead of "(Subsync)", "(synced)" or "(original)". It keeps each title's subtitle list and text for an hour, also its "no subtitles" answer: restart it once after setup (`docker restart aiometadata`), and set `JELLYFIN_SUBTITLE_TTL=300` in its environment to see synced copies within 5 minutes. A copy made when you first open a file is usually there at once if you pick the first subtitle of your language. |
 
 ## Update
 
@@ -195,7 +198,8 @@ removing it.
 ./setup --status
 ```
 
-Shows whether subsync is running and what it has done today.
+Shows whether subsync is running, what it has done (subtitle requests since it started, subtitles checked, synced
+copies offered) and how much it read today; on a public instance, how many people signed up.
 
 ```bash
 ./setup --update
@@ -216,7 +220,9 @@ Goes back to the version before the last update (see [Rollback](#rollback)).
 Takes subsync out of your config, deletes subsync's own configs on your AIOStreams (its Usenet config too) and removes
 the container with its stored copies. It then lists what stays: the subsync image, your web server's rule for subsync,
 and this folder with the copies of your config. On a public instance it removes AIOSubtitles with everyone's records
-and stored copies, after you confirm; the sync configs it made on people's AIOStreams stay.
+and stored copies, after you confirm; the sync configs it made on people's AIOStreams stay, and so do the copies of the
+databases made before updates, in `state/backups/`, which hold everyone's records: delete them yourself when you no
+longer need them.
 
 ```bash
 ./setup --restore state/backups/FILE
@@ -233,8 +239,9 @@ subsync's log. It contains no links and no keys.
 ## How the sync works
 
 1. subsync reads the played file's index and its own subtitle track's timings.
-2. It tries the subtitles you would see, best match for this release first.
-3. Each one is re-timed with alass, then each line is snapped to the file's own line.
+2. It tries the subtitles you would see and those of the sites it searches itself, best match for this release first.
+3. Each one is first checked as it is; one that doesn't fit is moved by one steady amount, fitted in sections for
+   another cut, or else re-timed with alass, then each line is snapped to the file's own line.
 4. A copy is kept only if at least 60 % of its lines pair with a line of the file's track (start within a second of
    it), at least 90 % of those land within 200 ms of it, and the typical (median) error is 100 ms or less, spread over
    the whole film. Copies whose lines snapped need 95 %.
@@ -250,8 +257,8 @@ parts it did not use for the fit. A copy is kept when, on those parts, its typic
 90 % of its lines that match speech start within 200 ms of it (and at least 80 % of all its lines do), at most 30 %
 match no speech, and none of those parts is clearly off. A copy that misses that is still kept when it is clearly
 closer to the speech than the original (SUBSYNC_AUDIO_BETTER): its typical error is 150 ms or less, at least 55 % of
-its lines are within 200 ms of the speech, few lines are unmatched, none of those parts is clearly off, and it moved
-the lines by at least a second.
+its lines that match speech start within 200 ms of it, few lines are unmatched, none of those parts is clearly off,
+and it moved the lines by at least a second.
 
 ## Settings
 
@@ -265,11 +272,11 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 
 - **`ROUTE`**: Install it for yourself (yourself, the default). This adds it to the AIOStreams you already run. Host a public instance (host). Runs here with its own sign-up page, so other people can use it with their own AIOStreams.
 - **`AIOS_CONTAINER`**: Asked only when more than one AIOStreams runs in Docker on this machine: the one your apps use. subsync joins that container's Docker network and finds files through it, so the wrong one means it finds none of the files you play. Pick the one whose address your apps use.
-- **`AIOS_URL`**: Asked only when setup can't find AIOStreams running in Docker on this machine: the address of AIOStreams' configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to AIOStreams at this address, so it must work from this machine.
-- **`AIOS_CONFIG_ID`**: The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page when you save or load the config, and part of its install link (…/stremio/<ID>/…). You can paste the whole install link, or its alias link (…/stremio/u/<name>/…): setup takes the ID out of it and checks that the config exists. subsync is added to this config, and subsync's own config is made from it.
+- **`AIOS_URL`**: Asked only when setup can't find or can't reach AIOStreams running in Docker on this machine: the address of AIOStreams' configure page, without /stremio/..., like http://127.0.0.1:3000 or https://aio.example.com. subsync talks to AIOStreams at this address, so it must work from this machine.
+- **`AIOS_CONFIG_ID`**: The ID of the AIOStreams config your apps use: a long code like 1a2b3c4d-…, shown on AIOStreams' configure page when you save or load the config, and part of its install link (…/stremio/\<ID>/…). You can paste the whole install link, or its alias link (…/stremio/u/\<name>/…): setup takes the ID out of it and checks that the config exists. subsync is added to this config, and subsync's own config is made from it.
 - **`AIOS_CONFIG_PASSWORD`**: The password you chose when you saved that config. Setup uses it to read the config and save the change, and doesn't store it; subsync gets its own config with its own random password. Removing subsync and restoring a saved copy ask for it again. If you put it in an answers file, keep that file private.
 - **`LANGUAGES`**: The subtitle languages to sync, up to four, the first one first; English if you choose none. In an answers file, names or codes separated by commas, like English, Spanish, ru. For each language and each file you play, subsync downloads that language's subtitles from your subtitle sources and the ones it searches itself, and checks them against the file. Each extra language adds those downloads and a few seconds of work per file; the video file is still read only once.
-- **`AUDIO`**: Some files carry no subtitle track, so subsync can time a subtitle to them only by listening to their speech: it reads short parts of the sound (about 60–350 MB a file, at most the audio limit you choose next) and keeps one processor busy for one to three minutes. When I pick the file (recommended with two or more processors): only after you choose the file's "<Language> (Subsync)" entry, so only files you watch are read. As soon as a file is opened: when your app asks for the file's subtitles, so files you only browse or that it prepares next are read too (at most 5 a day). No: those files keep their original subtitles and subsync reads about 1 MB of each.
+- **`AUDIO`**: Some files carry no subtitle track, so subsync can time a subtitle to them only by listening to their speech: it reads short parts of the sound (about 60–350 MB a file, at most the audio limit you choose next) and keeps one processor busy for one to three minutes. When I pick the file (recommended with two or more processors): only after you choose the file's "\<Language> (Subsync)" entry, so only files you watch are read. As soon as a file is opened: when your app asks for the file's subtitles, so files you only browse or that it prepares next are read too (at most 5 a day). No: those files keep their original subtitles and subsync reads about 1 MB of each.
 - **`USENET`**: Off by default. On: when a file you play isn't on your debrid service, AIOSubtitles looks for it through a second config it makes on your AIOStreams, with only your Usenet searches and services, and reads the few MB it needs (more for audio syncs). Recommended if you play from Usenet and your indexer's daily limit isn't tight. The cost: at most 10 extra searches a day through your indexers (usually none, because your AIOStreams reuses the search you just made), fetching a release's NZB when your Usenet service doesn't have it yet, and some Usenet data per file (more than the few MB read, because Usenet sends whole pieces of about 0.7 MB). It helps you first, and everyone who plays the same release, because one sync serves all of them. Off: nothing on Usenet is searched or read.
 - **`AUDIO_BUDGET`**: Asked only with the audio route on: the most it reads of one file, through your debrid service or Usenet: 0.5, 1, 2 or 4 GB. Recommended: 1: it covers nearly every file with no subtitle track (web releases, MP4s, re-encodes); remuxes usually carry image subtitles and need no audio. Higher: very high-quality files such as 4K remuxes get synced too, but each can cost that much data and take longer than the 14 seconds an app waits, so the copy comes the next time you open the file. Lower: less data on a metered connection; more high-bitrate files keep their originals. Smaller files are read only as far as needed. A change makes subsync judge again the files it kept as originals.
 - **`SUBDL_KEY`**: Optional: your free SubDL API key, from https://subdl.com/panel/api. With it, subsync also searches SubDL, which often has subtitles the other sources don't, so a copy that fits is more likely. Without it, SubDL isn't asked. Cost: one SubDL search for each file you play, plus a download per subtitle tried (at most three per file and language), counted against your key's own limit; the search sends the title's IMDb id. Kept only on this machine, in state/, readable only by your user.
@@ -284,7 +291,7 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 - **`TEST_READ`**: A small test read at the end: subsync reads the start and the index of one ready file (usually under 1 MB), as it does for every file you play. Yes: you see now that reading works and whether that file has its own subtitle track; your debrid service opens the file, so it may show in your debrid account's list. No (default): the first file you play is the first read.
 - **`HOST_ADDRESS`**: The web address of your public instance, with https, like https://subtitles.example.com: people open it to sign up, and their apps download synced files from it. Your web server sends it to this machine; setup shows the one rule it needs. It goes into every personal link, so choose one you will keep: changing it later breaks the links people already added to their AIOStreams.
 - **`REMOVE_OPENSUBTITLES`**: Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.
-- **`REMOVE`**: Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your config, deletes its own config and removes its container with its stored copies; on a public instance, everyone's records go too. No changes nothing. It is kept apart from CONFIRM, so an answers file made for installing never removes anything.
+- **`REMOVE`**: Asked by ./setup --uninstall before anything is removed. Yes takes subsync out of your config, deletes its own config and removes its container with its stored copies; on a public instance, everyone's records go too, except in the database copies made before updates, which stay in state/backups/. No changes nothing. It is kept apart from CONFIRM, so an answers file made for installing never removes anything.
 - **`RESTORE`**: Asked by ./setup --restore FILE before the saved copy is put back into your config. Yes replaces your config with that copy, after saving the current one. No changes nothing.
 
 ### subsync's settings
@@ -377,7 +384,7 @@ Each question shows its explanation as it is asked. In an answers file (`./setup
 - **`SUBSYNC_AUDIO_BETTER_MATCHED`** (default `25`): Audio route, "clearly closer": at least this many of the copy's lines must match speech. Recommended: 25. Higher or lower than recommended trades how many copies are offered against how closely they fit.
 - **`SUBSYNC_AUDIO_BETTER_MISS`** (default `0.30`): Audio route, "clearly closer": at most this share of the copy's lines may match no speech (0.30 = 30 %). Recommended: 0.30. Higher or lower than recommended trades how many copies are offered against how closely they fit.
 - **`SUBSYNC_AUDIO_BETTER_MEDIAN_MS`** (default `150`): Audio route, "clearly closer": the copy's typical error from the speech must be at most this many ms. Recommended: 150. Higher or lower than recommended trades how many copies are offered against how closely they fit.
-- **`SUBSYNC_AUDIO_BETTER_WITHIN`** (default `0.55`): Audio route, "clearly closer": at least this share of lines must start within 200 ms of the speech (0.55 = 55 %), lower than for a subtitle track because speech detection is less exact. Recommended: 0.55. Higher or lower than recommended trades how many copies are offered against how closely they fit.
+- **`SUBSYNC_AUDIO_BETTER_WITHIN`** (default `0.55`): Audio route, "clearly closer": at least this share of the lines that match speech must start within 200 ms of it (0.55 = 55 %), lower than for a subtitle track because speech detection is less exact. Recommended: 0.55. Higher or lower than recommended trades how many copies are offered against how closely they fit.
 - **`SUBSYNC_AUDIO_BETTER_MIN_SHIFT_S`** (default `1.0`): Audio route, "clearly closer": the copy must have moved the lines by at least this many seconds; a smaller change isn't worth replacing the original. Recommended: 1.0.
 
 #### Programs and addresses
@@ -435,7 +442,7 @@ These are not settings: AIOSubtitles always works this way.
 - **Only MKV and MP4 files.** subsync reads the subtitle tracks of MKV and MP4 files only, the formats nearly all streaming releases use. Other files (AVI, M2TS, fragmented MP4 and the like) keep their original subtitles, after one small read that shows the format.
 - **A file that can't be reached is tried again later.** A file that can't be reached on its first read is tried once more 10 seconds later; if it still fails, it waits 10 minutes, then 1, 6 and 24 hours, and then isn't read again.
 - **A copy is offered only after it passes the check.** Each synced copy is checked against the file itself before it is offered: at least 60 % of its lines must pair with lines of the file's own subtitle track (start within a second of one), at least 90 % of those must start within 200 ms (a fifth of a second) of theirs (95 % when snapped), with a typical error of 100 ms or less, spread over the whole film, or it must be clearly better than the original (SUBSYNC_BETTER). Where the track is in the subtitle's language and timing alone leaves doubt, the lines' words must agree too, except in Chinese and Japanese (SUBSYNC_TEXT_PAIRING); a copy fitted in sections for another cut must pass in every section (SUBSYNC_SECTIONS). Line ends are measured and recorded, but don't decide. Files without a subtitle track are checked against their speech instead (the audio route). A copy that fails is never offered: you get the original subtitles, as without subsync.
-- **A language with no synced copy is listed with its original.** A language that has subtitles but no synced copy for a file is listed once, as "<Language> (original)": the subtitle, unchanged, that fit the file best when it was checked, or else the likeliest by its release name, and only if its text is in that language. It isn't synced; a synced copy, when there is one, is listed instead.
+- **A language with no synced copy is listed with its original.** A language that has subtitles but no synced copy for a file is listed once, as "\<Language> (original)": the subtitle, unchanged, that fit the file best when it was checked, or else the likeliest by its release name, and only if its text is in that language. It isn't synced; a synced copy, when there is one, is listed instead.
 - **Subtitles are timed to the film's original language.** AIOSubtitles looks up each film's or series' original language by the title's id: at TMDB when a TMDB key is set, and at Wikidata (for anime, AniList). When the file has a subtitle track in that language, every subtitle, in any language, is checked and timed against it, because it follows the original speech: a plain track first, then a picture track (with SUBSYNC_IMAGE_REF on); one for the hearing impaired only for a language with no plain track of its own. A file with no subtitle track is fitted to its original-language sound first. Until the language is known, or when the file has no such track, each subtitle is checked against its own language's track as before.
 - **At most four languages.** ./setup syncs up to four languages. Each one is a separate sync for every file you play, with its own subtitle downloads and a few seconds of work, though the video file is read only once.
 - **subsync's config starts nothing in the background.** subsync's own AIOStreams config has failover, preloading, pre-caching of the next episode, service wrap, cache-and-play and owned-file checks turned off, whatever your config uses. So reading a listed file opens that one file and nothing else, and subsync never starts a download. Your own config keeps its settings.
@@ -446,7 +453,7 @@ These are not settings: AIOSubtitles always works this way.
 - **Public mode: Real-Debrid is left out.** If your AIOStreams uses Real-Debrid, AIOSubtitles leaves it out of its own config and never reads a Real-Debrid file, because it reads parts of each file you watch from the machine it runs on, and Real-Debrid's terms forbid using an account from a server, VPS or cloud service unless you pay extra for "Remote Traffic"; Real-Debrid records every connection and suspends accounts that break its terms. It syncs only files from your other services: a file you play from Real-Debrid gets a synced copy when another of your services has the same file ready. With Real-Debrid as your only debrid service, AIOSubtitles reads nothing for you: you get only the copies already synced for someone else who played the same release. With Usenet on, AIOSubtitles reads the files you play from Usenet for you, through your Usenet services; Real-Debrid stays out. Your own config and apps keep Real-Debrid as before, and your AIOStreams still searches it when you browse.
 - **Public mode: a few files at once.** The service works on a set number of files at once for everyone (SUBSYNC_SYNCS_AT_ONCE), in the order people asked; two people playing the same file of a torrent never read it twice at once: the second gets the first one's work. A file's subtitle track is about 1 MB (a few MB when the track's lines are pictures, whose words AIOSubtitles reads on its own server and doesn't keep) and is synced in seconds. Files already synced for someone are served at once. When many people play new files together, the synced copy can come after your app has picked a subtitle; the next time you open the file, it is there.
 - **Public mode: limits per person.** Each person can have a few files waiting and read a set number of new files and megabytes a day (UTC), by default 3 waiting, 200 files and 10,000 MB, and the whole service reads at most its own daily total; files already synced for someone don't count. Past a limit, you get only copies already synced for someone until the next day, and nobody else is affected. Sign-up attempts are limited per internet address, and the service takes a set number of people. Your settings page shows today's use.
-- **Public mode: files without a subtitle track.** With the audio route on, a file with no usable subtitle track can be synced from its sound, as you choose on your settings page: off; after you pick its "<Language> (AIOSubtitles)" entry (the default); or, where the instance offers it, as soon as your app asks for its subtitles, if no synced copy exists and a subtitle exists to fit. Never through Real-Debrid. AIOSubtitles reads short parts of the sound through your own debrid service or Usenet, about 60–350 MB, at most the instance's audio limit, and works one to three minutes; your app gets the original at once, and the synced copy is there next time, for everyone who plays the file. It starts only when your day's data and audio syncs, and the service's data, likely have room; otherwise, or if it stops half-way, the file waits for another pick. The service runs a set number of these at once (SUBSYNC_AUDIO_AT_ONCE).
+- **Public mode: files without a subtitle track.** With the audio route on, a file with no usable subtitle track can be synced from its sound, as you choose on your settings page: off; after you pick its "\<Language> (AIOSubtitles)" entry (the default); or, where the instance offers it, as soon as your app asks for its subtitles, if no synced copy exists and a subtitle exists to fit. Never through Real-Debrid. AIOSubtitles reads short parts of the sound through your own debrid service or Usenet, about 60–350 MB, at most the instance's audio limit, and works one to three minutes; your app gets the original at once, and the synced copy is there next time, for everyone who plays the file. It starts only when your day's data and audio syncs, and the service's data, likely have room; otherwise, or if it stops half-way, the file waits for another pick. The service runs a set number of these at once (SUBSYNC_AUDIO_AT_ONCE).
 - **Public mode: what is kept, and for how long.** AIOSubtitles keeps one record per person, encrypted so that it opens only with that person's personal link: the address of their AIOStreams, the id of their config, AIOSubtitles' own config there and its password (with Usenet on, its Usenet config's too), their languages and their answer for files with no subtitles of their own, their own TMDB key if they added one, and when their AIOStreams was last checked, plus how much was read for them each day. Your AIOStreams password is kept only if you tick "Keep my password", in the same encrypted record, until you untick it. For each synced subtitle only its new timing (never its text), with the names and sizes of the files it fits, is shared and kept 180 days after last use, without who played them; logs name the titles synced, never who asked. Your record is deleted when you delete it on your settings page, or 180 days after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may hold it longer.
 - **Public mode: the timing is shared, not the subtitles.** When someone already synced a subtitle for the file you play, AIOSubtitles reuses that work: it keeps only how the subtitle was re-timed, never its text. Your copy is made from the original subtitle, downloaded again for you from its site, with that timing, so no new check is needed. This follows the subtitle sites' rules, which don't allow one person's stored copy to be handed to others, and costs one small download. If the site changed or removed the subtitle since, you don't get that copy.
 - **The same subtitle counts once.** When the same subtitle comes from two places, for example from an addon in your config and from a site AIOSubtitles searches itself, it is checked and listed once. Same means the same words at the same times: another text encoding, line ending or a credit line such as a site's address at the start or end doesn't make it a different subtitle, while another timing does. The copy kept is the first one tried, which is the one that knows most about your release. This saves time and keeps your subtitle list free of repeats.

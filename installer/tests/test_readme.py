@@ -1,12 +1,13 @@
 """The README's own texts (its Settings section is test_explain's) say what setup and subsync do, in the words the owner
 approved, and the numbers they give are the code's."""
 import ast
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from installer import engine, screens
-from subsync import explain, relgate
+from subsync import explain, mkv, relgate, textpair
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -15,6 +16,11 @@ def section(title, joined=True):
     """A '## title' section of the README; `joined`: its words joined by single spaces."""
     text = (REPO / 'README.md').read_text(encoding='utf-8').split(f'\n## {title}\n', 1)[1].split('\n## ', 1)[0]
     return ' '.join(text.split()) if joined else text
+
+
+def opening():
+    """The README's opening, before its first section, its words joined by single spaces."""
+    return ' '.join((REPO / 'README.md').read_text(encoding='utf-8').split('\n## ', 1)[0].split())
 
 
 def files(folder):
@@ -36,6 +42,25 @@ def constants(path):
             except ValueError:
                 pass
     return out
+
+
+class Opening(unittest.TestCase):
+    def test_a_copy_for_a_file_without_a_track_is_checked_against_its_speech(self):
+        # It said every copy is checked against the file's own subtitle track; the audio route's copies are
+        # checked against the file's speech (How the sync works)
+        self.assertIn("It checks every copy against the file's own subtitle track (or, for a file without one, against "
+                      "its speech), so a copy that doesn't fit is never offered: you get the originals as before.",
+                      opening())
+
+
+class Markdown(unittest.TestCase):
+    def test_no_placeholder_is_taken_for_an_html_tag(self):
+        # Outside code, Markdown takes "<Language>", "<ID>" and "<name>" for HTML tags, and GitHub drops them
+        # ('pick the " (Subsync)" entry'); each is written "\<Language>", shown as "<Language>"
+        text = (REPO / 'README.md').read_text(encoding='utf-8')
+        text = re.sub(r'`[^`]*`', '', re.sub(r'```.*?```', '', text, flags=re.S))      # code blocks, then code spans
+        self.assertEqual(re.findall(r'(?<!\\)<[A-Za-z][^>\n]*>', text), [])
+        self.assertIn('only after you pick the "\\<Language> (Subsync)" entry', section('What subsync reads'))
 
 
 class WhatYouNeed(unittest.TestCase):
@@ -83,6 +108,16 @@ class WhatItChanges(unittest.TestCase):
 
 
 class WhatSubsyncReads(unittest.TestCase):
+    def test_the_word_checks_reads_are_named(self):
+        # The list of every read left out the words of the track's lines that the word check reads where
+        # timing alone can't settle it (SUBSYNC_TEXT_PAIRING, on by default): 120 lines of 2 KB at most
+        self.assertEqual(explain.SETTINGS['SUBSYNC_TEXT_PAIRING'][0], 'on')
+        self.assertIn('- **The file you play:** about 1 MB, made up of the start of the file, its index, and 64 KB at '
+                      "each end (up to 32 MB for a file with very many subtitle tracks); where timing alone can't "
+                      f"settle the check, also the words of up to {textpair.MAX_LINES} of its track's lines (up to "
+                      f"{textpair.MAX_LINES * mkv.WORD_READ // 1024} KB, a few MB when the track's lines are "
+                      'pictures). That is enough', section('What subsync reads'))
+
     def test_the_audio_limit_is_the_one_you_choose(self):
         # it gave the recommended 1 GB as a fixed maximum
         self.assertEqual(explain.SETTINGS['SUBSYNC_AUDIO_BUDGET_GB'][0], '1')
@@ -107,7 +142,41 @@ class WhatSubsyncReads(unittest.TestCase):
         self.assertNotIn('looked up once', section('What subsync reads'))
 
 
+class WhatYouWillSee(unittest.TestCase):
+    def test_the_original_and_the_numbered_copies_are_named(self):
+        # The table named only "(Subsync)" and "(synced)"; a language with subtitles but no synced copy is
+        # listed as "(original)", and up to 3 synced copies of the first language (SUBSYNC_MAIN_ALTERNATIVES)
+        self.assertEqual(explain.SETTINGS['SUBSYNC_MAIN_ALTERNATIVES'][0], '3')
+        see = section('What you will see')
+        self.assertIn('without the cache change, that can take up to 5 minutes. A language with subtitles but no '
+                      'synced copy is listed once as "\\<Language> (original)"; up to 3 synced copies of your first '
+                      'language are listed, best first, as "(synced)", "(synced 2)" and "(synced 3)". |', see)
+        self.assertIn('("English (external)") instead of "(Subsync)", "(synced)" or "(original)". It keeps', see)
+
+
+class EverydayCommands(unittest.TestCase):
+    def test_the_status_says_which_figures_are_todays(self):
+        # It said the status shows "what it has done today"; only what it read is a day's figure, the
+        # requests count since subsync started and the subtitles checked every result kept (engine.status_parts)
+        commands = section('Everyday commands')
+        self.assertIn('Shows whether subsync is running, what it has done (subtitle requests since it started, '
+                      'subtitles checked, synced copies offered) and how much it read today; on a public instance, how '
+                      'many people signed up.', commands)
+        self.assertNotIn('what it has done today', commands)
+
+
 class HowTheSyncWorks(unittest.TestCase):
+    def test_the_steps_name_the_sites_it_searches_and_each_way_to_fit(self):
+        # Step 2 named only the subtitles you would see, step 3 only alass; by default it also tries the sites
+        # it searches itself, and checks each one as it is, then one steady shift, then sections, before alass
+        self.assertTrue(explain.SETTINGS['SUBSYNC_EXTRA_SOURCES'][0])
+        for name in ('SUBSYNC_FAST_PATH', 'SUBSYNC_SHIFT_PATH', 'SUBSYNC_SECTIONS'):
+            self.assertEqual(explain.SETTINGS[name][0], 'on', name)
+        self.assertIn('2. It tries the subtitles you would see and those of the sites it searches itself, best match '
+                      "for this release first. 3. Each one is first checked as it is; one that doesn't fit is moved "
+                      'by one steady amount, fitted in sections for another cut, or else re-timed with alass, then '
+                      "each line is snapped to the file's own line.", section('How the sync works'))
+
     def test_the_check_counts_the_lines_that_pair(self):
         # it said 90 % of all lines; the check counts the paired ones and needs a median too
         self.assertEqual(relgate.WINDOW, 1.0)                     # "within a second"
@@ -120,6 +189,8 @@ class HowTheSyncWorks(unittest.TestCase):
 
     def test_the_audio_route_gives_both_ways_to_pass(self):
         # it gave only the "clearly closer" way's numbers; the rule for each part holds for both ways
+        #; the second way's share, like the first's, is of the lines that match speech,
+        # in its setting's text too
         c = constants(REPO / 'subsync' / 'subsync' / 'audiofit.py')
         better = c['BETTER']
         self.assertIn(f"A copy is kept when, on those parts, its typical error is {c['GATE_MEDIAN_MS']} ms or less, at "
@@ -128,10 +199,14 @@ class HowTheSyncWorks(unittest.TestCase):
                       f"{pct(c['GATE_MISS'])} match no speech, and none of those parts is clearly off. A copy that "
                       'misses that is still kept when it is '
                       'clearly closer to the speech than the original (SUBSYNC_AUDIO_BETTER): its typical error is '
-                      f"{better['median_ms']:.0f} ms or less, at least {pct(better['within'])} of its lines are within "
-                      f"{c['WITHIN_MS']} ms of the speech, few lines are unmatched, none of those parts is clearly "
-                      'off, and it moved the lines by at least a second.', section('How the sync works'))
+                      f"{better['median_ms']:.0f} ms or less, at least {pct(better['within'])} of its lines that match "
+                      f"speech start within {c['WITHIN_MS']} ms of it, few lines are unmatched, none of those parts is "
+                      'clearly off, and it moved the lines by at least a second.', section('How the sync works'))
         self.assertEqual(better['min_shift_s'], 1.0)              # "at least a second"
+        self.assertEqual(explain.SETTINGS['SUBSYNC_AUDIO_BETTER_WITHIN'][0], str(better['within']))
+        self.assertIn('"clearly closer": at least this share of the lines that match speech must start within '
+                      f"{c['WITHIN_MS']} ms of it ({better['within']} = {pct(better['within'])}),",
+                      explain.SETTINGS['SUBSYNC_AUDIO_BETTER_WITHIN'][1])
 
 
 class Folder(unittest.TestCase):
