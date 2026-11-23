@@ -122,6 +122,25 @@ class StoredCopiesTest(RecheckHarness, unittest.TestCase):
         checker.join(5)
         self.assertEqual(len(self.fake.requests), before)
 
+    def test_once_the_kept_password_is_refused_stored_copies_are_left_alone(self):
+        # The running service went on checking such a record every day, while after a restart it never did:
+        # stored copies only and no kept password is nothing to check, either way
+        uuid, result = self.sign_up_rd(keep=True)
+        token = result.token
+        checker = self.checker()
+        self.fake.configs[uuid]["password"] = "changed-by-them"
+        self.clock.t += 25 * HOUR
+        self.assertTrue(checker.maybe_start(token))
+        checker.join(5)
+        self.assertEqual(self.record(token)["state"], "password_refused")
+        before = len(self.fake.requests)
+        for _ in range(3):
+            self.clock.t += 25 * HOUR
+            self.assertFalse(checker.maybe_start(token))
+            checker.join(5)
+        self.assertFalse(self.checker().maybe_start(token))            # as after a restart
+        self.assertEqual(len(self.fake.requests), before)
+
     def test_with_a_kept_password_the_daily_check_moves_both_ways(self):
         uuid, result = self.sign_up_rd(keep=True)
         token = result.token

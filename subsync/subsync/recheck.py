@@ -18,13 +18,16 @@ import threading
 import time
 
 from .aiosconfig import PUBLIC_TIMEOUT, UNREACHABLE, AiosError, install_link
-from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, drop_sync,
-                     instance_key, public_api, rebuild, store_only)
+from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, config_fields,
+                     drop_sync, instance_key, public_api, rebuild, store_only)
 
 KINDS = ("sync", "usenet")   # AIOSubtitles' configs on a person's AIOStreams: the sync config and the Usenet config
 # the record fields a rebuild may change (signup.rebuild), copied from its working copy into the record (_apply sets
 # synced_at itself)
 REBUILT = SYNC_FIELDS + USENET_FIELDS + ("usenet", "usenet_why", "usenet_services", "store_only")
+# the record fields naming the configs a check looks at: a refresh that changed any of them while the check ran makes
+# what it saw old news
+LOOKED_AT = ("instance", "main_uuid", "sync_uuid", "usenet_uuid", "store_only")
 
 log = logging.getLogger("subsync.recheck")
 HOUR = 3600
@@ -46,13 +49,28 @@ def _problem(e):
     return ("rebuild" if e.unusable else "error"), e.message
 
 
+def _due(record):
+    """When the record's next check is due: never for stored copies only without a kept password (nothing to check
+    until a refresh, which forgets this), else its next_check (0: now)."""
+    if store_only(record) and not record.get("auto_password"):
+        return float("inf")
+    return record.get("next_check") or 0
+
+
+def _snapshot(record):
+    """What the person's worker runs on, of what a check may change: their state and each of AIOSubtitles' configs'
+    link and id. A check that changes it starts their worker again (on_change)."""
+    return (record.get("state"),) + tuple(record.get(f"{kind}_{name}") for kind in KINDS for name in ("link", "uuid"))
+
+
 class Checker:
     def __init__(self, settings, users, on_change=None, api_factory=public_api, clock=time.time,
                  timeout=PUBLIC_TIMEOUT):
         self.s, self.users, self.on_change = settings, users, on_change
         self.api_factory, self.clock, self.timeout = api_factory, clock, timeout
         self.lock = threading.Lock()
-        self.next = {}           # user id -> when their next check is due (read from their record once)
+        self.next = {}           # user id -> when their next check is due (_due: read from their record once, then
+                                 # set by each check)
         self.running = set()     # user ids being checked now
         self.instances = {}      # AIOStreams address -> its lock: one check at a time per AIOStreams
         self.threads = []
@@ -71,9 +89,7 @@ class Checker:
             record = self.users.open(token)
             if record is None:
                 return False
-            # stored copies only and no kept password: nothing to check until a refresh (which forgets this)
-            due = float("inf") if store_only(record) and not record.get("auto_password") else \
-                record.get("next_check") or 0
+            due = _due(record)
             with self.lock:
                 self.next[uid] = due
         if self.clock() < due:
@@ -104,6 +120,8 @@ class Checker:
             self.check(token)
         except Exception as e:   # never let a check take anything down
             log.warning("a check failed: %s", type(e).__name__)
+            with self.lock:      # tried again a period later, like a check that ran, not at their next request
+                self.next[uid] = max(self.next.get(uid, 0), self.clock() + self.s.recheck_hours * HOUR)
         finally:
             with self.lock:
                 self.running.discard(uid)
@@ -118,27 +136,26 @@ class Checker:
         changed, drop = False, []
         with self.users.locked(token):
             current = self.users.open(token)
-            if current is None or any(current.get(k) != record.get(k) for k in (
-                    "instance", "main_uuid", "sync_uuid", "usenet_uuid", "store_only")):
+            if current is None or any(current.get(k) != record.get(k) for k in LOOKED_AT):
                 # deleted, or a refresh came in meanwhile: what this check saw is about the old configs
                 state = (current or {}).get("state")
                 fields = found.get("fields") or {}
                 for kind in KINDS:             # made by this check, not used: removed
-                    made = fields.get(f"{kind}_uuid")
-                    if made and made != record.get(f"{kind}_uuid"):
-                        drop.append((made, fields.get(f"{kind}_link"), fields.get(f"{kind}_password")))
+                    made = config_fields(fields, kind)
+                    if made[0] and made[0] != record.get(f"{kind}_uuid"):
+                        drop.append(made)
             else:
-                before = (current.get("state"),) + tuple(current.get(f"{k}_{f}") for k in KINDS for f in ("link", "uuid"))
+                before = _snapshot(current)
                 self._apply(current, found)
                 state = current.get("state")
-                changed = (state,) + tuple(current.get(f"{k}_{f}") for k in KINDS for f in ("link", "uuid")) != before
+                changed = _snapshot(current) != before
                 self.users.update(token, current)
                 drop = list(found.get("drop") or [])
                 if store_only(current):   # the configs of a config that became Real-Debrid-only, once the record says so
                     drop += [d for d in found.get("dropped") or [] if d]
             if current is not None:
                 with self.lock:
-                    self.next[self.users.user_id(token)] = current.get("next_check") or 0
+                    self.next[self.users.user_id(token)] = _due(current)
         for fields in drop:   # nothing refers to them any more: removed without holding up the person's own actions
             drop_sync(self.api_factory(record["instance"], self.timeout), fields)
         if current is None:
@@ -226,6 +243,8 @@ class Checker:
         record.pop("main_gone_since", None)
         if record.get("state") == "main_gone" and found["main"] is True:
             record["state"] = None
+        if kind is not None:     # the rebuild failed: AIOSubtitles keeps its configs, each at the link that opens it
+            self._repair_links(record, found)
         if kind == "error":      # an error answer passes; counted as "couldn't reach" is, never action needed
             record["errors"] = (record.get("errors") or 0) + 1
             if record["errors"] >= UNREACHABLE_CHECKS and not record.get("state"):

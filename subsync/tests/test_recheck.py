@@ -395,6 +395,74 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
         self.assertEqual(self.record(token)["state_detail"],
                          "AIOSubtitles can't find any file it could read through your AIOStreams.")
 
+    def test_aiostreams_reason_is_one_short_line_in_the_log_and_the_record(self):
+        # A person's own AIOStreams-like server refused the rebuilt config with line breaks and 200,000
+        # characters: a line of its own in the operator's log, and a record and settings note of that size
+        from subsync.aiosconfig import ERROR_EXCERPT
+        uuid, token = self.sign_up(keep=True)
+        self.fake.configs[uuid]["config"]["presets"].insert(0, dict(COMET))
+        forged = "x\r\n2026-11-19 00:00:00,000 ERROR subsync.public forged\u2028line\x1b[31m " + "A" * 200_000
+        self.fake.refusal = lambda config: forged
+        with self.assertLogs("subsync.recheck", "WARNING") as logged:
+            self.assertEqual(self.checker().check(token), "config_refused")
+        detail = self.record(token)["state_detail"]
+        self.assertTrue(detail.startswith("x 2026-11-19 00:00:00,000 ERROR subsync.public forged line [31m AAA"), detail)
+        self.assertTrue(detail.endswith("A…"))
+        self.assertEqual(len(detail), ERROR_EXCERPT)
+        self.assertEqual(logged.output, ['WARNING:subsync.recheck:AIOStreams refused the config AIOSubtitles made at a '
+                                         f'daily check: "{detail}"'])
+        self.assertNotRegex(logged.output[0], "[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+    def test_a_changed_link_is_repaired_whatever_the_rebuild_found(self):
+        # AIOStreams gave AIOSubtitles' config a new link while the rebuild of the same check failed; the
+        # record kept the old link, which may no longer open, while the state's text says AIOSubtitles keeps using the
+        # config it made before
+        for state in ("config_refused", "cannot_rebuild", "password_refused", None):   # None: a first error answer
+            with self.subTest(state=state):
+                self.fake.__dict__.pop("refusal", None)       # each case on its own: nothing refused before it
+                self.fake.refuse_save_for.clear()
+                uuid, token = self.sign_up(keep=True)
+                sync_uuid = self.record(token)["sync_uuid"]
+                self.fake.encrypted[sync_uuid] = "NEWENCRYPTED"
+                main = self.fake.configs[uuid]
+                if state == "cannot_rebuild":
+                    main["config"]["services"] = []
+                elif state == "password_refused":
+                    main["password"] = "changed-by-them"
+                else:                                   # a change the rebuild follows, whose save fails
+                    main["config"]["presets"].insert(0, dict(COMET))
+                    if state == "config_refused":
+                        self.fake.refusal = lambda config: "Invalid preset options"
+                    else:
+                        self.fake.refuse_save_for.add(sync_uuid)
+                self.changed.clear()
+                self.assertEqual(self.checker().check(token), state)
+                self.assertEqual(self.record(token)["sync_link"],
+                                 f"{INSTANCE}/stremio/{sync_uuid}/NEWENCRYPTED/manifest.json")
+                self.assertEqual(self.changed, [token])       # the person's worker starts again with the new link
+
+    def test_a_check_that_fails_is_tried_again_a_period_later_not_at_each_request(self):
+        # A check that raised left its due time in the past, so each of the person's requests started another
+        # full check of their AIOStreams
+        from subsync import recheck
+        uuid, token = self.sign_up(keep=True)
+        checker = self.checker()
+        self.clock.t += 24 * HOUR
+        with mock.patch.object(recheck, "rebuild", side_effect=KeyError("a config of an odd shape")), \
+                self.assertLogs("subsync.recheck", "WARNING") as logged:
+            self.assertTrue(checker.maybe_start(token))
+            checker.join(5)
+            before = len(self.fake.requests)
+            for _ in range(3):
+                self.assertFalse(checker.maybe_start(token))
+                checker.join(5)
+        self.assertEqual(logged.output, ["WARNING:subsync.recheck:a check failed: KeyError"])
+        self.assertEqual(len(self.fake.requests), before)
+        self.clock.t += 24 * HOUR
+        self.assertTrue(checker.maybe_start(token))                    # a period later: checked again
+        checker.join(5)
+        self.assertEqual(self.record(token)["checked_at"], self.clock.t)
+
     def test_the_kept_password_is_never_in_clear_on_disk_or_in_the_log(self):
         uuid, token = self.sign_up(keep=True)
         self.checker().check(token)

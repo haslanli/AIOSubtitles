@@ -328,16 +328,16 @@ SYNC_FIELDS = ("sync_uuid", "sync_link", "sync_password", "sync_fp")
 USENET_FIELDS = ("usenet_uuid", "usenet_link", "usenet_password", "usenet_fp", "usenet_subtitles")
 
 
-def _config_fields(record, kind):
+def config_fields(record, kind):
     """(id, link, password) of one of AIOSubtitles' configs in a record: `kind` "sync" (the sync config) or "usenet"
     (the Usenet config)."""
     return tuple(record.get(f"{kind}_{name}") for name in ("uuid", "link", "password"))
 
 
 def _take_config(record, kind):
-    """One of AIOSubtitles' configs (`kind` as _config_fields) taken out of the record: its (id, link, password) as they
+    """One of AIOSubtitles' configs (`kind` as config_fields) taken out of the record: its (id, link, password) as they
     were, or None when it had none. The caller removes that config once the record is saved."""
-    fields = _config_fields(record, kind)
+    fields = config_fields(record, kind)
     for name in SYNC_FIELDS if kind == "sync" else USENET_FIELDS:
         record.pop(name, None)
     return fields if fields[0] else None
@@ -753,9 +753,9 @@ def _refresh(settings, users, token, form, api_factory, timeout):
                 if usenet_fields[0] != record.get("usenet_uuid"):
                     made.append(usenet_fields)
             if record.get("sync_uuid") and (not has_sync or moved):
-                old.append((record["instance"], _config_fields(record, "sync")))
+                old.append((record["instance"], config_fields(record, "sync")))
             if record.get("usenet_uuid") and (usenet is None or moved):
-                old.append((record["instance"], _config_fields(record, "usenet")))
+                old.append((record["instance"], config_fields(record, "usenet")))
             record["instance"], record["main_uuid"] = instance, main_uuid
             changes, added, manual = [], False, False
             if form.get("add_addon") == "on":
@@ -873,7 +873,7 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
         removed = True
         for kind in ("sync", "usenet"):          # no sync config for stored copies only or Usenet only
             if record.get(f"{kind}_uuid"):
-                removed = drop_sync(api, _config_fields(record, kind)) and removed
+                removed = drop_sync(api, config_fields(record, kind)) and removed
         outcome["sync_removed"] = removed
         if viewer is not None:
             manifest_url = f"{settings.public_base}/u/{token}/manifest.json"

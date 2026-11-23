@@ -476,7 +476,8 @@ PUBLIC_TIMEOUT = 30          # public mode's longest wait for any call, from its
                              # the settings page and the daily check (signup.public_api)
 MAX_ANSWER = 16 * 1024 * 1024   # the largest AIOStreams answer read (a config, a stream or subtitle listing)
 MAX_REFUSAL = 64 * 1024      # the most of an alias lookup's refusal read
-ERROR_EXCERPT = 300          # bytes of an error answer that isn't JSON kept as its message
+ERROR_EXCERPT = 300          # the most kept of AIOStreams' own words for an error: bytes of an answer that isn't JSON,
+                             # characters of its message (_one_line)
 READ_SIZE = 64 * 1024        # an answer is read this much at a time, at most
 
 BAD_ANSWER = 'BAD_ANSWER'    # AiosError.code: an answer AIOStreams doesn't give (not JSON of the call's shape, too
@@ -565,6 +566,19 @@ def _plain(code, message, making=False, status=None):
                     'later.')
         return LIMITED
     return message or str(code or '') or 'AIOStreams gave an error without a message.'
+
+
+_BREAKS = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]+')   # control characters and line separators
+
+
+def _one_line(words):
+    """AIOStreams' own words for an error as one short line: each run of control characters or line
+    separators one space, at most ERROR_EXCERPT characters, so quoting them in the log, a record or a page never
+    starts a line of its own nor carries megabytes. None stays None."""
+    if words is None:
+        return None
+    words = _BREAKS.sub(' ', words).strip()
+    return words if len(words) <= ERROR_EXCERPT else words[:ERROR_EXCERPT - 1] + '…'
 
 
 def _loads(data):
@@ -739,8 +753,8 @@ class AiosApi:
         if not isinstance(err, dict):
             return self._bad_answer(status)
         said, detail = err.get('message'), body.get('detail')
-        said = said if isinstance(said, str) else None
-        words = said or (detail if isinstance(detail, str) else None)
+        said = _one_line(said) if isinstance(said, str) else None
+        words = said or (_one_line(detail) if isinstance(detail, str) else None)
         message = _plain(err.get('code'), words, making, status)
         return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=said, reason=message,
                          kind=_reading(err.get('code'), words, status))
