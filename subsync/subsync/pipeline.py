@@ -1,15 +1,36 @@
-"""One (file, subtitle) sync: reference, alass sub-to-sub, per-line snap, the gate; below the bar the original is kept.
+"""One (file, subtitle) judged and, where it can be, re-timed: against the release's own subtitle track when the file
+has one, else against its speech; below the bar the original is kept. The settings that change a verdict come in one
+settings.Rules.
 
-Reference, cheapest first: the release's own text track from the Matroska Cues (any language, not
-forced/signs/songs, with at least half as many cues as the candidate has dialogue lines), else audio windows.
-On the Cues route alass gets the candidate as a plain SRT of its parsed lines' timings (it refuses WebVTT and SRT with
-a malformed index line), then each line can snap to its release line (refine.py). The snapped copy
-must reach `snap_within` (95 %) within 200 ms, since snapping makes the gate read high; the alass copy needs the usual
-90 %. The more exact copy that passes is offered.
-A copy that misses those bars is still offered when it is clearly better than the original (relgate.clearly_better;
-`better`, off unless given); the audio route has its own such rule (AudioFit, `audio_better`).
-Outcomes: in_sync (the original passes as it is: nothing is published), synced (the re-timed copy passes and moved
-lines by more than 100 ms), keep_original (anything else).
+The entry points, in the order the worker calls them for a download:
+- check_original, the fast path: the original as it is against the file's track (a gate, no alass);
+- shift_sync, the shift path: the subtitle moved by one steady offset (shift.best_shift), in milliseconds;
+- sync_subtitle: the original as it is, then (rules.sections) the sectioned fit for another cut (sections.py), then
+  alass sub-to-sub (given the lines' timings as a plain SRT: it refuses WebVTT and SRT with a malformed index line);
+  with no reference track, and none the subtitle is merely too long for (own_track), the audio route
+  (audiofit.fit_tracks).
+For a file with no subtitle track, before the audio route has judged anything: anchored_guess (another language's
+subtitle shifted onto the main language's guess) and consensus_guess (the downloads that agree with each other, when
+the main language's guess by name sits seconds off them).
+
+The reference (choose_reference): a text track, typesetting left out (text_references), with at least MIN_TEXT_SHARE
+as many lines as the subtitle has dialogue lines; with rules.image_ref, else an image track's sure starts (imageref).
+A track in the title's original language comes first (origlang.py), then the subtitle's own language (a plain track
+before an SDH or dub one; of several, the one agreeing with the file's other tracks: agreeing), then a fallback
+language (rules.fallback_reference), then the longest. A track in another language than the subtitle's is a cross
+reference (is_cross), with its own rules.
+
+The judging of a re-timed copy (judge_copy), re-centred on the reference first (recentre): it passes the gate (relgate:
+90 % of its lines within 200 ms), or snapped to the release's lines (refine.snap) by rules.snap_within (95 %, since
+snapping makes the gate read high), or else as clearly better than the original (rules.better,
+relgate.clearly_better), across languages instead by a sound alignment (relgate.aligned). A sectioned copy is checked
+section by section too (section_checks). With rules.text_pairing a pass is confirmed by the lines' words (TextCheck,
+textpair.py D2), read only where timing hasn't settled the language (settles, D1) or for a "clearly better"
+pass. The audio route has its own rules (AudioFit; rules.audio_better).
+
+Outcomes: in_sync (the original passes as it is; its body is then its magnet copy when snapping its lines onto the
+release's own moves a line and still passes, which the worker can list), synced (the re-timed copy passes and moved
+lines by more than MIN_SHIFT_S), keep_original (anything else, the reason saying why).
 """
 import bisect
 import contextlib
