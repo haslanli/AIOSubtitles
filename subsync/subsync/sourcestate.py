@@ -11,6 +11,7 @@ public mode it also counts per person, so that near a limit the people who alrea
 for the best candidates.
 """
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -104,6 +105,7 @@ class Ledger:
         self.keyed = dict(keyed or {})       # source -> has a key (picks the limits that apply)
         self.lock = threading.Lock()
         self.swept = 0.0
+        self.closed = False
         if path:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.db = sqlite3.connect(path or ":memory:", check_same_thread=False, isolation_level=None)
@@ -116,7 +118,10 @@ class Ledger:
                         " PRIMARY KEY (source, kind, span, start, who))")
 
     def close(self):
+        """At the service's stop. A job still running then (Worker.stop doesn't wait for it) finds every window full
+        and asks the sites nothing more, rather than failing on a closed database."""
         with self.lock:
+            self.closed = True
             self.db.close()
 
     def limits(self, source, kind):
@@ -150,7 +155,9 @@ class Ledger:
 
     def _add(self, source, kind, n, who, wins):
         """(lock held) `n` added to each window's row, and the person's, in one transaction, with the sweep when it is
-        due."""
+        due; nothing once the ledger is closed."""
+        if self.closed:
+            return
         rows = [(source, kind, span, start, w, n) for span, _, start in wins for w in (("", who) if who else ("",))]
         now = self.clock()
         sweep = now - self.swept > LEDGER_SWEEP_S
@@ -179,7 +186,9 @@ class Ledger:
             return self._n(source, kind, span, start, who)
 
     def _n(self, source, kind, span, start, who=""):
-        """(lock held) The count of one window, the person's with `who`."""
+        """(lock held) The count of one window, the person's with `who`; every window of a closed ledger is full."""
+        if self.closed:
+            return math.inf
         row = self.db.execute("SELECT n FROM counts WHERE source=? AND kind=? AND span=? AND start=? AND who=?",
                               (source, kind, span, start, who or "")).fetchone()
         return row[0] if row else 0
@@ -198,8 +207,9 @@ class Ledger:
             if not who:
                 return True
             with self.lock:
-                people = self.db.execute("SELECT COUNT(*) FROM counts WHERE source=? AND kind=? AND span=? AND start=? "
-                                         "AND who != ''", (source, kind, span, start)).fetchone()[0]
+                people = 0 if self.closed else self.db.execute(
+                    "SELECT COUNT(*) FROM counts WHERE source=? AND kind=? AND span=? AND start=? AND who != ''",
+                    (source, kind, span, start)).fetchone()[0]
             share = max(limit / max(people, 1), srclimits.MIN_SHARE * limit)
             if self._used(source, kind, span, start, who) >= share:
                 return True

@@ -2101,6 +2101,7 @@ class StopTest(unittest.TestCase):
             self.assertEqual(servers[0].host, "0.0.0.0")          # SUBSYNC_BIND's default
             worker = servers[0].app.worker
             self.assertIn(pick.alias, worker.pickable)
+            self.assertTrue(worker.extra.ledger.closed)          # so is the built-in sources' ledger
             for lane in (worker, worker.audio_worker):
                 lane.join(2)
                 self.assertFalse(lane.is_alive())

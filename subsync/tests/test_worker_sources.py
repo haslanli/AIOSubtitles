@@ -142,8 +142,7 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(len(by("tsdb")), 7)
 
     def test_near_the_limit_only_the_likeliest_and_at_the_limit_none(self):
-        ledger = Ledger(keyed={"subdl": True})
-        closed_after(self, ledger.db)                        # its database in memory
+        ledger = closed_after(self, Ledger(keyed={"subdl": True}))
         ledger.count("subdl", "download", 200, who="me")
         ledger.count("subdl", "download", 45, who="other")
         kept = self.worker(ledger, who="me")._within_limits(self.tries(), "a.mkv", None, None)
@@ -151,6 +150,20 @@ class LimitsTest(unittest.TestCase):
         ledger.count("subdl", "download", 55)
         kept = self.worker(ledger, who="me")._within_limits(self.tries(), "a.mkv", None, None)
         self.assertFalse([c for _, c in kept if c["source"] == "subdl"])
+
+    def test_after_the_stop_a_running_job_leaves_out_the_sites_with_limits(self):
+        # The stop closes the sources' ledger (Pool.close, the self-hosted stop) without waiting for a running
+        # job; the ledger's next call then failed the job ("Cannot operate on a closed database"); now every window of
+        # a closed ledger is full: nothing more is asked of SubDL (its downloads) or TheSubtitleDB, and nothing fails
+        ledger = Ledger(keyed={"subdl": True})
+        ledger.close()
+        kept = self.worker(ledger, who="me")._within_limits(self.tries(), "a.mkv", None, None)
+        self.assertEqual([c["source"] for _, c in kept], ["subsource"] * srclimits.PER_FILE_DOWNLOADS["subsource"])
+        self.assertTrue(ledger.exhausted("subdl", "download"))
+        self.assertTrue(ledger.tight("subdl", "download", who="me"))
+        self.assertFalse(ledger.take("subdl", "download", who="me"))
+        ledger.count("subdl", "download", 5)
+        self.assertTrue(ledger.take("subsource", "request"))          # no published limit (no key): never counted
 
     def test_a_built_in_subtitle_first_in_the_list_is_not_the_viewers_first(self):
         tries = self.tries()
@@ -191,8 +204,7 @@ class FetchTest(unittest.TestCase):
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def test_a_download_carries_the_sources_key_and_is_counted(self):
-        ledger = Ledger(keyed={"subsource": True, "subdl": True})
-        closed_after(self, ledger.db)                        # its database in memory
+        ledger = closed_after(self, Ledger(keyed={"subsource": True, "subdl": True}))
         w = Worker(Settings({"SUBSYNC_DATA": self.dir}), closed_after(self, Store(self.dir)), FakeAios(), None,
                    extra=FakeExtra(ledger=ledger))
         w.who = "me"
@@ -220,6 +232,19 @@ class FetchTest(unittest.TestCase):
         self.assertIn("INFO:subsync.worker:subtitle fetch movie/tt1 rus rank 1: no room left in subdl's limit",
                       logs.output)
 
+    def test_a_download_after_the_stop_closed_the_ledger_is_not_made(self):
+        # It failed on the closed database ("subtitle fetch failed ... ProgrammingError"); now it has no room
+        ledger = Ledger(keyed={"subdl": True})
+        ledger.close()
+        w = Worker(Settings({"SUBSYNC_DATA": self.dir}), closed_after(self, Store(self.dir)), FakeAios(), None,
+                   extra=FakeExtra(ledger=ledger))
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            got = w._fetch_one(Job("movie", "tt1"), "rus", 0, {"id": "d-0", "source": "subdl", "url": self.url + "/0"})
+        self.assertIsNone(got)
+        self.assertEqual(self.seen, [])
+        self.assertEqual(logs.output,
+                         ["INFO:subsync.worker:subtitle fetch movie/tt1 rus rank 0: no room left in subdl's limit"])
+
 
 class RestoredOriginalTest(unittest.TestCase):
     """An original known only from the store (after a restart: the lists are memory only, the store keeps its
@@ -233,8 +258,7 @@ class RestoredOriginalTest(unittest.TestCase):
         self.addCleanup(guard.stop)
 
     def test_a_stored_original_not_listed_now_is_downloaded_with_its_sources_key_and_counted(self):
-        ledger = Ledger(keyed={"subsource": True})
-        closed_after(self, ledger.db)
+        ledger = closed_after(self, Ledger(keyed={"subsource": True}))
         store = closed_after(self, Store(os.path.join(self.dir, "store")))
         job = Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 5})
         url = "https://api.subsource.net/api/v1/subtitles/123/download"
