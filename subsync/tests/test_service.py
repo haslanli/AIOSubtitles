@@ -442,6 +442,46 @@ class StoreTest(unittest.TestCase):
                              ["BEGIN", "COMMIT"] * 3)
             self.assertEqual(st.offers(FILE, ["eng"]), [])
 
+    def test_a_results_values_after_its_reason_are_named(self):
+        # Put took 13 values by place, and callers passed 11, so two of them (route and detail, the format
+        # and the copy) could trade places and be stored wrongly without an error
+        with TempDir() as d, Store(d) as st:
+            with self.assertRaises(TypeError):
+                st.put(FILE, SHA_A, "eng", 0, "synced", "why", "cues", {}, "srt", "1\n00:00:01,000 --> 00:00:02,000\nx\n")
+            self.assertIsNone(st.get(result_key(FILE, "eng", SHA_A)))
+            key = st.put(FILE, SHA_A, "eng", 0, "in_sync", "why", route="cues", detail={"n": 1}, fmt="srt")
+            self.assertEqual({k: st.get(key)[k] for k in ("outcome", "reason", "route", "detail", "fmt")},
+                             {"outcome": "in_sync", "reason": "why", "route": "cues", "detail": {"n": 1}, "fmt": "srt"})
+
+    def test_a_transaction_that_fails_leaves_none_of_its_statements(self):
+        # The store's transaction (all of its statements or none) never failed in a test
+        with TempDir() as d, Store(d, clock=Clock()) as st:
+            with self.assertRaises(ValueError), st._tx():
+                st.db.execute("INSERT INTO aliases VALUES ('a', ?, 0)", (FILE,))
+                raise ValueError("stopped half-way")
+            self.assertFalse(st.db.in_transaction)
+            self.assertIsNone(st.resolve("a"))
+            with self.assertRaises(sqlite3.IntegrityError), st._tx():   # a statement fails after one went through
+                st.db.execute("INSERT INTO aliases VALUES ('b', ?, 0)", (FILE,))
+                st.db.execute("INSERT INTO aliases VALUES ('b', ?, 0)", (FILE,))
+            self.assertFalse(st.db.in_transaction)
+            self.assertIsNone(st.resolve("b"))
+            with self.assertRaises(ValueError), st._tx():   # SQLite rolled it back itself (a full disk): its error
+                st.db.execute("INSERT INTO aliases VALUES ('c', ?, 0)", (FILE,))   # is raised, not ROLLBACK's
+                st.db.execute("ROLLBACK")
+                raise ValueError("disk full")
+            self.assertIsNone(st.resolve("c"))
+            with self.assertRaises(ValueError), st._tx():   # one inside another is part of it
+                st.judged_put(FILE, ["eng"], "r1")
+                raise ValueError("stopped after the inner one")
+            self.assertIsNone(st.judged_all(FILE, ["eng"], "r1", 0))
+            other = threading.Thread(target=st.alias, args=("d", FILE))   # the lock is free, the store still writes
+            other.start()
+            other.join(10)
+            self.assertFalse(other.is_alive())
+            st.judged_put(FILE, ["eng"], "r1")
+            self.assertEqual((st.resolve("d"), st.judged_all(FILE, ["eng"], "r1", 0)), (FILE, True))
+
     def test_the_store_commits_without_syncing_and_closes(self):
         # Every commit of the store (a listing's served copies, each range read's bytes) synced the disk;
         # the people's records keep doing so. The store couldn't be closed

@@ -554,10 +554,11 @@ class LanguageSyncStepsTest(unittest.TestCase):
     def stored(self, cid, rank, outcome, reason, within=0.9):
         """A result of the subtitle's bytes stored under the current rule; its key."""
         sha = hashlib.sha256(self.raw(cid)).hexdigest()
-        return self.store.put("f-1", sha, "eng", rank, outcome, reason, "cues",
-                              {"rule": self.w.s.rule_id, "gate_synced": {"within200": within, "median_ms": 40},
-                               "gate_original": {"within200": within, "median_ms": 40}},
-                              "srt", self.texts[f"http://subs.test/{cid}.srt"] if outcome == "synced" else None, cid)
+        return self.store.put("f-1", sha, "eng", rank, outcome, reason, route="cues",
+                              detail={"rule": self.w.s.rule_id, "gate_synced": {"within200": within, "median_ms": 40},
+                                      "gate_original": {"within200": within, "median_ms": 40}},
+                              fmt="srt", body=self.texts[f"http://subs.test/{cid}.srt"] if outcome == "synced" else None,
+                              candidate_id=cid)
 
     def test_the_same_subtitle_from_another_source_is_judged_once(self):
         sync = self.steps()
@@ -721,7 +722,8 @@ class AlassAfterOtherPassesTest(unittest.TestCase):
                 detail = dict({k: v for k, v in stored.items() if k not in ("outcome", "reason", "route")},
                               rule=self.w.s.rule_id)
                 self.store.put(file_key, hashlib.sha256(text.encode()).hexdigest(), "eng", 0, "synced",
-                               stored["reason"], "cues", detail, "srt", text, "os-a", offer=True, original=text)
+                               stored["reason"], route="cues", detail=detail, fmt="srt", body=text, candidate_id="os-a",
+                               offer=True, original=text)
                 self.assertEqual(self.judge(file_key), fitted)
                 self.assertEqual([r["candidate_id"] for r in self.store.offers(file_key, ["eng"], {"eng": 3})],
                                  ["os-a"])                                     # the stored pass is still offered

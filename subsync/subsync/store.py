@@ -311,10 +311,11 @@ class Store:
             return r
         return None
 
-    def put(self, file_key, sub_sha, lang, rank, outcome, reason=None, route=None, detail=None, fmt=None, body=None,
+    def put(self, file_key, sub_sha, lang, rank, outcome, reason=None, *, route=None, detail=None, fmt=None, body=None,
             candidate_id=None, offer=True, original=None):
         """offer=False (best fit): the result is stored but what is offered is left to set_offers. Public mode keeps
-        the copy's recipe from `original` (the original's text) instead of `body`; with no recipe it isn't offered."""
+        the copy's recipe from `original` (the original's text) instead of `body`; with no recipe it isn't offered.
+        What follows the reason is named at each call, so no two of its values can trade places unseen."""
         key = result_key(file_key, lang, sub_sha)
         now = self.clock()
         content = None

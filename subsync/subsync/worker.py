@@ -2278,8 +2278,8 @@ class LanguageSync:
             detail = dict(self._detail_base(e), language={"verdict": langcheck.FAIL, "words": m["words"],
                                                           "script": m["script"],
                                                           "common": {c: v for c, v in m["common"].items() if v}})
-            self.store.put(self.file_key, e["sha"], lang, e["rank"], "keep_original", self.not_language, None, detail,
-                           self._ext(e), None, e["cand"]["id"], offer=not self.best_fit)
+            self.store.put(self.file_key, e["sha"], lang, e["rank"], "keep_original", self.not_language, detail=detail,
+                           fmt=self._ext(e), candidate_id=e["cand"]["id"], offer=not self.best_fit)
         log.info("sync %s %s rank %d: keep_original (%s)", self.job.label, lang, e["rank"], self.not_language)
         return True
 
@@ -2412,9 +2412,10 @@ class LanguageSync:
         if outcome == "in_sync" and (e["rank"] > 0 or self.best_fit) and self.s.list_in_sync:
             text = self._text(e)   # stored before the switch was on: list it now, unchanged
             self.store.put(self.file_key, e["sha"], lang, e["rank"], "synced",
-                           f"in sync as it is (viewer's #{e['rank'] + 1}): listed unchanged", got.get("route"),
-                           dict(got.get("detail") or {}, unchanged=True, stacked=self._stacked(e)),
-                           self._ext(e), text, e["cand"]["id"], offer=not self.best_fit, original=text)
+                           f"in sync as it is (viewer's #{e['rank'] + 1}): listed unchanged", route=got.get("route"),
+                           detail=dict(got.get("detail") or {}, unchanged=True, stacked=self._stacked(e)),
+                           fmt=self._ext(e), body=text, candidate_id=e["cand"]["id"], offer=not self.best_fit,
+                           original=text)
             outcome = "synced"
         ok = outcome in ("synced", "in_sync")
         facts = dict(got.get("detail") or {}, outcome=got["outcome"], reason=got.get("reason"))   # gates in the detail
@@ -2513,9 +2514,9 @@ class LanguageSync:
         detail["seconds"] = round(time.time() - t0, 2)
         detail.update(self._detail_base(e))
         detail["stacked"] = self._stacked(e)
-        key = self.store.put(self.file_key, e["sha"], lang, e["rank"], r["outcome"], r.get("reason"), r.get("route"),
-                             detail, self._ext(e), r.get("body"), e["cand"]["id"], offer=not self.best_fit,
-                             original=self._text(e))
+        key = self.store.put(self.file_key, e["sha"], lang, e["rank"], r["outcome"], r.get("reason"),
+                             route=r.get("route"), detail=detail, fmt=self._ext(e), body=r.get("body"),
+                             candidate_id=e["cand"]["id"], offer=not self.best_fit, original=self._text(e))
         log.info("sync %s %s rank %d: %s (%s)", self.job.label, lang, e["rank"], r["outcome"], r.get("reason"))
         if pipeline.settles(r, lang):
             self.settled = True
