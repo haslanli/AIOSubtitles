@@ -20,8 +20,9 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads, local_network_only,  # noqa: E402
-                     RangeServer, start_server, stop_server, TempDir, traced_memory, watch_the_log)
+from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads,  # noqa: E402
+                     HAVE_CRYPTOGRAPHY, local_network_only, NEEDS, RangeServer, start_server, stop_server, TempDir,
+                     traced_memory, watch_the_log)
 from subsync import ALGO_VERSION  # noqa: E402
 from subsync.addon import App, file_id, serve, token  # noqa: E402
 from subsync.settings import Settings  # noqa: E402
@@ -483,8 +484,7 @@ class StoreTest(unittest.TestCase):
 
     def test_the_store_commits_without_syncing_and_closes(self):
         # Every commit of the store (a listing's served copies, each range read's bytes) synced the disk;
-        # the people's records keep doing so. The store couldn't be closed
-        from subsync.users import Users
+        # the people's records keep doing so (below). The store couldn't be closed
         with TempDir() as d:
             with Store(d) as st:
                 self.assertEqual(st.db.execute("PRAGMA synchronous").fetchone()[0], 1)   # NORMAL
@@ -494,6 +494,12 @@ class StoreTest(unittest.TestCase):
             again.close()
             with self.assertRaises(sqlite3.ProgrammingError):
                 again.day_count("read")
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_the_peoples_records_keep_syncing_each_commit(self):
+        #'s other half, on its own: the people's records need the cryptography package
+        from subsync.users import Users
+        with TempDir() as d:
             users = Users(os.path.join(d, "users.sqlite3"), b"s" * 32)
             self.addCleanup(users.close)
             self.assertEqual(users.db.execute("PRAGMA synchronous").fetchone()[0], 2)   # FULL
@@ -2793,7 +2799,7 @@ class VersionTest(unittest.TestCase):
             return f.read().strip()
 
     def test_the_manifest_and_every_user_agent_carry_the_releases_version(self):
-        from subsync import aiosconfig, extra, origlang, reader, signup, version
+        from subsync import aiosconfig, extra, origlang, reader, version
         from subsync.addon import manifest
         release = self.release()
         self.assertRegex(release, r"^\d+\.\d+\.\d+$")
@@ -2802,7 +2808,14 @@ class VersionTest(unittest.TestCase):
         agent = f"AIOSubtitles/{release} ({{}}; +https://github.com/haslanli/AIOSubtitles)"
         self.assertEqual({sources.USER_AGENT, extra.USER_AGENT, origlang.USER_AGENT, reader.USER_AGENT},
                          {agent.format("subsync")})                     # the file reads too ("subsync/1" before)
-        self.assertEqual((signup.USER_AGENT, aiosconfig.UA), (agent.format("public"), agent.format("setup")))
+        self.assertEqual(aiosconfig.UA, agent.format("setup"))
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_the_sign_ups_user_agent_carries_it_too(self):
+        # on its own: public mode's sign-up needs the cryptography package
+        from subsync import signup
+        self.assertEqual(signup.USER_AGENT,
+                         f"AIOSubtitles/{self.release()} (public; +https://github.com/haslanli/AIOSubtitles)")
 
     def test_no_other_module_writes_a_version_or_a_user_agent_of_its_own(self):
         from subsync import version
