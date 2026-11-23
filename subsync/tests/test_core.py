@@ -688,6 +688,25 @@ class AgreeingTrackReferenceTest(unittest.TestCase):
         self.assertEqual(first, 8)                                      # each Spanish track against the 4 others
         self.assertEqual(len(calls), first)
 
+    def test_a_file_with_many_text_tracks_is_compared_within_bounds(self):
+        # Each track of the language was compared with every other plain track (T x (T - 1) relgate calls:
+        # about 2 minutes of CPU for 256 tracks of 1,000 lines); now at most AGREE_CANDIDATES of the language, each
+        # against at most AGREE_OTHERS plain tracks, those with the most lines
+        base = rhythm(120, 12)
+        spanish = [self.track(100 + k, "es", base, 100 + k, keep=0.9) for k in range(12)]
+        french = [self.track(200 + k, "fr", base, 200 + k, keep=0.8) for k in range(80)]
+        compared = []
+        real = pipeline.relgate
+        pipeline.relgate = lambda ref, cand, *a, **kw: compared.append((len(ref), len(cand))) or real(ref, cand, *a, **kw)
+        try:
+            pipeline.choose_reference(FakeIndex(text=spanish + french), 100, "spa")
+        finally:
+            pipeline.relgate = real
+        self.assertEqual(len(compared), pipeline.AGREE_CANDIDATES * pipeline.AGREE_OTHERS)   # 12 x 91 before
+        # the 11 other Spanish tracks (the longest) and the 53 longest French ones: no shorter track is compared
+        lengths = sorted((len(t["cues"]) for t in spanish[1:] + french), reverse=True)
+        self.assertGreaterEqual(min(n for n, _ in compared), lengths[pipeline.AGREE_OTHERS])
+
 
 class TypesettingTrackReferenceTest(unittest.TestCase):
     """A fansub ASS track can hold tens of thousands of typesetting frames (Frieren S01E01's Portuguese track: 55,735 cues

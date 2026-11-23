@@ -21,7 +21,7 @@ import time
 from . import alass as alass_mod
 from . import imageref, imagetext, refine, sections, shift, textpair
 from .audiofit import fit_tracks
-from .langs import lang3, same_language, written
+from .langs import FAMILY, lang3, same_language, written
 from .reader import CapReached
 from .relgate import MIN_PAIRED, TENTHS, WINDOW, WITHIN_SHARE, aligned, clearly_better, relgate
 from .subs import dialogue_ends, dialogue_starts, parse, plain_srt, timing_srt, write_like
@@ -117,21 +117,26 @@ def image_reference(index, track):
 
 AGREE_MARGIN_MS = 50   # a track of the subtitle's language agreeing better than this with the file's other tracks (in
                        # median start offset) is the reference before one with more lines
+# the comparison's bounds, for a file with many text tracks (real ones have 2 to 4 a language, under about 100 in all;
+# 256 tracks of 1,000 lines each compared with every other cost about 2 minutes): at most AGREE_CANDIDATES tracks of
+# the language, each against at most AGREE_OTHERS of the file's other plain tracks, those with the most lines
+AGREE_CANDIDATES = 8
+AGREE_OTHERS = 64
 
 
 def track_agreement(index, track):
     """How far a text track's line starts sit from those of the file's other plain tracks (not forced,
-    not SDH or dub): the median, over the tracks that pair with at least MIN_PAIRED of its lines (relgate), of their
-    median start offset, in ms; None when none does. From the index already in hand: worked out once per file and track
-    and kept on its index."""
+    not SDH or dub; the AGREE_OTHERS with the most lines): the median, over the tracks that pair with at least
+    MIN_PAIRED of its lines (relgate), of their median start offset, in ms; None when none does. From the index already
+    in hand: worked out once per file and track and kept on its index."""
     kept = index.__dict__.setdefault("track_agreement", {}) if hasattr(index, "__dict__") else {}
     key = track["number"]
     if key not in kept:
         mine = [s for s, _ in track["cues"]]
+        others = [t for t in text_references(index) if t["number"] != key and not t["forced"] and not is_secondary(t)]
+        others.sort(key=lambda t: -len(t["cues"]))
         offsets = []
-        for t in text_references(index):
-            if t["number"] == key or t["forced"] or is_secondary(t):
-                continue
+        for t in others[:AGREE_OTHERS]:
             g = relgate([s for s, _ in t["cues"]], mine)
             if g["paired"] >= MIN_PAIRED and "median_ms" in g:
                 offsets.append(g["median_ms"])
@@ -140,9 +145,11 @@ def track_agreement(index, track):
 
 
 def agreeing(index, tracks):
-    """Of several tracks in the subtitle's language (most lines first), the first whose timing agrees with the file's
-    other plain tracks within AGREE_MARGIN_MS of the best agreeing one (Game of Thrones S01E01: es-419, not es-ES, which
-    runs about 167 ms early against English and es-419); the first when none can be compared."""
+    """Of several tracks in the subtitle's language (most lines first; the first AGREE_CANDIDATES of them), the first
+    whose timing agrees with the file's other plain tracks within AGREE_MARGIN_MS of the best agreeing one (Game of
+    Thrones S01E01: es-419, not es-ES, which runs about 167 ms early against English and es-419); the first when none
+    can be compared."""
+    tracks = tracks[:AGREE_CANDIDATES]
     scores = [track_agreement(index, t) for t in tracks]
     known = [v for v in scores if v is not None]
     if not known:
@@ -160,11 +167,12 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
     file's other tracks, else the one with the most lines. With no
     track in the subtitle's language, one in a `fallback` language comes first (Frieren's Russian was checked against a
     Portuguese track, a few lines longer than the English one AutoSync and the scoring use). A language's written forms
-    count as the language (langs.written: a Norwegian subtitle's own track may be tagged nb). The title's
+    count as the language, the subtitle's and the fallback's alike (langs.written: a Norwegian subtitle's own track may
+    be tagged nb). The title's
     original language goes first only `by_original` (a subtitle's timing); without, the track is the subtitle language's
     own, whose line count ranks it (choose.order)."""
     want = written(cand_lang)
-    fallback = {lang3(x) for x in fallback}
+    fallback = {written(x) for x in fallback}
     usable = [t for t in text_references(index) if not t["forced"] and len(t["cues"]) >= MIN_TEXT_SHARE * n_dialogue]
     original = getattr(index, "original_language", None) if by_original else None
     if original:
@@ -192,7 +200,7 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
             own.sort(key=lambda t: -len(t["cues"]))
             return dict(own[0], route="cues")
     if usable:
-        usable.sort(key=lambda t: (written(t["language"]) != want, lang3(t["language"]) not in fallback,
+        usable.sort(key=lambda t: (written(t["language"]) != want, written(t["language"]) not in fallback,
                                    prefer_plain and is_secondary(t), -len(t["cues"])))
         first = usable[0]
         if written(first["language"]) == want:
@@ -215,7 +223,8 @@ def choose_reference(index, n_dialogue, cand_lang, image_ref=False, prefer_plain
             images.append(dict(t, cues=ref["cues"], image=ref["stats"], route="image"))
     if not images:
         return None
-    images.sort(key=lambda t: (written(t["language"]) != want, lang3(t["language"]) not in fallback, -len(t["cues"])))
+    images.sort(key=lambda t: (written(t["language"]) != want, written(t["language"]) not in fallback,
+                               -len(t["cues"])))
     return images[0]
 
 
@@ -382,40 +391,46 @@ WORDS_BETTER_MS = 200.0   # and a pass as "clearly better" than the original
 class TextCheck:
     """D2 for one subtitle against one reference: its lines paired with the track's by their words, worked out once,
     then the confirmation of any timing of it. Off across languages, with text pairing off, and for the languages
-    written without spaces between words (textpair.UNSPACED), so nothing is read for them; on image references
-    only with a recogniser for their language."""
+    written without spaces between words (textpair.UNSPACED,; the Chinese varieties under their own codes too,
+    langs.FAMILY: Cantonese tagged yue is written in Han), so nothing is read for them; on image references only with a
+    recogniser for their language."""
 
     def __init__(self, index, ref, lines, lang, on):
         self.index, self.ref = index, ref
+        own = written(lang)
         self.on = bool(on) and ref.get("route") in ("cues", "image") and not is_cross(ref, lang) \
-            and written(lang) not in textpair.UNSPACED
+            and FAMILY.get(own, own) not in textpair.UNSPACED
         dial = [i for i, l in enumerate(lines) if l["kind"] == "dialogue"]
         self.order = sorted(range(len(dial)), key=lambda j: lines[dial[j]]["s"])
         self.lines = [lines[dial[j]] for j in self.order]
         self.anchors = None
 
-    def shifts(self, may_read):
-        """For the sectioned fit: {dialogue index in time order: the shift its words give} (empty without words)."""
+    def _track(self, may_read):
+        """The track's words (track_words), this subtitle's lines paired with them once (anchors); None when the check
+        is off or there are no words."""
         if not self.on:
-            return {}
+            return None
         track = track_words(self.index, self.ref, may_read)
         if not track:
-            return {}
+            return None
         if self.anchors is None:
             self.anchors = textpair.match(self.lines, track)
+        return track
+
+    def shifts(self, may_read):
+        """For the sectioned fit: {dialogue index in time order: the shift its words give} (empty without words)."""
+        track = self._track(may_read)
+        if track is None:
+            return {}
         return {a["c"][0]: track.lines[a["t"][0]]["s"] - self.lines[a["c"][0]]["s"] for a in self.anchors}
 
     def check(self, timed, limit_ms, may_read, gate=None):
         """The confirmation of `timed` (the subtitle's lines, re-timed, same count and order): None when there are no
         words to check against, else the textpair summary with ok and why. gate: relgate's result for `timed`, whose
         weak tenths the word check weighs."""
-        if not self.on:
+        track = self._track(may_read)
+        if track is None:
             return None
-        track = track_words(self.index, self.ref, may_read)
-        if not track:
-            return None
-        if self.anchors is None:
-            self.anchors = textpair.match(self.lines, track)
         dial = [l for l in timed if l["kind"] == "dialogue"]
         ordered = [dial[j] for j in self.order]
         anchors = [a for a in self.anchors if not any(ordered[i].get("drop") for i in a["c"])]   # lines left out

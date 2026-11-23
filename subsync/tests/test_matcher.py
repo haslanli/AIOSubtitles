@@ -670,6 +670,22 @@ class PipelineWordsTest(unittest.TestCase):
                 ref = pipeline.choose_reference(index, 500, lang)
                 self.assertFalse(pipeline.TextCheck(index, ref, pipeline.parse(text), lang, True).on)
 
+    def test_no_words_are_read_for_a_chinese_variety_under_its_own_code(self):
+        # Cantonese tagged yue (a track's BCP 47 tag yue-Hant too) is written in Han like Chinese, but its code
+        # isn't chi, so up to 120 of the track's lines were read for nothing; Thai, cut into words at its combining
+        # marks, pairs, and keeps its check
+        lines = dialogue(500, 22)
+        text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
+        for track_lang, lang, reads in (("yue", "yue", 0), ("yue-Hant", "yue", 0), ("cmn", "cmn", 0), ("wuu", "wuu", 0),
+                                        ("th", "tha", 1)):
+            with self.subTest(lang=track_lang):
+                index = WordIndex(lines, lang=track_lang)
+                r = pipeline.shift_sync(index, text, lang, text_pairing=True, snap=False, better={})
+                self.assertEqual(r["outcome"], "synced", r.get("reason"))
+                self.assertEqual(len(index.asked), reads)
+                ref = pipeline.choose_reference(index, 500, lang)
+                self.assertEqual(pipeline.TextCheck(index, ref, pipeline.parse(text), lang, True).on, bool(reads))
+
     def test_a_track_in_a_written_form_of_the_language_is_checked_by_its_words(self):
         # A Norwegian subtitle against the file's Norwegian track tagged nb was judged as across languages,
         # with no word check

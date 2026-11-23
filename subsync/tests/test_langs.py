@@ -141,6 +141,24 @@ class WrittenFormsTest(unittest.TestCase):
         self.assertFalse(pipeline.is_cross(ref, "nor"))            # and judged as its own language's, words included
         self.assertTrue(pipeline.is_cross({"language": "yue"}, "chi"))
 
+    def test_a_fallback_language_takes_its_written_forms_too(self):
+        # SUBSYNC_FALLBACK_REFERENCE=nor and a Swedish subtitle on a file with a Norwegian track tagged nb (or
+        # nn) and a longer German one: the Norwegian track is the reference, as a track tagged nor is; so for every
+        # written form (arb for ara, prs for per, zsm for may), on text and image tracks alike
+        from helpers import back_to_back, FakeIndex, pgs_track, realistic
+        from subsync import pipeline
+
+        def text(number, lang, n):
+            return {"number": number, "language": lang, "codec": "S_TEXT/UTF8", "name": "", "forced": False,
+                    "cues": realistic(n, number)}
+        for tag, fallback in (("nb", "nor"), ("nn", "no"), ("nor", "nor"), ("arb", "ara"), ("prs", "per"),
+                              ("zsm", "may")):
+            idx = FakeIndex(text=[text(3, tag, 100), text(4, "de", 120)])
+            self.assertEqual(pipeline.choose_reference(idx, 80, "swe", fallback=(fallback,))["number"], 3, tag)
+            idx = FakeIndex(image=[pgs_track(back_to_back(300, 5), 7, tag), pgs_track(back_to_back(360, 6), 8, "ger")])
+            ref = pipeline.choose_reference(idx, 80, "swe", image_ref=True, fallback=(fallback,))
+            self.assertEqual((ref["route"], ref["number"]), ("image", 7), tag)
+
 
 class DefaultLanguageTest(unittest.TestCase):
     """The language synced when none is chosen is one constant, wherever a default language is written."""
