@@ -59,9 +59,8 @@ class AttributionTest(unittest.TestCase):
 
     def test_each_addons_description_says_what_the_instance_does(self):
         # "or its speech" only while the audio route is on, TMDB's notice while TMDB is used: the public
-        # addon's too, and the self-hosted one no longer says speech with its audio route off
+        # addon's too (below), and the self-hosted one no longer says speech with its audio route off
         from subsync.addon import MANIFEST, manifest
-        from subsync.public import PUBLIC_MANIFEST
         from subsync.settings import Settings
         own = Settings({"SUBSYNC_AUDIO_ROUTE": "off"})
         self.assertEqual(manifest(own)["description"],
@@ -70,6 +69,14 @@ class AttributionTest(unittest.TestCase):
         self.assertEqual(manifest(Settings({"SUBSYNC_AUDIO_ROUTE": "on"}))["description"],
                          "Synced copies of the subtitles a viewer sees, checked against the release's own subtitle "
                          "track or its speech; below the bar the original is kept.")
+        self.assertEqual({k: v for k, v in manifest(own).items() if k != "description"},
+                         {k: v for k, v in MANIFEST.items() if k != "description"})
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_the_public_addons_description_says_what_the_instance_does(self):
+        #'s public half, on its own: public mode needs the cryptography package
+        from subsync.addon import manifest
+        from subsync.public import PUBLIC_MANIFEST
         public = "Synced copies of the subtitles you see, checked against each file's own subtitle track{}; below " \
                  "the bar the original is kept."
         notice = (" AIOSubtitles uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by "
@@ -84,8 +91,6 @@ class AttributionTest(unittest.TestCase):
                 self.assertEqual(made["description"], description)
                 self.assertEqual({k: v for k, v in made.items() if k != "description"},
                                  {k: v for k, v in PUBLIC_MANIFEST.items() if k != "description"})
-        self.assertEqual({k: v for k, v in manifest(own).items() if k != "description"},
-                         {k: v for k, v in MANIFEST.items() if k != "description"})
 
 
 class PrivacyTest(unittest.TestCase):

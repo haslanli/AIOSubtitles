@@ -3,7 +3,7 @@ Matroska tracks use, the terminologic spellings, TMDB's own codes, and the langu
 when a title's original language is compared with a file's tracks."""
 import unittest
 
-import helpers  # noqa: F401  (first: it puts the package on the import path)
+from helpers import HAVE_CRYPTOGRAPHY, NEEDS  # first: it puts the package on the import path
 from subsync import langs  # noqa: E402
 
 # the 32 two-letter codes the table knew before it was completed: each must map exactly as before
@@ -164,15 +164,20 @@ class DefaultLanguageTest(unittest.TestCase):
     """The language synced when none is chosen is one constant, wherever a default language is written."""
 
     def test_every_default_language_is_the_one_constant(self):
-        from subsync import explain, signup, ui
+        from subsync import explain, ui
         from subsync.settings import Settings
         self.assertEqual(langs.DEFAULT_LANGUAGE, "eng")
         self.assertEqual(Settings({}).languages, [langs.DEFAULT_LANGUAGE])
         self.assertEqual(explain.SETTINGS["SUBSYNC_LANGUAGES"][0], langs.DEFAULT_LANGUAGE)
         self.assertEqual(explain.QUESTIONS["LANGUAGES"][0], "English")
-        self.assertEqual(signup._languages(""), [langs.DEFAULT_LANGUAGE])
         slots = ui.language_slots([("English", "eng"), ("Russian", "rus")], [], 2, "q", "h")
         self.assertIn('<option value="eng" selected>English</option>', slots)
+
+    @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
+    def test_the_sign_up_takes_the_one_constant_too(self):
+        # public mode's sign-up needs the cryptography package (its records), so it is checked on its own
+        from subsync import signup
+        self.assertEqual(signup._languages(""), [langs.DEFAULT_LANGUAGE])
 
     def test_a_list_of_codes(self):
         # lang_list moved here from the worker: a setting's comma-separated codes, in their order

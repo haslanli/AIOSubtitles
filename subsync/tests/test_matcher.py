@@ -727,12 +727,18 @@ class PipelineWordsTest(unittest.TestCase):
         self.assertTrue(r["text"]["ok"])
 
     def test_no_words_across_languages_or_with_the_setting_off(self):
+        # a copy only the "clearly better" rule passes (no snap): its words are read to confirm it in its own language
+        # with the setting on (the control), never across languages or with the setting off. A copy that passes the
+        # main rule (the defaults) reads none whatever the language or the setting, so alone it proved nothing
         lines = dialogue(500, 25)
         text = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
-        index = WordIndex(lines, lang="en")
-        pipeline.shift_sync(index, text, "rus", rules(text_pairing=True))
-        pipeline.shift_sync(index, text, "eng", rules(text_pairing=False))
-        self.assertEqual(index.asked, [])
+        clearly = {"snap": False, "better": {}}
+        for lang, text_pairing, kw, reads in (("eng", True, clearly, 1), ("rus", True, clearly, 0),
+                                              ("eng", False, clearly, 0), ("rus", True, {}, 0), ("eng", False, {}, 0)):
+            with self.subTest(lang=lang, text_pairing=text_pairing, **kw):
+                index = WordIndex(lines, lang="en")
+                pipeline.shift_sync(index, text, lang, rules(text_pairing=text_pairing, **kw))
+                self.assertEqual(len(index.asked), reads)
 
 
 class TrackWordsLockTest(unittest.TestCase):
