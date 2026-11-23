@@ -902,11 +902,11 @@ class Worker(threading.Thread):
             return None
         return got
 
-    def recently_unlisted(self, alias, within=UNLISTED_S):
+    def recently_unlisted(self, alias):
         """A file the listing didn't have (Usenet, uncached) is not looked for again for an hour."""
         with self.cv:
             t = self.unlisted.get(alias)
-        return t is not None and time.time() - t < within
+        return t is not None and time.time() - t < UNLISTED_S
 
     def _note_unlisted(self, alias):
         """The listing doesn't have this file now (recently_unlisted)."""

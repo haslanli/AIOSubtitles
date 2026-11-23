@@ -55,10 +55,10 @@ def moved_back(was, now):
     return out
 
 
-def offsets(starts, ref, max_offset=MAX_OFFSET_S):
+def offsets(starts, ref):
     """The shifts worth trying: up to MAX_OFFSETS peaks of the start-difference histogram, PEAK_APART apart. starts in
     any order; ref sorted."""
-    got = shift._window(starts, ref, max_offset)
+    got = shift._window(starts, ref, MAX_OFFSET_S)
     if got is None:
         return []
     window, n = got

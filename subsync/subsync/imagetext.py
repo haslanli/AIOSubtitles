@@ -266,11 +266,11 @@ def rows(gray):
     return out
 
 
-def to_input(gray, height=HEIGHT):
-    """A row scaled (bilinear) to `height`, as the recogniser's input: float32 (1, 3, height, width) in [-1, 1]."""
+def to_input(gray):
+    """A row scaled (bilinear) to HEIGHT, as the recogniser's input: float32 (1, 3, HEIGHT, width) in [-1, 1]."""
     h, w = gray.shape
-    nw = max(8, min(MAX_WIDTH, int(round(w * height / h))))
-    ys = np.linspace(0, h - 1, height)
+    nw = max(8, min(MAX_WIDTH, int(round(w * HEIGHT / h))))
+    ys = np.linspace(0, h - 1, HEIGHT)
     xs = np.linspace(0, w - 1, nw)
     y0, x0 = np.floor(ys).astype(int), np.floor(xs).astype(int)
     y1, x1 = np.minimum(y0 + 1, h - 1), np.minimum(x0 + 1, w - 1)
@@ -352,15 +352,15 @@ def recogniser(lang):
         return _cache[name]
 
 
-def texts(codec, payloads, rec, private=b"", budget=BUDGET_S, clock=time.monotonic):
+def texts(codec, payloads, rec, private=b"", budget=BUDGET_S):
     """{start: text} of image lines {start: block payload}, read by `rec`, within `budget` seconds."""
-    out, t0 = {}, clock()
+    out, t0 = {}, time.monotonic()
     vobsub = codec.startswith("S_VOBSUB")
     lums = vobsub_palette(private) if vobsub else None   # the track's palette, read once
     if vobsub and lums is None:
         return out
     for s in sorted(payloads):
-        if clock() - t0 > budget:
+        if time.monotonic() - t0 > budget:
             break
         if vobsub:
             img = vobsub_image(payloads[s], lums)

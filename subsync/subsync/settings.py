@@ -44,11 +44,11 @@ CPU_MAX_FILE = "/sys/fs/cgroup/cpu.max"   # cgroup v2: the container's processor
 CFS_DIR = "/sys/fs/cgroup/cpu"            # cgroup v1: the same limit, cpu.cfs_quota_us ("-1" when none) and period
 
 
-def default_gateway(path=None):
+def default_gateway():
     """This machine's default IPv4 gateway (inside a Docker container: the address its network reaches it from), or
     None when there is none or it can't be read."""
     try:
-        with open(path or ROUTE_FILE, encoding="ascii") as f:
+        with open(ROUTE_FILE, encoding="ascii") as f:
             rows = f.read().splitlines()[1:]
     except (OSError, ValueError):
         return None

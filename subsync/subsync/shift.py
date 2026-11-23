@@ -115,7 +115,7 @@ def _ends(cand_ends, ref_ends):
     return [e for e in cand_ends if e is not None], known
 
 
-def best_shift(cand, ref, max_offset=MAX_OFFSET_S, cand_ends=None, ref_ends=None):
+def best_shift(cand, ref, cand_ends=None, ref_ends=None):
     """cand, ref: line starts (seconds). Returns (scale, offset, votes): the scale and offset (new start = start * scale +
     offset) that land the most candidate starts within NEAR_S of a reference start, and how many they land.
     cand_ends, ref_ends: the lines' ends (None for an unknown one), used to break ties between start peaks."""
@@ -126,7 +126,7 @@ def best_shift(cand, ref, max_offset=MAX_OFFSET_S, cand_ends=None, ref_ends=None
     best = None
     for scale in SCALES:
         scaled = sorted(c * scale for c in cand)
-        offset = _offset(scaled, ref, max_offset, (sorted(e * scale for e in ends[0]), ends[1]) if ends else None)
+        offset = _offset(scaled, ref, MAX_OFFSET_S, (sorted(e * scale for e in ends[0]), ends[1]) if ends else None)
         votes = _votes(scaled, ref, offset)
         need = votes if scale == 1.0 else votes / SCALE_MARGIN
         if best is None or need > best[3]:

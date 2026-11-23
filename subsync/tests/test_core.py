@@ -409,31 +409,60 @@ class RefineTest(unittest.TestCase):
     def line(s, e, text="n", **kw):
         return dict({"s": s, "e": e, "text": text, "kind": "dialogue"}, **kw)
 
+    @staticmethod
+    def dense(seed, split=False):
+        """Dense random dialogue against its release track: (lines, release cues); with `split`, about a third of the
+        lines followed by a split half that starts inside the same release line."""
+        r = random.Random(seed)
+        ref, t = [], 10.0
+        for _ in range(r.randint(50, 150)):
+            d = r.uniform(0.3, 2.0)
+            ref.append((t, d))
+            t += r.uniform(0.1, 0.8) if r.random() < 0.5 else r.uniform(0.8, 3.0)
+        cand = []
+        for s, d in ref:
+            if r.random() < 0.7:
+                s2 = s + 0.2 + r.gauss(0, 0.2)
+                cand.append(RefineTest.line(s2, s2 + d))
+                if split and r.random() < 0.3:
+                    s3 = s2 + r.uniform(0.05, d)
+                    cand.append(RefineTest.line(s3, s3 + d / 2))
+        return cand, ref
+
+    def assert_what_the_snap_guarantees(self, cand, ref, seed):
+        out, _ = refine.snap(cand, ref)
+        idx = sorted(range(len(cand)), key=lambda i: cand[i]["s"])
+        self.assertEqual([out[i]["s"] for i in idx], sorted(out[i]["s"] for i in idx), seed)
+        for i in idx:
+            need = min(refine.MIN_DISPLAY, cand[i]["e"] - cand[i]["s"])
+            self.assertGreaterEqual(round(out[i]["e"] - out[i]["s"], 9), round(need, 9), seed)
+        for x, y in zip(idx, idx[1:]):
+            if cand[x]["e"] <= cand[y]["s"] and out[x]["e"] > out[y]["s"] + 1e-9:
+                need = min(refine.MIN_DISPLAY, cand[x]["e"] - cand[x]["s"])
+                self.assertAlmostEqual(out[x]["e"], out[x]["s"] + need, places=9, msg=seed)
+
     def test_what_the_snap_guarantees(self):
         # Order kept, the minimum display kept, and a line that didn't overlap the next one doesn't after,
         # unless the minimum display is what makes it (it wins), over dense random dialogue
         for seed in range(300):
-            r = random.Random(seed)
-            ref, t = [], 10.0
-            for _ in range(r.randint(50, 150)):
-                d = r.uniform(0.3, 2.0)
-                ref.append((t, d))
-                t += r.uniform(0.1, 0.8) if r.random() < 0.5 else r.uniform(0.8, 3.0)
-            cand = []
-            for s, d in ref:
-                if r.random() < 0.7:
-                    s2 = s + 0.2 + r.gauss(0, 0.2)
-                    cand.append(self.line(s2, s2 + d))
-            out, _ = refine.snap(cand, ref)
-            idx = sorted(range(len(cand)), key=lambda i: cand[i]["s"])
-            self.assertEqual([out[i]["s"] for i in idx], sorted(out[i]["s"] for i in idx), seed)
-            for i in idx:
-                need = min(refine.MIN_DISPLAY, cand[i]["e"] - cand[i]["s"])
-                self.assertGreaterEqual(round(out[i]["e"] - out[i]["s"], 9), round(need, 9), seed)
-            for x, y in zip(idx, idx[1:]):
-                if cand[x]["e"] <= cand[y]["s"] and out[x]["e"] > out[y]["s"] + 1e-9:
-                    need = min(refine.MIN_DISPLAY, cand[x]["e"] - cand[x]["s"])
-                    self.assertAlmostEqual(out[x]["e"], out[x]["s"] + need, places=9, msg=seed)
+            self.assert_what_the_snap_guarantees(*self.dense(seed), seed)
+
+    def test_the_order_is_kept_through_split_continuations(self):
+        # P snaps to a long release line (40.0, 4 s), c is its split continuation and keeps p's shift (41.1),
+        # y snaps to a second voice starting inside it (41.05); x, between them, was first raised to c, then lowered to
+        # y by an order fix that never looked back, so c came after x. The same guarantees with split halves.
+        around = [(t, 2.0) for t in (28.0, 31.0, 34.0, 37.0)]
+        after = [(t, 2.0) for t in (46.0, 49.0, 52.0, 55.0)]
+        lines = [self.line(t, t + 2.0) for t, _ in around]
+        lines += [self.line(39.9, 40.8, "p"), self.line(41.0, 41.5, "c"), self.line(41.03, 41.5, "x"),
+                  self.line(41.06, 41.9, "y")]
+        lines += [self.line(t, t + 2.0) for t, _ in after]
+        out, st = refine.snap(lines, around + [(40.0, 4.0), (41.05, 1.0)] + after)
+        self.assertEqual(st["continuations"], 1)
+        self.assertEqual([(o["text"], round(o["s"], 9)) for o in out[4:8]],
+                         [("p", 40.0), ("c", 41.05), ("x", 41.05), ("y", 41.05)])
+        for seed in range(3000):
+            self.assert_what_the_snap_guarantees(*self.dense(seed, split=True), seed)
 
     def test_lines_a_sectioned_fit_left_out_take_no_part(self):
         # A dropped line (a scene the release cut) takes no release line and counts in no stat

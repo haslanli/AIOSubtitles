@@ -59,9 +59,9 @@ def _merged(times):
     return ev
 
 
-def pgs_lines(events, margin=SURE):
+def pgs_lines(events):
     """events: cue times of a PGS track. Returns [(start, duration)] for the events (_merged) that are starts with at
-    least `margin` to spare: forward and backward min-sum costs give, for each event, the cheapest labelling with it as
+    least SURE to spare: forward and backward min-sum costs give, for each event, the cheapest labelling with it as
     a start and as an end; an event whose two costs are close could be either, so it is left out."""
     ev = _merged(events)
     n = len(ev)
@@ -83,7 +83,7 @@ def pgs_lines(events, margin=SURE):
     lines = []
     for k in range(n):
         as_start, as_end = fwd[k][0] + bwd[k][0], fwd[k][1] + bwd[k][1]
-        if as_start + margin <= as_end:
+        if as_start + SURE <= as_end:
             end = ev[k + 1] if k + 1 < n else ev[k] + DEFAULT_LINE_S
             lines.append((ev[k], end - ev[k]))
     return lines
