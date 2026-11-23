@@ -18,8 +18,8 @@ import threading
 import time
 
 from .aiosconfig import PUBLIC_TIMEOUT, UNREACHABLE, AiosError, install_link
-from .signup import (STORED, SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, config_fields,
-                     drop_sync, instance_key, public_api, rebuild, store_only)
+from .signup import (SYNC_FIELDS, USENET_FIELDS, WRONG_PASSWORD_CODES, SignupError, all_clear, config_fields, drop_sync,
+                     instance_key, public_api, rebuild, store_only)
 
 KINDS = ("sync", "usenet")   # AIOSubtitles' configs on a person's AIOStreams: the sync config and the Usenet config
 # the record fields a rebuild may change (signup.rebuild), copied from its working copy into the record (_apply sets
@@ -152,7 +152,7 @@ class Checker:
                 self.users.update(token, current)
                 drop = list(found.get("drop") or [])
                 if store_only(current):   # the configs of a config that became Real-Debrid-only, once the record says so
-                    drop += [d for d in found.get("dropped") or [] if d]
+                    drop += found.get("dropped") or []
             if current is not None:
                 with self.lock:
                     self.next[self.users.user_id(token)] = _due(current)
@@ -198,13 +198,13 @@ class Checker:
                 try:
                     rebuilt = rebuild(self.s, copy, token, api, password, force=found["sync"] == "gone",
                                       force_usenet=found["usenet"] == "gone")
-                    if rebuilt is STORED:          # their config became Real-Debrid-only
+                    if rebuilt.to_store_only:      # their config became Real-Debrid-only
                         found["to_store_only"] = True
-                        found["dropped"] = [copy.get("dropped")] + list(copy.get("drop") or [])
+                        found["dropped"] = rebuilt.drop
                     else:
-                        found["rebuilt"] = rebuilt
+                        found["rebuilt"] = rebuilt.changed
                         found["fields"] = {k: copy.get(k) for k in REBUILT}
-                        found["drop"] = list(copy.get("drop") or [])
+                        found["drop"] = rebuilt.drop
                 except SignupError as e:
                     found["problem"] = _problem(e)
         return found
@@ -271,7 +271,7 @@ class Checker:
             all_clear(self.s, record, now)
             return
         if found.get("fields") is not None:   # rebuilt from their config with the kept password (or nothing to change)
-            if found["rebuilt"] is not None:
+            if found["rebuilt"]:
                 for name, value in found["fields"].items():
                     if value is None:
                         record.pop(name, None)

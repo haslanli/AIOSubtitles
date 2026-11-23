@@ -371,27 +371,6 @@ def wants_usenet(settings, form):
     return settings.usenet_offered and form.get("usenet") == "on"
 
 
-def _has_sync(viewer, manifest_url):
-    """Whether the viewer's config has a debrid service AIOSubtitles may read (a sync config can be made for it)."""
-    return not realdebrid.real_debrid_only(viewer) and \
-        not sync_config_problems(sync_config(viewer, manifest_url, names=OWN_NAMES))
-
-
-def _sync_for(viewer, manifest_url, usenet=False):
-    """The sync config for a viewer config that has a debrid service AIOSubtitles may use (Real-Debrid-only setups
-    are found first, with realdebrid.real_debrid_only, and get none). `usenet`: this instance reads Usenet files too, so
-    the reason a config can't be used names both."""
-    if realdebrid.real_debrid_only(viewer):
-        raise SignupError(realdebrid.REAL_DEBRID_ONLY, unusable=True)
-    warning = explain.PUBLIC_REAL_DEBRID_WARNING if realdebrid.SERVICE in realdebrid.debrid_in_use(viewer) else None
-    sync = sync_config(viewer, manifest_url, names=OWN_NAMES)
-    problems = sync_config_problems(sync, usenet=usenet)
-    if problems:
-        raise SignupError("AIOSubtitles can't find any file it could read through your AIOStreams: "
-                          + "; ".join(problems) + ".", unusable=True)
-    return sync, warning
-
-
 def _usenet_for(viewer, manifest_url, subtitles):
     """(Usenet config, the services it reads through, None), or (None, [], why) when the viewer's config has no
     Usenet route (aiosconfig.usenet_route). `subtitles`: it also carries the subtitle sources (no sync config)."""
@@ -401,19 +380,42 @@ def _usenet_for(viewer, manifest_url, subtitles):
     return usenet_sync_config(viewer, manifest_url, names=OWN_NAMES, subtitles=subtitles), services, None
 
 
+@dataclass
+class ConfigPlan:
+    """Which of AIOSubtitles' configs a person's config gets (_configs_for), made by sign-up, Refresh and the daily
+    rebuild as it says: `sync` the sync config (None: none), `usenet` the Usenet config (None: none) with the Usenet
+    `services` it reads through, or `why` it has none; `stored`: stored copies only; `warning`:
+    explain.PUBLIC_REAL_DEBRID_WARNING when Real-Debrid is left out of what is made."""
+    sync: dict = None
+    usenet: dict = None
+    services: list = field(default_factory=list)
+    why: str = None
+    stored: bool = False
+    warning: tuple = None
+
+
 def _configs_for(settings, viewer, manifest_url, want, judged=None):
-    """(has_sync, Usenet config, the services it reads through, why there is none, stored): which of AIOSubtitles'
-    configs a viewer's config gets. A sync config when it has a debrid service AIOSubtitles may read; with `want` (the
-    Usenet box) a Usenet config when it has a Usenet route; stored copies only when Real-Debrid is its only debrid
-    service and there is no Usenet config. `judged`: the config the two are made from, when not the viewer's
-    own (sign-up's clean-up). Raises SignupError when there is no file AIOSubtitles could read."""
+    """The ConfigPlan for a viewer's config: a sync config when it has a debrid service AIOSubtitles may read; with
+    `want` (the Usenet box) a Usenet config when it has a Usenet route; stored copies only when Real-Debrid is its only
+    debrid service and there is no Usenet config. `judged`: the config they are made from, when not the viewer's
+    own (sign-up's clean-up, which takes out only subtitle addons: none of them is a debrid service or a stream
+    source, so it is judged as the viewer's own). Raises SignupError (`unusable`) when there is no file AIOSubtitles
+    could read."""
     judged = viewer if judged is None else judged
-    has_sync = _has_sync(judged, manifest_url)
-    usenet, services, why = _usenet_for(judged, manifest_url, not has_sync) if want else (None, [], None)
-    stored = realdebrid.real_debrid_only(viewer) and usenet is None
-    if not stored and not has_sync and usenet is None:
-        _sync_for(viewer, manifest_url, usenet=settings.usenet)     # raises: nothing it could read
-    return has_sync, usenet, services, why, stored
+    real_debrid_only = realdebrid.real_debrid_only(judged)
+    sync = sync_config(judged, manifest_url, names=OWN_NAMES)
+    # `usenet`: this instance reads Usenet files too, so the reason a config can't be used names both
+    problems = sync_config_problems(sync, usenet=settings.usenet)
+    if real_debrid_only or problems:
+        sync = None
+    usenet, services, why = _usenet_for(judged, manifest_url, sync is None) if want else (None, [], None)
+    stored = real_debrid_only and usenet is None
+    if sync is None and usenet is None and not stored:      # so not Real-Debrid-only: `problems` says why
+        raise SignupError("AIOSubtitles can't find any file it could read through your AIOStreams: "
+                          + "; ".join(problems) + ".", unusable=True)
+    left_out = not stored and realdebrid.SERVICE in realdebrid.debrid_in_use(judged)
+    return ConfigPlan(sync=sync, usenet=usenet, services=services, why=why, stored=stored,
+                      warning=explain.PUBLIC_REAL_DEBRID_WARNING if left_out else None)
 
 
 def _usenet_state(record, want, services, why):
@@ -553,7 +555,15 @@ def _synced(settings, record, sync, fields, now):
     all_clear(settings, record, now)
 
 
-STORED = "stored copies only"   # rebuild's answer when a config became Real-Debrid-only
+@dataclass
+class Rebuilt:
+    """What a daily rebuild did (rebuild): whether any of the record's fields changed; whether the person's config
+    became Real-Debrid-only, so the record is now for stored copies only; and the configs it no longer
+    uses, (id, link, password) each, for the caller to remove once the record is saved. Kept apart from the record,
+    which holds only its own fields, so saving it never keeps a removed config's password."""
+    changed: bool = False
+    to_store_only: bool = False
+    drop: list = field(default_factory=list)
 
 
 def _usable_now(settings, record):
@@ -563,42 +573,38 @@ def _usable_now(settings, record):
 
 def rebuild(settings, record, token, api, password, force=False, force_usenet=False):
     """With the password a person let AIOSubtitles keep: AIOSubtitles' configs made again from theirs, each saved only
-    when it changed (or `force`, `force_usenet`: when it is gone). Returns True when anything changed, None when
-    nothing did; the record's fields are updated, and configs it no longer uses are listed in record["drop"] for the
-    caller to remove once the record is saved. Both ways: a stored-copies-only record whose config now has
-    another debrid service (or, with Usenet on, a Usenet route) gets its configs; a config that became Real-Debrid-only
-    without a Usenet route returns STORED, the record's sync fields taken out (found in record["dropped"]). The Usenet
-    config follows the person's box. Raises SignupError (field "password" when the password is refused).
-    Their own config is never changed."""
+    when it changed (or `force`, `force_usenet`: when it is gone). The record's fields are updated; returns a Rebuilt.
+    Both ways: a stored-copies-only record whose config now has another debrid service (or, with Usenet on, a
+    Usenet route) gets its configs; a config that became Real-Debrid-only without a Usenet route moves the record to
+    stored copies only, its sync fields taken out. The Usenet config follows the person's box. Raises SignupError
+    (field "password" when the password is refused). Their own config is never changed."""
     viewer, _ = _read_viewer(api, record["main_uuid"], password)
     manifest_url = personal_manifest_url(settings, token)
-    has_sync, usenet, services, why, stored = _configs_for(settings, viewer, manifest_url,
-                                                           _usable_now(settings, record))
-    drop, changed, made = [], False, []
-    if stored:
-        gone = _take_config(record, "usenet")
-        record["drop"] = [gone] if gone else []
-        _usenet_state(record, bool(record.get("usenet")), services, why)   # their box stays as they left it
+    plan = _configs_for(settings, viewer, manifest_url, _usable_now(settings, record))
+    if plan.stored:
+        usenet = _take_config(record, "usenet")
+        _usenet_state(record, bool(record.get("usenet")), plan.services, plan.why)   # their box stays as they left it
         if store_only(record):
-            return True if gone else None
-        record["dropped"] = _to_store_only(record)
-        return STORED
+            return Rebuilt(changed=usenet is not None, drop=[usenet] if usenet else [])
+        sync = _to_store_only(record)
+        return Rebuilt(changed=True, to_store_only=True, drop=[c for c in (sync, usenet) if c])
+    drop, changed, made = [], False, []
     # the Usenet config first: when it can't be made, nothing of the sync config's has changed yet
-    if usenet is None:
+    if plan.usenet is None:
         gone = _take_config(record, "usenet")
         if gone:
             drop.append(gone)
             changed = True
-    elif force_usenet or not record.get("usenet_uuid") or sync_fingerprint(usenet) != record.get("usenet_fp"):
-        fields = _put_sync(api, record, usenet, gone=force_usenet or not record.get("usenet_uuid"), kind="usenet")
+    elif force_usenet or not record.get("usenet_uuid") or sync_fingerprint(plan.usenet) != record.get("usenet_fp"):
+        fields = _put_sync(api, record, plan.usenet, gone=force_usenet or not record.get("usenet_uuid"), kind="usenet")
         if fields[0] != record.get("usenet_uuid"):
             made.append(fields)    # removed again if the sync config can't be made below
-        _usenet_synced(record, usenet, fields, not has_sync)
+        _usenet_synced(record, plan.usenet, fields, plan.sync is None)
         changed = True
     before = (record.get("usenet_why"), record.get("usenet_services"))
-    _usenet_state(record, bool(record.get("usenet")), services, why)
+    _usenet_state(record, bool(record.get("usenet")), plan.services, plan.why)
     changed = changed or before != (record.get("usenet_why"), record.get("usenet_services"))
-    if not has_sync:                      # Usenet only: no sync config any more
+    if plan.sync is None:                 # Usenet only: no sync config any more
         gone = _take_config(record, "sync")
         if gone:
             drop.append(gone)
@@ -606,22 +612,18 @@ def rebuild(settings, record, token, api, password, force=False, force_usenet=Fa
         if store_only(record):
             record.pop("store_only", None)
             changed = True
-        record["drop"] = drop
-        return True if changed else None
+        return Rebuilt(changed=changed, drop=drop)
     with _removed_on_failure(api, made):  # nothing left behind: the Usenet config made a moment ago goes too
-        sync, _ = _sync_for(viewer, manifest_url)
         if store_only(record) or not record.get("sync_uuid"):
-            fields = _new_sync(api, record["instance"], sync)
+            fields = _new_sync(api, record["instance"], plan.sync)
             record.pop("store_only", None)
-        elif not force and sync_fingerprint(sync) == record.get("sync_fp"):
-            record["drop"] = drop
-            return True if changed else None
+        elif not force and sync_fingerprint(plan.sync) == record.get("sync_fp"):
+            return Rebuilt(changed=changed, drop=drop)
         else:
-            fields = _put_sync(api, record, sync, gone=force)
+            fields = _put_sync(api, record, plan.sync, gone=force)
     record["sync_uuid"], record["sync_link"], record["sync_password"] = fields
-    record["sync_fp"] = sync_fingerprint(sync)
-    record["drop"] = drop
-    return True
+    record["sync_fp"] = sync_fingerprint(plan.sync)
+    return Rebuilt(changed=True, drop=drop)
 
 
 def _audio_answer(choice, settings):
@@ -675,28 +677,24 @@ def _signup(settings, users, form, api_factory, timeout):
     base = without_builtin_twins(viewer, clean_up)[0] if clean_up else viewer
     # with Real-Debrid as the only debrid service and no Usenet config, stored copies only: no sync config,
     # nothing of theirs read; the clean-up is left out, since AIOSubtitles then asks no subtitle site for them
-    has_sync, usenet, services, why, stored = _configs_for(settings, viewer, manifest_url, want, judged=base)
-    warning = None
+    plan = _configs_for(settings, viewer, manifest_url, want, judged=base)
     # nothing left behind: a config made here is removed again when a later step, or saving the record, fails
     with _removed_on_failure(api, []) as made:
-        if stored:
+        if plan.stored:
             clean_up = ()
             _to_store_only(record)
             all_clear(settings, record, users.clock())
-        elif has_sync:
-            sync, warning = _sync_for(base, manifest_url)
-            fields = _new_sync(api, instance, sync)
+        elif plan.sync is not None:
+            fields = _new_sync(api, instance, plan.sync)
             made.append(fields)
-            _synced(settings, record, sync, fields, users.clock())
-        elif usenet is not None:                                    # Usenet only
-            if realdebrid.SERVICE in realdebrid.debrid_in_use(viewer):
-                warning = explain.PUBLIC_REAL_DEBRID_WARNING
+            _synced(settings, record, plan.sync, fields, users.clock())
+        else:                                                       # Usenet only
             all_clear(settings, record, users.clock())
-        if usenet is not None:
-            fields = _new_sync(api, instance, usenet)
+        if plan.usenet is not None:
+            fields = _new_sync(api, instance, plan.usenet)
             made.append(fields)
-            _usenet_synced(record, usenet, fields, not has_sync, users.clock())
-        _usenet_state(record, want, services, why)
+            _usenet_synced(record, plan.usenet, fields, plan.sync is None, users.clock())
+        _usenet_state(record, want, plan.services, plan.why)
         # the person chose it (unticked by default): AIOSubtitles refreshes by itself
         if keeps_password(settings, form):
             record["auto_password"] = password
@@ -708,10 +706,11 @@ def _signup(settings, users, form, api_factory, timeout):
     if form.get("add_addon") == "on":
         changes, added, manual = _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up)
     log.info("signed up: %d language%s%s%s", len(langs), "" if len(langs) == 1 else "s",
-             ", stored copies only" if stored else ", Real-Debrid left out" if warning else "",
-             ", Usenet on" if usenet is not None else "")
-    return SignupResult(token, manifest_url, changes, warning, added, manual, langs, store_only=stored,
-                        usenet=usenet is not None, usenet_why=why if want else None, sync_made=has_sync and not stored)
+             ", stored copies only" if plan.stored else ", Real-Debrid left out" if plan.warning else "",
+             ", Usenet on" if plan.usenet is not None else "")
+    return SignupResult(token=token, manifest_url=manifest_url, changes=changes, warning=plan.warning, added=added,
+                        manual=manual, languages=langs, store_only=plan.stored, usenet=plan.usenet is not None,
+                        usenet_why=plan.why if want else None, sync_made=plan.sync is not None and not plan.stored)
 
 
 def refresh(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
@@ -755,64 +754,67 @@ def _refresh(settings, users, token, form, api_factory, timeout):
         want = wants_usenet(settings, form)
         was_stored = store_only(record)
         # stored copies, both ways
-        has_sync, usenet, services, why, stored = _configs_for(settings, viewer, manifest_url, want)
+        plan = _configs_for(settings, viewer, manifest_url, want)
         old = []                  # configs they no longer use, removed once the record is saved
-        sync = fields = usenet_fields = warning = None
+        fields = usenet_fields = None
         # configs made here: removed again when anything fails before the record holds them, so nothing holds their
         # keys unused
         with _removed_on_failure(api, []) as made:
-            if has_sync:
-                sync, warning = _sync_for(viewer, manifest_url)
-                if was_stored or moved or not record.get("sync_uuid"):
-                    fields = _new_sync(api, instance, sync)
-                else:
-                    fields = _put_sync(api, record, sync)
-                if fields[0] != record.get("sync_uuid"):
-                    made.append(fields)
-            elif usenet is not None and realdebrid.SERVICE in realdebrid.debrid_in_use(viewer):
-                warning = explain.PUBLIC_REAL_DEBRID_WARNING
-            if usenet is not None:
+            # the Usenet config first, as the daily rebuild: when it can't be made, nothing of the sync config's has
+            # changed yet
+            if plan.usenet is not None:
                 if moved or not record.get("usenet_uuid"):
-                    usenet_fields = _new_sync(api, instance, usenet)
+                    usenet_fields = _new_sync(api, instance, plan.usenet)
                 else:
-                    usenet_fields = _put_sync(api, record, usenet, kind="usenet")
+                    usenet_fields = _put_sync(api, record, plan.usenet, kind="usenet")
                 if usenet_fields[0] != record.get("usenet_uuid"):
                     made.append(usenet_fields)
-            if record.get("sync_uuid") and (not has_sync or moved):
+            if plan.sync is not None:
+                if was_stored or moved or not record.get("sync_uuid"):
+                    fields = _new_sync(api, instance, plan.sync)
+                else:
+                    fields = _put_sync(api, record, plan.sync)
+                if fields[0] != record.get("sync_uuid"):
+                    made.append(fields)
+            if record.get("sync_uuid") and (plan.sync is None or moved):
                 old.append((record["instance"], config_fields(record, "sync")))
-            if record.get("usenet_uuid") and (usenet is None or moved):
+            if record.get("usenet_uuid") and (plan.usenet is None or moved):
                 old.append((record["instance"], config_fields(record, "usenet")))
             record["instance"], record["main_uuid"] = instance, main_uuid
-            changes, added, manual = [], False, False
-            if form.get("add_addon") == "on":
-                changes, added, manual = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata, False)
-            if stored:
+            if plan.stored:
                 _to_store_only(record)
                 all_clear(settings, record, users.clock())
-            elif has_sync:
+            elif plan.sync is not None:
                 record.pop("store_only", None)
-                _synced(settings, record, sync, fields, users.clock())
+                _synced(settings, record, plan.sync, fields, users.clock())
             else:
                 record.pop("store_only", None)
                 _take_config(record, "sync")
                 all_clear(settings, record, users.clock())
-            if usenet is not None:
-                _usenet_synced(record, usenet, usenet_fields, not has_sync, users.clock())
+            if plan.usenet is not None:
+                _usenet_synced(record, plan.usenet, usenet_fields, plan.sync is None, users.clock())
             else:
                 _take_config(record, "usenet")
-            _usenet_state(record, want, services, why)
+            _usenet_state(record, want, plan.services, plan.why)
             if keeps_password(settings, form):
                 record["auto_password"] = password
             if not users.update(token, record):   # deleted meanwhile (it expired): nothing holds what was made here
                 raise SignupError(NOT_SIGNED_UP)
+        # the record first, as at sign-up: the person's own config is changed only once the record holds the refresh;
+        # still under the record's lock, so a delete can't come in between
+        changes, added, manual = [], False, False
+        if form.get("add_addon") == "on":
+            changes, added, manual = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata)
     for where, gone in old:   # the configs they no longer use: removed
         drop_sync(api_factory(where, timeout), gone)
-    log.info("refreshed a sync config%s%s%s", ", stored copies only" if stored else
-             ", Real-Debrid left out" if warning else "", ", on another AIOStreams" if moved and not stored else "",
-             ", Usenet on" if usenet is not None else "")
-    return SignupResult(token, manifest_url, changes, warning, added, manual, record["languages"], store_only=stored,
-                        to_store_only=stored and not was_stored, usenet=usenet is not None,
-                        usenet_why=why if want else None, sync_made=has_sync and not stored)
+    log.info("refreshed a sync config%s%s%s", ", stored copies only" if plan.stored else
+             ", Real-Debrid left out" if plan.warning else "",
+             ", on another AIOStreams" if moved and not plan.stored else "",
+             ", Usenet on" if plan.usenet is not None else "")
+    return SignupResult(token=token, manifest_url=manifest_url, changes=changes, warning=plan.warning, added=added,
+                        manual=manual, languages=record["languages"], store_only=plan.stored,
+                        to_store_only=plan.stored and not was_stored, usenet=plan.usenet is not None,
+                        usenet_why=plan.why if want else None, sync_made=plan.sync is not None and not plan.stored)
 
 
 def forget_password(users, token):

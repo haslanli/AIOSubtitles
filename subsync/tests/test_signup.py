@@ -826,6 +826,48 @@ class SignupTest(SignupHarness, unittest.TestCase):
         self.assertEqual(e.exception.message, "This link isn't signed up (any more). Sign up again on the start page.")
         self.assertEqual(list(self.fake.configs), [uuid])        # the config made by the refresh is removed again
 
+    def test_a_refresh_that_fails_saving_the_record_leaves_their_own_config_alone(self):
+        # Refresh put AIOSubtitles back into the person's own config before it saved the record, so a record
+        # that went meanwhile, or a write that failed, left their config changed though the refresh had failed
+        from unittest import mock
+
+        def without_entry(uuid):
+            main = self.fake.configs[uuid]["config"]
+            main["presets"] = [p for p in main["presets"] if p["options"]["name"] != "AIOSubtitles"]  # they took it out
+            return copy.deepcopy(main)
+
+        def expiring(token):
+            def factory(base, timeout):
+                client = self.api(base, timeout)
+                create = client.create_config
+
+                def made_then_expired(config, password):
+                    made = create(config, password)
+                    self.users.delete(token)               # the record expires meanwhile (no lock keeps that out)
+                    return made
+                client.create_config = made_then_expired
+                return client
+            return factory
+        form = {"password": PASSWORD, "add_addon": "on"}
+        uuid, result = self.run_signup(viewer())
+        before = without_entry(uuid)
+        del self.fake.configs[self.users.open(result.token)["sync_uuid"]]   # gone: the refresh makes it again
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.refresh(self.s, self.users, result.token, form, api_factory=expiring(result.token))
+        self.assertEqual(e.exception.message, "This link isn't signed up (any more). Sign up again on the start page.")
+        self.assertEqual(self.fake.configs[uuid]["config"], before)    # their own config not changed
+
+        uuid, result = self.run_signup(viewer())
+        before = without_entry(uuid)
+        with mock.patch.object(self.users, "update", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.signup.refresh(self.s, self.users, result.token, form, api_factory=self.api)
+        self.assertEqual(self.fake.configs[uuid]["config"], before)
+        again = self.signup.refresh(self.s, self.users, result.token, form, api_factory=self.api)   # once it saves
+        self.assertTrue(again.added)
+        names = [p["options"]["name"] for p in self.fake.configs[uuid]["config"]["presets"]]
+        self.assertEqual(names.count("AIOSubtitles"), 1)
+
     def test_a_deletion_is_logged_only_when_something_was_kept(self):
         _, result = self.run_signup(viewer(), keep_password="on")
         self.signup.forget_password(self.users, result.token)

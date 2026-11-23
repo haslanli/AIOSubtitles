@@ -856,7 +856,7 @@ class PublicUsenetTest(TempDirTest):
     def test_a_fault_at_a_refresh_removes_what_it_made(self):
         uuid, result = self.run_signup(setup_of([TORBOX, NZBDAV], [TORRENTIO, PROWLARR, NEWZNAB, SUBS]), usenet="")
         before = self.users.open(result.token)
-        del self.fake.configs[before["sync_uuid"]]                # gone: made again, then the Usenet config fails
+        del self.fake.configs[before["sync_uuid"]]                # gone: made again after the Usenet config, and fails
         with self.assertRaises(RuntimeError):
             self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD, "usenet": "on"},
                                 api_factory=self.faulty_creates(1), timeout=10)
@@ -880,15 +880,18 @@ class PublicUsenetTest(TempDirTest):
         sync = (record["sync_uuid"], record["sync_link"], record["sync_password"])
         self.fake.configs[uuid]["config"] = setup_of([ENGINE], [NEWZNAB, SUBS])    # TorBox removed: Usenet only now
         api = self.api(INSTANCE, 10)
-        self.assertIs(self.signup.rebuild(self.s, record, result.token, api, PASSWORD), True)
-        self.assertEqual(record["drop"], [sync])                       # the caller removes it once the record is saved
+        rebuilt = self.signup.rebuild(self.s, record, result.token, api, PASSWORD)
+        self.assertIs(rebuilt.changed, True)
+        self.assertEqual(rebuilt.drop, [sync])                         # the caller removes it once the record is saved
         self.assertNotIn("sync_uuid", record)
         self.assertIn(record["usenet_uuid"], self.fake.configs)
-        self.assertIsNone(self.signup.rebuild(self.s, record, result.token, api, PASSWORD))   # nothing changed since
-        self.assertEqual(record["drop"], [])
+        rebuilt = self.signup.rebuild(self.s, record, result.token, api, PASSWORD)
+        self.assertIs(rebuilt.changed, False)                          # nothing changed since
+        self.assertEqual(rebuilt.drop, [])
         record["store_only"] = True                                    # a record for stored copies only, before
-        self.assertIs(self.signup.rebuild(self.s, record, result.token, api, PASSWORD), True)
+        self.assertIs(self.signup.rebuild(self.s, record, result.token, api, PASSWORD).changed, True)
         self.assertNotIn("store_only", record)                         # its Usenet config reads now
+        self.assertFalse({"drop", "dropped"} & set(record))            # the record holds only its own fields
 
     def test_usenet_stays_off_unless_ticked_and_allowed(self):
         v = setup_of([TORBOX, NZBDAV], [TORRENTIO, NEWZNAB, SUBS])
@@ -941,6 +944,22 @@ class PublicUsenetTest(TempDirTest):
         self.assertEqual(self.users.count(), 0)
 
     # -- refresh --------------------------------------------------------------------------------------------------
+    def test_a_refresh_that_cant_make_the_usenet_config_leaves_the_sync_config_as_it_was(self):
+        # Refresh saved into the sync config first and only then made the Usenet config, so when that failed
+        # the sync config on AIOStreams had changed though the refresh had not; the Usenet config comes first now, as
+        # in the daily rebuild
+        uuid, result = self.run_signup(setup_of([TORBOX, NZBDAV], [TORRENTIO, PROWLARR, NEWZNAB, SUBS]), usenet="")
+        record = self.users.open(result.token)
+        self.assertNotIn("usenet_uuid", record)
+        before = copy.deepcopy(self.config(record["sync_uuid"]))
+        self.config(uuid)["presets"].append(dict(ZILEAN))                   # a change the sync config would follow
+        self.fake.fault = "rate_limited"                                    # no new config on it this hour
+        with self.assertRaises(self.signup.SignupError):
+            self.refresh(result.token)                                      # the box ticked: a Usenet config is made
+        self.assertEqual(self.config(record["sync_uuid"]), before)
+        self.assertEqual(self.users.open(result.token), record)
+        self.assertEqual(len(self.fake.configs), 2)                         # theirs and the sync config
+
     def test_refresh_turns_usenet_on_and_off(self):
         _, result = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]), usenet="")
         self.assertNotIn("usenet_uuid", self.users.open(result.token))
