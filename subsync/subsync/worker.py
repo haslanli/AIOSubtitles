@@ -864,7 +864,7 @@ class Worker(threading.Thread):
         by construction)."""
         reason = row.get("reason") or ""
         d = row.get("detail") or {}
-        passed = Worker.passed_as(d, reason)
+        passed = pipeline.passed_as(d, reason)
         if row.get("outcome") == "in_sync" or d.get("unchanged") or d.get("magnet") or "as it is" in reason:
             cls, g = 0, d.get("gate_original") or {}
         elif d.get("shift_fit") and passed == "main":   # moved as a whole: its author's own timing
@@ -877,20 +877,6 @@ class Worker(threading.Thread):
         stacked = (d.get("stacked") or 0.0) >= pipeline.STACKED_SHARE
         within = (g.get("within200") or 0.0) - (pipeline.STACKED_PENALTY if stacked else 0.0)
         return (cls, -within, med if med is not None else 1e9)
-
-    @staticmethod
-    def passed_as(facts, reason):
-        """How a re-timed copy passed (pipeline.judge_copy): "clearly better" than the original, "aligned" to another
-        language's track, else "main" (the main rule against its own language). Told by the gates its judging recorded
-        (`facts`: a result, or a stored row's detail); by the reason's words only for a row stored without them."""
-        def gate(key, said):
-            got = facts.get(key)
-            return bool(got.get("pass")) if isinstance(got, dict) else said
-        if gate("better", "clearly better" in reason):
-            return "clearly better"
-        if gate("aligned", reason.startswith("aligned")):
-            return "aligned"
-        return "main"
 
     def start_lookup(self, video_id):
         """Starts the title's original-language lookup in the background (nothing if it is kept or running); with this
@@ -2423,7 +2409,8 @@ class LanguageSync:
                            self._ext(e), text, e["cand"]["id"], offer=not self.best_fit, original=text)
             outcome = "synced"
         ok = outcome in ("synced", "in_sync")
-        if ok and pipeline.settles(dict(got, reference=(got.get("detail") or {}).get("reference")), lang):
+        facts = dict(got.get("detail") or {}, outcome=got["outcome"], reason=got.get("reason"))   # gates in the detail
+        if ok and pipeline.settles(facts, lang):
             self.settled = True
         if ok and self.best_fit and outcome == "synced":
             self._offer(result_key(self.file_key, lang, e["sha"]))
@@ -2465,7 +2452,7 @@ class LanguageSync:
         if not (r and r["outcome"] == "synced"):
             return False
         self._record(e, dict(r, fast=True), t0)
-        if self.w.passed_as(r, r["reason"]) == "main":
+        if pipeline.passed_as(r, r["reason"]) == "main":
             e["got"] = self._fresh(e)
             return True
         e["shifted"] = self._fresh(e)

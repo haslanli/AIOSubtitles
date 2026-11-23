@@ -373,15 +373,29 @@ def track_words(index, ref, may_read):
     return kept[key]
 
 
+def passed_as(facts, reason):
+    """How a re-timed copy passed (judge_copy): "clearly better" than the original, "aligned" to another language's
+    track, else "main" (the main rule against its own language; an original in sync as it is too). Told by the gates
+    its judging recorded (`facts`: a result, or a stored row's detail); by the reason's words only for a row stored
+    without them."""
+    def gate(key, said):
+        got = facts.get(key)
+        return bool(got.get("pass")) if isinstance(got, dict) else said
+    if gate("better", "clearly better" in reason):
+        return "clearly better"
+    if gate("aligned", reason.startswith("aligned")):
+        return "aligned"
+    return "main"
+
+
 def settles(r, lang):
     """D1: a result that settles its language by timing, so the track's words are not read for it: a pass by the
-    main rule against a track in the subtitle's own language (as it is, moved by one shift, re-timed or snapped). The
-    track is the one the result records (reference), whichever rule it passed by."""
-    reason = r.get("reason") or ""
+    main rule (passed_as) against a track in the subtitle's own language (as it is, moved by one shift, re-timed or
+    snapped). The track is the one the result records (reference), whichever rule it passed by. `r`: a result, or a
+    stored row's detail with the row's outcome and reason."""
     if r.get("outcome") not in ("synced", "in_sync") or not r.get("reference") or is_cross(r["reference"], lang):
         return False
-    return reason.startswith(("passes against the release track", "original passes against the release track",
-                              "in sync as it is"))
+    return passed_as(r, r.get("reason") or "") == "main"
 
 
 WORDS_MAIN_MS = 100.0     # D2: the median error the words allow a pass by the main rule (an original as it is too)

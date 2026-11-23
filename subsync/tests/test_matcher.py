@@ -16,6 +16,7 @@ from subsync import mkv, mp4, pipeline, sections, shift, textpair  # noqa: E402
 from subsync.audiofit import AudioFit  # noqa: E402
 from subsync.reader import CapReached, ReadFailed, Refused, Stopped  # noqa: E402
 from subsync.relgate import relgate  # noqa: E402
+from subsync.subs import parse, write_like  # noqa: E402
 
 
 def periodic(n, step=3.0, seed=5, start=20.0):
@@ -621,6 +622,33 @@ class PipelineWordsTest(unittest.TestCase):
         self.assertEqual((r["reference"]["language"], r["outcome"]), ("es", "synced"))
         self.assertTrue(pipeline.settles(r, "spa"))
 
+    def test_what_settles_a_language_is_told_by_the_recorded_gates_not_the_reasons_words(self):
+        # Settles read three exact reason prefixes, two of them written by the worker; a reworded reason
+        # stopped a language from settling (the track's words then read for every later subtitle of it)
+        lines = dialogue(500, 22)
+        index = WordIndex(lines)
+        moved = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=6.0)])
+        as_is = srt([(c["s"], c["e"], c["text"]) for c in timed(lines)])
+        rough = srt([(c["s"], c["e"], c["text"]) for c in timed(lines, shift_s=9.0, jitter=0.17, seed=3)])
+        main = pipeline.shift_sync(index, moved, "eng")
+        in_sync = pipeline.sync_subtitle(index, as_is, "eng", audio=False)
+        clearly = pipeline.shift_sync(index, rough, "eng", snap=False, better={})
+        self.assertEqual((main["outcome"], in_sync["outcome"], clearly["outcome"]), ("synced", "in_sync", "synced"))
+        self.assertIn("clearly better", clearly["reason"])
+        for r in (main, in_sync):
+            self.assertTrue(pipeline.settles(dict(r, reason="a reason worded some other way"), "eng"))
+        self.assertFalse(pipeline.settles(dict(clearly, reason="passes against the release track"), "eng"))
+        # a stored row: its outcome and reason, with the gates in its detail (Worker RECORDED), as the worker passes it
+        stored = {k: clearly[k] for k in ("route", "reference", "gate_original", "gate_synced", "better", "shift_fit")}
+        self.assertFalse(pipeline.settles(dict(stored, outcome="synced", reason="passes against the release track"),
+                                          "eng"))
+        # a row stored without its gates is told by its words, as before
+        old = {"outcome": "synced", "reference": main["reference"]}
+        self.assertTrue(pipeline.settles(dict(old, reason="passes against the release track (one shift)"), "eng"))
+        self.assertFalse(pipeline.settles(dict(old, reason="clearly better than the original (one shift)"), "eng"))
+        self.assertTrue(pipeline.settles(dict(old, outcome="in_sync", reason="in sync as it is (viewer's #2): listed "
+                                              "unchanged"), "eng"))
+
     def test_a_clearly_better_pass_reads_the_words_once_and_is_confirmed(self):
         lines = dialogue(500, 22)
         index = WordIndex(lines)
@@ -813,6 +841,70 @@ class AudioLockTest(unittest.TestCase):
         self.assertFalse(lock.locked())
         for r in (locked, unlocked):
             self.assertEqual((r["route"], r["outcome"], r["reason"]), ("audio", "keep_original", "a stand-in"))
+
+
+class AudioResultTest(unittest.TestCase):
+    """What an audio fit's decision becomes in sync_subtitle's result, as the service stores and serves it:
+    the outcome and its reason, the copy re-timed to the fit's lines, the "clearly better" gate, a close call and the
+    audio track of a dub, with the fit's measures beside them."""
+
+    MEASURES = {"model": "silero", "gate_old": {"pass": False, "median_ms": 2500.0},
+                "gate_new": {"pass": True, "median_ms": 40.0}, "windows": 6, "audio_s": 312.5}
+
+    def setUp(self):
+        self.text = srt([(s, s + d, t) for s, d, t in dialogue(40, 32)])
+        self.lines = parse(self.text)
+        self.moved = [dict(l, s=l["s"] + 2.5, e=l["e"] + 2.5) for l in self.lines]
+
+    def judged(self, **fit):
+        with mock.patch.object(pipeline, "fit_tracks", lambda index, lines, **kw: dict(self.MEASURES, **fit)):
+            return pipeline.sync_subtitle(FakeIndex(), self.text, "eng", vad=object())
+
+    def assert_measures(self, r):
+        m = self.MEASURES
+        self.assertEqual((r["route"], r["model"], r["gate_original"], r["gate_synced"], r["windows"], r["audio_s"]),
+                         ("audio", m["model"], m["gate_old"], m["gate_new"], m["windows"], m["audio_s"]))
+        self.assertEqual((r["lines"], r["dialogue"]), (len(self.lines), len(self.lines)))
+
+    def test_a_synced_fit_is_served_as_the_original_moved_to_the_fits_lines(self):
+        for why, reason in ((None, "passes against speech (release lead removed)"),
+                            ("a stand-in's rule", "clearly better than the original (speech)")):
+            with self.subTest(why=why):
+                r = self.judged(decision="synced", lines=self.moved, why=why, moved_s=2.5)
+                self.assertEqual((r["outcome"], r["reason"]), ("synced", reason))
+                self.assertEqual(r["body"], write_like(self.text, self.moved))
+                self.assertNotEqual(r["body"], write_like(self.text, self.lines))
+                self.assertEqual(r["better"], {"pass": why is not None, "moved_s": 2.5})
+                self.assert_measures(r)
+                self.assertNotIn("close_call", r)
+                self.assertNotIn("audio_track", r)
+
+    def test_an_in_sync_fit_publishes_no_copy(self):
+        for why, reason in ((None, "original passes against speech (release lead removed)"),
+                            ("a stand-in's rule", "original fits the speech as it is (release lead removed)")):
+            with self.subTest(why=why):
+                r = self.judged(decision="in_sync", why=why)
+                self.assertEqual((r["outcome"], r["reason"]), ("in_sync", reason))
+                self.assertNotIn("body", r)
+                self.assertNotIn("better", r)
+                self.assert_measures(r)
+
+    def test_a_close_call_and_a_dubs_audio_track_are_kept(self):
+        close = {"windows": 18, "first": {"pass": False, "within": 0.88}}
+        r = self.judged(decision="synced", lines=self.moved, close_call=close, audio_track=1, audio_language="jpn")
+        self.assertEqual(r["outcome"], "synced")
+        self.assertEqual(r["close_call"], close)
+        self.assertEqual(r["audio_track"], {"index": 1, "language": "jpn"})
+        r = self.judged(decision="in_sync", audio_track=0, audio_language="eng")      # the first track is a track too
+        self.assertEqual(r["audio_track"], {"index": 0, "language": "eng"})
+
+    def test_a_fit_that_keeps_the_original_says_why(self):
+        r = self.judged(decision="keep_original")
+        self.assertEqual((r["outcome"], r["reason"]), ("keep_original", "below the bar or shift under 100 ms"))
+        self.assertNotIn("body", r)
+        self.assert_measures(r)
+        r = self.judged(decision="keep_original", why="too little speech")
+        self.assertEqual(r["reason"], "too little speech")
 
 
 def cut_film(n, seed, cuts, gap_at_cut=3.0):
