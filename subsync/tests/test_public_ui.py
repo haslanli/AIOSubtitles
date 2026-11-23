@@ -22,9 +22,10 @@ def contrast(a, b):
 
 
 def css_rule(selector):
-    """The declarations of the stylesheet's rule for `selector`, written at the start of its own line."""
+    """The declarations of the stylesheet's rule for `selector`, written at the start of its own line, alone or as one
+    of a group of selectors that share them (".a,.b{...}")."""
     from subsync.ui import APP_CSS
-    return re.search(r"(?m)^" + re.escape(selector) + r"\{([^}]*)\}", APP_CSS).group(1)
+    return re.search(r"(?m)^(?:[^{}\n]*,)?" + re.escape(selector) + r"(?:,[^{}\n]*)?\{([^}]*)\}", APP_CSS).group(1)
 
 
 def css_media(query):
@@ -1243,6 +1244,19 @@ class ScriptTest(unittest.TestCase):
         self.assertIsNotNone(guard, "the sign-up form has no submit guard")
         self.assertRegex(guard["body"], r"^\s*if \(at === screens\.length - 1\) return;\s*e\.preventDefault\(\);\s*"
                                         r"enter\(at \+ 1\);\s*paint\(false\);\s*$")
+
+    def test_a_poll_leaves_the_parts_that_didnt_change_in_place(self):
+        # Every poll of a page whose work runs (every 2 s) put in fresh copies of the back arrow, the body and
+        # the actions, changed or not: a screen reader's place in the progress list was lost each time, and a focus or
+        # a selection in them. A part equal to the fresh one stays as it is
+        from subsync.ui import APP_JS
+        part = re.search(r'\["main \.fbar", "main \.body", "main \.actions"\]\.forEach\(function \(selector\) \{'
+                         r'(?P<body>.*?)\n      \}\);', APP_JS, re.S)
+        self.assertIsNotNone(part, "the poll puts in no parts")
+        self.assertRegex(part["body"], r"^\s*var old = document\.querySelector\(selector\), now = fresh\.querySelector"
+                                       r"\(selector\);\s*if \(old && now && old\.isEqualNode\(now\)\) return;"
+                                       r"[^\n]*\n\s*if \(now\) now = document\.importNode\(now, true\);")
+        self.assertEqual(part["body"].count("replaceWith"), 1)
 
     def test_the_phones_back_goes_where_the_arrow_goes(self):
         # The layer added no entry to the page's history, so the phone's Back button or gesture left the site

@@ -265,6 +265,7 @@
       var known = lines(document);
       ["main .fbar", "main .body", "main .actions"].forEach(function (selector) {
         var old = document.querySelector(selector), now = fresh.querySelector(selector);
+        if (old && now && old.isEqualNode(now)) return;   // unchanged: kept, with a reader's place and focus in it
         if (now) now = document.importNode(now, true);
         if (old && now) old.replaceWith(now);
         else if (old) old.remove();

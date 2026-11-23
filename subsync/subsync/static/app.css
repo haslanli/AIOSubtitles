@@ -80,10 +80,10 @@ h2[tabindex="-1"]:focus{outline:none}
 .input.code{max-width:19em;font-size:20px;letter-spacing:.06em}
 pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);border:1px solid #2A2A2A;font:400 15px/1.5 var(--mono);color:var(--text);overflow-x:auto;white-space:pre}
 .input::placeholder{color:#8A8A8A;opacity:1}
-.input:hover{border-color:var(--text-3)}
+.input:hover,.sel select:hover,.num:hover{border-color:var(--text-3)}
 /* a focused box (this one, a select, a number box) shows it by its border; its outline stays, unseen, for
    high-contrast mode to paint */
-.input:focus{outline:2px solid transparent;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
+.input:focus,.sel select:focus{outline:2px solid transparent;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
 .input[aria-invalid=true]{border-color:var(--danger)}
 .with-btn{position:relative;margin-top:10px}
 .with-btn .input{margin-top:0;padding-right:84px}
@@ -95,21 +95,23 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 
 /* ---------- choice rows: the whole row is the control; a ticked row takes the chosen blue ---------- */
 .choices{display:grid;gap:12px}
-.choice{display:grid;grid-template-columns:24px minmax(0,1fr);column-gap:16px;padding:18px 20px 20px;border-radius:12px;
+/* the checkbox row (.choice) and the radio row (.way, below) are one row: its box, or circle, then its words */
+.choice,.way{display:grid;grid-template-columns:24px minmax(0,1fr);column-gap:16px;padding:18px 20px 20px;border-radius:12px;
   background:var(--row);border:1px solid transparent;cursor:pointer;
   transition:background-color var(--t-quick) var(--ease),border-color var(--t-quick) var(--ease)}
-.choice:hover{border-color:#4A4A4A}
-.choice input{appearance:none;-webkit-appearance:none;width:24px;height:24px;margin:1px 0 0;border-radius:6px;
-  border:2px solid var(--text-3);background:transparent;display:grid;place-content:center;cursor:pointer;
+.choice:hover,.way:hover{border-color:#4A4A4A}
+.choice input,.way input{appearance:none;-webkit-appearance:none;width:24px;height:24px;border:2px solid var(--text-3);
+  background:transparent;display:grid;place-content:center;cursor:pointer;
   transition:background-color var(--t-quick) var(--ease),border-color var(--t-quick) var(--ease)}
+.choice input:checked,.way input:checked{background:var(--text);border-color:var(--text)}
+.choice input:checked::after,.way input:checked::after{opacity:1}
+.choice input:focus-visible,.way input:focus-visible{outline:2px solid var(--accent-link);outline-offset:3px}
+.choice:has(input:checked),.way:has(input:checked){background:var(--accent-bg);border-color:var(--accent-link)}
+.choice input{margin:1px 0 0;border-radius:6px}
 .choice input::after{content:"";width:12px;height:7px;border:solid var(--accent-bg);border-width:0 0 2.5px 2.5px;
   transform:translateY(-1px) rotate(-45deg);opacity:0;transition:opacity var(--t-quick) var(--ease)}
-.choice input:checked{background:var(--text);border-color:var(--text)}
-.choice input:checked::after{opacity:1}
-.choice input:focus-visible{outline:2px solid var(--accent-link);outline-offset:3px}
 .choice b{display:block;font-weight:700;font-size:17px;line-height:1.4}
 .choice b~span{display:block;margin-top:6px;font-size:15px;line-height:1.55;color:var(--text-2)}
-.choice:has(input:checked){background:var(--accent-bg);border-color:var(--accent-link)}
 .choice.off,.choice:has(input:disabled){opacity:.5;cursor:not-allowed}
 .choice input:disabled{cursor:not-allowed}
 
@@ -117,22 +119,12 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .ways{border:0;padding:0;margin:0;min-width:0}
 .ways legend{padding:0;font-weight:700;font-size:18px;line-height:1.62}
 .options{display:grid;gap:12px;margin-top:10px}
-.way{display:grid;grid-template-columns:24px minmax(0,1fr);column-gap:16px;padding:18px 20px 20px;border-radius:12px;
-  background:var(--row);border:1px solid transparent;cursor:pointer;
-  transition:background-color var(--t-quick) var(--ease),border-color var(--t-quick) var(--ease)}
-.way:hover{border-color:#4A4A4A}
-.way input{appearance:none;-webkit-appearance:none;width:24px;height:24px;margin:2px 0 0;border-radius:50%;
-  border:2px solid var(--text-3);background:transparent;display:grid;place-content:center;cursor:pointer;
-  transition:border-color var(--t-quick) var(--ease),background-color var(--t-quick) var(--ease)}
+.way input{margin:2px 0 0;border-radius:50%}
 .way input::after{content:"";width:10px;height:10px;border-radius:50%;background:var(--accent-bg);opacity:0}
-.way input:checked{background:var(--text);border-color:var(--text)}
-.way input:checked::after{opacity:1}
-.way input:focus-visible{outline:2px solid var(--accent-link);outline-offset:3px}
 .way .head{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
 .way b{font-weight:700;font-size:19px;line-height:1.35;overflow-wrap:anywhere}
 .way i{font-style:normal;font-size:15px;font-weight:700;color:var(--accent-text);white-space:nowrap}
 .way .head~span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
-.way:has(input:checked){background:var(--accent-bg);border-color:var(--accent-link)}
 .way:has(input:checked) .head~span{color:var(--on-accent-bg)}
 /* words for the picked row only (AD567): hidden while another row is picked; a browser without :has shows them */
 .way:not(:has(input:checked)) .if-chosen{display:none}
@@ -147,8 +139,6 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .sel select{appearance:none;-webkit-appearance:none;width:100%;height:56px;padding:0 48px 0 16px;background:var(--field);
   border:1px solid var(--edge);border-radius:10px;color:var(--text);font:400 17px/1 var(--sans);cursor:pointer;
   transition:border-color var(--t-quick) var(--ease),box-shadow var(--t-quick) var(--ease)}
-.sel select:hover{border-color:var(--text-3)}
-.sel select:focus{outline:2px solid transparent;border-color:var(--accent-link);box-shadow:0 0 0 1px var(--accent-link)}
 .sel select.empty{color:var(--text-3)}
 .sel select:not(.empty){border-color:var(--accent-link);background:var(--accent-bg);color:var(--text)}
 .sel option{background:var(--surface);color:var(--text)}
@@ -207,11 +197,12 @@ pre.code{margin:0;padding:12px 16px;border-radius:10px;background:var(--field);b
 .small{margin-top:16px;font-size:15px;line-height:1.5;color:var(--text-3)}
 .after{margin-top:16px;font-size:15px;line-height:1.55;color:var(--text-3);max-width:34em}
 
-/* ---------- the start page ---------- */
-.p-start .grid{display:grid;grid-template-columns:repeat(12,var(--col));column-gap:24px;padding:clamp(64px,10vh,112px) 0 96px}
-.p-start h1{grid-column:1/-1;font-size:clamp(64px,6.4vw,92px);letter-spacing:-.035em}
+/* ---------- the start page (its grid and headings are the signed-up page's too) ---------- */
+.p-start .grid,.p-done .grid{display:grid;grid-template-columns:repeat(12,var(--col));column-gap:24px;
+  padding:clamp(64px,10vh,112px) 0 96px}
+.p-start h1,.p-done h1{grid-column:1/-1;font-size:clamp(64px,6.4vw,92px);letter-spacing:-.035em}
 h1 br.phone{display:none}
-.p-start h2{font-size:18px;line-height:1.62}
+.p-start h2,.p-done h2{font-size:18px;line-height:1.62}
 .what{grid-column:1/6;margin-top:clamp(48px,7vh,72px)}
 .what p{font-size:18px;line-height:1.62;color:var(--text-2);max-width:31em}
 .what p+p{margin-top:16px}
@@ -270,10 +261,7 @@ body.open .sheet,.layer:target .sheet{transform:none}
     background:var(--surface)}
 }
 
-/* ---------- the signed-up page ---------- */
-.p-done .grid{display:grid;grid-template-columns:repeat(12,var(--col));column-gap:24px;padding:clamp(64px,10vh,112px) 0 96px}
-.p-done h1{grid-column:1/-1;font-size:clamp(64px,6.4vw,92px);letter-spacing:-.035em}
-.p-done h2{font-size:18px;line-height:1.62}
+/* ---------- the signed-up page (its grid and headings: the start page's) ---------- */
 .then .notes{margin-bottom:36px}
 .p-done .key{grid-column:1/7;align-self:start;margin-top:clamp(40px,6vh,64px);padding:32px 32px 30px}
 .p-done .key .help{margin-top:12px}
@@ -339,7 +327,6 @@ body.open .sheet,.layer:target .sheet{transform:none}
 /* number field with its unit inside; takes a number or auto */
 .num{position:relative;display:inline-flex;align-items:center;margin-top:10px;height:56px;min-width:180px;background:var(--field);
   border:1px solid var(--edge);border-radius:10px;transition:border-color var(--t-quick) var(--ease),box-shadow var(--t-quick) var(--ease)}
-.num:hover{border-color:var(--text-3)}
 .num:focus-within{outline:2px solid transparent;outline-offset:3px;border-color:var(--accent-link);
   box-shadow:0 0 0 1px var(--accent-link)}
 .num input{width:7.5ch;height:100%;padding:0 0 0 16px;border:0;background:transparent;color:var(--text);
@@ -462,7 +449,7 @@ html:not(.js) .screens{margin-top:24px}
   .js .screen{flex:1}
   .sheet .q{font-size:30px}
   .input.code{max-width:none}
-  .choice{padding:16px 16px 18px}
+  .choice,.way{padding:16px 16px 18px}
   .actions .btn{width:100%;height:56px}
   /* a label longer than the narrowest phones' column takes two lines, not the page's margin */
   .btn{white-space:normal;text-align:center}
@@ -506,7 +493,6 @@ html:not(.js) .screens{margin-top:24px}
   .seg{display:flex;flex:1}
   .seg label{flex:1}
   .seg span{min-width:0}
-  .way{padding:16px 16px 18px}
   .way .head{flex-direction:column;align-items:flex-start;gap:2px}
 }
 /* narrow phones: a real personal link (a 43-character key) takes four lines */
