@@ -280,6 +280,8 @@ class LanguagesTest(unittest.TestCase):
         self.assertEqual(Settings({"SUBSYNC_LANGUAGES": "eng,xx"}).conflicts(), [lead + "xx isn't one."])
         self.assertEqual(Settings({"SUBSYNC_LANGUAGES": " xx , Klingon"}).conflicts(),
                          [lead + "xx isn't one.", lead + "Klingon isn't one."])
+        # A code in other letters than a to z names no language either ("рус" is Russian's own abbreviation)
+        self.assertEqual(Settings({"SUBSYNC_LANGUAGES": "eng,рус"}).conflicts(), [lead + "рус isn't one."])
         for empty in ("", " , "):
             with self.subTest(value=empty):
                 self.assertEqual(Settings({"SUBSYNC_LANGUAGES": empty}).conflicts(),

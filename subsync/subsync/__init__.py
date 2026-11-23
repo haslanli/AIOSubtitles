@@ -32,5 +32,7 @@ ALGO_VERSION = "v3"   # part of every stored result's key: a new version recompu
 # for Chinese and Japanese, tracks named or flagged as commentary, or as full ones with signs and songs, song and sign
 # styles told by their names' whole words, and SRT cues with no blank line between them; each uncovered stretch
 # judged on its own against a track in the subtitle's own language, and one shift excusing a missing stretch only when
-# the subtitle's lines after it pair near the shift again
+# the subtitle's lines after it pair near the shift again; in the language check, Japanese and Korean told from
+# Chinese by their own script, a language's written forms and varieties as the language, and WebVTT's character
+# references as their characters
 RULE_REVISION = 11

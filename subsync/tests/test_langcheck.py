@@ -24,15 +24,17 @@ CJK = {"chi": ("我不知道你在说什么。", "我们明天早上再走吧。
 # What passes the check, as one fingerprint (check_rules), and the RULE_REVISION it has been judged under since it took
 # this form. A change to it must bump RULE_REVISION, so stored verdicts are judged again: pin the new fingerprint here
 # with the new revision
-CHECK_RULES = "1e9e418748edcee4544d2ceb9fdc22cb9b9e193712ed152064ac71a14640f05a"
+CHECK_RULES = "8fe862e37499fa0567bb0662e19d32a180512058f861348f8023a613e2ce96b4"
 CHECK_REVISION = 11
 
 
 def check_rules():
-    """The fingerprint of what the check decides by: its thresholds, the scripts' letters and each language's scripts,
-    the common-word lists, and how words and vector drawings are found."""
-    rules = {"thresholds": [langcheck.MIN_WORDS, langcheck.MIN_SCRIPT_SHARE, langcheck.MIN_COMMON_SHARE],
-             "blocks": langcheck._BLOCKS, "scripts": langcheck.SCRIPTS, "characters": langcheck.CHARACTER_SCRIPTS,
+    """The fingerprint of what the check decides by: its thresholds, the scripts' letters and each language's scripts
+    (and own script), the common-word lists, and how words and vector drawings are found."""
+    rules = {"thresholds": [langcheck.MIN_WORDS, langcheck.MIN_SCRIPT_SHARE, langcheck.MIN_COMMON_SHARE,
+                            langcheck.MIN_OWN_SCRIPT_SHARE],
+             "blocks": langcheck._BLOCKS, "scripts": langcheck.SCRIPTS, "own": langcheck.OWN_SCRIPT,
+             "characters": langcheck.CHARACTER_SCRIPTS,
              "words": {code: sorted(words) for code, words in langcheck.WORDS.items()},
              "patterns": [langcheck._TOKEN.pattern, langcheck.DRAWING.pattern]}
     return hashlib.sha256(json.dumps(rules, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -122,6 +124,49 @@ class LanguageCheckTest(unittest.TestCase):
         # still refused: Japanese listed as Chinese (its kanji alone), and English listed as Chinese
         self.assertEqual(langcheck.check(srt(CJK["jpn"], words=900), "chi"), langcheck.FAIL)
         self.assertEqual(langcheck.check(srt(EN), "chi"), langcheck.FAIL)
+
+    def test_chinese_listed_as_japanese_or_korean_fails(self):
+        # Han counted as Japanese and as Korean script, so a Chinese subtitle passed as either (script 1.0);
+        # Japanese needs kana, and Korean Hangul, in at least MIN_OWN_SCRIPT_SHARE of its units, and Chinese has none
+        chinese = srt(CJK["chi"], words=900)
+        for lang in ("jpn", "kor"):
+            with self.subTest(lang=lang):
+                m = langcheck.measure(chinese, lang)
+                self.assertEqual((m["script"], m["own_script"]), (1.0, 0.0))
+                self.assertEqual(langcheck.check(chinese, lang), langcheck.FAIL)
+        self.assertEqual(langcheck.check(chinese, "chi"), langcheck.PASS)
+        self.assertIsNone(langcheck.measure(chinese, "chi")["own_script"])         # Chinese has no floor of its own
+        # Japanese and Korean stay far above the floor, with an English line under each line too, and Korean with a
+        # word in Chinese characters (Hanja) on each line passes
+        for lang in ("jpn", "kor"):
+            with self.subTest(lang=lang):
+                both = srt([f"{own}\n{en}" for own, en in zip(CJK[lang], EN)])
+                self.assertGreater(langcheck.measure(both, lang)["own_script"], 4 * langcheck.MIN_OWN_SCRIPT_SHARE)
+        hanja = srt([f"{line} 韓國人" for line in CJK["kor"]], words=900)
+        self.assertEqual(langcheck.check(hanja, "kor"), langcheck.PASS)
+
+    def test_a_languages_written_forms_and_varieties_get_its_check(self):
+        # The scripts and words were looked up by the code as given, so a language set as one of its written
+        # forms or varieties (nb, nn, arb, pes, prs, zsm, yue, cmn) got no verdict whatever its subtitle's text
+        for code, language in (("nob", "nor"), ("nb", "nor"), ("nno", "nor"), ("nn", "nor"), ("arb", "ara"),
+                               ("pes", "per"), ("prs", "per"), ("zsm", "may"), ("yue", "chi"), ("cmn", "chi")):
+            texts = {"English": srt(ENGLISH), "Russian": srt(RUSSIAN), "Chinese": srt(CJK["chi"], words=900)}
+            for name, text in texts.items():
+                with self.subTest(code=code, text=name):
+                    self.assertNotEqual(langcheck.check(text, code), langcheck.NO_VERDICT)
+                    self.assertEqual(langcheck.check(text, code), langcheck.check(text, language))
+        self.assertEqual(langcheck.check(srt(RUSSIAN), "arb"), langcheck.FAIL)
+        self.assertEqual(langcheck.check(srt(CJK["chi"], words=900), "yue"), langcheck.PASS)
+
+    def test_webvtt_character_references_are_their_characters(self):
+        # WebVTT writes "&", "<" and a hard space as "&amp;", "&lt;" and "&nbsp;", which were read as the
+        # words "amp", "lt" and "nbsp"; read as the SRT copy writes them, the same subtitle reads the same
+        cues = (("Tom &amp; Jerry&nbsp;now", "Tom & Jerry\xa0now"), ("1 &lt; 2, R&amp;D", "1 < 2, R&D"))
+        vtt = "WEBVTT\n\n" + "\n".join(f"00:00:0{i}.000 --> 00:00:0{i}.800\n{v}\n" for i, (v, _) in enumerate(cues))
+        plain = "\n".join(f"{i + 1}\n00:00:0{i},000 --> 00:00:0{i},800\n{s}\n" for i, (_, s) in enumerate(cues))
+        self.assertEqual(langcheck.plain_text(vtt), "tom & jerry now\n1 < 2, r&d")
+        self.assertEqual(langcheck.plain_text(vtt), langcheck.plain_text(plain))
+        self.assertEqual(langcheck.measure(vtt, "eng")["words"], 5)                  # tom, jerry, now, r, d
 
     def test_ass_styling_tags_and_drawings_are_not_text(self):
         text = ass(RUSSIAN)

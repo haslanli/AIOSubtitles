@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import time
+import unicodedata
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,21 @@ from subsync.subs import decode, fingerprint
 from subsync.worker import Job, LanguageSync, Worker
 
 RU = "1\n00:00:01,000 --> 00:00:02,000\nПривет\n\n2\n00:00:03,500 --> 00:00:04,000\nКак дела?\n"
+VIE = ("1\n00:00:01,000 --> 00:00:02,000\nTôi không biết anh ấy đang ở đâu.\n\n"
+       "2\n00:00:03,000 --> 00:00:04,000\nChúng ta sẽ gặp lại nhau ở Việt Nam.\n")
+TONE_MARKS = "\u0300\u0301\u0303\u0309\u0323"   # grave, acute, tilde, hook above, dot below
+
+
+def windows_1258(text):
+    """text as Windows writes Vietnamese (cp1258): a letter the code page has whole as it is, any other as its letter
+    with its tone mark after it, as a character of its own."""
+    out = []
+    for ch in unicodedata.normalize("NFC", text):
+        apart = unicodedata.normalize("NFD", ch)
+        tone = "".join(c for c in apart if c in TONE_MARKS)
+        letter = unicodedata.normalize("NFC", "".join(c for c in apart if c not in TONE_MARKS))
+        out.append(ch.encode("cp1258") if not tone else (letter + tone).encode("cp1258"))
+    return b"".join(out)
 
 
 class FingerprintTest(unittest.TestCase):
@@ -48,6 +64,28 @@ class FingerprintTest(unittest.TestCase):
     def test_another_timing_or_text_is_another_subtitle(self):
         self.assertNotEqual(fingerprint(RU), fingerprint(RU.replace("00:00:03,500", "00:00:04,000")))
         self.assertNotEqual(fingerprint(RU), fingerprint(RU.replace("Привет", "Здравствуй")))
+
+    def test_the_same_subtitle_as_srt_and_as_webvtt_with_character_references(self):
+        # WebVTT writes "&" and "<" as "&amp;" and "&lt;", which were compared as words, so the same subtitle
+        # as SRT and as WebVTT was two whenever a line held one of them (judged twice, and listed twice)
+        lines = (("Tom & Jerry go to R&D.", "Tom &amp; Jerry go to R&amp;D."), ("Say <i>now</i>", "Say <i>now</i>"),
+                 ("1 < 2", "1 &lt; 2"))
+        srt = "\n".join(f"{i + 1}\n00:00:0{i},000 --> 00:00:0{i},800\n{s}\n" for i, (s, _) in enumerate(lines))
+        vtt = "WEBVTT\n\n" + "\n".join(f"00:00:0{i}.000 --> 00:00:0{i}.800\n{v}\n" for i, (_, v) in enumerate(lines))
+        self.assertEqual(fingerprint(srt), fingerprint(vtt))
+        self.assertNotEqual(fingerprint(srt), fingerprint(srt.replace("R&D", "R and D")))   # another text still counts
+        # an SRT's own text is compared as it is: "&amp;" there is no "&"
+        self.assertNotEqual(fingerprint(srt), fingerprint(srt.replace("R&D", "R&amp;D")))
+
+    def test_the_same_subtitle_with_its_tone_marks_joined_to_their_letters_or_not(self):
+        # Vietnamese in its old Windows encoding (cp1258) writes tone marks as characters of their own, as
+        # does Unicode text in the decomposed form, and the same words were compared as other words
+        old = decode(windows_1258(VIE), "vie")
+        self.assertNotEqual(old, VIE)                                     # read with its tone marks apart
+        self.assertEqual(unicodedata.normalize("NFC", old), VIE)
+        same = (VIE, old, unicodedata.normalize("NFD", VIE), decode(VIE.encode("utf-8"), "vie"))
+        self.assertEqual(len({fingerprint(text) for text in same}), 1)
+        self.assertNotEqual(fingerprint(VIE), fingerprint(VIE.replace("Việt", "Viet")))   # another letter still counts
 
     def test_with_no_edge_left_out_a_longer_subtitle_is_still_told_apart(self):
         long = "\n".join(f"{i + 1}\n00:00:{i:02d},000 --> 00:00:{i:02d},800\nLine {i}\n" for i in range(30))

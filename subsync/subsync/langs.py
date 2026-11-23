@@ -77,8 +77,9 @@ NOT_A_LANGUAGE = {"und", "mul", "zxx", "mis"}
 # a language's written forms, counted as the language wherever a subtitle's language is compared with a track's
 #: Norwegian's two, and the standard forms of Arabic, Persian and Malay
 WRITTEN = {"nob": "nor", "nno": "nor", "arb": "ara", "pes": "per", "prs": "per", "zsm": "may"}
-# languages counted as one when a title's original language is compared with a file's tracks (only there): the written
-# forms, and the Chinese varieties too (written Cantonese differs from standard Chinese, so not in WRITTEN)
+# languages counted as one when a title's original language is compared with a file's tracks, and where only the
+# script matters (a subtitle's old encoding, the language check: family): the written forms, and the Chinese varieties
+# too (written Cantonese differs from standard Chinese, so not in WRITTEN)
 FAMILY = {"yue": "chi", "cmn": "chi", "nan": "chi", "hak": "chi", "wuu": "chi", **WRITTEN}
 # the usual Windows encoding of a subtitle in each language when it isn't Unicode (subs.decode); any other
 # language is read as Western (cp1252). Serbian and Chinese have two each, and the text decides (subs.decode)
@@ -124,9 +125,10 @@ def name(code):
 
 def known(code):
     """A code (two or three letters, an IETF tag or an English name) as a three-letter language code; None when it
-    names no language."""
+    names no language (a language code's letters are a to z, so "рус" is none)."""
     c = lang3(code)
-    if len(c) != 3 or not c.isalpha() or not c.islower() or c in NOT_A_LANGUAGE or "qaa" <= c <= "qtz":
+    if (len(c) != 3 or not c.isascii() or not c.isalpha() or not c.islower() or c in NOT_A_LANGUAGE
+            or "qaa" <= c <= "qtz"):
         return None
     return c
 
@@ -146,11 +148,17 @@ def written(code):
     return WRITTEN.get(c, c)
 
 
+def family(code):
+    """A code as a three-letter code, a written form or a variety as its language (FAMILY): where only the script
+    matters (legacy_encodings, the language check:)."""
+    c = lang3(code)
+    return FAMILY.get(c, c)
+
+
 def legacy_encodings(code):
     """The encodings a subtitle in language `code` that isn't Unicode may be in (LEGACY_ENCODINGS; a variety by its
-    language, FAMILY): one, two for subs.decode to choose between, or none (Western)."""
-    c = lang3(code)
-    found = LEGACY_ENCODINGS.get(FAMILY.get(c, c), ())
+    language, family): one, two for subs.decode to choose between, or none (Western)."""
+    found = LEGACY_ENCODINGS.get(family(code), ())
     return (found,) if isinstance(found, str) else found
 
 

@@ -53,8 +53,8 @@ def add_audio_bytes(index, n):
 
 HEAD_BYTES = 256 * 1024
 HASH_CHUNK = 64 * 1024
-ELEMENT_READ = 64 * 1024           # the first read of Info or Tracks found through the SeekHead (a few KB each)
-MAX_ELEMENT = 8 * 1024 * 1024      # Info/Tracks larger than this are not read
+ELEMENT_READ = 64 * 1024           # the first read of Info, Tracks or a second SeekHead a SeekHead names (a few KB)
+MAX_ELEMENT = 8 * 1024 * 1024      # Info, Tracks or a second SeekHead larger than this are not read
 MAX_CUES = 32 * 1024 * 1024        # 7.27 MB on a file with 75 PGS tracks; larger ones are never read (IndexTooLarge)
 # cue track positions kept of one file (the 7.27 MB above hold a few hundred thousand); each is a few Python objects
 # (a cue cluster and a subtitle cue at most), so a Cues of tiny made-up entries could otherwise hold a gigabyte: a file
@@ -493,6 +493,13 @@ class MkvIndex:
                 head = head + self.r.get(len(head), p + sz - len(head))   # only the part not held yet
             self._element(head, eid, raw, p, sz)
         self._head = head
+        # A SeekHead may name a second one, which lists what the first doesn't (the format allows it, for
+        # example after an edit used up the room at the start): read once, when the Cues, Info or Tracks are still
+        # unknown, and no further (a SeekHead it names is a place kept, never read)
+        unknown = (CUES not in self.positions or not (self.info or INFO in self.positions)
+                   or not (self.tracks_raw or TRACKS in self.positions))
+        if unknown and SEEKHEAD in self.positions:
+            self._fetch_element(self.positions[SEEKHEAD], SEEKHEAD)
         for eid in (INFO, TRACKS):  # not in the first read: follow the SeekHead
             if eid in self.positions and not (self.info if eid == INFO else self.tracks_raw):
                 self._fetch_element(self.positions[eid], eid)
@@ -527,9 +534,9 @@ class MkvIndex:
             raise NotMatroska("an element runs past the file's end")
 
     def _fetch_element(self, at, want):
-        """Info or Tracks (`want`) where the SeekHead puts them, in one read of ELEMENT_READ bytes and, for a longer
-        one, a read of its rest (its header was read, then all of it again); one in the file's last 64 KiB
-        comes with them (_bytes). A place at or past the file's end is not followed."""
+        """Info, Tracks or a second SeekHead (`want`) where the SeekHead puts them, in one read of ELEMENT_READ bytes
+        and, for a longer one, a read of its rest (its header was read, then all of it again); one in the
+        file's last 64 KiB comes with them (_bytes). A place at or past the file's end is not followed."""
         if at >= self.size:
             return
         buf = self._bytes(at, ELEMENT_READ)

@@ -1,6 +1,7 @@
 """Language codes: the full two-letter (ISO 639-1) table to the three-letter bibliographic codes (ISO 639-2/B) that
-Matroska tracks use, the terminologic spellings, TMDB's own codes, and the language families that count as one language
-when a title's original language is compared with a file's tracks."""
+Matroska tracks use, the terminologic spellings, TMDB's own codes, codes of plain letters only, and the language
+families that count as one language when a title's original language is compared with a file's tracks, and where only
+the script matters."""
 import unittest
 
 from helpers import HAVE_CRYPTOGRAPHY, NEEDS  # first: it puts the package on the import path
@@ -102,6 +103,13 @@ class KnownTest(unittest.TestCase):
         for code in ("", None, "und", "mul", "zxx", "mis", "xx", "q", "toolong", "e1"):
             self.assertIsNone(langs.known(code), code)
 
+    def test_a_code_with_letters_outside_a_to_z_names_no_language(self):
+        # Any three Unicode letters were taken as a code, so SUBSYNC_LANGUAGES=eng,рус started with a
+        # language no source answers for; language codes are plain letters
+        for code in ("рус", "ñño", "ÉNG", "eñg", "日本語"):
+            self.assertIsNone(langs.known(code), code)
+        self.assertEqual(langs.known("RUS"), "rus")
+
 
 class FamilyTest(unittest.TestCase):
     def test_one_language_for_the_comparison(self):
@@ -110,6 +118,14 @@ class FamilyTest(unittest.TestCase):
             self.assertTrue(langs.same_language(a, b), (a, b))
         for a, b in (("eng", "spa"), ("chi", "jpn"), ("nor", "dan"), ("und", "eng"), ("", "")):
             self.assertFalse(langs.same_language(a, b), (a, b))
+
+    def test_a_written_form_or_a_variety_as_its_language(self):
+        # where only the script matters: a subtitle's old encoding, and the language check
+        for code, language in (("yue", "chi"), ("cmn", "chi"), ("nb", "nor"), ("nno", "nor"), ("arb", "ara"),
+                               ("pes", "per"), ("prs", "per"), ("zsm", "may"), ("en-GB", "eng"), ("zho", "chi")):
+            self.assertEqual(langs.family(code), language, code)
+        self.assertEqual(langs.legacy_encodings("yue"), ("gbk", "cp950"))
+        self.assertEqual(langs.legacy_encodings("arb"), ("cp1256",))
 
     def test_the_families_dont_change_lang3(self):
         self.assertEqual(langs.lang3("yue"), "yue")

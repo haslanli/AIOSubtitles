@@ -605,7 +605,7 @@ class KeepTest(Base):
         # corrected; an episode's id is still no key
         with self.assertLogs("subsync.origlang", "WARNING") as logs:
             lk = self.make(SUBSYNC_ORIGINAL_LANGUAGES="mal:5114=ja,kitsu:7442=zh,mal:21:1=ko")
-        self.assertEqual(logs.output, ["WARNING:subsync.origlang:SUBSYNC_ORIGINAL_LANGUAGES: 1 entries ignored "
+        self.assertEqual(logs.output, ["WARNING:subsync.origlang:SUBSYNC_ORIGINAL_LANGUAGES: 1 entry ignored "
                                        "(not an id=language pair)"])
         self.assertEqual(origlang.choose(lk.peek("mal:5114:3")), ("jpn", "override"))
         self.assertEqual(origlang.choose(lk.peek("kitsu:7442")), ("chi", "override"))
@@ -622,6 +622,13 @@ class KeepTest(Base):
                                        "(not an id=language pair)"])
         with self.assertNoLogs("subsync.origlang", "WARNING"):
             self.make(SUBSYNC_ORIGINAL_LANGUAGES="tt1375666=en,")
+        # One is "1 entry", not "1 entries"
+        with self.assertLogs("subsync.origlang", "WARNING") as logs:
+            self.make(SUBSYNC_ORIGINAL_LANGUAGES="tt1375666=en,bad")
+        self.assertEqual(logs.output, ["WARNING:subsync.origlang:SUBSYNC_ORIGINAL_LANGUAGES: 1 entry ignored "
+                                       "(not an id=language pair)"])
+        # A code in other letters than a to z names no language ("рус" is Russian's own abbreviation)
+        self.assertEqual(origlang.parse_overrides("tt1375666=рус,tt2788316=ja"), ({"tt2788316": "jpn"}, 1))
 
     def test_tmdb_answers_stay_when_tmdb_is_no_longer_used(self):
         self.srv.find["tt1"] = {"movie_results": [{"id": 1, "original_language": "en"}]}

@@ -10,23 +10,26 @@ out) and measures two things:
                  languages the check knows (only words found in one list count, so "no" or "de" tell nothing).
 
 No verdict under MIN_WORDS words, so a short subtitle is never refused; a language without a word list gets the script
-check only, and one without a known script neither. Refused only with a clear margin: the expected script under half the
-units, or the expected language's common words under 3 % of the words and below another known language's. It never
-re-labels a subtitle, it only refuses it. No packages besides the standard library.
+check only, and one without a known script neither; a written form or a variety (nb, arb, yue) is checked as its
+language. Refused only with a clear margin: the expected script under half the units, Japanese or Korean with under
+10 % of them in its own script (kana, Hangul: Chinese is all Han), or the expected language's common words under 3 % of
+the words and below another known language's. It never re-labels a subtitle, it only refuses it. No packages besides
+the standard library.
 """
 import bisect
 import re
 import unicodedata
 
-from .langs import lang3
-from .subs import DRAWING, parse, plain_line
+from .langs import family
+from .subs import DRAWING, format_of, parse, plain_line
 
 PASS, FAIL, NO_VERDICT = "pass", "fail", "no verdict"
 
-MIN_WORDS = 300            # fewer words: no verdict
-MIN_SCRIPT_SHARE = 0.5     # refused when less than this share of the units (measure) is in the language's script
-MIN_COMMON_SHARE = 0.03    # ... or its common words are less than this share of the words and below another language's
-MORE_DOWNLOADS = 3         # an original refused when served: at most this many more of the file's subtitles downloaded
+MIN_WORDS = 300             # fewer words: no verdict
+MIN_SCRIPT_SHARE = 0.5      # refused when less than this share of the units (measure) is in the language's script
+MIN_OWN_SCRIPT_SHARE = 0.1  # ... or, of a language with a script of its own (OWN_SCRIPT), less than this in that one
+MIN_COMMON_SHARE = 0.03     # ... or its common words are less than this share of the words and below another language's
+MORE_DOWNLOADS = 3          # an original refused when served: at most this many more of the file's subtitles downloaded
 
 # Unicode blocks of each script: (first code point, last code point, script)
 _BLOCKS = sorted([
@@ -50,7 +53,7 @@ _STARTS = [b[0] for b in _BLOCKS]
 # other script is
 CHARACTER_SCRIPTS = ("han", "kana", "hangul")
 
-# The scripts a language is written in, by its 3-letter code (langs.lang3)
+# The scripts a language is written in, by its 3-letter code (langs.family)
 _LATIN = ("eng spa fre ger ita por dut swe nor dan fin cze slo hun rum hrv bos slv pol tur ind may vie est lav lit cat "
           "glg baq ice alb tgl")
 SCRIPTS = {code: ("latin",) for code in _LATIN.split()}
@@ -61,6 +64,11 @@ SCRIPTS.update({
     "hin": ("devanagari",), "mar": ("devanagari",), "nep": ("devanagari",), "tha": ("thai",),
     "chi": ("han",), "jpn": ("han", "kana"), "kor": ("hangul", "han"),
 })
+# the script that tells a language from another it shares a script with: Japanese and Korean are written
+# partly in Han, as Chinese is wholly, so a text with no kana (or no Hangul) is Chinese however much of it is Han.
+# Japanese dialogue is about three quarters kana, Korean nearly all Hangul, and about half each with an English line
+# under each line
+OWN_SCRIPT = {"jpn": "kana", "kor": "hangul"}
 
 # The most common function words of subtitle dialogue, lower case
 WORDS = {code: frozenset(text.split()) for code, text in {
@@ -101,13 +109,14 @@ def script_of(ch):
 
 
 def plain_text(text):
-    """A subtitle's dialogue with its markup removed, one line of text per subtitle line, lower case."""
-    lines = []
+    """A subtitle's dialogue with its markup removed, one line of text per subtitle line, lower case, letters in one
+    Unicode form (subs.plain_line)."""
+    fmt, lines = format_of(text or ""), []
     for line in parse(text or ""):
         if line["kind"] != "dialogue" or DRAWING.search(line["text"]):   # a drawing's commands are letters, not words
             continue
-        lines.append(plain_line(line["text"]))
-    return unicodedata.normalize("NFC", "\n".join(lines))
+        lines.append(plain_line(line["text"], fmt))
+    return "\n".join(lines)
 
 
 def units(plain):
@@ -131,29 +140,34 @@ def units(plain):
 
 def measure(text, lang):
     """What the check reads: {"words", "script" (share of the units in the language's scripts, None when its script
-    isn't known), "common" ({code: share of the words that are that language's common words})}."""
-    code = lang3(lang)
+    isn't known), "own_script" (of a language in OWN_SCRIPT, the share of the units in that script; else None),
+    "common" ({code: share of the words that are that language's common words})}."""
+    code = family(lang)
     plain = plain_text(text)
     words = _TOKEN.findall(plain)
-    scripts = SCRIPTS.get(code)
-    script = None
+    scripts, own = SCRIPTS.get(code), OWN_SCRIPT.get(code)
+    script = own_script = None
     written = units(plain) if scripts else []
     if written:
         script = round(sum(1 for s in written if s in scripts) / len(written), 3)
+        if own:
+            own_script = round(written.count(own) / len(written), 3)
     common = {c: round(sum(1 for w in words if w in distinct) / len(words), 4) if words else 0.0
               for c, distinct in _DISTINCT.items()}
-    return {"words": len(words), "script": script, "common": common}
+    return {"words": len(words), "script": script, "own_script": own_script, "common": common}
 
 
 def verdict(m, lang):
     """PASS, FAIL or NO_VERDICT for a measure (measure())."""
-    code = lang3(lang)
+    code = family(lang)
     if m["words"] < MIN_WORDS:
         return NO_VERDICT
     known = False
     if m["script"] is not None:
         known = True
         if m["script"] < MIN_SCRIPT_SHARE:
+            return FAIL
+        if m["own_script"] is not None and m["own_script"] < MIN_OWN_SCRIPT_SHARE:
             return FAIL
     if code in WORDS:
         known = True

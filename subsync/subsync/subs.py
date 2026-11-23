@@ -7,6 +7,7 @@ as SRT: an SRT's text as it is, WebVTT's (and ASS's, for a player that asks for 
 import codecs
 import hashlib
 import re
+import unicodedata
 from html import unescape
 from typing import NamedTuple
 
@@ -394,32 +395,37 @@ CREDIT = re.compile(r"(?i)https?://|www\.|\.(com|org|net|info|tv|ru)\b|subtitles
                     r"subdl|subsource|addic7ed|advertise")
 
 
-def plain_line(text):
-    """A line's words as the language check and fingerprints compare them: markup (ASS overrides, HTML tags) and ASS
-    line breaks and hard spaces gone, spaces collapsed, lower case."""
+def plain_line(text, fmt="srt"):
+    """A line's words as the language check and fingerprints compare them, the same whatever the subtitle's format or
+    encoding: a WebVTT line (`fmt`: format_of) as the SRT copy writes it, its character references
+    (&amp;) as their characters; markup (ASS overrides, HTML tags) and ASS line breaks and hard spaces gone, spaces
+    collapsed, lower case, and letters in one Unicode form (composed: a tone mark written apart joins its letter)."""
+    if fmt == "vtt":
+        text = _vtt_srt_text(text or "")
     text = strip_tags(text or "").replace("\\N", " ").replace("\\n", " ").replace("\\h", " ")
-    return " ".join(text.split()).lower()
+    return unicodedata.normalize("NFC", " ".join(text.split()).lower())
 
 
 WEBVTT_NOTE = re.compile(r"(?im)^NOTE\b[ \t]*")
 
 
 def fingerprint(text):
-    """What makes two subtitles the same one: their dialogue lines' words and start times to a tenth of a
-    second, once credit lines at the start and the end (at most srclimits.FINGERPRINT_CREDIT_LINES each) are left out,
-    and for a subtitle of more than srclimits.FINGERPRINT_LONGER_THAN lines its first and last
+    """What makes two subtitles the same one: their dialogue lines' words (plain_line) and start times to a
+    tenth of a second, once credit lines at the start and the end (at most srclimits.FINGERPRINT_CREDIT_LINES each)
+    are left out, and for a subtitle of more than srclimits.FINGERPRINT_LONGER_THAN lines its first and last
     srclimits.FINGERPRINT_EDGE lines too: OpenSubtitles V3+ adds a notice line first and marks the first cue's lines
     with WebVTT's "NOTE". Another encoding, line ending, byte-order mark, format (SRT or WebVTT) or notice
     doesn't change it; another timing or text does."""
+    fmt = format_of(text)
     lines = [l for l in parse(text) if l["kind"] == "dialogue"]
     for end in (0, -1):   # the first lines, then the last
         for _ in range(srclimits.FINGERPRINT_CREDIT_LINES):
-            if not lines or not CREDIT.search(plain_line(lines[end]["text"])):
+            if not lines or not CREDIT.search(plain_line(lines[end]["text"], fmt)):
                 break
             lines.pop(end)
     if len(lines) > srclimits.FINGERPRINT_LONGER_THAN:
         lines = lines[srclimits.FINGERPRINT_EDGE:len(lines) - srclimits.FINGERPRINT_EDGE]
-    body = "\n".join(f"{round(l['s'], 1):.1f}|{plain_line(WEBVTT_NOTE.sub('', l['text']))}" for l in lines)
+    body = "\n".join(f"{round(l['s'], 1):.1f}|{plain_line(WEBVTT_NOTE.sub('', l['text']), fmt)}" for l in lines)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 

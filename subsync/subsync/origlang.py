@@ -227,9 +227,10 @@ def make_lookup(settings, store, clock=time.time):
     if not settings.original_language:
         store.title_languages_clear()
         return None
-    if settings.original_languages_ignored:
-        log.warning("SUBSYNC_ORIGINAL_LANGUAGES: %d entries ignored (not an id=language pair)",
-                    settings.original_languages_ignored)
+    ignored = settings.original_languages_ignored
+    if ignored:
+        log.warning("SUBSYNC_ORIGINAL_LANGUAGES: %d %s ignored (not an id=language pair)", ignored,
+                    "entry" if ignored == 1 else "entries")
     store.title_languages_expiring(TMDB_KEEP_S, _from_tmdb)
     return Lookup(settings, store, clock=clock)
 

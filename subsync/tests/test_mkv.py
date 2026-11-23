@@ -1,10 +1,11 @@
 """The file index on damaged or made-up files, and how it reads them: blocks that inflate (or lose a stripped header)
 only so far, line reads that stop without waiting for a read that hangs, the decoder's pipe on a failed read and what a
 failed decoder said, fields cut off at a buffer's end, children read only within their parent and by their id (a CRC-32
-or a Void passed over), strings up to their NUL, integers of 8 bytes at most, at most MAX_TRACKS tracks, nothing read
-past the file's end, the Cues read with the hash's last 64 KiB and bytes a read holds not read again, cue points kept
-compactly and at most MAX_CUE_POINTS, a plausible runtime, and the clusters an audio window needs, from a margin before
-it. No network: files are served from memory."""
+or a Void passed over), a second SeekHead read once when the first leaves the Cues, Info or Tracks unknown, strings up
+to their NUL, integers of 8 bytes at most, at most MAX_TRACKS tracks, nothing read past the file's end, the Cues read
+with the hash's last 64 KiB and bytes a read holds not read again, cue points kept compactly and at most MAX_CUE_POINTS,
+a plausible runtime, and the clusters an audio window needs, from a margin before it. No network: files are served from
+memory."""
 import math
 import os
 import random
@@ -692,6 +693,86 @@ class ChildIdTest(unittest.TestCase):
     def test_children_skips_any_other_id(self):
         buf = crc_element(bytes(4)) + el("AE", b"") + el("EC", bytes(2)) + el("AE", b"\x80\x80")
         self.assertEqual(list(mkv.children(buf, 0, len(buf), 0xAE)), [(15, 0), (35, 2)])
+
+
+def seekhead(*entries):
+    """A SeekHead listing each (element id in hex, its place in the Segment)."""
+    return el("114D9B74", b"".join(el("4DBB", el("53AB", bytes.fromhex(eid)) + el("53AC", at.to_bytes(8, "big")))
+                                   for eid, at in entries))
+
+
+SEEK_IDS = {"info": "1549A966", "tracks": "1654AE6B", "cues": "1C53BB6B", "seekhead": "114D9B74"}
+
+
+def chained(first, second, third=(), pad=0, pad_end=0):
+    """A file laid out as an edit leaves one whose SeekHead had no room left: a SeekHead listing `first` (of "info",
+    "tracks", "cues" and "seekhead", the next SeekHead), Info, a Void of `pad` bytes, Tracks, one Cluster, the Cues, a
+    Void of `pad_end` bytes and a second SeekHead listing `second` (and a third after it listing `third`, if any).
+    Returns the file and the absolute places of its Cluster, Cues and second SeekHead."""
+    ebml = el("1A45DFA3", el("4282", b"matroska"))
+    seg = bytes.fromhex("18538067") + bytes.fromhex("01FFFFFFFFFFFFFF")
+    info = el("1549A966", el("2AD7B1", (1_000_000).to_bytes(4, "big")) + el("4489", struct.pack(">d", 90_000.0)))
+    tracks = el("1654AE6B", text_track(1))
+    cluster = el("1F43B675", el("E7", b"\x00"))
+
+    def size(names):                       # a SeekHead's size depends only on how many it lists
+        return len(seekhead(*[("1549A966", 0)] * len(names)))
+    at = {"info": size(first)}
+    at["tracks"] = at["info"] + len(info) + (len(el("EC", bytes(pad))) if pad else 0)
+    cluster_at = at["tracks"] + len(tracks)
+
+    def point(ms):
+        return el("BB", el("B3", ms.to_bytes(2, "big")) + el("B7", el("F7", b"\x01")
+                                                             + el("F1", cluster_at.to_bytes(4, "big"))))
+    cues = el("1C53BB6B", point(1000) + point(2000))
+    at["cues"] = cluster_at + len(cluster)
+    second_at = at["cues"] + len(cues) + (len(el("EC", bytes(pad_end))) if pad_end else 0)
+
+    def listing(names, next_at):
+        return seekhead(*[(SEEK_IDS[n], next_at if n == "seekhead" else at[n]) for n in names])
+    data = (ebml + seg + listing(first, second_at) + info + (el("EC", bytes(pad)) if pad else b"") + tracks + cluster
+            + cues + (el("EC", bytes(pad_end)) if pad_end else b"") + listing(second, second_at + size(second))
+            + (listing(third, 0) if third else b""))
+    seg_data = len(ebml) + len(seg)
+    return data, {"cluster": seg_data + cluster_at, "cues": seg_data + at["cues"], "second": seg_data + second_at}
+
+
+class SecondSeekHeadTest(unittest.TestCase):
+    """A SeekHead may name a second one that lists what the first doesn't (the format allows it, for example
+    after an edit used up the room at the start). It was never read, so Cues (or Tracks) listed only there weren't
+    found: no text track's timings, and the audio route's "no seek index". It is read once, when the Cues, Info or
+    Tracks are still unknown, and no further."""
+
+    def assert_cues_found(self, index, places):
+        self.assertEqual(index.cues_at, places["cues"])
+        self.assertEqual(index.cue_points, [(1.0, places["cluster"])])
+        self.assertEqual(index.track_cues, {1: [(1.0, 0.0), (2.0, 0.0)]})
+
+    def test_cues_listed_only_in_a_second_seekhead_are_found(self):
+        data, places = chained(first=("info", "tracks", "seekhead"), second=("cues",))
+        self.assert_cues_found(open_index(Memory(data)), places)
+
+    def test_tracks_and_cues_listed_only_there_are_found_with_one_more_read(self):
+        data, places = chained(first=("info", "seekhead"), second=("tracks", "cues"), pad=HEAD_BYTES)
+        r = Memory(data)
+        index = open_index(r)
+        self.assertEqual([t["codec"] for t in index.text_tracks()], ["S_TEXT/UTF8"])
+        self.assert_cues_found(index, places)
+        # the second SeekHead, the Tracks and the Cues come with the file's last 64 KiB, which the hash needs too
+        self.assertEqual(r.reads, [(0, HEAD_BYTES), (len(data) - HASH_CHUNK, HASH_CHUNK)])
+
+    def test_a_third_seekhead_is_not_followed(self):
+        data, _ = chained(first=("info", "tracks", "seekhead"), second=("seekhead",), third=("cues",))
+        index = open_index(Memory(data))
+        self.assertIsNone(index.cues_at)
+        self.assertEqual(index.track_cues, {})
+
+    def test_nothing_more_is_read_when_the_first_lists_all(self):
+        data, places = chained(first=("info", "tracks", "cues", "seekhead"), second=("cues",), pad=HEAD_BYTES,
+                               pad_end=2 * HASH_CHUNK)
+        r = Memory(data)
+        self.assert_cues_found(open_index(r), places)
+        self.assertFalse([read for read in r.reads if read[0] <= places["second"] < read[0] + read[1]])
 
 
 class PaddedStringTest(unittest.TestCase):
