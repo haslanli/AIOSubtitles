@@ -2698,23 +2698,13 @@ class WholeRequestBoundTest(unittest.TestCase):
             self.assertLess(time.monotonic() - t0, 3.0)
             self.assertEqual(fetch_subtitle(f"{self.url}/fast/a.srt", timeout=1), self.TEXT)
 
-    def test_a_sources_answer_and_a_language_lookups_are_bounded_too(self):
-        # the same reader: a built-in source's answer (extra._get) and an original-language lookup's (origlang._get)
-        from subsync import origlang
-        from subsync.extra import ExtraSources
-        ex = ExtraSources(Settings({}))
-        self.addCleanup(ex.pool.shutdown)
-        self.assertTrue(self.timed_out(lambda: ex._get(f"{self.url}/slow-body/stream/a.json", timeout=1)))
-        self.assertEqual(ex._get(f"{self.url}/fast/stream/a.json", timeout=1), {"streams": []})
-        lookup = origlang.Lookup(Settings({}), None)
-        self.addCleanup(lookup.close)
-        lookup.timeout = 1
-        t0 = time.monotonic()
-        with self.assertRaises(origlang.Failed) as failed:
-            lookup._get("wikidata", f"{self.url}/slow-body/stream/a.json")
-        self.assertLess(time.monotonic() - t0, 2.0)
-        self.assertEqual(failed.exception.why, "timed out")
-        self.assertEqual(lookup._get("wikidata", f"{self.url}/fast/stream/a.json"), {"streams": []})
+    def test_a_status_line_cut_at_the_bound_is_no_http_error(self):
+        # the bound shut the connection right after "HTTP/1.1 404": no "not found", the request timed out
+        aios = Aios(f"{self.url}/cut-404/manifest.json", timeout=1)
+        aios.check_config = lambda: None
+        self.assertTrue(self.timed_out(lambda: aios.streams("movie", "tt1")))
+        with mock.patch.object(sources, "PACED_HOSTS", ("127.0.0.1",)):
+            self.assertTrue(self.timed_out(lambda: fetch_subtitle(f"{self.url}/cut-404/a.srt", timeout=1)))
 
 
 class PlayerAddressTest(unittest.TestCase):

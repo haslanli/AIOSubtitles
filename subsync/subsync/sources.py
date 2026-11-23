@@ -90,16 +90,22 @@ def resource_path(type_, video_id):
     return f"{urllib.parse.quote(type_, safe='')}/{urllib.parse.quote(video_id, safe=':')}"
 
 
-def read_answer(req, timeout, limit, urlopen=None):
-    """A request's answer, at most `limit` bytes, through the request gate (realdebrid.urlopen, or `urlopen`, one of
-    its forms), the whole request within `timeout` seconds (net.Deadline: its connections, any redirect, its status
-    line, headers and body), so a server that sends its answer a byte now and then holds it no longer: TimeoutError
-    then. An HTTP error, and a request toward Real-Debrid, are raised as they are."""
+def _read_answer(req, timeout, limit):
+    """A GET's answer through the request gate, at most `limit` bytes, the whole request within `timeout` seconds
+    (net.Deadline: its connections, any redirect, its status line, headers and body), so a server that sends its answer
+    a byte now and then holds it no longer: TimeoutError then. An HTTP error that came before the bound, and
+    a request toward Real-Debrid, are raised as they are; one raised after it was shut mid-head is a TimeoutError too
+    (what came reads as a whole status line)."""
     bound = net.Deadline(timeout)
     try:
-        with bound, (urlopen or realdebrid.urlopen)(req, timeout=timeout) as r:
+        with bound, realdebrid.urlopen(req, timeout=timeout) as r:
             body = r.read(limit)
-    except (urllib.error.HTTPError, realdebrid.Blocked):
+    except urllib.error.HTTPError as e:
+        if bound.passed:
+            e.close()
+            raise TimeoutError("timed out") from None
+        raise
+    except realdebrid.Blocked:
         raise
     except (OSError, http.client.HTTPException):   # its connection shut at the bound fails the read it was in
         if bound.passed:
@@ -113,7 +119,7 @@ def read_answer(req, timeout, limit, urlopen=None):
 def _get_json(url, timeout):
     req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                "Connection": "close"})
-    return json.loads(read_answer(req, timeout, MAX_ANSWER))
+    return json.loads(_read_answer(req, timeout, MAX_ANSWER))
 
 
 def row_hints(stream):
@@ -406,7 +412,7 @@ def fetch_subtitle(url, timeout=DOWNLOAD_TIMEOUT_S, headers=None):
     """A subtitle's bytes. Gzip is unpacked; a zip (SubDL, SubSource) gives its subtitle file, the one named for the
     episode when the link ends in #SxxEyy. `headers`: what the source needs besides (a key, never in the address).
     MAX_SUBTITLE_BYTES bounds what is downloaded and, again, what is unpacked from it; `timeout` each try's whole
-    download (read_answer), so a paced host's place is never held longer."""
+    download (_read_answer), so a paced host's place is never held longer."""
     url, _, frag = url.partition("#")
     gate = _gate((urllib.parse.urlsplit(url).hostname or "").lower())
     for attempt in range(1, RETRIES_429 + 2):
@@ -415,7 +421,7 @@ def fetch_subtitle(url, timeout=DOWNLOAD_TIMEOUT_S, headers=None):
             if gate:
                 gate.acquire()
             try:
-                raw = read_answer(req, timeout, MAX_SUBTITLE_BYTES + 1)
+                raw = _read_answer(req, timeout, MAX_SUBTITLE_BYTES + 1)
             finally:
                 if gate:
                     gate.release()
