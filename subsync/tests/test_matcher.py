@@ -12,11 +12,11 @@ from array import array
 from unittest import mock
 
 from helpers import AUDIO_BETTER, FakeIndex, FIXTURES, rhythm, rules, truth_fit
-from subsync import mkv, mp4, pipeline, sections, shift, textpair  # noqa: E402
-from subsync.audiofit import AudioFit  # noqa: E402
-from subsync.reader import CapReached, ReadFailed, Refused, Stopped  # noqa: E402
-from subsync.relgate import relgate  # noqa: E402
-from subsync.subs import parse, write_like  # noqa: E402
+from subsync import mkv, mp4, pipeline, sections, shift, textpair
+from subsync.audiofit import AudioFit
+from subsync.reader import CapReached, ReadFailed, Refused, Stopped
+from subsync.relgate import relgate
+from subsync.subs import parse, write_like
 
 
 def periodic(n, step=3.0, seed=5, start=20.0):

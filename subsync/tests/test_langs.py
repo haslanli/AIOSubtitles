@@ -4,7 +4,7 @@ when a title's original language is compared with a file's tracks."""
 import unittest
 
 from helpers import HAVE_CRYPTOGRAPHY, NEEDS  # first: it puts the package on the import path
-from subsync import langs  # noqa: E402
+from subsync import langs
 
 # the 32 two-letter codes the table knew before it was completed: each must map exactly as before
 BEFORE = {"en": "eng", "ru": "rus", "ja": "jpn", "fr": "fre", "de": "ger", "es": "spa", "it": "ita", "pt": "por",

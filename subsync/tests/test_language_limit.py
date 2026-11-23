@@ -3,9 +3,9 @@ languages explanation and the too-many error take its number, and the sign-up an
 import unittest
 
 from helpers import HAVE_CRYPTOGRAPHY, NEEDS  # (first: it puts the package on the import path)
-from subsync import explain  # noqa: E402
-from subsync.aiosconfig import parse_languages  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
+from subsync import explain
+from subsync.aiosconfig import parse_languages
+from subsync.settings import Settings
 
 # the approved text, rewritten with the installer plan
 MAX_LANGUAGES_TEXT = (

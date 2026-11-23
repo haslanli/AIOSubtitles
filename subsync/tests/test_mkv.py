@@ -18,12 +18,12 @@ import zlib
 from array import array
 from unittest import mock
 
-from helpers import el, fixture, FIXTURES, have, matroska, Memory, Opener, text_track, traced_memory  # noqa: E402
-from subsync import mkv, mp4  # noqa: E402
-from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash  # noqa: E402
-from subsync.mp4 import Mp4Index, open_index  # noqa: E402
-from subsync.reader import CapReached, IndexTooLarge, RangeReader, ReadFailed  # noqa: E402
-from subsync.worker import audio_facts  # noqa: E402
+from helpers import el, fixture, FIXTURES, have, matroska, Memory, Opener, text_track, traced_memory
+from subsync import mkv, mp4
+from subsync.mkv import HASH_CHUNK, HEAD_BYTES, MkvIndex, NotMatroska, oshash
+from subsync.mp4 import Mp4Index, open_index
+from subsync.reader import CapReached, IndexTooLarge, RangeReader, ReadFailed
+from subsync.worker import audio_facts
 
 
 class InflateLimitTest(unittest.TestCase):

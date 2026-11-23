@@ -4,9 +4,9 @@ import re
 import unittest
 
 import helpers  # noqa: F401  (first: it puts the package on the import path)
-from helpers import HAVE_CRYPTOGRAPHY, NEEDS  # noqa: E402
-from subsync import explain  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
+from helpers import HAVE_CRYPTOGRAPHY, NEEDS
+from subsync import explain
+from subsync.settings import Settings
 
 # The package's own folder, wherever the tests run from (in the image they sit apart from the code).
 CODE = os.path.dirname(os.path.abspath(explain.__file__))

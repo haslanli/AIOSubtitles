@@ -11,7 +11,7 @@ from unittest import mock
 # helpers first: it puts the package on the path
 from helpers import (form, HAVE_CRYPTOGRAPHY, http, LINK, NEEDS, RECORD, ServerHarness, settings, start_server,
                      stop_server, USAGE)
-from subsync import explain, origlang, pages, ui  # noqa: E402
+from subsync import explain, origlang, pages, ui
 
 PERSON_KEY = "fedcba9876543210fedcba9876543210"
 

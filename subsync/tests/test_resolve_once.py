@@ -5,8 +5,8 @@ import logging
 import threading
 import unittest
 
-from helpers import DebridLink, FIXTURES  # noqa: E402
-from subsync.reader import MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused  # noqa: E402
+from helpers import DebridLink, FIXTURES
+from subsync.reader import MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused
 
 
 class ResolveOnceTest(unittest.TestCase):
@@ -78,6 +78,7 @@ class ResolveOnceTest(unittest.TestCase):
     def test_a_dead_address_asks_the_link_a_few_times_in_all(self):
         # The download address stops answering (no reply at all); the link still redirects to it, so
         # every look-up fails too. The reader asks the link at most 1 + MAX_RE_RESOLVE times, then no more
+        self.assertEqual(MAX_RE_RESOLVE, 3)                 # the first look-up and at most 3 more
         r = RangeReader(self.d.link, "test")
         r.get(0, 100)
         self.d.file_dead = True

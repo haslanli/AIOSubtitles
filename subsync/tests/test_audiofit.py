@@ -15,14 +15,14 @@ from unittest import mock
 
 import numpy as np
 
-from helpers import (AUDIO_BETTER, FIXTURES, matroska, Memory, Opener, RangeServer, rhythm,  # noqa: E402
+from helpers import (AUDIO_BETTER, FIXTURES, matroska, Memory, Opener, RangeServer, rhythm,
                      timeline_fit, truth_fit)
-from subsync import audiofit, mp4  # noqa: E402
-from subsync.audiofit import DT, OMAX, AudioFit  # noqa: E402
-from subsync.mkv import NotMatroska  # noqa: E402
-from subsync.mp4 import NoAudioThere, NotMp4, open_index  # noqa: E402
-from subsync.reader import RangeReader, ReadFailed  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
+from subsync import audiofit, mp4
+from subsync.audiofit import DT, OMAX, AudioFit
+from subsync.mkv import NotMatroska
+from subsync.mp4 import NoAudioThere, NotMp4, open_index
+from subsync.reader import RangeReader, ReadFailed
+from subsync.settings import Settings
 
 # What the audio fit judges by, as one fingerprint (fit_rules), and the RULE_REVISION it has been judged under since it
 # took this form. A change to it must bump RULE_REVISION, so stored verdicts are judged again: pin the new fingerprint

@@ -10,10 +10,10 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import Clock, closed_after, LookupServices, start_server, stop_server, TempDir  # noqa: E402
-from subsync import origlang  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.store import Store  # noqa: E402
+from helpers import Clock, closed_after, LookupServices, start_server, stop_server, TempDir
+from subsync import origlang
+from subsync.settings import Settings
+from subsync.store import Store
 
 KEY = "0123456789abcdef0123456789abcdef"            # a made-up v3 key (32 hex characters)
 TOKEN = "eyJhbGciOiJIUzI1NiJ9.made-up-token-for-tests.c2lnbmF0dXJl"   # a made-up Read Access Token

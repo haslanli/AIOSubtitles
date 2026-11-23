@@ -20,18 +20,18 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads,  # noqa: E402
+from helpers import (answers, Clock, closed_after, dialogue_srt, exchange, FakeDownloads,
                      HAVE_CRYPTOGRAPHY, local_network_only, NEEDS, RangeServer, start_server, stop_server, TempDir,
                      traced_memory, watch_the_log)
-from subsync import ALGO_VERSION  # noqa: E402
-from subsync.addon import App, file_id, serve, token  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync import explain, sources  # noqa: E402
-from subsync.sources import (Aios, expected_size, extras, fetch_subtitle, parse_extras, same_hash,  # noqa: E402
+from subsync import ALGO_VERSION
+from subsync.addon import App, file_id, serve, token
+from subsync.settings import Settings
+from subsync import explain, sources
+from subsync.sources import (Aios, expected_size, extras, fetch_subtitle, parse_extras, same_hash,
                              unreadable)
-from subsync.store import JUDGED_FOR_S, REFUSED_BACKOFF_S, Store, result_key  # noqa: E402
-from subsync.reader import Stopped  # noqa: E402
-from subsync.worker import Job, JobGuard, Safety, Worker, rewrite  # noqa: E402
+from subsync.store import JUDGED_FOR_S, REFUSED_BACKOFF_S, Store, result_key
+from subsync.reader import Stopped
+from subsync.worker import Job, JobGuard, Safety, Worker, rewrite
 
 SHA_A, SHA_B, SHA_C = "a" * 64, "b" * 64, "c" * 64
 FILE = "0123456789abcdef-1000"

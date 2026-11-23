@@ -10,10 +10,10 @@ import unittest
 from helpers import (closed_after, dialogue_srt, FakeDownloads, FIXTURES, HAVE_CRYPTOGRAPHY, have, KEY,
                      Limits as CountedLimits, Listing, local_network_only, NEEDS, RangeServer, run_once, start_server,
                      stop_server, TempDir, wait_until)
-from subsync import audiofit  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.store import Store  # noqa: E402
-from subsync.worker import Job, OverLimit, Safety, Turn, Worker, audio_places  # noqa: E402
+from subsync import audiofit
+from subsync.settings import Settings
+from subsync.store import Store
+from subsync.worker import Job, OverLimit, Safety, Turn, Worker, audio_places
 
 
 

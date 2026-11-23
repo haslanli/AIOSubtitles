@@ -11,9 +11,9 @@ import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import HAVE_CRYPTOGRAPHY, KEY, NEEDS, TempDir, local_network_only, start_server, stop_server  # noqa: E402
-from subsync import aiosconfig, net  # noqa: E402
-from subsync.aiosconfig import BAD_ANSWER, AiosApi, AiosError  # noqa: E402
+from helpers import HAVE_CRYPTOGRAPHY, KEY, NEEDS, TempDir, local_network_only, start_server, stop_server
+from subsync import aiosconfig, net
+from subsync.aiosconfig import BAD_ANSWER, AiosApi, AiosError
 
 UUID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 CONFIG = {"services": [], "presets": []}

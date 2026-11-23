@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest import mock
 
-from helpers import (files_bytes, HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, NEEDS, OTHER, PASSWORD, REALDEBRID,  # noqa: E402
+from helpers import (files_bytes, HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, NEEDS, OTHER, PASSWORD, REALDEBRID,
                      RecheckHarness, TORBOX)
 
 COMET = {"type": "comet", "instanceId": "cmt", "enabled": True, "options": {"name": "Comet"}}

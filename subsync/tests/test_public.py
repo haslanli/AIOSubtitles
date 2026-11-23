@@ -6,8 +6,8 @@ import os
 import threading
 import unittest
 
-from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, run_once, wait_until  # noqa: E402
-from subsync.settings import Settings, available_cpus  # noqa: E402
+from helpers import Clock, closed_after, HAVE_CRYPTOGRAPHY, NEEDS, run_once, wait_until
+from subsync.settings import Settings, available_cpus
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 

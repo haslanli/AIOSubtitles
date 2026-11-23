@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest import mock
 
-from helpers import Clock, files_bytes, HAVE_CRYPTOGRAPHY, NEEDS, TempDir  # noqa: E402
+from helpers import Clock, files_bytes, HAVE_CRYPTOGRAPHY, NEEDS, TempDir
 
 SECRET = bytes(range(32))
 RECORD = {"instance": "https://aios.test", "sync_uuid": "11111111-2222-3333-4444-555555555555",

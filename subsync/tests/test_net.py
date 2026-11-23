@@ -13,8 +13,8 @@ import urllib.request
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from helpers import local_network_only, start_server, stop_server  # noqa: E402
-from subsync import net, realdebrid  # noqa: E402
+from helpers import local_network_only, start_server, stop_server
+from subsync import net, realdebrid
 
 
 def resolver_answering(*ips, asked=None):

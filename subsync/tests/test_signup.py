@@ -6,9 +6,9 @@ import os
 import time
 import unittest
 
-from helpers import (FakeAiostreams, files_bytes, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD,  # noqa: E402
+from helpers import (FakeAiostreams, files_bytes, HAVE_CRYPTOGRAPHY, INSTANCE, KEY, NEEDS, PASSWORD,
                      SignupHarness, TempDir)
-from subsync.settings import Settings  # noqa: E402
+from subsync.settings import Settings
 
 TORRENTIO = {"type": "torrentio", "instanceId": "tio", "enabled": True, "options": {"name": "Torrentio"}}
 OSV3 = {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,

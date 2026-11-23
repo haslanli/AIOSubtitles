@@ -9,11 +9,11 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import local_network_only, start_server, stop_server  # noqa: E402
-from subsync import realdebrid  # noqa: E402
-from subsync.reader import RangeReader, ReadFailed  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.sources import Aios, fetch_subtitle, unreadable  # noqa: E402
+from helpers import local_network_only, start_server, stop_server
+from subsync import realdebrid
+from subsync.reader import RangeReader, ReadFailed
+from subsync.settings import Settings
+from subsync.sources import Aios, fetch_subtitle, unreadable
 
 TORBOX = {'id': 'torbox', 'enabled': True, 'credentials': {'apiKey': 'tb'}}
 REAL_DEBRID = {'id': 'realdebrid', 'enabled': True, 'credentials': {'apiKey': 'rd'}}

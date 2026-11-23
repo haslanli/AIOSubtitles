@@ -6,7 +6,7 @@ import time
 import unittest
 
 from helpers import SourcesHarness  # (first: it puts the package on the import path)
-from subsync import choose, extra  # noqa: E402
+from subsync import choose, extra
 
 
 def cand(cid, release, **kw):

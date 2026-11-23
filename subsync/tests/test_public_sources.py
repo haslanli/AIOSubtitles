@@ -10,14 +10,14 @@ import unittest
 import urllib.error
 import urllib.request
 
-from helpers import closed_after, local_network_only, RangeServer, start_server, stop_server  # noqa: E402
-from subsync import srclimits  # noqa: E402
-from subsync.addon import App, file_id, serve  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.store import Store  # noqa: E402
-from subsync.subs import (apply_recipe, fingerprint, line_positions, parse, recognised,  # noqa: E402
+from helpers import closed_after, local_network_only, RangeServer, start_server, stop_server
+from subsync import srclimits
+from subsync.addon import App, file_id, serve
+from subsync.settings import Settings
+from subsync.store import Store
+from subsync.subs import (apply_recipe, fingerprint, line_positions, parse, recognised,
                           timing_recipe, write_like)
-from subsync.worker import Safety, Worker  # noqa: E402
+from subsync.worker import Safety, Worker
 
 FILE = "0123456789abcdef-1000"
 SRT = ("1\n00:00:01,000 --> 00:00:02,000\nHello <i>there</i>\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral Kenobi\n\n"

@@ -5,7 +5,7 @@ import socket
 import time
 import unittest
 
-from helpers import (answers, exchange, form, HAVE_CRYPTOGRAPHY, http, INSTANCE, NEEDS, PASSWORD,  # noqa: E402
+from helpers import (answers, exchange, form, HAVE_CRYPTOGRAPHY, http, INSTANCE, NEEDS, PASSWORD,
                      ServerHarness, VIEWER, wait_until)
 
 

@@ -10,7 +10,7 @@ from unittest import mock
 import numpy as np
 
 from helpers import IMAGE_BUILD
-from subsync import vad  # noqa: E402
+from subsync import vad
 
 
 class FakeSession:

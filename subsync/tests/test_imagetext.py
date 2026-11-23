@@ -12,9 +12,9 @@ from unittest import mock
 import numpy as np
 
 from helpers import FIXTURES, IMAGE_BUILD, ocr_models_in, rules
-import imagesubs as I  # noqa: E402
-from subsync import imagetext, mkv, pipeline, textpair  # noqa: E402
-from subsync.reader import CapReached, ReadFailed, Refused  # noqa: E402
+import imagesubs as I
+from subsync import imagetext, mkv, pipeline, textpair
+from subsync.reader import CapReached, ReadFailed, Refused
 
 WORDS = ("time money house water night light dream river stone heart road friend father mother brother sister city "
          "story letter window garden forest winter summer morning evening doctor captain soldier machine").split()

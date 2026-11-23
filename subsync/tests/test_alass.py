@@ -8,9 +8,9 @@ import time
 import unittest
 from unittest import mock
 
-from helpers import TempDir  # noqa: E402
-from subsync import alass, programs  # noqa: E402
-from subsync.settings import available_cpus  # noqa: E402
+from helpers import TempDir
+from subsync import alass, programs
+from subsync.settings import available_cpus
 
 REF = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
 CANDIDATE = "1\n00:00:05,000 --> 00:00:06,000\nhello\n"

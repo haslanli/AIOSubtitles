@@ -9,10 +9,10 @@ import unittest
 from array import array
 from unittest import mock
 
-from helpers import fixture, have, Memory, Opener, traced_memory  # noqa: E402
-from subsync import mp4  # noqa: E402
-from subsync.mp4 import NotMp4, open_index  # noqa: E402
-from subsync.reader import IndexTooLarge, RangeReader  # noqa: E402
+from helpers import fixture, have, Memory, Opener, traced_memory
+from subsync import mp4
+from subsync.mp4 import NotMp4, open_index
+from subsync.reader import IndexTooLarge, RangeReader
 
 CONTAINERS = (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts")
 ECHO = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]   # a decoder stand-in

@@ -10,13 +10,13 @@ import threading
 import time
 import unittest
 
-from helpers import (closed_after, Counts, DebridLink, FakeDebrid, FakeUsenet, HAVE_CRYPTOGRAPHY,  # noqa: E402
+from helpers import (closed_after, Counts, DebridLink, FakeDebrid, FakeUsenet, HAVE_CRYPTOGRAPHY,
                      INSTANCE, KEY, NEEDS, PASSWORD, row)
-from subsync import aiosconfig, realdebrid, sources, worker as worker_mod  # noqa: E402
-from subsync.reader import RangeReader, ReadFailed  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.store import day_of, Store  # noqa: E402
-from subsync.worker import Job, Worker  # noqa: E402
+from subsync import aiosconfig, realdebrid, sources, worker as worker_mod
+from subsync.reader import RangeReader, ReadFailed
+from subsync.settings import Settings
+from subsync.store import day_of, Store
+from subsync.worker import Job, Worker
 
 URL = "https://aiosubtitles.example/u/TOKEN/manifest.json"
 PROXIED = {"url": "http://nzbdav:3000", "apiKey": "k", "aiostreamsAuth": "user:pass"}

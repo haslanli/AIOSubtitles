@@ -12,14 +12,14 @@ import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from helpers import (closed_after, dialogue_srt, FakeDownloads, FakeIndex, local_network_only,  # noqa: E402
+from helpers import (closed_after, dialogue_srt, FakeDownloads, FakeIndex, local_network_only,
                      RangeServer, realistic, srt_of, start_server, stop_server)
-from subsync import choose, pipeline, srclimits  # noqa: E402
-from subsync.settings import Settings  # noqa: E402
-from subsync.sourcestate import Ledger  # noqa: E402
-from subsync.store import result_key, Store  # noqa: E402
-from subsync.subs import decode, fingerprint  # noqa: E402
-from subsync.worker import Job, LanguageSync, Worker  # noqa: E402
+from subsync import choose, pipeline, srclimits
+from subsync.settings import Settings
+from subsync.sourcestate import Ledger
+from subsync.store import result_key, Store
+from subsync.subs import decode, fingerprint
+from subsync.worker import Job, LanguageSync, Worker
 
 RU = "1\n00:00:01,000 --> 00:00:02,000\nПривет\n\n2\n00:00:03,500 --> 00:00:04,000\nКак дела?\n"
 

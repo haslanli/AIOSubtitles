@@ -11,8 +11,8 @@ import unittest
 from unittest import mock
 
 import helpers  # noqa: F401  (first: it puts the package on the import path)
-from subsync import ALGO_VERSION, RULE_REVISION, explain, settings as settings_module  # noqa: E402
-from subsync.settings import GB, MB, Rules, Settings  # noqa: E402
+from subsync import ALGO_VERSION, RULE_REVISION, explain, settings as settings_module
+from subsync.settings import GB, MB, Rules, Settings
 
 PUBLIC = {"SUBSYNC_PUBLIC": "on"}
 

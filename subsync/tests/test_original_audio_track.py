@@ -8,10 +8,10 @@ import threading
 import unittest
 
 from helpers import AUDIO_BETTER, FIXTURES, rhythm, timeline_fit
-from subsync import audiofit  # noqa: E402
-from subsync.langs import lang3  # noqa: E402
-from subsync.mp4 import open_index  # noqa: E402
-from subsync.worker import audio_facts  # noqa: E402
+from subsync import audiofit
+from subsync.langs import lang3
+from subsync.mp4 import open_index
+from subsync.worker import audio_facts
 
 
 def track(i, lang, default=False, name="", tagged=True):

@@ -4,9 +4,9 @@ the same release. Refresh and the daily check (with a kept password) move a pers
 import os
 import unittest
 
-from helpers import (closed_after, HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, KEY, NEEDS, PASSWORD, REALDEBRID,  # noqa: E402
+from helpers import (closed_after, HAVE_CRYPTOGRAPHY, HOUR, INSTANCE, KEY, NEEDS, PASSWORD, REALDEBRID,
                      RecheckHarness, TempDir, TORBOX, TORRENTIO)
-from subsync.settings import Settings  # noqa: E402
+from subsync.settings import Settings
 
 OSV3 = {"type": "opensubtitles-v3-plus", "instanceId": "osp", "enabled": True,
         "options": {"name": "OpenSubtitles V3+", "resources": ["subtitles"]}}
