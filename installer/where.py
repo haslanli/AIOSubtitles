@@ -136,14 +136,16 @@ def discover(version, environ=None):
 
 
 def setup_script(place):
-    """The image route's ./setup: the same docker run line, on this folder, with the port and image it was run with."""
+    """The image route's ./setup: the same docker run line, on this folder, with the port and image it was run with.
+    As the source route's ./setup, it gives the container a terminal whenever the answers are typed in one, so a
+    password stays hidden also with the output piped, and output that isn't a terminal gets no colours."""
     pull = '' if place.local else ' --pull always'
     port = place.page_port or PAGE_PORT
     return ('#!/bin/sh\n'
             f'{SCRIPT_MARK} runs setup again on this folder (./setup --help lists the options).\n'
             '# Setup rewrites this file; edits here are replaced.\n'
             'cd "$(dirname "$0")" || exit 1\n'
-            't=; [ -t 0 ] && [ -t 1 ] && t=-t\n'
+            't=; [ -t 0 ] && t=-t; [ -t 1 ] || t="$t -e NO_COLOR=1"\n'
             f'exec docker run --rm -i $t{pull} {_SOCKET_MOUNT} -v "$PWD:{MOUNT}" '
             f'-p 127.0.0.1:{port}:{PAGE_PORT} {place.run_as} setup "$@"\n')
 

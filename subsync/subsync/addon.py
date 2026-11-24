@@ -28,7 +28,8 @@ GET  /notice.srt                               public mode: what the person must
 GET  /health, /status
 HEAD any of these: the GET's headers without its body; the subtitle list and the pick, pending and "(original)" entries
      answer 200 with their content type only, and do nothing (no job, pick, wait or download); 404 where their
-     GET is "not found" before any work
+     GET is "not found" before any work; in public mode so do a synced copy (200 while its timings are stored)
+     and the notice, whose GETs start the person's service and download the copy's original again
 
 With SUBSYNC_ADDON_KEY set, the manifest, the subtitles route and /status answer only under /<key>/ (the manifest URL
 AIOStreams is given carries it); /file, /health and the entries the subtitle lists name (/pick, /pending, /original)
@@ -44,6 +45,7 @@ import json
 import logging
 import re
 import sys
+import textwrap
 import threading
 import time
 import urllib.parse
@@ -94,6 +96,8 @@ PENDING_ROUTE = re.compile(r"^/pending/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 PICK_ROUTE = re.compile(r"^/pick/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 ORIGINAL_ROUTE = re.compile(r"^/original/([A-Za-z0-9_-]+)/([a-z]{3})\.srt$")
 NOTICE_PATH = "/notice.srt"
+# a synced copy's content type, by FILE_ROUTE's ending
+FILE_TYPES = {"srt": "application/x-subrip; charset=utf-8", "ass": "text/x-ssa; charset=utf-8"}
 ENTRY_ROUTES = (FILE_ROUTE, PENDING_ROUTE, PICK_ROUTE, ORIGINAL_ROUTE)
 # a Stremio id is short ("tt0944947:1:1", "kitsu:46474:1"): a longer one, or one with a line break or another control
 # character, names no title and is answered 404 (it would reach the log as it is); so is one with a "/" (sent as %2F: it
@@ -130,13 +134,25 @@ def video_id_of(raw):
     return None if len(vid) > MAX_VIDEO_ID or not vid.isprintable() or "/" in vid else vid
 
 
-def head_answer(path, key=""):
+def head_answer(path, key="", store=None):
     """How a HEAD of `path` is answered without its GET's work, when `path` is a subtitle list or a pick,
     pending or "(original)" entry: their GETs queue jobs, start the audio route, wait and download, which a link checker
     or a proxy asking for the headers only must never set off. (200, the content type), or (404, None) where the GET
     answers "not found" before any work, by the same cheap checks: an id that names no title, an entry address
-    subsync didn't list (alias_of, under SUBSYNC_ADDON_KEY `key`). None for any other path, whose HEAD is its GET
-    without the body."""
+    subsync didn't list (alias_of, under SUBSYNC_ADDON_KEY `key`). With public mode's `store` (one that keeps no texts),
+    a synced copy and the notice too: a copy's GET rebuilds it by downloading its original again, against the
+    site's limits; 200 while the store has the copy's timings, else 404 (a HEAD may say 200 where this person's download
+    would be 404, as accepted for the entries). None for any other path, whose HEAD is its GET without the
+    body."""
+    if store is not None and not store.keep_texts:
+        if path == NOTICE_PATH:
+            return 200, "application/x-subrip; charset=utf-8"
+        m = FILE_ROUTE.match(path)
+        if m:
+            copy = key_of(m.group(1))
+            if not (store.recipe(copy) and store.get(copy)):   # what App.text_of rebuilds the copy from
+                return 404, None
+            return 200, FILE_TYPES[m.group(2)]
     m = SUB_ROUTE.match(path)
     if m:
         return (200, "application/json; charset=utf-8") if video_id_of(m.group(2)) is not None else (404, None)
@@ -189,6 +205,27 @@ def no_subtitle_note(lang):
     return f"1\n00:00:01,000 --> 00:00:08,000\nNo {lang_name(lang)} subtitle was found for this file.\n"
 
 
+# The "action needed" entry's subtitles, as subtitles are read: at most two lines of about CUE_LINE
+# characters at once, each shown for CUE_CHARS_PER_S characters a second, and never less than CUE_MIN_S
+CUE_LINE = 42
+CUE_CHARS_PER_S = 15
+CUE_MIN_S = 2.0
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def readable_srt(text, start=1.0):
+    """`text` as subtitles that can be read as they show, one after another from `start` (seconds): a new one at each
+    sentence, a sentence longer than two lines in as many as it needs."""
+    lines, at = [], start
+    for sentence in SENTENCE_END.split(text.strip()):
+        wrapped = textwrap.wrap(sentence, CUE_LINE, break_long_words=False, break_on_hyphens=False)
+        for shown in (wrapped[i:i + 2] for i in range(0, len(wrapped), 2)):
+            end = at + max(CUE_MIN_S, len(" ".join(shown)) / CUE_CHARS_PER_S)
+            lines.append({"s": at, "e": end, "text": "\n".join(shown)})
+            at = end
+    return to_srt(lines)
+
+
 # What a pick, pending or "(original)" answer sent, now that an original comes as text with 200 like a
 # synced copy: "copy" (a synced copy), "original" (an original sent unchanged), "guess" (a waiting file's anchored
 # guess) or "note" (the "No <Language> subtitle was found" note); a redirect has none
@@ -237,13 +274,13 @@ class App:
         return None
 
     def notice_text(self):
-        """The "action needed" entry's subtitle: what to do, in two cues; None when nothing is needed."""
+        """The "action needed" entry's subtitle: what is wrong, what to do and where, in subtitles that can be read as
+        they show (readable_srt); None when nothing is needed."""
         state = self.action()
         if state is None:
             return None
         title, text = explain.PUBLIC_STATES[state].title, explain.state_text(state, self.detail)
-        return (f"1\n00:00:01,000 --> 00:00:09,000\n{title}.\n{text}\n\n"
-                f"2\n00:00:09,500 --> 00:00:16,000\n{explain.PUBLIC_TEXTS['notice_where']}\n")
+        return readable_srt(f"{title}. {text} {explain.PUBLIC_TEXTS['notice_where']}")
 
     def route(self, path):
         """(path without the base path and key, keyed) for a request path. Both are compared as the address carries
@@ -267,15 +304,23 @@ class App:
                 "lang": r["lang"], "label": f"{lang_name(r['lang'])} (synced{'' if n == 1 else f' {n}'})",
                 "variantOf": r.get("candidate_id") or "original"}
 
+    def _usable(self, alias):
+        """Which stored copies of a file this person is offered (Store.offers' `usable`): in public mode those their
+        own list can rebuild (Worker.rebuildable); on a self-hosted install, whose copies are kept as text,
+        every one (None)."""
+        return None if self.store.keep_texts else (lambda result: self.worker.rebuildable(alias, result))
+
     def offers(self, job):
         """The finished copies for a request's file (Worker.file_of): per language its best fit, the first language up
-        to SUBSYNC_MAIN_ALTERNATIVES, labelled "(synced)", "(synced 2)", "(synced 3)"."""
+        to SUBSYNC_MAIN_ALTERNATIVES, labelled "(synced)", "(synced 2)", "(synced 3)". In public mode only those
+        this person's own list can rebuild (_usable): another takes the place of one it can't, or none does and the
+        language is left to their own job or their "(original)" entry; one left out isn't marked served for them."""
         file_key = self.worker.file_of(job.aliases, job.hints.get("videoHash"))
         out = []
         if file_key:
             counts = {self.s.languages[0]: self.s.alternatives} if self.s.best_fit and self.s.languages else None
             seen = {}
-            for r in self.store.offers(file_key, self.s.languages, counts):
+            for r in self.store.offers(file_key, self.s.languages, counts, self._usable(job.alias)):
                 seen[r["lang"]] = seen.get(r["lang"], 0) + 1
                 out.append(self.entry(r, seen[r["lang"]]))
                 self.store.served(r["key"])
@@ -283,11 +328,12 @@ class App:
 
     def ready_copy(self, alias, lang):
         """The synced copy a pick or pending entry serves for a file and language now: the store's best whose copy
-        exists, the one the list shows first (also after a restart), else, while best fit still judges, the
-        pass the file's job published, which is also tried when the store's best can't be served to this person
-        (public mode: made from a subtitle only someone else's list has); (key, text), or None."""
+        exists (in public mode one this person's list can rebuild), the one the list shows first (also after a
+        restart), else, while best fit still judges, the pass the file's job published, which is also tried
+        when the store's best can't be served to this person (public mode: made from a subtitle only someone else's
+        list has); (key, text), or None."""
         file_key = self.store.resolve(alias)
-        best = self.store.offers(file_key, [lang]) if file_key else []
+        best = self.store.offers(file_key, [lang], usable=self._usable(alias)) if file_key else []
         key = best[0]["key"] if best else None
         text = self.text_of(key)
         if text is None:
@@ -588,8 +634,7 @@ class Handler(BaseHTTPRequestHandler):
                 app.store.served(key)
                 if m.group(2) == "srt":   # the .srt link sends SRT whatever the copy's own format
                     body = as_srt(body)
-                ctype = "text/x-ssa; charset=utf-8" if m.group(2) == "ass" else "application/x-subrip; charset=utf-8"
-                return self._send(200, body, ctype, {"Cache-Control": FILE_CACHE})
+                return self._send(200, body, FILE_TYPES[m.group(2)], {"Cache-Control": FILE_CACHE})
             m = PENDING_ROUTE.match(path)
             if m:
                 try:

@@ -66,8 +66,18 @@ def has_usable_port(parts):
         return False
 
 
+def has_credentials(parts):
+    """Whether a split address has a name or password before its @ (an empty one too, as in http://@host)."""
+    return parts.username is not None or parts.password is not None
+
+
 # an address with a space (or another blank) inside: urlsplit lets it through, and Python's http.client then refuses it
 NO_SPACES = 'Leave out the spaces.'
+# subsync's address with a port that can't be one (0, letters, a digit too many), on both routes
+BAD_PORT = 'Use a port from 1 to 65535.'
+# subsync's address with a name and password before the @, on both routes: it would go into every link players get, and
+# apps refuse such links
+NO_CREDENTIALS = "Leave out the name and password before the @: apps can't use an address with them."
 
 
 def has_space(text):
@@ -78,8 +88,12 @@ def check_public(url):
     """(good, message, normalized) for an address typed in by the user."""
     url = (url or '').strip().rstrip('/')
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme not in ('http', 'https') or not parts.hostname or not has_usable_port(parts):
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
         return False, 'Type a full address that starts with http:// or https://', url
+    if has_credentials(parts):
+        return False, NO_CREDENTIALS, url
+    if not has_usable_port(parts):
+        return False, BAD_PORT, url
     if parts.query or parts.fragment:
         return False, 'Leave out anything after ? or #.', url
     if has_space(url):

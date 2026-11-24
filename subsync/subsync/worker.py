@@ -38,6 +38,9 @@ from .subs import NO_DIALOGUE, decode, fingerprint, is_ass, parse, recognised
 
 log = logging.getLogger("subsync.worker")
 UNLISTED_S = 3600   # a file the listing didn't have (uncached, or another release) isn't looked for again this long
+# public mode: a stored copy whose original this person's own list was found without isn't listed to them this long
+# (rebuildable)
+MISSED_S = 24 * 3600
 USENET_ROW_KEPT_S = 3600   # a file found on Usenet: a retry or its audio job reuses its row and address this long
 PICKED_EARLY_S = 3600   # an entry downloaded while the file's first pass ran still counts as its pick this long
 LIST_TTL_S = 600    # a text pass's subtitle list and downloads, reused by the audio job that follows a pick
@@ -54,6 +57,7 @@ GUESSES_ENTRIES = 500       # a waiting file's anchored guesses (provisional) an
 UNLISTED_ENTRIES = 5000     # files the listing didn't have
 USENET_ROWS_ENTRIES = 200   # files found on Usenet
 LISTS_ENTRIES = 200         # files' subtitle lists
+MISSED_ENTRIES = 2000       # stored copies whose original this person's list was found without
 FETCH_AT_ONCE = 4   # a language's subtitle downloads at once: one round (a picked language's alass after it)
 CONSENSUS_TRIES = 12   # a file with no track: the main language's downloads beside its guess, for a consensus
 RELEASE_CHARS = 120   # a subtitle's release name as its stored results record it, cut to this many characters
@@ -608,6 +612,7 @@ class Worker(threading.Thread):
         self.pickable = {}        # alias -> job of a file that needs the audio route and waits for the viewer's pick
         self.picked_early = {}    # alias -> when its entry was downloaded before the file was known to need audio
         self.seen = {}            # alias -> (type, video_id, hints) of its last job, so a pick can ask for the list again
+        self.missed = {}          # result key -> when this person's list was found without its original
         self.stop_flag = False
         self.last_expire = 0.0
         self.vad_lock = threading.Lock()
@@ -2017,6 +2022,25 @@ class Worker(threading.Thread):
         the last good result stored), or None."""
         return LanguageSync(self, job, index, file_key, lang, candidates, oshash, filename).run()
 
+    def rebuildable(self, alias, result):
+        """Public mode: whether this person's own list can give the original a stored copy of the file
+        `alias` names is rebuilt from (original_text). Not for MISSED_S once their list was found without it: by a
+        download of the copy (original_text), or here, in the file's list fetched for them since (their own job's),
+        which notes that miss too; while their list isn't known, it can."""
+        key, now = (result.get("candidate_id"), result.get("lang")), time.time()
+        with self.cv:
+            if key in self.by_id:
+                return True
+            at = self.missed.get(result["key"])
+            if at is not None and now - at < MISSED_S:
+                return False
+            listed = self.lists.get(alias)
+            if listed is None or now - listed[0] >= MISSED_S \
+                    or any((c["id"], c["lang"]) == key for c in listed[1]):
+                return True
+            put_bounded(self.missed, result["key"], now, MISSED_ENTRIES)
+            return False
+
     @staticmethod
     def viewer_first(candidates):
         """Is the first candidate the viewer's own first subtitle (from their config)? With no subtitle addon in the
@@ -2026,7 +2050,9 @@ class Worker(threading.Thread):
     def original_text(self, result, recipe=None):
         """Public mode: the original a stored result was made from, downloaded again from the source this
         person's own list gives for it, or None when their list has no such subtitle or it changed since (its bytes
-        differ, and the copy's recipe doesn't recognise it: subs.recognised)."""
+        differ, and the copy's recipe doesn't recognise it: subs.recognised). A list fetched again here without it is
+        a miss kept a day (rebuildable), and when the file's originals weren't chosen for this person yet,
+        they are from that list, as for a file judged lately: their "(original)" entry can take the copy's place."""
         key = (result.get("candidate_id"), result.get("lang"))
         with self.cv:
             cand = self.by_id.get(key)
@@ -2034,9 +2060,14 @@ class Worker(threading.Thread):
         if cand is None:   # not listed lately: the list of a file this person opened that has this result
             for alias, (type_, video_id, hints) in reversed(seen):
                 if self.store.resolve(alias) == result.get("file_key"):
-                    self._candidates(Job(type_, video_id, hints), dict(hints))
+                    candidates = self._candidates(Job(type_, video_id, hints), dict(hints))
                     with self.cv:
                         cand = self.by_id.get(key)
+                        if cand is None:
+                            put_bounded(self.missed, result["key"], time.time(), MISSED_ENTRIES)
+                    if cand is None and candidates and self.known_originals(alias) is None:
+                        self._set_originals(alias, candidates, hints.get("filename"),
+                                            hints.get("videoHash") or result["file_key"].split("-")[0])
                     break
         if cand is None:
             return None

@@ -33,7 +33,7 @@ from .store import day_of
 from .ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS   # the setup page sends the same
 from .users import READ_KEY, TOKEN
 from .version import VERSION
-from .worker import OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
+from .worker import MISSED_S, OverLimit, Safety, Turn, UsenetGate, Worker, audio_places
 
 log = logging.getLogger("subsync.public")
 
@@ -186,7 +186,8 @@ class Pool:
     worker, for up to SUBSYNC_ACTIVE_WORKERS people, else answering from the shared store only, as for a record for
     stored copies. Kept, an App knows the files its person asked about, which the entries of their lists need
     when they are downloaded (a copy is rebuilt from the person's own list). Their next App starts from what the
-    last one had: their refusal back-off (doubling while refusals come in a row) and, for SEEN_KEPT_S, those files."""
+    last one had: their refusal back-off (doubling while refusals come in a row), for SEEN_KEPT_S those files, and for
+    MISSED_S the stored copies their list couldn't rebuild."""
 
     def __init__(self, settings, env, store, users, clock=time.time, start_workers=True):
         self.s, self.env, self.store, self.users, self.clock = settings, dict(env), store, users, clock
@@ -207,6 +208,9 @@ class Pool:
         self.entries = {}
         self.safeties = {}         # user id -> their worker.Safety, while they have an App or refusals that count
         self.seen = {}             # user id -> (until, Worker.seen) of their App that stopped last
+        # user id -> (until, Worker.missed) of their App that stopped last: the copies their list can't rebuild stay
+        # unlisted to them the day each was found
+        self.missed = {}
         self.stops = 0             # Apps stopped so far: a record opened before a stop may have changed or gone
         self.lock = threading.Lock()
         self.expired_day = None
@@ -228,6 +232,9 @@ class Pool:
         until, seen = self.seen.pop(uid, (0.0, {}))
         if until > self.clock():
             worker.seen.update(seen)
+        until, missed = self.missed.pop(uid, (0.0, {}))
+        if until > self.clock():
+            worker.missed.update(missed)
         if start:
             worker.start()
         return App(s, self.store, worker, safety, state=record.get("state"), detail=record.get("state_detail"))
@@ -296,11 +303,14 @@ class Pool:
         return sum(entry["kind"] == "worker" for entry in self.entries.values())
 
     def _keep_seen(self, uid, app):
-        """What an App that stops knew of the files its person asked about, for their next one (lock held)."""
+        """What an App that stops knew of the files its person asked about, and of the copies their list can't rebuild,
+        for their next one (lock held)."""
         with app.worker.cv:
-            seen = dict(app.worker.seen)
+            seen, missed = dict(app.worker.seen), dict(app.worker.missed)
         if seen:
             self.seen[uid] = (self.clock() + SEEN_KEPT_S, seen)
+        if missed:
+            self.missed[uid] = (self.clock() + MISSED_S, missed)
 
     def active(self):
         """How many people have a worker now."""
@@ -316,8 +326,9 @@ class Pool:
     def stop(self, token, reset=False, forget=False):
         """Stops the person's App (a settings save, a refresh, a delete, a change the daily check found); the next
         request opens their record again. Their next App keeps their refusal back-off and the files this one knew,
-        except: `reset` drops the back-off (a refresh: they may have changed their debrid key), `forget` drops both (a
-        delete), and its worker then writes nothing more of theirs to the store (Worker.stop)."""
+        except: `reset` drops the back-off and the copies their list couldn't rebuild (a refresh: they may have changed
+        their debrid key, or their subtitle addons), `forget` drops all of it (a delete), and its worker then writes
+        nothing more of theirs to the store (Worker.stop)."""
         uid = self.users.user_id(token)
         with self.lock:
             self.stops += 1
@@ -326,6 +337,7 @@ class Pool:
                 self._keep_seen(uid, entry["app"])
             if reset or forget:
                 self.safeties.pop(uid, None)
+                self.missed.pop(uid, None)
             if forget:
                 self.seen.pop(uid, None)
         if entry is not None:
@@ -345,6 +357,7 @@ class Pool:
                     self._keep_seen(uid, entry["app"])
                     stopped.append(entry["app"].worker)
             self.seen = {uid: kept for uid, kept in self.seen.items() if kept[0] > now}
+            self.missed = {uid: kept for uid, kept in self.missed.items() if kept[0] > now}
             self.safeties = {uid: safety for uid, safety in self.safeties.items()
                              if uid in self.entries or _refusing(safety)}
         for worker in stopped:
@@ -644,11 +657,12 @@ class PublicHandler(Handler):
 
     def _person(self, token, rest):
         """A request of a person's own service (their subtitle lists, and their entries), answered by their App. A HEAD
-        of a list or an entry (head_answer) is answered from their record alone: neither their service nor their daily
-        check starts for it."""
+        of a list or an entry (head_answer), a synced copy and the notice included, is answered from their
+        record and the store alone: neither their service nor their daily check starts for it, and nothing is downloaded
+."""
         svc = self.service
         # a person's entries carry no code (user_settings: no SUBSYNC_ADDON_KEY), their read key guards them
-        head = head_answer(rest) if self.command == "HEAD" else None
+        head = head_answer(rest, store=svc.store) if self.command == "HEAD" else None
         if head:
             return self._not_found() if svc.users.open(token) is None else self._headers_only(*head)
         app = svc.pool.app(token)

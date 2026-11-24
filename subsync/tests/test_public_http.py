@@ -1,6 +1,7 @@
 """Public mode over HTTP: the pages, the router in front of each person's own service, and the limits on requests."""
 import json
 import logging
+import re
 import socket
 import time
 import unittest
@@ -59,6 +60,38 @@ class PublicManifestTest(ServerHarness, unittest.TestCase):
         self.assertEqual(self.service.checker.next, {})                 # nor their daily check
         unknown = head(f"/u/{new_token()}/subtitles/movie/tt1/filename=a.mkv&videoSize=5.json")[0]
         self.assertTrue(unknown.startswith(b"HTTP/1.1 404 "), unknown)   # a link nobody signed up with, as a GET
+
+    def test_a_head_of_a_copy_or_the_notice_starts_nothing_and_downloads_nothing(self):
+        # A HEAD of a copy link or of the notice ran the GET: the person's service and daily check started,
+        # and the copy was rebuilt by downloading its original again from its site, against the site's limits
+        from subsync.addon import file_id
+        self.start(SUBSYNC_RECHECK_HOURS="24")
+        self.store.keep_texts = False                     # as public mode keeps its store (__main__.public_store)
+        original = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n"
+        key = self.store.put("0123456789abcdef-1000", "a" * 64, "eng", 0, "synced", fmt="srt", candidate_id="os-1",
+                             body=original.replace("00:00:01,000", "00:00:01,500"), original=original)
+        served = self.store.get(key)["last_served"]
+        _, _, _, _, token = self.sign_up()
+        read_key, fid = self.users.read_key(token), file_id(key)
+        port = self.server.server_address[1]
+
+        def head(path):
+            data = exchange(port, f"HEAD {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+            return data.partition(b"\r\n\r\n")
+        for path, ctype in ((f"/r/{read_key}/file/{fid}.srt", "application/x-subrip; charset=utf-8"),
+                            (f"/r/{read_key}/file/{fid}.ass", "text/x-ssa; charset=utf-8"),
+                            (f"/r/{read_key}/notice.srt", "application/x-subrip; charset=utf-8")):
+            with self.subTest(path=path):
+                headers, _, rest = head(path)
+                self.assertTrue(headers.startswith(b"HTTP/1.1 200 "), headers)
+                self.assertIn(f"\r\nContent-Type: {ctype}\r\n".encode(), headers + b"\r\n")
+                self.assertNotIn(b"Content-Length", headers)
+                self.assertEqual(rest, b"")
+        not_stored = head(f"/r/{read_key}/file/{fid[:-16]}{'f' * 16}.srt")[0]
+        self.assertTrue(not_stored.startswith(b"HTTP/1.1 404 "), not_stored)   # no copy of that one is stored
+        self.assertIsNone(self.pool.live_app(token))                    # no service of theirs started, nothing rebuilt
+        self.assertEqual(self.service.checker.next, {})                 # nor their daily check
+        self.assertEqual(self.store.get(key)["last_served"], served)    # nor is the copy marked served
 
     def test_a_head_of_an_address_its_get_refuses_is_not_found_and_starts_nothing(self):
         # A HEAD answered 200 before the checks its GET makes (an id that names no title, an entry token that
@@ -795,6 +828,38 @@ class PublicCheckTest(ServerHarness, unittest.TestCase):
         self.assertEqual(self.notices(token), [])
         self.set_record(token, state=None)
         self.assertEqual(self.notices(token), [])
+
+    def test_the_notice_can_be_read_as_it_shows(self):
+        # The title and the whole explanation were one subtitle from 0:01 to 0:09, six to nine lines at 30 to
+        # 45 characters a second (subtitles are read at about 15 to 20): gone before most people had read it
+        from subsync import explain
+        from subsync.subs import parse
+        _, _, _, _, token = self.sign_up()
+        key = self.users.read_key(token)
+        for state in ("sync_gone", "main_gone", "password_refused", "reads_refused"):
+            with self.subTest(state=state):
+                self.set_record(token, state=state)
+                code, body, _ = http(f"{self.base}/r/{key}/notice.srt")
+                self.assertEqual(code, 200)
+                cues = parse(body.decode())
+                shown = [" ".join(cue["text"].split("\n")) for cue in cues]
+                said = (f"{explain.PUBLIC_STATES[state].title}. {explain.state_text(state)} "
+                        f"{explain.PUBLIC_TEXTS['notice_where']}")
+                self.assertEqual(" ".join(shown), said)                          # the same words, in order
+                self.assertEqual(cues[0]["s"], 1.0)
+                for i, cue in enumerate(cues):
+                    lines = cue["text"].split("\n")
+                    self.assertLessEqual(len(lines), 2, cue)                     # two lines at most
+                    self.assertLessEqual(max(map(len, lines)), 42, cue)          # of about 42 characters
+                    # long enough to read: 15 characters a second, at least 2 seconds; one after another
+                    self.assertAlmostEqual(cue["e"] - cue["s"], max(2.0, len(shown[i]) / 15), delta=0.002)
+                    if i:
+                        self.assertEqual(cue["s"], cues[i - 1]["e"])
+                starts = {len(" ".join(shown[:i])) + bool(i) for i in range(len(shown))}
+                at = 0
+                for sentence in re.split(r"(?<=[.!?]) ", said):                 # a new one at each sentence
+                    self.assertIn(at, starts, sentence)
+                    at += len(sentence) + 1
 
     def test_reads_refused_three_times_needs_an_action(self):
         uuid, code, text, headers, token = self.sign_up()

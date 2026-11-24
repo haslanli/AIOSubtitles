@@ -68,16 +68,21 @@ class Pieces(unittest.TestCase):
 
     def test_the_address_must_be_https_and_a_whole_host(self):
         self.assertEqual(hosting.check_address('https://Subs.Example.com/'), (True, '', 'https://subs.example.com'))
-        # An address with a user name or password would be written into every person's addon link
         for bad in ('http://subs.example.com', 'subs.example.com', 'https://subs.example.com/subsync', 'ftp://x',
-                    'https://', 'https://subs.example.com?x=1', 'https://user:pw@subs.example.com',
-                    'https://user@subs.example.com', 'https://:pw@subs.example.com'):
+                    'https://', 'https://subs.example.com?x=1'):
             with self.subTest(bad=bad):
                 good, message, _ = hosting.check_address(bad)
                 self.assertFalse(good)
                 # it repeated the question's own explanation, with no word of what was wrong (a path, say)
                 self.assertEqual(message, 'Type an https address with no path after the name, like '
                                           'https://subtitles.example.com: the pages and links start at its root.')
+        # An address with a user name or password would be written into every person's addon link;:
+        # refused with the path's sentence, its own now
+        for bad in ('https://user:pw@subs.example.com', 'https://user@subs.example.com',
+                    'https://:pw@subs.example.com'):
+            with self.subTest(bad=bad):
+                self.assertEqual(hosting.check_address(bad), (False, "Leave out the name and password before the @: "
+                                                                     "apps can't use an address with them.", bad))
 
     def test_a_name_that_cant_be_looked_up_is_refused(self):
         # IDNA refuses an empty label or one over 63 characters; the address was taken, and every check of it

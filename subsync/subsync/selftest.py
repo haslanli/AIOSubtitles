@@ -14,7 +14,7 @@ import time
 
 from .mkv import NotMatroska
 from .mp4 import Mp4Index, open_index
-from .reader import RangeReader, ReadFailed, Refused, Stopped
+from .reader import IndexTooLarge, RangeReader, ReadFailed, Refused, Stopped
 from .settings import MB, Settings
 from .worker import rewrite
 
@@ -55,8 +55,9 @@ def run(url, cap_bytes=None, settings=None, size=None):
                    note="neither Matroska nor MP4: subsync keeps the original subtitles for it")
     except Refused as e:
         out.update(error="refused", detail=str(e))
-    except Stopped:
-        out.update(error="cap", detail=f"its index is larger than subsync reads ({cap_bytes / MB:.0f} MB): subsync "
+    except Stopped as e:   # the cap, or the parsers' own limit when that stopped the read first
+        limit = e.cap if isinstance(e, IndexTooLarge) else cap_bytes
+        out.update(error="cap", detail=f"its index is larger than subsync reads ({limit / MB:.0f} MB): subsync "
                                        "keeps the original subtitles for this file")
     except ReadFailed as e:
         out.update(error="read", detail=str(e))

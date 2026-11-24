@@ -1,7 +1,9 @@
 """Where setup runs: what setup reads about its own container, and the ./setup it writes into the
 image route's folder."""
+import contextlib
 import json
 import os
+import pty
 import subprocess
 import tempfile
 import unittest
@@ -249,6 +251,21 @@ class Scripts(unittest.TestCase):
         self.assertIn(f'AIOSUBTITLES_STATE={where.MOUNT}/state', (REPO / 'installer' / 'image-entry.sh').read_text())
 
 
+@contextlib.contextmanager
+def terminal():
+    """A terminal's end for a child's input or output (a pty), as a person's ./setup has; the test is skipped where
+    none can be opened."""
+    try:
+        master, tty = pty.openpty()
+    except OSError:
+        raise unittest.SkipTest('needs a pty') from None
+    try:
+        yield tty
+    finally:
+        os.close(tty)
+        os.close(master)
+
+
 class SetupScript(unittest.TestCase):
     def place(self, **kw):
         return where.place_from(inspect(**kw), PULLED, '1.4.0', 'image', (os.getuid(), os.getgid()))
@@ -273,8 +290,28 @@ class SetupScript(unittest.TestCase):
                                   timeout=30, stdin=subprocess.DEVNULL, cwd=tmp,
                                   env={'PATH': f'{bin_}:/usr/bin:/bin'})
         line = done.stdout.strip()
-        self.assertTrue(line.startswith(f'{folder}|run --rm -i --pull always'), line)   # no -t without a terminal
+        # no -t without a terminal; its output piped: no colours
+        self.assertTrue(line.startswith(f'{folder}|run --rm -i -e NO_COLOR=1 --pull always'), line)
         self.assertTrue(line.endswith('setup --status'))
+
+    def test_answers_typed_in_a_terminal_get_one_also_with_the_output_piped(self):
+        # -t only when both input and output were terminals, so with the output piped (./setup --uninstall |
+        # tee log) the config password, AIOStreams' sign-in and the keys showed on screen as they were typed
+        with tempfile.TemporaryDirectory() as tmp:
+            folder, bin_, log = Path(tmp) / 'aiosubtitles', Path(tmp) / 'bin', Path(tmp) / 'docker.log'
+            folder.mkdir()
+            bin_.mkdir()
+            (bin_ / 'docker').write_text(f'#!/bin/sh\necho "$*" > "{log}"\n')
+            (bin_ / 'docker').chmod(0o755)
+            where.write_setup_script(self.place(), folder)
+            for stdout_tty, options in ((False, '-t -e NO_COLOR=1'), (True, '-t')):
+                with self.subTest(stdout_tty=stdout_tty):
+                    with terminal() as tty:
+                        subprocess.run(['sh', str(folder / 'setup'), '--status'], stdin=tty,
+                                       stdout=tty if stdout_tty else subprocess.PIPE, stderr=subprocess.PIPE,
+                                       timeout=30, cwd=tmp, env={'PATH': f'{bin_}:/usr/bin:/bin'})
+                    self.assertTrue(log.read_text().startswith(f'run --rm -i {options} --pull always '),
+                                    log.read_text())
 
     def test_a_setup_file_it_didnt_write_is_never_replaced(self):
         with tempfile.TemporaryDirectory() as tmp:

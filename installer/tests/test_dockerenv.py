@@ -218,7 +218,9 @@ class Probe(unittest.TestCase):
             found = dockerenv.probe(IMAGE, [('127.0.0.1', 8790), ('0.0.0.0', 8790)])
         self.assertEqual(found, {'lan': '192.168.1.5', 'taken': ['0.0.0.0:8790']})
         cmd = docker.calls[0][0]
-        self.assertEqual(cmd[:9], ['docker', 'run', '--rm', '--network', 'host', '--user', '10001:10001',
+        # as root: as the service's user it was refused every port below 1024 and called each one free, so a
+        # web server on port 80 went unseen and the new container couldn't start
+        self.assertEqual(cmd[:9], ['docker', 'run', '--rm', '--network', 'host', '--user', '0:0',
                                    '--entrypoint', 'python'])
         self.assertNotIn('docker.sock', ' '.join(cmd))
         self.assertEqual(cmd[-2:], ['127.0.0.1:8790', '0.0.0.0:8790'])
@@ -228,8 +230,9 @@ class Probe(unittest.TestCase):
         refused = []
 
         class Unprivileged(socket.socket):
-            """A port below 1024 is refused (EACCES), as for the helper's user, whoever runs the tests: as root (the
-            image build's test run) port 1 would bind, and the refusal would never be checked."""
+            """A port below 1024 is refused (EACCES), as for a user that may not open it, whoever runs the tests: as
+            root (the image build's test run, and the helper itself) port 1 would bind, and the refusal
+            would never be checked."""
 
             def bind(self, address):
                 if address[1] < 1024:

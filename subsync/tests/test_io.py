@@ -25,8 +25,8 @@ from subsync import imageref, mkv, mp4, pipeline, realdebrid, selftest, sources
 from subsync.addon import App
 from subsync.mkv import MkvIndex, NotMatroska, oshash, pipe_until
 from subsync.mp4 import Mp4Index, open_index
-from subsync.reader import (CapReached, CHUNK, MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused, SIZE_TOLERANCE,
-                            Stopped)
+from subsync.reader import (CapReached, CHUNK, IndexTooLarge, MAX_RE_RESOLVE, RangeReader, ReadFailed, Refused,
+                            SIZE_TOLERANCE, Stopped)
 from subsync.settings import Settings
 from subsync.store import REFUSED_BACKOFF_S, Store
 from subsync.subs import parse, to_srt, ts
@@ -1887,6 +1887,22 @@ class SelfTestTest(unittest.TestCase):
         out = self.run_selftest(self.srv.url("tiny.mkv"), None, Settings({"SUBSYNC_INDEX_CAP_MB": "0.001"}))
         self.assertEqual(out["error"], "cap")
         self.assertIn("larger than subsync reads", out["detail"])
+
+    def test_an_index_past_the_parsers_own_limit_names_that_limit(self):
+        # An index is never read past a fixed limit (32 MiB in MKV, 64 MiB in MP4) whatever the cap; when that
+        # limit stopped the read, the sentence still named the cap: with a cap of 64, an MKV index of 40 MB was "larger
+        # than subsync reads (64 MB)"
+        for name, limit, cap, said in (("tiny.mkv", mkv.MAX_CUES, "64", "32"), ("tiny.mp4", mp4.MAX_MOOV, "100", "64")):
+            with self.subTest(name=name), \
+                    mock.patch.object(selftest, "open_index", side_effect=IndexTooLarge(limit)):
+                out = self.run_selftest(self.srv.url(name), None, Settings({"SUBSYNC_INDEX_CAP_MB": cap}))
+                self.assertEqual((out["ok"], out["error"], out["detail"]),
+                                 (False, "cap", f"its index is larger than subsync reads ({said} MB): subsync keeps "
+                                                "the original subtitles for this file"))
+        with mock.patch.object(selftest, "open_index", side_effect=Stopped("cap reached")):   # the cap stopped it
+            out = self.run_selftest(self.srv.url("tiny.mkv"), 3 * 1024 * 1024, Settings({}))
+        self.assertEqual(out["detail"], "its index is larger than subsync reads (3 MB): subsync keeps the original "
+                                        "subtitles for this file")
 
     def test_an_index_cap_of_0_is_no_cap_as_for_the_worker(self):
         # SUBSYNC_INDEX_CAP_MB 0 (accepted: "a number from 0") is no cap for the worker's JobGuard, but the

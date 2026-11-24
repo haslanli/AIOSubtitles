@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from installer import update
+from installer.tests.test_where import terminal
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPT = (REPO / 'setup').read_text()
@@ -75,14 +76,14 @@ class SourceSetup(unittest.TestCase):
         path.write_text(f'#!/bin/sh\n{body}\n')
         path.chmod(0o755)
 
-    def run_setup(self, *args, system='Linux', build_fails=False):
+    def run_setup(self, *args, system='Linux', build_fails=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE):
         env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'LOG': str(self.log), 'UNAME': system, 'HOME': str(self.tmp),
                'BUILD_FAILS': '1' if build_fails else ''}
-        done = subprocess.run(['bash', str(self.folder / 'setup'), *args], capture_output=True, text=True,
-                              timeout=60, env=env, stdin=subprocess.DEVNULL, cwd=self.tmp)
+        done = subprocess.run(['bash', str(self.folder / 'setup'), *args], stdout=stdout, stderr=subprocess.PIPE,
+                              text=True, timeout=60, env=env, stdin=stdin, cwd=self.tmp)
         calls = self.log.read_text().splitlines() if self.log.exists() else []
         self.log.unlink(missing_ok=True)
-        return done.returncode, done.stdout + done.stderr, calls
+        return done.returncode, (done.stdout or '') + done.stderr, calls
 
     def release(self, version):
         (self.origin / 'VERSION').write_text(version + '\n')
@@ -117,6 +118,21 @@ class SourceSetup(unittest.TestCase):
         _, _, calls = self.run_setup(system='Darwin')
         self.assertIn('-p 127.0.0.1:8789:8789', calls[1])
         self.assertNotIn('--network host', calls[1])
+
+    def test_answers_typed_in_a_terminal_get_one_also_with_the_output_piped(self):
+        # -t only when both input and output were terminals, so with the output piped (./setup --uninstall |
+        # tee log) the config password, AIOStreams' sign-in and the keys showed on screen as they were typed; output
+        # that isn't a terminal gets no colours
+        _, _, calls = self.run_setup('--status')
+        self.assertTrue(calls[1].startswith('run --rm -i -e NO_COLOR=1 --network host '), calls[1])   # no terminal
+        with terminal() as tty:
+            code, out, calls = self.run_setup('--status', stdin=tty)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(calls[1].startswith('run --rm -i -t -e NO_COLOR=1 --network host '), calls[1])
+        with terminal() as tty:
+            code, out, calls = self.run_setup('--status', stdin=tty, stdout=tty)        # both a terminal: colours
+        self.assertEqual(code, 0, out)
+        self.assertTrue(calls[1].startswith('run --rm -i -t --network host '), calls[1])
 
     def test_a_failed_build_runs_nothing(self):
         code, _, calls = self.run_setup(build_fails=True)
@@ -157,6 +173,57 @@ class SourceSetup(unittest.TestCase):
         code, out, calls = self.run_setup('--update')
         self.assertNotEqual(code, 0)
         self.assertIn(update.CHANGED.format(files='VERSION'), out)
+        self.assertEqual(calls, [])
+
+    def test_an_untracked_file_the_update_adds_stops_it_in_setups_words(self):
+        # Only changed tracked files were looked at; git's merge then ended the script in its own words
+        # ("error: The following untracked working tree files would be overwritten by merge: NOTES.md ... Aborting")
+        (self.origin / 'NOTES.md').write_text('the release notes\n')
+        git(self.origin, 'add', 'NOTES.md')
+        self.release('1.5.0')
+        (self.folder / 'NOTES.md').write_text('my own notes\n')
+        (self.folder / 'mine.txt').write_text('a file the update leaves alone\n')
+        code, out, calls = self.run_setup('--update')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.strip(), update.CHANGED.format(files='NOTES.md'))
+        self.assertEqual(calls, [])
+        self.assertEqual((self.folder / 'VERSION').read_text().strip(), '1.4.0')
+        self.assertEqual((self.folder / 'NOTES.md').read_text(), 'my own notes\n')
+        (self.folder / 'NOTES.md').unlink()                                    # an untracked file it doesn't add
+        code, out, calls = self.run_setup('--update')
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.folder / 'VERSION').read_text().strip(), '1.5.0')
+        self.assertTrue((self.folder / 'mine.txt').exists())
+
+    def test_a_commit_of_its_own_stops_the_update_in_setups_words(self):
+        # Git's "fatal: Not possible to fast-forward, aborting." ended the script
+        (self.folder / 'compose.override.yaml').write_text('services: {}\n')
+        git(self.folder, 'add', 'compose.override.yaml')
+        git(self.folder, 'commit', '-qm', 'mine')
+        before = git(self.folder, 'rev-parse', 'HEAD')
+        self.release('1.5.0')
+        code, out, calls = self.run_setup('--update')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.strip(), update.CHANGED.format(files='compose.override.yaml'))
+        self.assertEqual(calls, [])
+        self.assertEqual(git(self.folder, 'rev-parse', 'HEAD'), before)
+
+    def test_a_fetch_that_fails_names_gits_cause(self):
+        # The last line of git's error was kept, the end of its hint: "Couldn't look for a new version: and
+        # the repository exists."
+        self.origin.rename(self.tmp / 'moved')
+        code, out, calls = self.run_setup('--update')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.strip(), update.LOOK_FAILED.format(
+            reason=f"'{self.origin}' does not appear to be a git repository"))
+        self.assertEqual(calls, [])
+
+    def test_no_upstream_names_gits_cause_without_its_fatal(self):
+        # "Couldn't look for a new version: fatal: no upstream configured for branch 'main'."
+        git(self.folder, 'branch', '--unset-upstream')
+        code, out, calls = self.run_setup('--update')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.strip(), update.LOOK_FAILED.format(reason="no upstream configured for branch 'main'"))
         self.assertEqual(calls, [])
 
     def test_a_folder_without_git_says_so(self):

@@ -21,7 +21,11 @@ if [ -n "$updating" ]; then
     echo "This folder wasn't downloaded with git, so it can't fetch a new version: download the new version, copy this folder's state/ into it, and run ./setup there."
     exit 1
   fi
-  reason() { printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | tail -n 1 | sed 's/[.[:space:]]*$//'; }
+  # git names the cause on its first line ("... does not appear to be a git repository"); its last may be a hint's end
+  # ("and the repository exists.")
+  reason() {
+    printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | head -n 1 | sed -E 's/^(fatal|error): //; s/[.[:space:]]*$//'
+  }
   if ! upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>&1); then
     echo "Couldn't look for a new version: $(reason "$upstream")."
     exit 1
@@ -31,7 +35,13 @@ if [ -n "$updating" ]; then
     exit 1
   fi
   if [ "$(git rev-parse HEAD)" != "$(git rev-parse '@{u}')" ]; then
-    changed=$(git diff --name-only HEAD | sed -n 'H;${x;s/^\n//;s/\n/, /g;p;}')
+    # the folder's own changes, which git's merge would stop on in its own words: files changed here, the files of
+    # commits made here (the update only moves the folder forward), and untracked files the new version would write over
+    changed=$({ git diff --name-only HEAD
+                git log --format= --name-only '@{u}..HEAD'
+                git ls-files --others --exclude-standard | LC_ALL=C sort \
+                  | LC_ALL=C comm -12 - <(git diff --name-only HEAD '@{u}' | LC_ALL=C sort); } \
+              | sed '/^$/d' | LC_ALL=C sort -u | sed -n 'H;${x;s/^\n//;s/\n/, /g;p;}')
     if [ -n "$changed" ]; then
       echo "This folder has changes of its own, so the update stopped before changing anything: $changed."
       exit 1
@@ -59,8 +69,11 @@ if [ "$(uname -s)" = Linux ]; then
 else
   net="-p 127.0.0.1:${AIOSUBTITLES_SETUP_PORT:-8789}:8789"
 fi
+# a terminal whenever the answers are typed in one, so a password stays hidden, also with the output piped (./setup |
+# tee log); output that isn't a terminal gets no colours
 t=
-if [ -t 0 ] && [ -t 1 ]; then t=-t; fi
+if [ -t 0 ]; then t=-t; fi
+if [ ! -t 1 ]; then t="$t -e NO_COLOR=1"; fi
 # setup finds its own container by this mark (installer/where.py): on this machine's network it has the machine's
 # hostname, not its own ID
 mark="$$-$RANDOM$RANDOM"

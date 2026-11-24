@@ -190,21 +190,37 @@ class Terminal(TmpState):
 
 class Addresses(unittest.TestCase):
     def test_an_address_with_a_port_that_cant_be_one_is_refused(self):
-        # urlsplit lets these through and raises ValueError only when the port is read (later, outside the check)
+        # urlsplit lets these through and raises ValueError only when the port is read (later, outside the check);
+        # Refused with the scheme's sentence, though each starts with http:// or https://
         for bad in ('http://192.168.1.10:87900', 'http://host:99999', 'http://host:abc', 'http://host.example:0',
                     'https://a.example.com:-1/subsync'):
             with self.subTest(bad=bad):
-                self.assertEqual(plan.check_public(bad), (False, 'Type a full address that starts with http:// or '
-                                                                 'https://', bad))
+                self.assertEqual(plan.check_public(bad), (False, 'Use a port from 1 to 65535.', bad))
         for good in ('http://192.168.1.10:8790', 'https://a.example.com:65535/subsync', 'http://host'):
             with self.subTest(good=good):
                 self.assertEqual(plan.check_public(good), (True, '', good))
 
     def test_a_public_instances_address_with_a_port_that_cant_be_one_is_refused(self):
+        # Refused with the path's sentence, though none has a path
         for bad in ('https://subs.example.com:abc', 'https://subs.example.com:99999', 'https://subs.example.com:0'):
             with self.subTest(bad=bad):
-                self.assertEqual(hosting.check_address(bad), (False, hosting.ADDRESS_REFUSED, bad))
+                self.assertEqual(hosting.check_address(bad), (False, 'Use a port from 1 to 65535.', bad))
         self.assertEqual(hosting.check_address('https://Subs.Example.com:8443/'), (True, '', 'https://subs.example.com:8443'))
+
+    def test_an_address_with_a_name_or_password_before_the_at_is_refused(self):
+        # It would go into every link players get (the password too), and apps refuse such links
+        said = "Leave out the name and password before the @: apps can't use an address with them."
+        for bad in ('https://me:secret@subs.example.org', 'http://user@192.168.1.5:8790', 'http://:pw@host/subsync',
+                    'http://@host', 'http://me:pw@host:99999'):
+            with self.subTest(bad=bad):
+                self.assertEqual(plan.check_public(bad), (False, said, bad))
+        for bad in ('https://me:secret@subs.example.org', 'https://user@subs.example.com',
+                    'https://:pw@subs.example.com', 'https://@subs.example.com',
+                    'https://me:pw@subs.example.com/subsync'):
+            with self.subTest(bad=bad):
+                self.assertEqual(hosting.check_address(bad), (False, said, bad))
+        path_with_an_at = 'http://192.168.1.5:8790/sub@sync'                 # an @ after the name is no sign-in
+        self.assertEqual(plan.check_public(path_with_an_at), (True, '', path_with_an_at))
 
     def test_an_address_with_a_space_in_it_is_asked_again(self):
         # urlsplit lets a space through (and drops a tab); the address's first check then ended in http.client's
@@ -408,11 +424,25 @@ class StateFlows(Offline):
         with self.assertRaises(engine.Problem) as caught:
             e.choices()
         self.assertEqual((caught.exception.field, caught.exception.missing), ('PUBLIC_ADDRESS', False))
-        self.assertEqual(caught.exception.message, 'Type a full address that starts with http:// or https://')
+        self.assertEqual(caught.exception.message, 'Use a port from 1 to 65535.')
         e = engine.Engine({'HOST_ADDRESS': 'https://subs.example.com:abc'}, page=True)
         with self.assertRaises(engine.Problem) as caught:
             e.host_address()
-        self.assertEqual((caught.exception.field, caught.exception.message), ('HOST_ADDRESS', hosting.ADDRESS_REFUSED))
+        self.assertEqual((caught.exception.field, caught.exception.message),
+                         ('HOST_ADDRESS', 'Use a port from 1 to 65535.'))
+
+    def test_an_address_with_a_name_and_password_is_asked_again(self):
+        # A personal install took it and wrote it into every link players and AIOStreams get, the password
+        # with it; most web-based apps refuse such a link. A public instance's refused it with the path's sentence
+        said = "Leave out the name and password before the @: apps can't use an address with them."
+        e = self.page_engine({'LANGUAGES': 'English', 'PUBLIC_ADDRESS': 'https://me:secret@subs.example.org'})
+        with self.assertRaises(engine.Problem) as caught:
+            e.choices()
+        self.assertEqual((caught.exception.field, caught.exception.message), ('PUBLIC_ADDRESS', said))
+        e = engine.Engine({'HOST_ADDRESS': 'https://me:pw@subs.example.com'}, page=True)
+        with self.assertRaises(engine.Problem) as caught:
+            e.host_address()
+        self.assertEqual((caught.exception.field, caught.exception.message), ('HOST_ADDRESS', said))
 
 
 class ConfigRecovery(Offline):

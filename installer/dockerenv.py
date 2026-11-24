@@ -182,8 +182,9 @@ SOCKET = '/var/run/docker.sock'
 # The databases a copy holds: subsync's own list (subsync/subsync/hostcmd.py DATABASES; a test keeps them equal)
 DATABASES = ('users.sqlite3', 'subsync.sqlite3')
 
-# The helper's script: this machine's network address, and which of the host:port pairs given are taken. A port it
-# may not open (below 1024 for its user) is not "taken": only an address already in use is.
+# The helper's script: this machine's network address, and which of the host:port pairs given are taken. It runs as
+# root, so it may open a port below 1024 too and sees one in use (as the service's user it was refused every
+# such port, in use or not); a port it still may not open is not "taken": only an address already in use is.
 PROBE = """import errno, json, socket, sys
 def taken(host, port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -209,9 +210,9 @@ print(json.dumps({"lan": lan(), "taken": [f"{h}:{p}" for h, p in pairs if taken(
 
 def probe(image, checks):
     """Answers from this machine's own network, by a short-lived helper from setup's own image (on the host's network,
-    as the service's user, without Docker's socket, removed at once): {'lan': its address, 'taken': ['host:port']} for
-    the (host, port) pairs in `checks`. None when the helper can't run."""
-    cmd = ['docker', 'run', '--rm', '--network', 'host', '--user', SERVICE_USER, '--entrypoint', 'python', image,
+    as root, without Docker's socket, removed at once): {'lan': its address, 'taken': ['host:port']} for the (host,
+    port) pairs in `checks`. None when the helper can't run."""
+    cmd = ['docker', 'run', '--rm', '--network', 'host', '--user', '0:0', '--entrypoint', 'python', image,
            '-I', '-c', PROBE] + [f'{h}:{p}' for h, p in checks]
     code, out, _ = run(cmd, timeout=120)
     try:

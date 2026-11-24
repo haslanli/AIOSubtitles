@@ -95,8 +95,13 @@ def check_address(value):
     start at the address's root), written the same way every time."""
     text = (value or '').strip()
     parts = urllib.parse.urlsplit(text)
-    if parts.scheme != 'https' or not parts.hostname or not _named(parts.hostname) or not plan.has_usable_port(parts) \
-            or parts.path not in ('', '/') or parts.query or parts.fragment or parts.username or parts.password:
+    if parts.scheme != 'https' or not parts.hostname or not _named(parts.hostname):
+        return False, ADDRESS_REFUSED, text
+    if plan.has_credentials(parts):
+        return False, plan.NO_CREDENTIALS, text
+    if not plan.has_usable_port(parts):
+        return False, plan.BAD_PORT, text
+    if parts.path not in ('', '/') or parts.query or parts.fragment:
         return False, ADDRESS_REFUSED, text
     if plan.has_space(text):
         return False, plan.NO_SPACES, text

@@ -1065,6 +1065,68 @@ class KeptAppTest(unittest.TestCase):
         self.assertEqual(again.text_of(self.key), SYNCED_EN)
         self.assertEqual(self.pool.active(), 0)                   # still no worker of their own
 
+    def theirs(self):
+        """A stored copy of the file made from a subtitle only someone else's list has (an addon of their own config):
+        its key."""
+        import hashlib
+        return self.store.put(FILE_KEY, hashlib.sha256(b"an addon's").hexdigest(), "eng", 0, "synced", body=SYNCED_EN,
+                              fmt="srt", candidate_id="addon-en", original=SRT_EN, offer=False)
+
+    def entries(self, app):
+        return [(e["label"], e["variantOf"]) for e in app.subtitles("movie", "tt1", QUERY)]
+
+    def test_a_copy_their_own_list_cant_rebuild_gives_way_to_one_it_can(self):
+        # Copies are shared by file and each person's is rebuilt from their own list; one made from a subtitle
+        # only someone else's list has was listed to everyone, its download failed every time, and as the language
+        # counted as covered nothing else was listed; their own listings kept it served
+        from unittest import mock
+        from subsync.worker import MISSED_S
+        theirs = self.theirs()
+        self.store.set_offers(FILE_KEY, "eng", [theirs, self.key])         # best fit put it first
+        token = self.person()
+        app = self.pool.app(token)
+        both = [("English (synced)", "addon-en"), ("English (synced 2)", "os-en")]
+        self.assertEqual(self.entries(app), both)                           # their list isn't known yet
+        self.assertIsNone(app.text_of(theirs))                              # its one failed download
+        with mock.patch.object(self.store, "served", wraps=self.store.served) as served:
+            self.assertEqual(self.entries(app), [("English (synced)", "os-en")])  # the copy their list rebuilds
+        self.assertEqual([c.args for c in served.call_args_list], [(self.key,)])  # theirs no longer kept alive
+        self.assertEqual(app.text_of(self.key), SYNCED_EN)
+        self.assertEqual(app.ready_copy(ALIAS, "eng"), (self.key, SYNCED_EN))     # a pick entry serves it too
+        self.clock.t += self.settings.worker_idle_s + 1
+        self.assertEqual(self.pool.reap(), 1)
+        app = self.pool.app(token)                                          # their next App keeps the miss
+        self.assertEqual(self.entries(app), [("English (synced)", "os-en")])
+        with app.worker.cv:
+            app.worker.missed[theirs] -= MISSED_S                           # a day later, it is tried again
+        self.assertEqual(self.entries(app), both)
+
+    def test_a_copy_their_own_jobs_list_hasnt_is_never_listed_to_them(self):
+        # Their list is known once their own job fetched it: no failed download first
+        from subsync.sources import parse_extras
+        from subsync.worker import Job
+        self.store.set_offers(FILE_KEY, "eng", [self.theirs(), self.key])
+        app = self.pool.app(self.person())
+        job = Job("movie", "tt1", parse_extras(QUERY))
+        app.worker._candidates(job, dict(job.hints))                        # their job's list of the file
+        self.assertEqual(self.entries(app), [("English (synced)", "os-en")])
+        other = self.pool.app(self.person())                                # someone whose list isn't known: as before
+        self.assertEqual(self.entries(other), [("English (synced)", "addon-en"), ("English (synced 2)", "os-en")])
+
+    def test_with_no_copy_their_list_rebuilds_their_original_is_listed(self):
+        # The file read and judged lately for the other person, and its only English copy made from a
+        # subtitle only that person's list has: after its one failed download, their "(original)" entry takes its
+        # place, from their own list, with nothing of the file read again
+        theirs = self.theirs()
+        self.store.set_offers(FILE_KEY, "eng", [theirs])
+        app = self.pool.app(self.person())
+        self.store.file_read(FILE_KEY, 1000, FILE_KEY[:16], True, {"rule": app.s.rule_id})
+        self.store.judged_put(FILE_KEY, ["eng"], app.s.rule_id)
+        self.assertEqual(self.entries(app), [("English (synced)", "addon-en")])
+        self.assertIsNone(app.text_of(theirs))
+        self.assertEqual(self.entries(app), [("English (original)", "os-en")])
+        self.assertEqual(app.worker.jobs, {})                               # no job: nothing of the file is read
+
     def test_past_the_cap_their_original_downloads(self):
         # An "(original)" entry's download got the "No French subtitle was found" note
         import time

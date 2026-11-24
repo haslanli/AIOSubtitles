@@ -407,9 +407,10 @@ class Store:
             else:
                 self.db.execute("DELETE FROM last_good WHERE file_key=? AND lang=?", (file_key, lang))
 
-    def offers(self, file_key, langs, counts=None):
+    def offers(self, file_key, langs, counts=None, usable=None):
         """The synced results to list for a file: per language its offers in order (up to counts[lang], default 1),
-        else its last_good; only those whose copy exists, skipped before they are counted, so a missing one hides none
+        else its last_good; only those whose copy exists (and that `usable`, given a result, allows: in public mode
+        those a person's own list can rebuild), skipped before they are counted, so a missing one hides none
         behind it."""
         out = []
         for lang in langs:
@@ -421,7 +422,8 @@ class Store:
                 lg = self.last_good(file_key, lang)
                 keys = [lg["key"]] if lg else []
             listed = [r for r in map(self.get, keys)
-                      if r and r["outcome"] == "synced" and os.path.exists(self._copy_path(r["key"]))]
+                      if r and r["outcome"] == "synced" and os.path.exists(self._copy_path(r["key"]))
+                      and (usable is None or usable(r))]
             out += listed[:n]
         return out
 
