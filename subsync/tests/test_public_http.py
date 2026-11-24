@@ -459,7 +459,8 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         from subsync import public
         port = self.server.server_address[1]
         signup = b"POST /signup HTTP/1.1\r\nHost: x\r\nContent-Length: 30\r\n\r\n"
-        for head, rest, answer in ((signup, b"link=&password=" + b"x" * 15, [500]),        # the form
+        # the form: 408, the client's slowness, not the service's fault
+        for head, rest, answer in ((signup, b"link=&password=" + b"x" * 15, [408]),
                                    (b"GET /health HTTP/1.1\r\n", b"X-Slow: " + b"a" * 21 + b"\r\n\r\n", [])):  # the head
             with self.subTest(head=head.split(b" ")[0]), mock.patch.object(public, "REQUEST_ARRIVAL_S", 0.5):
                 seconds, data = trickle(port, head, rest, 0.1)
@@ -468,6 +469,135 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         self.assertEqual(http(self.base + "/health")[:2], (200, b"ok"))
         seconds, data = trickle(port, b"GET /health HTTP/1.1\r\n", b"Host: x\r\n\r\n", 0.05)   # slow, but in time
         self.assertEqual(answers(data), [200])
+
+    def test_a_form_that_comes_too_slowly_is_answered_408_and_not_logged(self):
+        # A form slower than REQUEST_ARRIVAL_S got the "Something went wrong" page (500) and a warning in the
+        # operator's log, so anyone could fill the log at will; now a way on, on the form's own page, and the
+        # connection closes (the rest of the form is never read)
+        from unittest import mock
+        from subsync import public
+        _, _, _, _, token = self.sign_up()
+        port = self.server.server_address[1]
+        for path in ("/signup", f"/u/{token}/configure"):
+            with self.subTest(path=path), mock.patch.object(public, "REQUEST_ARRIVAL_S", 0.5), \
+                    self.assertNoLogs("subsync", "DEBUG"):
+                with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                    sock.sendall(f"POST {path} HTTP/1.1\r\nHost: x\r\nAccept: text/html\r\nContent-Length: 30\r\n\r\n"
+                                 "action=lang".encode())        # then nothing more
+                    data = b""
+                    while chunk := sock.recv(65536):            # the server closes: no wait for the socket's 5 s
+                        data += chunk
+                self.assertEqual(answers(data), [408])
+                self.assertIn(b"The form took too long to arrive. Send it again from this page.", data)
+
+    def test_a_client_that_stops_reading_the_answer_is_closed_quietly(self):
+        # A write past the connection's timeout (the client stopped reading) was logged as a failed request
+        # and answered with the "Something went wrong" page it couldn't read either
+        from unittest import mock
+        from subsync import public
+        with mock.patch.object(public.PublicHandler, "_html", side_effect=TimeoutError("timed out")), \
+                self.assertNoLogs("subsync", "DEBUG"):
+            with socket.create_connection(("127.0.0.1", self.server.server_address[1]), timeout=5) as sock:
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                data = b""
+                while chunk := sock.recv(65536):                # closed, with no answer: no wait for the 5 s
+                    data += chunk
+        self.assertEqual(data, b"")
+        self.assertEqual(http(self.base + "/health")[:2], (200, b"ok"))
+
+    def test_a_sign_up_sent_from_another_site_is_refused_before_it_counts(self):
+        # Any page could make its visitors' browsers post the sign-up form, each post one of their address's
+        # hourly tries; a post the browser marks as sent from another site is refused before anything is counted
+        uuid = self.fake.add(json.loads(json.dumps(VIEWER)), PASSWORD)
+        fields = form(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", password=PASSWORD,
+                      languages="English")
+        for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Origin": "https://elsewhere.example"},
+                        {"Origin": "null", "Sec-Fetch-Site": "cross-site"},
+                        {"Origin": "https://subs.test.elsewhere.example", "Sec-Fetch-Site": "same-site"}):
+            with self.subTest(headers=headers):
+                code, body, _ = http(self.base + "/signup", fields, headers)
+                self.assertEqual(code, 400)
+                self.assertIn("That sign-up was sent from another website. Sign up on this page instead.",
+                              body.decode())
+        self.assertEqual(dict(self.service.gate.attempts.counts), {})            # no attempt counted
+        self.assertEqual((self.fake.requests, self.users.count()), ([], 0))      # nothing asked or made
+        # its own pages' posts (they send no referrer, so Origin "null"), this instance's own origin, or no header (an
+        # older browser, a script): signed up as before
+        for headers in ({"Origin": "null", "Sec-Fetch-Site": "same-origin"}, {"Origin": "https://subs.test"}, {}):
+            with self.subTest(headers=headers):
+                self.assertEqual(http(self.base + "/signup", fields, headers)[0], 200)
+        self.assertEqual(self.users.count(), 3)
+
+    def test_requests_that_call_out_run_only_so_many_at_once(self):
+        # A sign-up, a Refresh and a Delete with a password wait on outside services; with no bound, a burst of
+        # them toward a slow host took every one of SUBSYNC_MAX_CONNECTIONS, /health included
+        from subsync import signup
+        self.assertEqual(signup.OUTSIDE_CALLS_AT_ONCE, 16)
+        uuid, _, _, _, token = self.sign_up()
+        busy = "AIOSubtitles is busy right now. Try again in a few minutes."
+        for _ in range(signup.OUTSIDE_CALLS_AT_ONCE):       # every place taken by requests still waiting outside
+            self.assertTrue(self.service.outside.acquire(blocking=False))
+        try:
+            attempts = dict(self.service.gate.attempts.counts)
+            del self.fake.requests[:]
+            code, body, _ = http(self.base + "/signup", form(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json",
+                                                              password=PASSWORD, languages="English"))
+            self.assertEqual(code, 503)
+            self.assertIn(busy, body.decode())
+            self.assertEqual(dict(self.service.gate.attempts.counts), attempts)   # it cost no sign-up attempt
+            for action in ("refresh", "delete"):
+                with self.subTest(action=action):
+                    code, body, _ = http(f"{self.base}/u/{token}/configure", form(action=action, password=PASSWORD))
+                    self.assertEqual(code, 503)
+                    self.assertIn(busy, body.decode())
+            self.assertEqual(self.fake.requests, [])                    # nothing asked of AIOStreams
+            self.assertEqual(dict(self.service.attempts.attempts.counts), {})   # nor counted as their attempts
+            # what calls nothing outside still answers
+            self.assertEqual(http(self.base + "/health")[:2], (200, b"ok"))
+            code, _, headers = http(f"{self.base}/u/{token}/configure", form(action="languages", languages="Spanish"))
+            self.assertEqual((code, headers["Location"]), (303, "configure?done=languages"))
+        finally:
+            for _ in range(signup.OUTSIDE_CALLS_AT_ONCE):
+                self.service.outside.release()
+        code, _, headers = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD))
+        self.assertEqual((code, headers["Location"]), (303, "configure?done=refreshed"))   # places free again
+
+    def test_a_change_while_another_runs_is_told_so_at_once(self):
+        # Every settings action waited for the person's record with no limit, holding its connection
+        from unittest import mock
+        from subsync import signup
+        _, _, _, _, token = self.sign_up()
+        with mock.patch.object(signup, "RECORD_WAIT_S", 0.3), self.users.locked(token):   # a Refresh runs
+            for fields in (dict(action="languages", languages="Spanish"), dict(action="refresh", password=PASSWORD),
+                           dict(action="delete", password=PASSWORD)):
+                with self.subTest(action=fields["action"]):
+                    started = time.monotonic()
+                    code, body, _ = http(f"{self.base}/u/{token}/configure", form(**fields))
+                    self.assertLess(time.monotonic() - started, 3)
+                    self.assertEqual(code, 409)
+                    self.assertIn("Another change to your settings is still running. Try again in a minute.",
+                                  body.decode())
+        self.assertEqual(self.users.open(token)["languages"], ["eng"])        # nothing changed, nothing deleted
+
+    def test_refresh_and_delete_attempts_are_limited(self):
+        # Refresh made the sign-up's calls with any link and password typed, and nothing counted it: a
+        # signed-up person could loop guesses at any config from AIOSubtitles' address
+        from subsync import signup
+        _, _, _, _, token = self.sign_up()
+        configure = f"{self.base}/u/{token}/configure"
+        for _ in range(signup.ATTEMPTS_PER_HOUR - 1):
+            self.assertEqual(http(configure, form(action="refresh", password="wrong"))[0], 400)
+        self.assertEqual(http(configure, form(action="delete", password="wrong"))[0], 400)   # a Delete counts too
+        self.assertEqual(http(configure, form(action="delete-confirm"))[0], 200)            # the step itself doesn't
+        del self.fake.requests[:]
+        too_many = "Too many attempts in the last hour. Try again in an hour."
+        for action in ("refresh", "delete"):
+            with self.subTest(action=action):
+                code, body, _ = http(configure, form(action=action, password=PASSWORD))
+                self.assertEqual(code, 429)
+                self.assertIn(too_many, body.decode())
+        self.assertEqual(self.fake.requests, [])                        # refused before anything was asked
+        self.assertIsNotNone(self.users.open(token))
 
     def test_the_stylesheet_and_script_are_kept_for_good_at_their_hashed_address(self):
         # Pages ask for them by their content's hash, yet they were kept an hour

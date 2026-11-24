@@ -241,6 +241,26 @@ class MemoryTest(TempDirTest):
         self.assertNotIn("Film", key)
         self.assertNotEqual(key, worker_mod.UsenetGate.key_of("who2", "name:Some.Film.2024.mkv|123"))
 
+    def test_kept_two_days_also_when_no_new_one_comes(self):
+        # Old notes went only when a new one was written, so once Usenet use stopped the last ones stayed
+        # for good; the store's clean-up removes them now
+        now = [1_000_000.0]
+        store = closed_after(self, Store(self.dir, clock=lambda: now[0]))
+        store.usenet_missed("old")
+        now[0] += 86400
+        store.usenet_missed("recent")
+        now[0] += 86400 + 1                                    # "old" is past two days, and no new note came
+        store.expire()
+        self.assertEqual([k for (k,) in store.db.execute("SELECT key FROM usenet_misses")], ["recent"])
+
+    def test_a_self_hosted_install_keeps_its_key_form(self):
+        # Only public mode's notes moved under the person's own rows; a self-hosted install's keep their keys
+        import hashlib
+        store = closed_after(self, Store(self.dir))
+        worker_mod.UsenetGate(store, 10, Counts()).missed("name:a.mkv|1")
+        self.assertEqual([k for (k,) in store.db.execute("SELECT key FROM usenet_misses")],
+                         [hashlib.sha256(b"usenet||name:a.mkv|1").hexdigest()[:32]])
+
 
 class StoreCountsTest(TempDirTest):
     """A self-hosted service's Usenet listings and the day's stop, in the store's day counters."""
@@ -277,7 +297,7 @@ class GateTest(TempDirTest):
         counts = Slow(store)
         for _ in range(9):
             counts.add_listing()
-        gate = worker_mod.UsenetGate(store, 10, counts, who="w")
+        gate = worker_mod.UsenetGate(store, 10, counts, rows_key="w")
         taken = []
         lanes = [threading.Thread(target=lambda alias=alias: taken.append(gate.take(alias)), daemon=True)
                  for alias in ("name:a.mkv|1", "name:b.mkv|2")]
@@ -330,7 +350,7 @@ class UsageTest(TempDirTest):
         gates = {}
         for token in (a, b):
             limits = UserLimits(s, users, token)
-            gates[token] = worker_mod.UsenetGate(store, 2, limits.usenet_counts(), who=limits.who)
+            gates[token] = worker_mod.UsenetGate(store, 2, limits.usenet_counts(), rows_key=limits.rows_key)
         self.assertEqual([gates[a].take(f"name:{n}.mkv|1") for n in "xyz"], [True, True, False])   # a's two a day
         self.assertEqual(users.usenet_usage(a), {"listings": 2, "stopped": False})
         self.assertEqual(users.usenet_usage(b), {"listings": 0, "stopped": False})
@@ -509,7 +529,7 @@ class WorkerTest(TempDirTest):
         s = Settings(dict({"SUBSYNC_DATA": self.dir, "SUBSYNC_LANGUAGES": "eng"}, **env))
         self.store = closed_after(self, Store(self.dir))
         self.counts = Counts()
-        gate = worker_mod.UsenetGate(self.store, per_day, self.counts, who="w")
+        gate = worker_mod.UsenetGate(self.store, per_day, self.counts, rows_key="w")
         w = Worker(s, self.store, debrid or FakeDebrid(), worker_mod.Safety(), usenet=usenet, usenet_gate=gate)
         self.rows = []
         w._process_row = lambda job, hints, r, bt: self.rows.append((job.usenet, r))
@@ -658,7 +678,7 @@ class FinderTest(TempDirTest):
     def finder(self, listed):
         self.store = closed_after(self, Store(self.dir))
         self.counts, self.usenet = Counts(), FakeUsenet(listed)
-        return worker_mod.UsenetFinder(self.usenet, worker_mod.UsenetGate(self.store, 10, self.counts, who="w"))
+        return worker_mod.UsenetFinder(self.usenet, worker_mod.UsenetGate(self.store, 10, self.counts, rows_key="w"))
 
     def test_a_found_row_is_kept_with_its_address_for_the_audio_job(self):
         finder, job = self.finder([row()]), Job("movie", "tt1", HINTS)
@@ -709,7 +729,7 @@ class UsenetJobTest(TempDirTest):
         subs = [{"id": "s", "url": "http://127.0.0.1:1/1.srt", "lang": "eng"}]
         u = FakeUsenet([row(url="http://127.0.0.1:1/playback/1")], subs=subs)
         w = Worker(s, store, FakeDebrid(subs), worker_mod.Safety(), usenet=u,
-                   usenet_gate=worker_mod.UsenetGate(store, 10, counts, who="w"))
+                   usenet_gate=worker_mod.UsenetGate(store, 10, counts, rows_key="w"))
         job = Job("movie", "tt1", HINTS)
         self.assertFalse(w.audio_allowed(job))                   # a first pass reads the index only, opened or not
         seen = {}
@@ -752,7 +772,7 @@ class UsenetJobTest(TempDirTest):
                  "ai": False}]
         u = FakeUsenet([row(url=srv.url("tiny-nosub.mp4"), name="tiny-nosub.mp4", size=size)], subs=subs)
         w = Worker(s, store, FakeDebrid(subs), worker_mod.Safety(), usenet=u,
-                   usenet_gate=worker_mod.UsenetGate(store, 10, Counts(), who="w"))
+                   usenet_gate=worker_mod.UsenetGate(store, 10, Counts(), rows_key="w"))
         job = Job("movie", "tt1", hints)
         w.process(job)
         self.assertTrue(job.usenet)
@@ -1171,11 +1191,42 @@ class PublicUsenetTest(TempDirTest):
         aios = sources.Aios(record["usenet_link"].replace(INSTANCE, self.fake.url), password=record["usenet_password"])
         counts = Counts()
         finder = worker_mod.UsenetFinder(aios, worker_mod.UsenetGate(closed_after(self, Store(self.dir)), 10, counts,
-                                                                     who="w"))
+                                                                     rows_key="w"))
         del self.fake.requests[:]
         self.assertEqual(finder.find(Job("movie", "tt1", HINTS), HINTS), row())
         self.assertEqual(self.fake.requests.count(("GET", "/api/v1/user")), 1)
         self.assertEqual((self.fake.listed, counts.n), ([(record["usenet_uuid"], "stream")], 1))
+
+    def test_a_persons_usenet_files_not_found_are_their_own_rows(self):
+        # The notes of their Usenet files not found were kept under their fair-share key, outside their own
+        # rows in the store, so Delete ("Everything AIOSubtitles keeps about you is deleted.") left them behind
+        from subsync.public import Pool
+        env = {"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": KEY,
+               "SUBSYNC_PUBLIC_BASE": "https://subs.test", "SUBSYNC_USENET": "on", "SUBSYNC_EXTRA_SOURCES": "",
+               "SUBSYNC_ORIGINAL_LANGUAGE": "off"}
+        _, a = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
+        _, b = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
+        store = closed_after(self, Store(self.dir))
+        pool = Pool(Settings(env), env, store, self.users, start_workers=False)
+        self.addCleanup(pool.close)
+        gates = {t: pool.app(t).worker.usenet_finder.gate for t in (a.token, b.token)}
+        for gate in gates.values():
+            gate.missed("name:a.mkv|1")
+        mine = f"p:{self.users.rows_key(a.token)}:"
+        key = worker_mod.UsenetGate.key_of(self.users.rows_key(a.token), "name:a.mkv|1")
+        self.assertTrue(key.startswith(mine))
+        self.assertTrue(store.usenet_recently_missed(key, 86400))
+        self.assertFalse(gates[a.token].may_take("name:a.mkv|1"))           # not looked up again for a day
+        self.assertEqual(store.drop_rows_of(self.users.rows_key(a.token)), 1)  # Delete's: their note goes
+        self.assertTrue(gates[a.token].may_take("name:a.mkv|1"))
+        self.assertFalse(gates[b.token].may_take("name:a.mkv|1"))           # anyone else's stays
+        # once their data is deleted (the delete's stop), a job still running writes none of theirs
+        pool.stop(a.token, forget=True)
+        gates[a.token].missed("name:b.mkv|2")
+        self.assertEqual(store.db.execute("SELECT COUNT(*) FROM usenet_misses WHERE key LIKE ?",
+                                          (mine + "%",)).fetchone()[0], 0)
+        gates[b.token].missed("name:b.mkv|2")
+        self.assertFalse(gates[b.token].may_take("name:b.mkv|2"))
 
 
 class PagesTest(unittest.TestCase):

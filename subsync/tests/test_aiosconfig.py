@@ -840,8 +840,22 @@ class SignupCallersTest(ClientCase):
                 self.stand.routes[("POST", "/api/v1/user")] = answer(201, body)
                 with self.assertRaises(self.signup.SignupError) as e:
                     self.signup._new_sync(self.public(), self.stand.url, CONFIG)
+                # the step first, then the way on, as every other step's error
                 self.assertEqual(e.exception.message,
-                                 "Your AIOStreams answered in a way AIOSubtitles doesn't know when making its config.")
+                                 "Making AIOSubtitles' config on your AIOStreams: your AIOStreams answered in a way "
+                                 "AIOSubtitles doesn't know. Try again in a few minutes.")
+
+    def test_a_checked_config_of_another_shape(self):
+        # "…doesn't know when checking its config." read as AIOStreams' own config, and gave no way on
+        self.stand.routes[("POST", "/api/v1/user")] = answer(201, {"success": True, "data": {
+            "uuid": UUID, "encryptedPassword": "E"}})
+        self.stand.routes[("GET", f"/stremio/{UUID}/E/manifest.json")] = answer(200, [1])
+        self.stand.routes[("DELETE", "/api/v1/user")] = answer(200, {"success": True})
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._new_sync(self.public(), self.stand.url, CONFIG)
+        self.assertEqual(e.exception.message, "Checking AIOSubtitles' config on your AIOStreams: your AIOStreams "
+                                              "answered in a way AIOSubtitles doesn't know. Try again in a few minutes.")
+        self.assertIn(("DELETE", "/api/v1/user", True), self.stand.requests)    # the config made is removed again
 
     def test_reading_a_config_of_another_shape(self):
         self.stand.routes[("GET", "/api/v1/status")] = answer(200, {"success": True, "data": {"version": "2.37.0"}})
@@ -867,8 +881,10 @@ class SignupCallersTest(ClientCase):
                 self.stand.routes[("GET", "/api/v1/user")] = answer(200, {"success": True})
                 with self.assertRaises(self.signup.SignupError) as e:
                     self.signup.delete(s, users, token, {"password": "pw"}, api_factory=lambda base, t: self.public())
-                # the delete step's problem is titled "Nothing was deleted": its message doesn't say it again
-                self.assertEqual(e.exception.message, "Your AIOStreams answered in a way AIOSubtitles doesn't know.")
+                # the delete step's problem is titled "Nothing was deleted": its message doesn't say it again;
+                # it names its step and says to try again, as the step errors do
+                self.assertEqual(e.exception.message, "Reading your AIOStreams config: your AIOStreams answered in a way "
+                                                      "AIOSubtitles doesn't know. Try again in a few minutes.")
                 self.assertIsNotNone(users.open(token))
                 self.assertEqual([r for r in self.stand.requests if r[0] == "DELETE"], [])
             finally:

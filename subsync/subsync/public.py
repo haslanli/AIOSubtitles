@@ -11,6 +11,7 @@ entries those lists name are under their read key (/r/<key>/, users.read_key), w
 
 A worker with nothing to do for a while stops, and its opened record leaves memory; the next request opens it again.
 """
+import contextlib
 import io
 import logging
 import re
@@ -24,8 +25,9 @@ from .addon import MANIFEST_CACHE, App, Handler, Server, head_answer, is_entry, 
 from .aiosconfig import MAX_LANGUAGES, PUBLIC_TIMEOUT, parse_languages
 from .settings import AUDIO_CHOICES, Settings
 from .recheck import Checker
-from .signup import (SignupError, SignupGate, delete, forget_password, form_languages, personal_manifest_url,
-                     public_api, refresh, remove_tmdb_key, set_audio, set_languages, set_tmdb_key, signup, store_only)
+from .signup import (BUSY, OUTSIDE_CALLS_AT_ONCE, AttemptGate, SignupError, SignupGate, delete, forget_password,
+                     form_languages, personal_manifest_url, public_api, refresh, remove_tmdb_key, set_audio,
+                     set_languages, set_tmdb_key, signup, store_only)
 from .sources import Aios
 from .store import day_of
 from .ui import FONT_HEADERS, PAGE_HEADERS, SCRIPT_HEADERS   # the setup page sends the same
@@ -76,10 +78,11 @@ class UserLimits:
 
     def __init__(self, settings, users, token):
         self.s, self.users, self.token = settings, users, token
-        # the sources' fair shares and the Usenet files not found count per person under this opaque key (not the
-        # token, never logged; Users.who_key)
+        # the sources' fair shares count per person under this opaque key (not the token, never logged; Users.who_key,
+        #)
         self.who = users.who_key(token)
-        self.rows_key = users.rows_key(token)   # their own rows in the shared store
+        # their own rows in the shared store, their Usenet files not found among them
+        self.rows_key = users.rows_key(token)
 
     def may_queue(self, queued):
         return queued < self.s.user_queue
@@ -215,7 +218,8 @@ class Pool:
         usenet = gate = None
         if s.usenet_usable and isinstance(limits, UserLimits):
             usenet = Aios.from_settings(s, s.usenet_manifest, s.usenet_password, self.s.public_base)
-            gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(), who=limits.who)
+            gate = UsenetGate(self.store, self.s.usenet_listings_per_day, limits.usenet_counts(),
+                              rows_key=limits.rows_key)
         safety = self.safeties.get(uid)
         if safety is None:
             safety = self.safeties[uid] = Safety(backoff_s=s.backoff_s)
@@ -397,12 +401,18 @@ class FormError(Exception):
 
 
 class PublicService:
-    """What the public pages and routes share: settings, the stores, the pool, the sign-up gate."""
+    """What the public pages and routes share: settings, the stores, the pool, the sign-up gate, the gate of Refresh's
+    and Delete's attempts, and the places of the requests that call outside services."""
 
     def __init__(self, settings, store, users, pool, api_factory=public_api, timeout=PUBLIC_TIMEOUT, clock=time.time):
         self.s, self.store, self.users, self.pool = settings, store, users, pool
         self.api_factory, self.timeout, self.clock = api_factory, timeout, clock
         self.gate = SignupGate(settings, users.count, clock=clock)
+        self.attempts = AttemptGate(clock=clock)
+        self.outside = threading.BoundedSemaphore(OUTSIDE_CALLS_AT_ONCE)
+        # this instance's origin, as a browser names it in a post's Origin header (_from_another_site): its address,
+        # which has no path in public mode (Settings.conflicts)
+        self.origin = settings.public_base.lower()
         # each person's AIOStreams checked again about once a day while they use the service; a change restarts their
         # worker with the new record
         self.checker = Checker(settings, users, on_change=pool.stop, api_factory=api_factory, clock=clock,
@@ -423,6 +433,26 @@ class PublicService:
 
     def manifest_url(self, token):
         return personal_manifest_url(self.s, token)
+
+    @contextlib.contextmanager
+    def calling_out(self):
+        """A request that calls outside services (a sign-up, a Refresh, a Delete with a password, the TMDB key check):
+        at most OUTSIDE_CALLS_AT_ONCE at once, past it SignupError(BUSY, 503), so slow outside services never hold every
+        one of SUBSYNC_MAX_CONNECTIONS."""
+        if not self.outside.acquire(blocking=False):
+            raise SignupError(BUSY, 503)
+        try:
+            yield
+        finally:
+            self.outside.release()
+
+    @contextlib.contextmanager
+    def trying(self, token, ip):
+        """A Refresh or a Delete with a password: one of the requests that call outside services (calling_out), then one
+        of the person's attempts (AttemptGate), so a busy instance costs them none."""
+        with self.calling_out():
+            self.attempts.check(self.users.user_id(token), ip)
+            yield
 
     def forget(self, token):
         """A record just deleted: its service stops and writes nothing more of theirs (Pool.stop), its daily check is
@@ -538,7 +568,11 @@ class PublicHandler(Handler):
         if length > MAX_FORM:
             self.close_connection = True
             raise FormError("The form is too large: send it again from this page.", 413)
-        raw = self.read_body(length)
+        try:
+            raw = self.read_body(length)
+        except TimeoutError:      # not whole within REQUEST_ARRIVAL_S: a slow connection, no fault to log
+            self.close_connection = True
+            raise FormError("The form took too long to arrive. Send it again from this page.", 408) from None
         try:
             text = raw.decode("utf-8")
             fields = urllib.parse.parse_qs(text, keep_blank_values=True, max_num_fields=MAX_FIELDS)
@@ -601,6 +635,9 @@ class PublicHandler(Handler):
             return self._person(token, rest)
         except (BrokenPipeError, ConnectionResetError):
             return None
+        except TimeoutError:      # the client stopped reading the answer: no fault to log
+            self.close_connection = True
+            return None
         except Exception as e:
             log.warning("request failed: %s", type(e).__name__)
             return self._failed(path)
@@ -620,8 +657,19 @@ class PublicHandler(Handler):
         svc.checker.maybe_start(token)   # in the background, at most once per SUBSYNC_RECHECK_HOURS
         return self.dispatch(app, rest, True)
 
+    def _from_another_site(self):
+        """Whether the browser marks this post as sent from another site: Sec-Fetch-Site cross-site, or an
+        Origin that is neither this instance's nor "null" (its pages send no referrer, so their own posts say "null").
+        A post with neither header (an older browser, a script) passes as before."""
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            return True
+        return (self.headers.get("Origin") or "").strip().lower() not in ("", "null", self.service.origin)
+
     def _signup(self):
         svc = self.service
+        if self._from_another_site():   # refused before anything is read or counted
+            return self._html(400, pages.signup_page(svc.s, error="That sign-up was sent from another website. Sign up "
+                                                                  "on this page instead."))
         try:
             form = self._form()
         except FormError as e:
@@ -629,10 +677,11 @@ class PublicHandler(Handler):
         ip = svc.client_ip(self)
         try:
             form["languages"] = form_languages(form)
-            svc.gate.check(ip, form.get("invite"))
-            # an earlier sign-up of the same config whose place this one took is deleted
-            result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout,
-                            on_replaced=svc.forget)
+            with svc.calling_out():     # before the gate counts it: a busy instance costs no attempt
+                svc.gate.check(ip, form.get("invite"))
+                # an earlier sign-up of the same config whose place this one took is deleted
+                result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout,
+                                on_replaced=svc.forget)
         except SignupError as e:
             # too many attempts or sign-ups (429), a full or busy instance (503): entering the cleared boxes again only
             # costs a try
@@ -682,10 +731,11 @@ class PublicHandler(Handler):
                 return self._see("audio")
             if action == "refresh":
                 try:
-                    result = refresh(svc.s, svc.users, token,
-                                     {"password": form.get("password"), "add_addon": "on", "link": form.get("link"),
-                                      "keep_password": form.get("keep_password"), "usenet": form.get("usenet")},
-                                     api_factory=svc.api_factory, timeout=svc.timeout)
+                    with svc.trying(token, svc.client_ip(self)):   # it tries a password at an AIOStreams
+                        result = refresh(svc.s, svc.users, token,
+                                         {"password": form.get("password"), "add_addon": "on", "link": form.get("link"),
+                                          "keep_password": form.get("keep_password"), "usenet": form.get("usenet")},
+                                         api_factory=svc.api_factory, timeout=svc.timeout)
                 except SignupError as e:      # the password field is called "refresh" on this page, the link
                     # "new_link"; with that box left empty, a link error is about the stored AIOStreams: no box is
                     # marked
@@ -704,7 +754,8 @@ class PublicHandler(Handler):
                 forget_password(svc.users, token)
                 return self._see("forgot")
             if action == "tmdb-key" and pages.personal_tmdb(svc.s):
-                set_tmdb_key(svc.users, token, form.get("tmdb_key"), svc.s)   # checked with TMDB once
+                with svc.calling_out():       # checked with TMDB once
+                    set_tmdb_key(svc.users, token, form.get("tmdb_key"), svc.s)
                 svc.pool.stop(token)          # the next request opens the record with it
                 return self._see("tmdb-key")
             if action == "tmdb-key-remove":   # also after the instance stopped asking for keys
@@ -718,9 +769,12 @@ class PublicHandler(Handler):
                 def forget():                 # their service stops, and writes nothing more of theirs (Pool.stop)
                     svc.pool.stop(token, forget=True)
                     svc.checker.forget(token)
+                # with a password it first tries it at their AIOStreams, as a Refresh does
+                trying = svc.trying(token, svc.client_ip(self)) if form.get("password") else contextlib.nullcontext()
                 try:                          # forgotten once the delete is certain: never for a mistyped password
-                    outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
-                                     api_factory=svc.api_factory, timeout=svc.timeout, on_confirmed=forget)
+                    with trying:
+                        outcome = delete(svc.s, svc.users, token, {"password": form.get("password") or ""},
+                                         api_factory=svc.api_factory, timeout=svc.timeout, on_confirmed=forget)
                 except SignupError as e:      # back to the delete step, not the settings page
                     return self._html(e.code, pages.delete_confirm_page(
                         error=e.message, field="delete" if e.field == "password" else e.field,

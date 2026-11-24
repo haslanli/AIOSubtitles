@@ -666,9 +666,81 @@ class SignupTest(SignupHarness, unittest.TestCase):
         _, result = self.run_signup(viewer())
         with self.assertRaises(self.signup.SignupError) as e:
             self.signup.delete(self.s, self.users, result.token, {"password": "wrong"}, api_factory=self.api)
-        self.assertEqual(e.exception.message, self.signup.WRONG_PASSWORD)
+        # the delete step has no link: its words name none
+        self.assertEqual(e.exception.message, "Your AIOStreams didn't accept this password. Type the password of your "
+                                              "config: the one you set on AIOStreams' configure page, not the one you "
+                                              "sign in to AIOStreams with.")
         page = pages.delete_confirm_page(self.s, error=e.exception.message, field="delete")
         self.assertEqual(page.count("Nothing was deleted"), 1)
+
+    def test_with_no_link_typed_refresh_and_delete_point_to_no_link(self):
+        # The errors were written for the sign-up, where a link was just typed; a Refresh with its link box
+        # left empty and Delete (whose page has no link) said "Check the link", "for this link" and "Is the link from
+        # AIOStreams?" too. With a link typed nothing changed
+        from subsync.aiosconfig import AiosApi
+        uuid, result = self.run_signup(viewer())
+        link = f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json"
+
+        def down(base, timeout):        # an AIOStreams that can't be reached
+            return AiosApi("http://127.0.0.1:9", timeout=timeout, max_timeout=timeout)
+        # (what goes wrong, the password typed, the AIOStreams, the words with a link typed, the words without)
+        for what, password, api, typed, untyped in (
+                ("a wrong password", "wrong", self.api,
+                 "Your AIOStreams didn't accept this password for this link. Type the password of this config: the one "
+                 "you set on AIOStreams' configure page, not the one you sign in to AIOStreams with.",
+                 "Your AIOStreams didn't accept this password. Type the password of your config: the one you set on "
+                 "AIOStreams' configure page, not the one you sign in to AIOStreams with."),
+                ("bad_config", PASSWORD, self.api,
+                 "Your AIOStreams answered in a way AIOSubtitles doesn't know. Is the link from AIOStreams?",
+                 "Reading your AIOStreams config: your AIOStreams answered in a way AIOSubtitles doesn't know. Try "
+                 "again in a few minutes."),
+                ("not reached", PASSWORD, down,
+                 "Reading your AIOStreams config: AIOSubtitles can't reach your AIOStreams from the internet. Check the "
+                 "link, and that your AIOStreams can be opened from outside your home network.",
+                 "Reading your AIOStreams config: AIOSubtitles can't reach your AIOStreams from the internet. Check "
+                 "that your AIOStreams can be opened from outside your home network.")):
+            self.fake.fault = what if what == "bad_config" else None
+            for how, form, call, words in (
+                    ("refresh, link typed", {"password": password, "link": link}, self.signup.refresh, typed),
+                    ("refresh, box empty", {"password": password}, self.signup.refresh, untyped),
+                    ("delete", {"password": password}, self.signup.delete, untyped)):
+                with self.subTest(what=what, how=how), self.assertRaises(self.signup.SignupError) as e:
+                    call(self.s, self.users, result.token, form, api_factory=api)
+                self.assertEqual(e.exception.message, words)
+        self.fake.fault = None
+        self.assertIsNotNone(self.users.open(result.token))           # nothing was deleted
+        # any step of a Refresh with no link typed: an AIOStreams that can't be reached is said so without a link
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._new_sync(down(INSTANCE, 5), INSTANCE, {}, typed_link=False)
+        self.assertEqual(e.exception.message, "Making AIOSubtitles' config on your AIOStreams: AIOSubtitles can't reach "
+                                              "your AIOStreams from the internet. Check that your AIOStreams can be "
+                                              "opened from outside your home network.")
+
+    def test_a_change_waits_for_the_record_a_few_seconds_then_says_so(self):
+        # A request waited on the person's record with no time limit, holding its connection, so a burst of
+        # one person's posts behind one slow Refresh could take every connection the service has
+        import threading
+        from unittest import mock
+        _, result = self.run_signup(viewer())
+        self.assertEqual(self.signup.RECORD_WAIT_S, 5)
+        done = []
+
+        def save():
+            try:
+                done.append(self.signup.set_languages(self.users, result.token, "Spanish"))
+            except self.signup.SignupError as e:
+                done.append((e.code, e.message))
+        with mock.patch.object(self.signup, "RECORD_WAIT_S", 0.3), self.users.locked(result.token):
+            thread = threading.Thread(target=save, daemon=True)     # a refresh or the daily check holds the record
+            started = time.monotonic()
+            thread.start()
+            thread.join(3)
+            self.assertEqual(done, [(409, "Another change to your settings is still running. Try again in a "
+                                          "minute.")])
+            self.assertLess(time.monotonic() - started, 2)
+        thread.join(5)
+        self.assertEqual(self.users.open(result.token)["languages"], ["eng"])    # nothing saved
+        self.assertEqual(self.signup.set_languages(self.users, result.token, "Spanish"), ["spa"])   # free: saved
 
     # -- refresh and delete ----------------------------------------------------------------------------------------
     def test_refresh_after_adding_prowlarr_naming_the_usenet_engine(self):   # the same at Refresh
@@ -1321,6 +1393,29 @@ class GateTest(unittest.TestCase):
                          "or someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is "
                          "stricter, higher helps many people behind one shared address. One address can also sign up "
                          "only that many times in 24 hours.")
+
+    def test_refresh_and_delete_attempts_are_counted_per_link_and_per_address(self):
+        # A Refresh (and a Delete with a password) tries a password at an AIOStreams as a sign-up does, yet
+        # nothing counted it: a signed-up person could loop guesses at any config from the service's address
+        from subsync.signup import ATTEMPTS_PER_HOUR, AttemptGate, SignupError
+        self.assertEqual(ATTEMPTS_PER_HOUR, 10)
+        too_many = ("Too many attempts in the last hour. Try again in an hour.", 429)
+        start = self.now[0]
+        gate = AttemptGate(clock=lambda: self.now[0])
+        for i in range(10):                              # one link from ten addresses
+            gate.check("link-a", f"1.2.3.{i}")
+        with self.assertRaises(SignupError) as e:
+            gate.check("link-a", "5.6.7.8")              # the link's eleventh, from yet another address
+        self.assertEqual((e.exception.message, e.exception.code), too_many)
+        for i in range(9):                               # ten links from one /64 block: each counts against it
+            gate.check(f"link-{i}", f"2001:db8:1:2::{i}")
+        gate.check("link-9", "2001:db8:1:2:ffff::1")
+        with self.assertRaises(SignupError) as e:
+            gate.check("link-x", "2001:db8:1:2::abc")    # the block's eleventh, with another link
+        self.assertEqual((e.exception.message, e.exception.code), too_many)
+        gate.check("link-x", "2001:db8:1:3::1")          # the next block, another address
+        self.now[0] = start + 3600                       # an hour after the first: the link's attempts aged out
+        gate.check("link-a", "5.6.7.8")
 
 
 if __name__ == "__main__":

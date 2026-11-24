@@ -42,7 +42,8 @@ again.
 
 In public mode the rows of one person alone (their waiting files, their original subtitles and the refusals of their
 reads) are keyed "p:<their rows key>:<hash>" (worker.Worker._person_key), so Delete removes them (drop_rows_of,
-).
+); so are the Usenet files not found for them (usenet_misses, worker.UsenetGate), which go after two
+days anyway.
 """
 import contextlib
 import gzip
@@ -544,11 +545,9 @@ class Store:
     # -- Usenet: a file not found there ---------------------------------------------------------------------------
     def usenet_missed(self, key):
         """A file not found in a Usenet listing, by a key that names neither the person nor the file (worker.UsenetGate),
-        so it lasts through restarts and stopped workers. Entries older than two days go."""
-        now = self.clock()
+        so it lasts through restarts and stopped workers; kept USENET_MISSES_KEPT_S (expire)."""
         with self.lock:
-            self.db.execute("INSERT OR REPLACE INTO usenet_misses VALUES (?,?)", (key, now))
-            self.db.execute("DELETE FROM usenet_misses WHERE at < ?", (now - USENET_MISSES_KEPT_S,))
+            self.db.execute("INSERT OR REPLACE INTO usenet_misses VALUES (?,?)", (key, self.clock()))
 
     def usenet_recently_missed(self, key, within):
         with self.lock:
@@ -605,12 +604,13 @@ class Store:
 
     def drop_rows_of(self, rows_key):
         """Public mode, when a person's data is deleted: their own rows (keys "p:<rows_key>:", users.rows_key), the
-        files they wait to pick, their original subtitles and the refusals of their reads, go at once.
-        Returns how many went."""
+        files they wait to pick, their original subtitles, the refusals of their reads and the Usenet files
+        not found for them, go at once. Returns how many went."""
         mine = f"p:{rows_key}:%"       # a hex key: nothing in it that LIKE reads as a pattern
         with self._tx():
             return sum(self.db.execute(f"DELETE FROM {table} WHERE {column} LIKE ?", (mine,)).rowcount
-                       for table, column in (("pickable", "alias"), ("originals", "alias"), ("files", "file_key")))
+                       for table, column in (("pickable", "alias"), ("originals", "alias"), ("files", "file_key"),
+                                             ("usenet_misses", "key")))
 
     def drop_shared_waiting(self):
         """Public mode: waiting files and their original subtitles are each person's own (keys starting "p:");
@@ -695,6 +695,8 @@ class Store:
             self.db.execute("DELETE FROM budget WHERE day < ?", (day_of(now - 40 * DAY),))
             self.db.execute("DELETE FROM pickable WHERE created < ?", (now - KEEP_PICKABLE_S,))
             self.db.execute("DELETE FROM originals WHERE updated < ?", (now - KEEP_PICKABLE_S,))
+            # the Usenet files not found: two days, also once no new one comes
+            self.db.execute("DELETE FROM usenet_misses WHERE at < ?", (now - USENET_MISSES_KEPT_S,))
             for table in ("judged", "audio_covered"):
                 self.db.execute(f"DELETE FROM {table} WHERE at < ?", (now - 2 * JUDGED_FOR_S,))
             self.db.execute("DELETE FROM kept_original WHERE at < ?", (now - RETRY_KEEP_ORIGINAL_S,))

@@ -374,6 +374,27 @@ class ContactTest(unittest.TestCase):
         self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:not started: " + line])   # exit code 2
 
 
+class PublicAddressTest(unittest.TestCase):
+    def test_a_public_instance_under_a_path_stops_the_start(self):
+        # Public mode ignored SUBSYNC_BASE_PATH and a path in SUBSYNC_PUBLIC_BASE: such an instance, set by
+        # hand against ./setup, started without a word and answered "doesn't exist" to every page and personal link
+        base_path = ("SUBSYNC_BASE_PATH isn't used in public mode: its pages start at the root of SUBSYNC_PUBLIC_BASE. "
+                     "Remove it.")
+        path = ("SUBSYNC_PUBLIC_BASE can't have a path in public mode: give an address like "
+                "https://subtitles.example.com, whose root serves the pages.")
+        for env, lines in (({"SUBSYNC_BASE_PATH": "/aiosubtitles"}, [base_path]),
+                           ({"SUBSYNC_PUBLIC_BASE": "https://example.com/aiosubtitles"}, [path]),
+                           ({"SUBSYNC_PUBLIC_BASE": "https://example.com/aio/", "SUBSYNC_BASE_PATH": "aio"},
+                            [base_path, path]),
+                           ({"SUBSYNC_PUBLIC_BASE": "https://example.com/"}, []),
+                           ({"SUBSYNC_PUBLIC_BASE": "https://example.com:8443", "SUBSYNC_BASE_PATH": "/"}, [])):
+            with self.subTest(env=env):
+                self.assertEqual(Settings(dict(PUBLIC, **env)).conflicts(), lines)
+                self.assertEqual(Settings(env).conflicts(), [])        # self-hosted: its routes follow both
+        env = {"SUBSYNC_PUBLIC": "on", "SUBSYNC_SECRET_KEY": helpers.KEY, "SUBSYNC_PUBLIC_BASE": "https://subs.test/aio"}
+        self.assertEqual(helpers.run_main(self, env, "INFO"), ["ERROR:subsync:not started: " + path])   # exit code 2
+
+
 class AddonKeyTest(unittest.TestCase):
     def test_a_key_with_a_slash_stops_a_self_hosted_start(self):
         # It can't be one part of an address, so every keyed route answered "not found" for good

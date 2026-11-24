@@ -239,6 +239,25 @@ class PersonsKeyTest(unittest.TestCase):
         self.assertNotIn("tmdb_key", c.users.open(token))
         self.assertEqual(c.pool.app(token).s.tmdb_key, "")
 
+    def test_a_key_isnt_checked_while_the_service_is_busy(self):
+        # The key check is one of the requests that call outside services, which run only so many at once
+        from subsync import signup
+        c = self.case
+        _, _, _, _, token = c.sign_up()
+        for _ in range(signup.OUTSIDE_CALLS_AT_ONCE):        # every place taken by requests still waiting outside
+            self.assertTrue(c.service.outside.acquire(blocking=False))
+        try:
+            code, body, _ = self.post(token, action="tmdb-key", tmdb_key=PERSON_KEY)
+        finally:
+            for _ in range(signup.OUTSIDE_CALLS_AT_ONCE):
+                c.service.outside.release()
+        self.assertEqual(code, 503)
+        self.assertIn("AIOSubtitles is busy right now. Try again in a few minutes.", body.decode())
+        self.assertEqual(self.tmdb.calls, [])                 # TMDB wasn't asked
+        self.assertNotIn("tmdb_key", c.users.open(token))
+        code, _, headers = self.post(token, action="tmdb-key", tmdb_key=PERSON_KEY)
+        self.assertEqual((code, headers["Location"]), (303, "configure?done=tmdb-key"))   # places free again
+
     def test_tmdb_not_answering(self):
         c = self.case
         _, _, _, _, token = c.sign_up()

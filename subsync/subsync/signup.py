@@ -51,6 +51,15 @@ DAY = 24 * HOUR
 # the most addresses (an IPv6 one: its /64 block) the sign-up gate counts at once: past it a new one is told
 # AIOSubtitles is busy until counted ones age out, so a flood from ever new addresses can't grow its table without end
 MAX_SIGNUP_ADDRESSES = 50_000
+# Refresh and Delete with a password try a password at an AIOStreams as a sign-up does: at most this many attempts an
+# hour per personal link and per address (AttemptGate)
+ATTEMPTS_PER_HOUR = 10
+# the requests that call outside services (a sign-up, a Refresh, a Delete with a password, the TMDB key check) run at
+# most this many at once, well below SUBSYNC_MAX_CONNECTIONS, so slow ones never hold every connection
+OUTSIDE_CALLS_AT_ONCE = 16
+# a request waits at most this long for a person's record while another change of it runs; then the page says so
+# (_locked_record)
+RECORD_WAIT_S = 5
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -123,8 +132,11 @@ REFUSED_CONFIG = ("Your AIOStreams didn't accept the config AIOSubtitles makes f
 NOT_A_LINK = ("That isn't an AIOStreams config link: it should look like https://…/stremio/<config id>/…/manifest.json. "
               "Copy it again from AIOStreams' configure page.")
 NOT_SIGNED_UP = "This link isn't signed up (any more). Sign up again on the start page."
-UNKNOWN_ANSWER = "Your AIOStreams answered in a way AIOSubtitles doesn't know"   # each step ends the sentence
+# the steps an AIOStreams error names first (_plain)
 ALIAS_STEP = "Opening your alias link"
+READING_STEP = "Reading your AIOStreams config"
+MAKING_STEP = "Making AIOSubtitles' config on your AIOStreams"
+CHECKING_STEP = "Checking AIOSubtitles' config on your AIOStreams"
 
 
 def _variant_query(query):
@@ -268,23 +280,37 @@ def form_languages(form):
 
 WRONG_PASSWORD = ("Your AIOStreams didn't accept this password for this link. Type the password of this config: the one "
                   "you set on AIOStreams' configure page, not the one you sign in to AIOStreams with.")
+# the same where no link was typed: a Refresh with its link box left empty, and Delete
+WRONG_PASSWORD_NO_LINK = ("Your AIOStreams didn't accept this password. Type the password of your config: the one you "
+                          "set on AIOStreams' configure page, not the one you sign in to AIOStreams with.")
 
 
-def _plain(e, doing, own_password=False, making=False):
+def _unknown_answer(doing):
+    """An answer AIOSubtitles can't read, after the step that got it: it answered, so it is reached and may answer
+    next time."""
+    return f"{doing}: your AIOStreams answered in a way AIOSubtitles doesn't know. Try again in a few minutes."
+
+
+def _plain(e, doing, own_password=False, making=False, typed_link=True):
     """An AIOStreams error in plain words, without the link or the password: the page's own step (`doing`) only, then
     AIOStreams' reason, its own words quoted as its words (./setup's words, e.message, stay its own).
     own_password: the call used the person's own password, so a refused config is about that password. making: the
-    call made a config, which AIOStreams limits per hour. Told by the error's code and kind, never by words
-    in its message, which may be AIOStreams' own."""
+    call made a config, which AIOStreams limits per hour. typed_link: the person typed the config's link
+    with this request (a sign-up, a Refresh with a new link); without one (a Refresh with its link box left empty,
+    Delete) no advice points to a link. Told by the error's code and kind, never by words in its message,
+    which may be AIOStreams' own."""
     if own_password and str(e.code) in WRONG_PASSWORD_CODES:
-        return WRONG_PASSWORD
+        return WRONG_PASSWORD if typed_link else WRONG_PASSWORD_NO_LINK
     if e.code == UNREACHABLE:
-        return (f"{doing}: AIOSubtitles can't reach your AIOStreams from the internet. Check the link, and that "
-                "your AIOStreams can be opened from outside your home network.")
+        if typed_link:
+            return (f"{doing}: AIOSubtitles can't reach your AIOStreams from the internet. Check the link, and that "
+                    "your AIOStreams can be opened from outside your home network.")
+        return (f"{doing}: AIOSubtitles can't reach your AIOStreams from the internet. Check that your AIOStreams can "
+                "be opened from outside your home network.")
     if e.code == TOO_SLOW:       # asked, so it is reached
         return f"{doing}: your AIOStreams took too long to answer. Try again in a few minutes."
     if e.code == UNREADABLE:     # it answered, so it is reached
-        return f"{doing}: your AIOStreams answered in a way AIOSubtitles doesn't know. Try again in a few minutes."
+        return _unknown_answer(doing)
     if is_limited(e):
         if making:
             return (f"{doing}: your AIOStreams limits how many configs one address can make in an hour, and "
@@ -308,6 +334,8 @@ TOO_MANY_ATTEMPTS = "Too many sign-up attempts from your address in the last hou
 TOO_MANY_SIGNUPS = "Too many sign-ups from your address in the last day. Try again tomorrow."
 # the box's help right under it says the rest: AIOSubtitles is open only to invited people
 WRONG_INVITE = "That invite code isn't right."
+TOO_MANY_TRIES = "Too many attempts in the last hour. Try again in an hour."   # a Refresh's or Delete's
+STILL_CHANGING = "Another change to your settings is still running. Try again in a minute."
 
 
 def _address_of(ip):
@@ -381,19 +409,41 @@ class SignupGate:
             self.signups.add(_address_of(ip), now)
 
 
+class AttemptGate:
+    """Checked before a Refresh or a Delete with a password contacts anything: each tries a password at an
+    AIOStreams as a sign-up does, so its attempts are counted the same way, per personal link (by its record's id) and
+    per address (_address_of), at most ATTEMPTS_PER_HOUR each in the last hour."""
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.attempts = _Window(HOUR)
+        self.lock = threading.Lock()
+
+    def check(self, uid, ip):
+        now, keys = self.clock(), (uid, _address_of(ip))   # a record's id (hex) is never an address
+        with self.lock:
+            self.attempts.age(now)
+            if any(self.attempts.counts[key] >= ATTEMPTS_PER_HOUR for key in keys):
+                raise SignupError(TOO_MANY_TRIES, 429)
+            for key in keys:
+                self.attempts.add(key, now)
+
+
 # ------------------------------------------------------------------------------------------- the steps
 
-def _read_viewer(api, uuid, password, metadata=True):
+def _read_viewer(api, uuid, password, metadata=True, typed_link=True):
     """(the person's config, the presets' details AIOStreams' status gives, for adding AIOSubtitles to it); without
     `metadata` the status isn't asked and the details are {}: the daily rebuild changes nothing in their config
-."""
+. typed_link: as _plain's."""
     try:
         status = api.status() if metadata else {}
         viewer, _ = api.get_config(uuid, password)
     except AiosError as e:
-        if e.code == BAD_ANSWER:
-            raise SignupError(f"{UNKNOWN_ANSWER}. Is the link from AIOStreams?") from None
-        raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True), field=_field_of(e)) from None
+        if e.code == BAD_ANSWER:     # a link just typed may not be an AIOStreams one
+            raise SignupError("Your AIOStreams answered in a way AIOSubtitles doesn't know. Is the link from "
+                              "AIOStreams?" if typed_link else _unknown_answer(READING_STEP)) from None
+        raise SignupError(_plain(e, READING_STEP, own_password=True, typed_link=typed_link),
+                          field=_field_of(e)) from None
     presets = (status.get("settings") or {}).get("presets") if isinstance(status.get("settings"), dict) else None
     metadata = {p["ID"]: p for p in presets or [] if isinstance(p, dict) and "ID" in p}
     return viewer, metadata
@@ -632,38 +682,37 @@ def _one_at_a_time(api, instance, uuid):
         lock.release()
 
 
-def _new_sync(api, instance, sync):
+def _new_sync(api, instance, sync, typed_link=True):
     """A new sync config on `instance`, checked by its manifest: (id, link, password). Nothing is left behind when the
-    check fails."""
+    check fails. typed_link: as _plain's."""
     sync_password = new_key(24)
     try:
         sync_uuid, sync_encrypted = api.create_config(sync, sync_password)
     except AiosError as e:
-        if e.code == BAD_ANSWER:
-            raise SignupError(f"{UNKNOWN_ANSWER} when making its config.") from None
-        raise SignupError(_plain(e, "Making AIOSubtitles' config on your AIOStreams", making=True),
-                          refused=_refused(e)) from None
+        if e.code == BAD_ANSWER:     # the step first, as every other step's error
+            raise SignupError(_unknown_answer(MAKING_STEP)) from None
+        raise SignupError(_plain(e, MAKING_STEP, making=True, typed_link=typed_link), refused=_refused(e)) from None
     with _removed_on_failure(api, [(sync_uuid, None, sync_password)]):
         try:
             api.addon_get(f"/stremio/{sync_uuid}/{sync_encrypted}", "/manifest.json")
         except AiosError as e:
-            raise SignupError(f"{UNKNOWN_ANSWER} when checking its config." if e.code == BAD_ANSWER
-                              else _plain(e, "Checking AIOSubtitles' config on your AIOStreams")) from None
+            raise SignupError(_unknown_answer(CHECKING_STEP) if e.code == BAD_ANSWER
+                              else _plain(e, CHECKING_STEP, typed_link=typed_link)) from None
     return sync_uuid, install_link(instance, sync_uuid, sync_encrypted), sync_password
 
 
-def _put_sync(api, record, sync, gone=False, kind="sync"):
+def _put_sync(api, record, sync, gone=False, kind="sync", typed_link=True):
     """`sync` saved into the record's sync config (`kind` "usenet": its Usenet config), or into a new one when that one
-    is gone (`gone`: known already, so not tried): (id, link, password)."""
+    is gone (`gone`: known already, so not tried): (id, link, password). typed_link: as _plain's."""
     if not gone:
         try:
             api.save_config(record[f"{kind}_uuid"], record[f"{kind}_password"], sync)
             return record[f"{kind}_uuid"], record[f"{kind}_link"], record[f"{kind}_password"]
         except AiosError as e:
             if str(e.code) not in WRONG_PASSWORD_CODES:
-                raise SignupError(_plain(e, "Updating AIOSubtitles' config on your AIOStreams"),
+                raise SignupError(_plain(e, "Updating AIOSubtitles' config on your AIOStreams", typed_link=typed_link),
                                   refused=_refused(e)) from None
-    return _new_sync(api, record["instance"], sync)
+    return _new_sync(api, record["instance"], sync, typed_link=typed_link)
 
 
 def drop_sync(api, fields):
@@ -912,12 +961,19 @@ def refresh(settings, users, token, form, api_factory=public_api, timeout=PUBLIC
 @contextlib.contextmanager
 def _locked_record(users, token, missing=NOT_SIGNED_UP):
     """The person's record, opened under its lock (users.locked) and held for the block, so a refresh, the daily check,
-    a setting and a delete never write over each other's changes; SignupError(`missing`) when there is none."""
-    with users.locked(token):
+    a setting and a delete never write over each other's changes; SignupError(`missing`) when there is none. A request
+    waits for the lock at most RECORD_WAIT_S, then is told another change still runs (409), so requests never pile up
+    behind one, each holding a connection; the daily check takes the lock itself and waits."""
+    lock = users.locked(token)
+    if not lock.acquire(timeout=RECORD_WAIT_S):
+        raise SignupError(STILL_CHANGING, 409)
+    try:
         record = users.open(token)
         if record is None:
             raise SignupError(missing)
         yield record
+    finally:
+        lock.release()
 
 
 def _refresh(settings, users, token, form, api_factory, timeout):
@@ -929,6 +985,7 @@ def _refresh(settings, users, token, form, api_factory, timeout):
             log.info("a kept password was deleted")
         link = (form.get("link") or "").strip()
         instance, main_uuid, alias = parse_link(link) if link else (record["instance"], record["main_uuid"], None)
+        typed = bool(link)         # with the box left empty, no error points to a link
         moved = instance_key(instance) != instance_key(record["instance"])
         if not moved:              # the same AIOStreams, however the link spells it: kept as the record has it
             instance = record["instance"]
@@ -937,7 +994,7 @@ def _refresh(settings, users, token, form, api_factory, timeout):
         # its AIOStreams calls within its whole time, so its page comes back
         with _within_time(api, REFRESH_TOO_SLOW):
             main_uuid = _config_id(api, main_uuid, alias)
-            viewer, metadata = _read_viewer(api, main_uuid, password)
+            viewer, metadata = _read_viewer(api, main_uuid, password, typed_link=typed)
             manifest_url = personal_manifest_url(settings, token)
             want = wants_usenet(settings, form)
             was_stored = store_only(record)
@@ -952,16 +1009,16 @@ def _refresh(settings, users, token, form, api_factory, timeout):
                 # changed yet
                 if plan.usenet is not None:
                     if moved or not record.get("usenet_uuid"):
-                        usenet_fields = _new_sync(api, instance, plan.usenet)
+                        usenet_fields = _new_sync(api, instance, plan.usenet, typed_link=typed)
                     else:
-                        usenet_fields = _put_sync(api, record, plan.usenet, kind="usenet")
+                        usenet_fields = _put_sync(api, record, plan.usenet, kind="usenet", typed_link=typed)
                     if usenet_fields[0] != record.get("usenet_uuid"):
                         made.append(usenet_fields)
                 if plan.sync is not None:
                     if was_stored or moved or not record.get("sync_uuid"):
-                        fields = _new_sync(api, instance, plan.sync)
+                        fields = _new_sync(api, instance, plan.sync, typed_link=typed)
                     else:
-                        fields = _put_sync(api, record, plan.sync)
+                        fields = _put_sync(api, record, plan.sync, typed_link=typed)
                     if fields[0] != record.get("sync_uuid"):
                         made.append(fields)
                 if record.get("sync_uuid") and (plan.sync is None or moved):
@@ -1085,9 +1142,10 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
             try:
                 viewer, _ = api.get_config(record["main_uuid"], password)
             except AiosError as e:      # the delete step's problem is titled "Nothing was deleted"
+                # and its page has no link: the words point to none
                 if e.code == BAD_ANSWER:
-                    raise SignupError(f"{UNKNOWN_ANSWER}.") from None
-                raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True),
+                    raise SignupError(_unknown_answer(READING_STEP)) from None
+                raise SignupError(_plain(e, READING_STEP, own_password=True, typed_link=False),
                                   field=_field_of(e)) from None
         if on_confirmed is not None:
             on_confirmed()

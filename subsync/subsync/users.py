@@ -5,14 +5,15 @@ an id made from the service's secret and that token, and encrypted (AES-256-GCM)
 the token, so neither the database, nor the database and the secret together, open a record without the person's link.
 The service opens a record only while that person's requests come in. The subtitle entries their apps get carry a read
 key instead of the token (read_key): the token sealed with the secret, which opens only those entries. What
-the shared store keeps for them alone is under a key made from the secret and the token too (rows_key), and
-so are their counts in the subtitle sites' fair shares and their Usenet files not found (who_key).
+the shared store keeps for them alone, their Usenet files not found included, is under a key made from the secret and
+the token too (rows_key), and so are their counts in the subtitle sites' fair shares (who_key,
+).
 
 A record holds their AIOStreams address and the id of their config; the configs the service made there (the sync config
 and, with Usenet on, the Usenet config: each one's id, link and password); their languages, their answer for files with
 no subtitles of their own and their own TMDB key if they added one; what the last check of their AIOStreams found, and
 when; and their own AIOStreams password only while they tick the box that lets AIOSubtitles keep it. Usage is
-counted per person and UTC day for their limits.
+counted per person and UTC day for their limits, today's and yesterday's kept (USAGE_KEPT_S).
 """
 import base64
 import hashlib
@@ -43,6 +44,8 @@ _ENTRIES_INFO = b"subtitle entries"   # the read keys' own key (a token's charac
 _FORMAT = b"\x01"
 _NONCE = 12
 
+# users.created_day is kept empty: nothing reads it, so the day each person signed up isn't kept; the column
+# stays, so an earlier image, whose insert gives four values, still works on this database
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, blob BLOB NOT NULL, created_day TEXT NOT NULL,
   seen_day TEXT NOT NULL);
@@ -57,6 +60,9 @@ CREATE TABLE IF NOT EXISTS audio_usage (id TEXT NOT NULL, day TEXT NOT NULL, syn
 # tables of their own: the usage table keeps its four columns, so an earlier image, whose usage insert names none,
 # still works on this database (the way back after a deploy)
 DAY_TABLES = ("usage", "usenet_usage", "audio_usage")
+# a person's rows in DAY_TABLES are kept from yesterday on: only today's is read (their limits, their settings page),
+# yesterday's keeps the change of day at 00:00 UTC safe
+USAGE_KEPT_S = DAY
 
 
 def new_token():
@@ -75,6 +81,7 @@ class Users:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        self.db.execute("UPDATE users SET created_day='' WHERE created_day<>''")   # as written before
         self.lock = threading.RLock()
         # one lock per person, kept only while someone holds it or waits for it
         self._record_locks = weakref.WeakValueDictionary()
@@ -106,14 +113,15 @@ class Users:
 
     def rows_key(self, token):
         """The key of a person's own rows in the shared store (the files they wait to pick, their original subtitles
-        and the refusals of their reads: worker.Worker._person_key): made from their token with the service's secret,
-        unlike user_id, so nothing stored leads to it, only their link; Delete removes the rows by it."""
+        and the refusals of their reads: worker.Worker._person_key; the Usenet files not found for them:
+        worker.UsenetGate): made from their token with the service's secret, unlike user_id, so nothing stored
+        leads to it, only their link; Delete removes the rows by it."""
         return hmac.new(self.secret, b"rows:" + token.encode(), hashlib.sha256).hexdigest()[:32]
 
     def who_key(self, token):
-        """The key a person is counted under in the subtitle sites' fair shares (sourcestate.Ledger) and the Usenet
-        files not found for them (worker.UsenetGate): made from their token with the service's secret under a label of
-        its own, as rows_key is, so neither the users database nor the store's other rows lead to it."""
+        """The key a person is counted under in the subtitle sites' fair shares (sourcestate.Ledger): made from their
+        token with the service's secret under a label of its own, as rows_key is, so neither the users database nor the
+        store's other rows lead to it."""
         return hmac.new(self.secret, b"who:" + token.encode(), hashlib.sha256).hexdigest()[:16]
 
     def read_key(self, token):
@@ -152,8 +160,7 @@ class Users:
         exist, counted in the same statement as the write: sign-ups that passed the sign-up gate's count together can't
         all pass the cap."""
         uid = self.user_id(token)
-        today = day_of(self.clock())
-        row = (uid, self._seal(token, uid, record), today, today)
+        row = (uid, self._seal(token, uid, record), "", day_of(self.clock()))   # created_day empty (SCHEMA)
         with self.lock:
             if max_users is None:
                 self.db.execute("INSERT INTO users VALUES (?,?,?,?)", row)
@@ -201,9 +208,9 @@ class Users:
         if not isinstance(keep_days, int) or keep_days < 1:
             raise ValueError("keep_days must be a whole number from 1")
         now = self.clock()
-        cutoff, old_usage = day_of(now - keep_days * DAY), day_of(now - 40 * DAY)
+        cutoff, old_usage = day_of(now - keep_days * DAY), day_of(now - USAGE_KEPT_S)
         with self._tx():   # one statement per table, one commit, however many records go
-            for table in DAY_TABLES:   # the usage of the records that go, and usage past 40 days
+            for table in DAY_TABLES:   # the usage of the records that go, and usage older than yesterday's
                 self.db.execute(f"DELETE FROM {table} WHERE id IN (SELECT id FROM users WHERE seen_day < ?) OR day < ?",
                                 (cutoff, old_usage))
             return self.db.execute("DELETE FROM users WHERE seen_day < ?", (cutoff,)).rowcount

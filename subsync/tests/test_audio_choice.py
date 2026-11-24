@@ -1046,7 +1046,8 @@ class UsenetTest(Base):
         self.usenet = FakeUsenet([row(url=self.link.url, name="tiny-nosub.mp4", size=self.size)], subs=self.subs())
         self.limits = Limits()
         self.w = Worker(self.settings(), self.store, FakeDebrid(self.subs()), Safety(), limits=self.limits,
-                        usenet=self.usenet, usenet_gate=worker_mod.UsenetGate(self.store, 10, self.counts, who="w"))
+                        usenet=self.usenet,
+                        usenet_gate=worker_mod.UsenetGate(self.store, 10, self.counts, rows_key="w"))
         self.workers.append(self.w)
 
     def picked(self):

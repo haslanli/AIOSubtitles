@@ -523,6 +523,14 @@ class Settings:
                     f"{entry} isn't one." for entry in self.unknown_proxies]
         if self.public and self.contact and not self.contact.lower().startswith(CONTACT_SCHEMES):
             out.append("SUBSYNC_CONTACT must start with https://, http:// or mailto:, like mailto:you@example.com.")
+        # a public instance's pages and personal links start at the root of its address (public.PublicHandler._route),
+        # so one served under a path would answer "doesn't exist" to everything
+        if self.public and self.base_path:
+            out.append("SUBSYNC_BASE_PATH isn't used in public mode: its pages start at the root of "
+                       "SUBSYNC_PUBLIC_BASE. Remove it.")
+        if self.public and "/" in self.public_base.partition("://")[2]:     # a path after its host
+            out.append("SUBSYNC_PUBLIC_BASE can't have a path in public mode: give an address like "
+                       "https://subtitles.example.com, whose root serves the pages.")
         if not self.public:     # a public instance uses each person's own languages and configs, and no addon key
             out += self._own_conflicts()
         return out

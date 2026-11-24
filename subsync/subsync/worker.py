@@ -158,20 +158,26 @@ class UsenetGate:
     """Whether a Usenet listing may be made now: at most `per_day` a UTC day (0: none), none for the
     rest of the day once a Usenet listing or read failed (an indexer's error or limit, or one AIOSubtitles can't tell
     from it), none for a file not found there in the last 24 h. `counts`: listings(), add_listing(), stopped(), stop();
-    `who`: an opaque key of the person (public mode), so one person's misses don't stop another's look-ups."""
+    `rows_key`: public mode's key of the person's own rows in the store (users.rows_key), under which their files not
+    found are kept, so one person's misses don't stop another's look-ups and Delete removes them."""
 
-    def __init__(self, store, per_day, counts, who=""):
-        self.store, self.per_day, self.counts, self.who = store, per_day, counts, who or ""
+    def __init__(self, store, per_day, counts, rows_key=None):
+        self.store, self.per_day, self.counts, self.rows_key = store, per_day, counts, rows_key
+        self.forgotten = False          # the person's data is deleted (forget): nothing more of theirs is written
         self._lock = threading.Lock()   # both lanes of a worker list through its one gate
 
     @staticmethod
-    def key_of(who, alias):
-        return hashlib.sha256(f"usenet|{who}|{alias}".encode()).hexdigest()[:32]
+    def key_of(rows_key, alias):
+        """The store's key of a file not found, naming neither the person nor the file: a hash of the file's hint on a
+        self-hosted install; in public mode under the person's rows key ("p:<rows_key>:", as Worker._person_key's), so
+        Delete removes it with their other rows (store.drop_rows_of)."""
+        hashed = hashlib.sha256(f"usenet|{rows_key or ''}|{alias}".encode()).hexdigest()[:32]
+        return f"p:{rows_key}:{hashed}" if rows_key else hashed
 
     def _shut(self, alias):
         """No listing for this file now (lock held)."""
         return self.per_day <= 0 or self.counts.stopped() or self.counts.listings() >= self.per_day \
-            or self.store.usenet_recently_missed(self.key_of(self.who, alias), USENET_UNLISTED_S)
+            or self.store.usenet_recently_missed(self.key_of(self.rows_key, alias), USENET_UNLISTED_S)
 
     def may_take(self, alias):
         """Whether a listing for this file could be taken now, nothing counted: asked before the work a listing needs
@@ -189,7 +195,15 @@ class UsenetGate:
             return True
 
     def missed(self, alias):
-        self.store.usenet_missed(self.key_of(self.who, alias))
+        with self._lock:
+            if not self.forgotten:
+                self.store.usenet_missed(self.key_of(self.rows_key, alias))
+
+    def forget(self):
+        """The person's data is being deleted (Worker.stop with forget): from now on none of their files not found is
+        written, so Delete leaves none."""
+        with self._lock:
+            self.forgotten = True
 
     def stop(self, why):
         self.counts.stop()
@@ -280,6 +294,10 @@ class UsenetFinder:
     def stop(self, why):
         """No Usenet listing until 00:00 UTC (a Usenet file's first read failed or was refused)."""
         self.gate.stop(why)
+
+    def forget(self):
+        """The person's data is being deleted: none of their files not found is written any more (UsenetGate.forget)."""
+        self.gate.forget()
 
 
 class Safety:
@@ -1098,6 +1116,8 @@ class Worker(threading.Thread):
                 if job.audio:
                     self._put_waiting(job)
             self.cv.notify_all()
+        if forget and self.usenet_finder is not None:    # nor their Usenet files not found
+            self.usenet_finder.forget()
 
     def run(self):
         self._loop("main")

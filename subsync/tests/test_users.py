@@ -139,7 +139,7 @@ class UsersTest(unittest.TestCase):
             self.users.add_audio(token)
         self.clock.t += 100 * DAY
         self.users.create(self.token, RECORD)
-        self.users.add_usage(self.token, files=1, nbytes=1)        # past 40 days when expire runs: goes too
+        self.users.add_usage(self.token, files=1, nbytes=1)        # older than yesterday when expire runs: goes too
         self.clock.t += 85 * DAY                                    # the five: seen 185 days ago; this one: 85
         self.users.add_usage(self.token, files=2, nbytes=2)        # today's: kept
         self.users.add_audio(self.token)
@@ -157,6 +157,39 @@ class UsersTest(unittest.TestCase):
                               "audio_usage": [(self.users.user_id(self.token), self.users_module.day_of(self.clock.t))]})
         self.assertEqual(self.users.usage(self.token), {"files": 2, "bytes": 2})
         self.assertEqual(self.users.expire(180), 0)
+
+    def test_a_persons_day_rows_are_kept_from_yesterday_on(self):
+        # Each person's daily use (bytes and files read, Usenet listings, audio syncs) was kept 40 days, though
+        # nothing reads any day but today's; yesterday's is kept for the change of day
+        self.assertEqual(self.users_module.USAGE_KEPT_S, DAY)
+        self.users.create(self.token, RECORD)
+        start = self.clock.t
+        for day in range(3):                                    # the day before yesterday, yesterday, today
+            self.clock.t = start + day * DAY
+            self.users.add_usage(self.token, files=1, nbytes=1)
+            self.users.add_usenet_listing(self.token)
+            self.users.add_audio(self.token)
+        self.assertEqual(self.users.expire(180), 0)
+        kept = [self.users_module.day_of(start + day * DAY) for day in (1, 2)]
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            for table in self.users_module.DAY_TABLES:
+                self.assertEqual(sorted(day for (day,) in db.execute(f"SELECT day FROM {table}")), kept, table)
+        self.assertEqual(self.users.usage(self.token), {"files": 1, "bytes": 1})          # today's, as before
+
+    def test_the_day_a_person_signed_up_isnt_kept(self):
+        # Each record's row kept its sign-up day in clear beside the encrypted record, and nothing read it
+        self.users.create(self.token, RECORD)
+        day = self.users_module.day_of(self.clock.t)
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT created_day, seen_day FROM users").fetchall(), [("", day)])
+            # the way back after a deploy: an earlier image still writes its four values, the day among them
+            db.execute("INSERT INTO users VALUES (?,?,?,?)", ("0" * 64, b"x", day, day))
+            db.commit()
+        self.users.close()
+        self.users = self.users_module.Users(self.path, SECRET, clock=self.clock)        # the next start empties it
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT created_day, seen_day FROM users").fetchall(), [("", day)] * 2)
+        self.assertEqual(self.users.open(self.token), RECORD)
 
     def test_delete_removes_all_of_a_record_or_nothing(self):
         # Delete committed each of its statements on its own, so one that failed left the rest done
