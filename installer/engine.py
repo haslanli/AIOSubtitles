@@ -393,6 +393,12 @@ def image_handle(image):
     return found[:12] if re.fullmatch(r'[0-9a-f]{64}', found) else image
 
 
+def image_known(image):
+    """Whether Docker has the image `image`: a local build pinned by digest no longer resolves once a newer build of its
+    version took its tag (installer/where.py)."""
+    return dockerenv.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', image])[0] == 0
+
+
 def installed_image(s):
     """The image the install saved in `s` (state/settings.json) runs: the one recorded, or for an install setup 1.3.0
     or before made, which recorded none, the one it built, named by its version (as its own removal named it); None
@@ -1300,7 +1306,9 @@ class Engine:
         before made is taken over here: it gets setup's own image and an id, and its volume, which Docker can't label,
         is kept as it is (recorded in state/settings.json, declared external in its compose file) while Docker has it;
         once it is gone, Compose makes the usual labelled one instead (an external volume must exist). Its container and
-        network are made again with the label when it starts."""
+        network are made again with the label when it starts. A local build of setup's own version that Docker no
+        longer has (a newer build of that version took its tag) gives way to setup's own: the service could not start
+        on it."""
         self.s['install_id'] = self.prev.get('install_id') or self.install_id or new_install_id()
         kept = data_volume(self.prev) if made_before_labels(self.prev) or self.prev.get('external_volume') else None
         if kept and not volume_gone(kept):
@@ -1309,6 +1317,9 @@ class Engine:
             self.s.pop('external_volume', None)
         if self.prev.get('installed') and self.prev.get('image') and not made_before_labels(self.prev):
             self.s.update({k: self.prev[k] for k in ('image', 'local', 'version', 'previous') if k in self.prev})
+            if PLACE and self.s.get('local') and self.s.get('version') == setup_version() \
+                    and not image_known(self.s['image']):
+                self.s.update(image=PLACE.image, local=PLACE.local)
         elif PLACE:
             self.s.update(image=PLACE.image, local=PLACE.local, version=setup_version())
         else:
@@ -2035,7 +2046,7 @@ class Engine:
                 remove_entry(dest)      # what the copy that failed left: never kept as one of the copies
         in_service(['python', '-c', f'import shutil; shutil.rmtree({inside!r}, ignore_errors=True)'])
         if code != 0:
-            reason = ((err or out).strip().splitlines() or ['no answer'])[-1]
+            reason = dockerenv.reason(out, err, 'no answer')
             raise Stop(failed.format(reason=reason.rstrip('.'), version=old['version']))
         databases = plain_databases(dest)
         for path in list(dest.iterdir()):

@@ -774,6 +774,55 @@ class StepsKeepTheVersion(Offline):
         with mock.patch.object(engine.Engine, 'switch', lambda e, *a, **k: a):
             self.assertEqual(engine.Engine({}).rollback(), (self.PREVIOUS['image'], False, '0.8.0'))
 
+    @staticmethod
+    def local_build(version, digit):
+        return f'aiosubtitles:local-{version}@sha256:' + digit * 64
+
+    def rerun(self, image, local, version, gone=()):
+        """A ./setup run from a build of setup's own version made here (the source route's ./setup builds one each
+        time) on an install that runs `image` (`local`: built on this machine) of `version`, with Docker no longer
+        having the images in `gone`: settings.json after it."""
+        engine.save_settings(dict(engine.load_settings(), image=image, local=local, version=version,
+                                  previous=self.PREVIOUS))
+
+        def run(cmd, timeout=60, stdin=None):
+            check_argv(cmd)
+            if cmd[:3] == ['docker', 'image', 'inspect'] and cmd[-1] in gone:
+                return 1, '', f'Error response from daemon: No such image: {cmd[-1]}'
+            return 0, '', ''
+        built = self.place._replace(route='source', image=self.local_build(engine.setup_version(), '2'), local=True,
+                                    run_as=f'aiosubtitles:local-{engine.setup_version()}')
+        with mock.patch.object(engine, 'PLACE', built), mock.patch.object(dockerenv, 'run', run):
+            code, out = self.again()
+        self.assertEqual(code, 0, out)
+        return engine.load_settings()
+
+    def test_a_local_build_docker_no_longer_has_gives_way_to_setups_own(self):
+        # Docker 29's image store gave each build of the source route's ./setup a new digest, also of
+        # unchanged code: the next ./setup's build took the tag, and the service, kept on the build it ran, didn't
+        # start ("No such image: aiosubtitles:local-1.7.0@sha256:…")
+        self.install()
+        version = engine.setup_version()
+        gone, built = self.local_build(version, '3'), self.local_build(version, '2')
+        s = self.rerun(gone, True, version, gone={gone})
+        self.assertEqual((s['image'], s['local'], s['version'], s['previous']), (built, True, version, self.PREVIOUS))
+        self.assertIn(f'    image: {built}\n', self.compose())
+
+    def test_any_other_image_is_kept(self):
+        self.install()
+        version = engine.setup_version()
+        kept = self.local_build(version, '3')
+        registry = f'ghcr.io/haslanli/aiosubtitles:{version}@sha256:' + '4' * 64
+        older = self.local_build('0.9.0', '5')
+        for image, local, running, gone in ((kept, True, version, ()),                   # Docker still has it
+                                            (registry, False, version, {registry}),      # pulled when it is needed
+                                            (older, True, '0.9.0', {older})):            # another version
+            with self.subTest(image=image):
+                s = self.rerun(image, local, running, gone)
+                self.assertEqual((s['image'], s['local'], s['version'], s['previous']),
+                                 (image, local, running, self.PREVIOUS))
+                self.assertIn(f'    image: {image}\n', self.compose())
+
 
 class AiostreamsShapes(Offline):
     """AIOStreams on the host network, elsewhere on the network (a LAN address), and two of them on this machine."""

@@ -26,6 +26,16 @@ def run(cmd, timeout=60, stdin=None):
         return 1, '', str(e)
 
 
+def reason(out, err, default):
+    """Why a docker command failed: the last line it printed (on stderr, else on stdout), leaving out the hint Docker
+    ends with ("Run 'docker run --help' for more information", "See 'docker run --help'."); `default` when there is
+    none."""
+    lines = [line.strip() for line in (err or out).splitlines()]
+    said = [line for line in lines
+            if line and not (line.startswith(("Run 'docker ", "See 'docker ")) and "--help'" in line)]
+    return (said or [default])[-1]
+
+
 def docker_problem():
     """None when Docker and Compose v2 work, else (problem, fix)."""
     if not shutil.which('docker'):
@@ -286,7 +296,7 @@ def check_image(image, project, install_id, seconds=90):
                               '-e', f'SUBSYNC_PUBLIC_INVITE={secrets.token_urlsafe(9)}',
                               '-e', 'SUBSYNC_RECHECK_HOURS=0', image], timeout=300)
         if code != 0:
-            return False, ((err or out).strip().splitlines() or ['it did not start'])[-1]
+            return False, reason(out, err, 'it did not start')
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             code, out, _ = run(['docker', 'exec', name] + HEALTH, timeout=20)
@@ -352,4 +362,4 @@ def restore_databases(image, volume, files):
                          stdin=databases_tar(files), timeout=600)
     if code == 0 and out.strip().endswith('restored'):
         return True, ''
-    return False, ((err or out).strip().splitlines() or ['no answer'])[-1]
+    return False, reason(out, err, 'no answer')

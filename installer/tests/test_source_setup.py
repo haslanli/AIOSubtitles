@@ -102,6 +102,16 @@ class SourceSetup(unittest.TestCase):
         self.assertTrue(run.endswith('aiosubtitles:local-1.4.0 setup --status'), run)
         self.assertTrue((self.folder / 'state').is_dir())
 
+    def test_it_builds_without_buildxs_default_attestation(self):
+        # With it, Docker 29's image store gave each build a new digest, also of unchanged code: the next
+        # ./setup's build took the tag, and the service, pinned to the digest of the build before, didn't start ("No
+        # such image: aiosubtitles:local-1.7.0@sha256:…")
+        self.stub('docker', 'echo "$* [${BUILDX_NO_DEFAULT_ATTESTATIONS-}]" >> "$LOG"')
+        code, out, calls = self.run_setup('--status')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(calls[0], 'build -f subsync/Dockerfile -t aiosubtitles:local-1.4.0 . [1]')
+        self.assertTrue(calls[1].endswith(' setup --status []'), calls[1])         # the build's only
+
     def test_setups_container_carries_a_mark_of_its_own_to_be_found_by(self):
         # on Linux setup runs on the machine's network, where its container has the machine's hostname, not its ID
         marks = []

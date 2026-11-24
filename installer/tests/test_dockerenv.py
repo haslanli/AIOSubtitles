@@ -435,6 +435,15 @@ class CheckImage(unittest.TestCase):
         self.assertIn(['docker', 'rm', '-f'], cmds)
         self.assertIn(['docker', 'volume', 'rm'], cmds)
 
+    def test_dockers_reason_is_named_without_the_hint_after_it(self):
+        # A rollback to an image Docker no longer had stopped on "Run 'docker run --help' for more information"
+        said = f'docker: Error response from daemon: No such image: {IMAGE}'
+        for err in (f"{said}\n\nRun 'docker run --help' for more information\n", f"{said}\nSee 'docker run --help'.\n"):
+            with self.subTest(err=err):
+                docker = FakeDocker([(['docker', 'run', '-d'], (125, '', err))])
+                with mock.patch.object(dockerenv, 'run', docker):
+                    self.assertEqual(dockerenv.check_image(IMAGE, 'aiosubtitles', 'id-1'), (False, said))
+
     def test_a_version_that_stops_fails_at_once(self):
         docker = FakeDocker([(['docker', 'exec'], (1, '', 'container is not running')),
                              (['docker', 'inspect'], (0, 'exited ', ''))])
@@ -462,6 +471,14 @@ class Restore(unittest.TestCase):
             self.assertNotIn(name, dockerenv.RESTORE)                       # given, never a copy of the list
         with tarfile.open(fileobj=io.BytesIO(base64.b64decode(stdin))) as t:
             self.assertEqual(sorted(t.getnames()), ['subsync.sqlite3', 'users.sqlite3'])
+
+    def test_dockers_reason_is_named_without_the_hint_after_it(self):
+        said = 'docker: Error response from daemon: No such image: aiosubtitles:local-1.3.0'
+        hint = "Run 'docker run --help' for more information"
+        docker = FakeDocker([(['docker', 'run'], (125, '', f'{said}\n\n{hint}\n'))])
+        with mock.patch.object(dockerenv, 'run', docker):
+            self.assertEqual(dockerenv.restore_databases('aiosubtitles:local-1.3.0', 'aiosubtitles_subsync-data',
+                                                         {'users.sqlite3': b'U'}), (False, said))
 
     def test_the_restore_script_removes_leftovers_and_writes_the_copy(self):
         import tempfile

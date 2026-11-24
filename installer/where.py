@@ -71,8 +71,11 @@ def place_from(info, image, version, route, owner):
     if run_as.startswith('sha256:') and mine:
         run_as = f'{repo}:{version}'
     # a name without a registry (aiosubtitles:local-1.4.0) is a build of this machine's: never pulled. Docker 29's
-    # image store gives such a build a digest too: it pins this very build, under its own tag. Docker's classic image
-    # store gives it none, and its tag moves to the next build of the same version: its image ID pins it then
+    # image store gives such a build a digest too, which pins it while its tag is on it: once the next build of the same
+    # version takes the tag, the name with the old digest no longer resolves. The source route's ./setup builds without
+    # Buildx's default provenance attestation, so a rebuild of unchanged code keeps its digest, and Engine.own_image
+    # runs setup's own build when the pinned one of its version is gone. Docker's classic image store gives it none,
+    # and its tag moves to the next build of the same version: its image ID pins it then
     local = not _registry(repo)
     if not digest:
         pinned = (info.get('Image') or run_as) if local else run_as

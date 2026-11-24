@@ -54,7 +54,9 @@ if [ -n "$updating" ]; then
 fi
 image="aiosubtitles:local-$version"
 echo "Building AIOSubtitles $version here (its tests run in the build; a few minutes the first time) ..."
-if ! docker build -f subsync/Dockerfile -t "$image" .; then
+# without Buildx's default provenance attestation, which differs on every build: with it, Docker 29's image store gave
+# each build a new digest, also of unchanged code, and the service's pin (installer/where.py) no longer resolved
+if ! BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker build -f subsync/Dockerfile -t "$image" .; then
   if [ -n "$old" ]; then
     git reset --quiet --keep "$old"
     echo "The update didn't go through: building version $version failed. Version $old_version keeps running."
