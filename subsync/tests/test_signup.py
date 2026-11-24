@@ -516,6 +516,160 @@ class SignupTest(SignupHarness, unittest.TestCase):
         self.assertEqual([s["id"] for s in sync["services"]], ["torbox"])
         self.assertEqual([p["options"]["services"] for p in sync["presets"] if p["type"] == "prowlarr"], [["torbox"]])
 
+    # -- the sign-up's and Refresh's whole time -----------------------------------------------------------
+    def spending(self, name):
+        """An api_factory whose `name` call first waits out what is left of the operation's whole time."""
+        def factory(base, timeout):
+            api = self.api(base, timeout)
+            call = getattr(api, name)
+
+            def late(*args, **kwargs):
+                time.sleep(api.time_left())
+                return call(*args, **kwargs)
+            setattr(api, name, late)
+            return api
+        return factory
+
+    def test_a_sign_up_that_runs_out_of_time_keeps_nothing(self):
+        # each call had its own bound, the sign-up's 6 to 9 of them together none: past the front proxy's 100 s the page
+        # with the personal link was lost, while the sign-up went on and kept the record
+        from unittest import mock
+        uuid = self.fake.add(viewer(), PASSWORD)
+        before = copy.deepcopy(self.fake.configs)
+        with mock.patch.object(self.signup, "PUBLIC_WHOLE_TIMEOUT", 1.0), \
+                self.assertRaises(self.signup.SignupError) as e:
+            self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.spending("addon_get"))
+        self.assertEqual((e.exception.message, e.exception.field),
+                         ("Your AIOStreams answered too slowly, so the sign-up stopped and nothing was kept. Try again "
+                          "in a few minutes.", None))
+        self.assertEqual(self.users.count(), 0)
+        self.assertEqual(self.fake.configs, before)               # the config it made removed, theirs as it was
+        self.assertEqual(self.signup.PUBLIC_WHOLE_TIMEOUT, 75)
+
+    def test_a_slow_aiostreams_ends_the_sign_up_within_its_time(self):
+        from unittest import mock
+        uuid = self.fake.add(viewer(), PASSWORD)
+        self.fake.fault, self.fake.hang_s = "hang", 0.4             # every answer 0.4 s late
+        t0 = time.monotonic()
+        with mock.patch.object(self.signup, "PUBLIC_WHOLE_TIMEOUT", 1.0), \
+                self.assertRaises(self.signup.SignupError) as e:
+            self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.api)
+        self.assertLess(time.monotonic() - t0, 2.5)
+        self.assertTrue(e.exception.message.startswith("Your AIOStreams answered too slowly, so the sign-up stopped"))
+        self.assertEqual(self.users.count(), 0)
+
+    def test_adding_aiosubtitles_gets_what_time_is_left(self):
+        # with none left, the page gives the steps to add it by hand, as when the save fails
+        from unittest import mock
+        uuid = self.fake.add(viewer(), PASSWORD)
+        with mock.patch.object(self.signup, "PUBLIC_WHOLE_TIMEOUT", 1.0):
+            result = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.spending("save_config"))
+        self.assertEqual((result.added, result.manual, result.unchecked, result.changes), (False, True, False, []))
+        self.assertIsNotNone(self.users.open(result.token))
+        self.assertNotIn(("PUT", "/api/v1/user"), self.fake.writes())
+
+    def test_a_refresh_that_runs_out_of_time_says_so(self):
+        from unittest import mock
+        uuid, result = self.run_signup(viewer())
+        record, before = self.users.open(result.token), copy.deepcopy(self.fake.configs)
+        with mock.patch.object(self.signup, "PUBLIC_WHOLE_TIMEOUT", 1.0), \
+                self.assertRaises(self.signup.SignupError) as e:
+            self.signup.refresh(self.s, self.users, result.token, {"password": PASSWORD},
+                                api_factory=self.spending("get_config"))
+        self.assertEqual((e.exception.message, e.exception.field),
+                         ("Your AIOStreams answered too slowly, so the refresh stopped. Try again in a few minutes.",
+                          None))
+        self.assertEqual((self.users.open(result.token), self.fake.configs), (record, before))
+
+    # -- an earlier sign-up of the same config ---------------------------------------------------
+    def entries(self, uuid):
+        """The tokens of the AIOSubtitles entries in a config."""
+        return [p["options"]["manifestUrl"].split("/u/")[1].split("/")[0] for p in self.fake.configs[uuid]["config"]
+                ["presets"] if p["options"].get("name") == "AIOSubtitles"]
+
+    def test_signing_up_again_replaces_the_earlier_sign_up(self):
+        # each sign-up made a record and a config holding the person's keys; the second took the first's place in
+        # their config, and the first, its link lost, was never used again nor could be removed
+        uuid, first = self.run_signup(viewer())
+        sync = self.users.open(first.token)["sync_uuid"]
+        replaced = []
+        again = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.api,
+                                   on_replaced=replaced.append)
+        self.assertEqual((again.replaced, replaced), (True, [first.token]))
+        self.assertIsNone(self.users.open(first.token))
+        self.assertNotIn(sync, self.fake.configs)
+        self.assertEqual(self.entries(uuid), [again.token])
+        unticked = self.signup.signup(self.s, self.users, self.form(uuid, add_addon=""), api_factory=self.api)
+        self.assertFalse(unticked.replaced)                       # their apps still use the earlier one: it stays
+        self.assertIsNotNone(self.users.open(again.token))
+        self.assertEqual(self.users.count(), 2)
+
+    def test_only_an_earlier_sign_up_of_this_config_whose_configs_go_is_deleted(self):
+        from unittest import mock
+        from subsync.aiosconfig import AiosError
+        uuid, first = self.run_signup(viewer())
+        other, elsewhere = self.run_signup(viewer())             # another config's record, its entry copied here
+        self.fake.configs[uuid]["config"]["presets"] += [
+            p for p in self.fake.configs[other]["config"]["presets"] if p["options"].get("name") == "AIOSubtitles"]
+        kept = self.users.open(first.token)
+
+        def failing(base, timeout):
+            api = self.api(base, timeout)
+            api.delete_config = mock.Mock(side_effect=AiosError("Internal error", code="INTERNAL"))
+            return api
+        again = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=failing)
+        self.assertFalse(again.replaced)
+        self.assertEqual((self.users.open(first.token), self.users.count()), (kept, 3))   # its config couldn't go
+        self.assertEqual(self.entries(uuid), [again.token])
+        self.assertIsNotNone(self.users.open(elsewhere.token))   # another config's, not touched
+        taken = again
+        again = self.signup.signup(self.s, self.users, self.form(uuid), api_factory=self.api)
+        self.assertTrue(again.replaced)
+        self.assertIsNone(self.users.open(taken.token))
+        self.assertEqual(self.users.count(), 3)
+
+    def test_sign_ups_of_one_config_run_one_at_a_time(self):
+        import threading
+        uuid = self.fake.add(viewer(), PASSWORD)
+        self.fake.fault, self.fake.hang_s = "hang", 0.1
+        results = []
+        both = [threading.Thread(target=lambda: results.append(self.signup.signup(
+            self.s, self.users, self.form(uuid), api_factory=self.api, timeout=10))) for _ in range(2)]
+        for t in both:
+            t.start()
+        for t in both:
+            t.join(30)
+        self.assertEqual(sorted(r.replaced for r in results), [False, True])
+        self.assertEqual(self.users.count(), 1)
+        self.assertEqual(self.entries(uuid), [r.token for r in results if r.replaced])
+        self.assertEqual(len(self.fake.configs), 2)              # theirs and the one sign-up's
+
+    def test_delete_takes_out_only_this_records_entry(self):
+        # With their password, Delete took out every entry named AIOSubtitles, a newer sign-up's of the same
+        # config included; an entry of this record's from before a change of the instance's address stayed
+        uuid, older = self.run_signup(viewer())
+        newer = self.signup.signup(self.s, self.users, self.form(uuid, add_addon=""), api_factory=self.api)
+        self.signup.refresh(self.s, self.users, newer.token, {"password": PASSWORD, "add_addon": "on"},
+                            api_factory=self.api)               # its entry takes the older one's place
+        self.assertEqual(self.entries(uuid), [newer.token])
+        self.fake.configs[uuid]["config"]["presets"].append(
+            {"type": "custom", "instanceId": "old", "enabled": True,
+             "options": {"name": "Subtitles", "manifestUrl": f"https://old.subs.test/u/{older.token}/manifest.json"}})
+        outcome = self.signup.delete(self.s, self.users, older.token, {"password": PASSWORD}, api_factory=self.api)
+        self.assertTrue(outcome["addon_removed"])
+        self.assertEqual(self.entries(uuid), [newer.token])
+        self.assertNotIn("old", [p["instanceId"] for p in self.fake.configs[uuid]["config"]["presets"]])
+
+    def test_a_refused_delete_says_nothing_was_deleted_once(self):
+        # The problem's title says "Nothing was deleted"; its message said it again
+        from subsync import pages
+        _, result = self.run_signup(viewer())
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.delete(self.s, self.users, result.token, {"password": "wrong"}, api_factory=self.api)
+        self.assertEqual(e.exception.message, self.signup.WRONG_PASSWORD)
+        page = pages.delete_confirm_page(self.s, error=e.exception.message, field="delete")
+        self.assertEqual(page.count("Nothing was deleted"), 1)
+
     # -- refresh and delete ----------------------------------------------------------------------------------------
     def test_refresh_after_adding_prowlarr_naming_the_usenet_engine(self):   # the same at Refresh
         uuid, result = self.run_signup(viewer())
@@ -1078,6 +1232,95 @@ class GateTest(unittest.TestCase):
         with self.assertRaises(SignupError) as e:
             gate.check("1.2.3.4", "")
         self.assertIn("full", e.exception.message)
+
+    def test_a_wrong_invite_code_is_said_once(self):
+        # The error repeated the sentence the box's help says right under it
+        from subsync import explain
+        from subsync.signup import SignupError
+        with self.assertRaises(SignupError) as e:
+            self.gate(SUBSYNC_PUBLIC_INVITE="letmein").check("1.2.3.4", "guess")
+        self.assertEqual((e.exception.message, e.exception.code, e.exception.field),
+                         ("That invite code isn't right.", 403, "invite"))
+        self.assertEqual(explain.PUBLIC_FIELDS["invite"],
+                         "The code you were given. AIOSubtitles is open only to invited people for now.")
+
+    def test_an_ipv6_address_counts_with_its_64_block(self):
+        # An IPv6 visitor, who has a whole /64 of addresses, took a new one for each try and was never limited;
+        # an IPv4 address written as IPv6 counts as that IPv4 address
+        from subsync.signup import SignupError
+        for block, other in ((("2001:db8:1:2::1", "2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2:abcd::9"),
+                              "2001:db8:1:3::1"),
+                             (("1.2.3.4", "::ffff:1.2.3.4", "1.2.3.4"), "1.2.3.5")):
+            with self.subTest(address=block[0]):
+                gate = self.gate(SUBSYNC_SIGNUPS_PER_HOUR="2")
+                gate.check(block[0], "")
+                gate.check(block[1], "")
+                with self.assertRaises(SignupError) as e:
+                    gate.check(block[2], "")
+                self.assertEqual((e.exception.message, e.exception.code),
+                                 ("Too many sign-up attempts from your address in the last hour. Try again in an hour.",
+                                  429))
+                gate.check(other, "")                                   # the next block, another address
+
+    def test_counted_addresses_age_out_in_order_and_are_capped(self):
+        # Every check walked every address of the last hour under the gate's lock, and their table grew without
+        # end; now each check drops only what aged out, and past a fixed number of addresses a new one is told to wait
+        from unittest import mock
+        from subsync import signup
+        start = self.now[0]
+        gate = self.gate(SUBSYNC_SIGNUPS_PER_HOUR="5")
+        with mock.patch.object(signup, "MAX_SIGNUP_ADDRESSES", 3):
+            for i in range(3):
+                self.now[0] = start + 60 * i
+                gate.check(f"1.2.3.{i}", "")
+            self.now[0] = start + 180
+            with self.assertRaises(signup.SignupError) as e:
+                gate.check("1.2.3.9", "")
+            self.assertEqual((e.exception.message, e.exception.code),
+                             ("AIOSubtitles is busy right now. Try again in a few minutes.", 503))
+            gate.check("1.2.3.0", "")                                   # one counted already still tries
+            self.now[0] = start + 3630                                  # its first try aged out, not its second
+            with self.assertRaises(signup.SignupError):
+                gate.check("1.2.3.9", "")
+            self.assertEqual(dict(gate.attempts.counts), {"1.2.3.0": 1, "1.2.3.1": 1, "1.2.3.2": 1})
+            self.now[0] = start + 3670                                  # 1.2.3.1's one try aged out
+            gate.check("1.2.3.9", "")
+            self.assertEqual(dict(gate.attempts.counts), {"1.2.3.0": 1, "1.2.3.2": 1, "1.2.3.9": 1})
+            self.now[0] = start + 3670 + 3600
+            gate.check("1.2.3.8", "")
+            self.assertEqual((dict(gate.attempts.counts), len(gate.attempts.made)), ({"1.2.3.8": 1}, 1))
+
+    def test_sign_ups_made_per_address_per_day(self):
+        # One address could make SUBSYNC_SIGNUPS_PER_HOUR records an hour, 120 a day, and fill the instance in
+        # 40 hours; now as many a day as attempts in an hour, checked before anything is fetched
+        from subsync import explain
+        from subsync.signup import SignupError
+        too_many = ("Too many sign-ups from your address in the last day. Try again tomorrow.", 429)
+        for made, again, other in (("1.2.3.4", "1.2.3.4", "1.2.3.5"), ("2001:db8::1", "2001:db8::2", "2001:db8:0:1::1")):
+            with self.subTest(address=made):
+                gate = self.gate(SUBSYNC_SIGNUPS_PER_HOUR="2")
+                for _ in range(2):
+                    gate.check(made, "")
+                    gate.signed_up(made)
+                self.now[0] += 3601                                     # the hour's attempts aged out, not the day's
+                with self.assertRaises(SignupError) as e:
+                    gate.check(again, "")
+                self.assertEqual((e.exception.message, e.exception.code), too_many)
+                gate.check(other, "")                                   # another address
+                self.now[0] += 86400 - 3601
+                gate.check(again, "")                                   # a day after the first
+        gate = self.gate(SUBSYNC_SIGNUPS_PER_HOUR="2")
+        for _ in range(2):
+            gate.check("1.2.3.4", "")                                   # attempts that made no record
+        self.now[0] += 3601
+        gate.check("1.2.3.4", "")
+        self.assertEqual(explain.SETTINGS["SUBSYNC_SIGNUPS_PER_HOUR"][1],
+                         "Sign-up attempts allowed per internet address per hour, counted before anything is fetched; "
+                         "an IPv6 address counts with the rest of its /64 block. Each attempt makes the service contact "
+                         "that person's AIOStreams several times, so this stops one address from flooding the service "
+                         "or someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is "
+                         "stricter, higher helps many people behind one shared address. One address can also sign up "
+                         "only that many times in 24 hours.")
 
 
 if __name__ == "__main__":

@@ -342,6 +342,55 @@ class WholeCallBoundTest(ClientCase):
         self.assert_timed_out(lambda: self.api(timeout=1).status())
 
 
+class DeadlineTest(ClientCase):
+    """A caller's whole time (AiosApi.deadline; the public sign-up's and Refresh's). Each call was bounded, the
+    calls together weren't: a sign-up of 6 to 9 of them outlasted the front proxy's 100 s and its page was lost."""
+
+    VERSION = json.dumps({"success": True, "data": {"version": "2.37.0"}}).encode()
+
+    def test_a_call_waits_at_most_what_is_left(self):
+        self.stand.routes[("GET", "/api/v1/status")] = slow_head(200, self.VERSION, seconds=6)
+        api = self.api(timeout=5)
+        api.deadline = time.monotonic() + 0.5
+        t0 = time.monotonic()
+        with self.assertRaises(AiosError) as e:
+            api.status()
+        self.assertLess(time.monotonic() - t0, 2.5)                 # not the call's own 5 s
+        self.assertEqual(e.exception.code, aiosconfig.TOO_SLOW)      # asked, its answer not in time
+        self.assertEqual(api.time_left(), 0)
+        self.assertIsNone(self.api().time_left())                    # no deadline, no limit of its own
+
+    def test_no_call_is_sent_once_nothing_is_left(self):
+        api = self.api()
+        api.deadline = time.monotonic() - 1
+        for name, call, _ in self.calls(api):
+            with self.subTest(call=name), self.assertRaises(AiosError) as e:
+                call()
+            self.assertEqual((e.exception.code, e.exception.message, e.exception.fix),
+                             (aiosconfig.OUT_OF_TIME, f"AIOStreams at {self.stand.url} took too long to answer.",
+                              "Try again in a few minutes."))
+        with self.assertRaises(AiosError) as e:
+            api.alias_config_id("fam")
+        self.assertEqual(e.exception.code, aiosconfig.OUT_OF_TIME)
+        self.assertEqual(self.stand.requests, [])
+
+    def test_a_slow_down_that_doesnt_fit_isnt_waited(self):
+        self.stand.routes[("GET", "/api/v1/status")] = answer(429, {}, **{"Retry-After": "3"})
+        self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = answer(429, {}, **{"Retry-After": "3"})
+        for deadline, waited in ((None, [3] * (aiosconfig.TRIES - 1)), (2, [])):
+            with self.subTest(deadline=deadline):
+                api = self.api(on_wait=lambda s: None, retry_wait_cap=5)
+                api.deadline = None if deadline is None else time.monotonic() + deadline
+                waits = []
+                with no_sleep(waits):
+                    status, _ = api.call("GET", "/api/v1/status")
+                self.assertEqual((status, waits), (429, waited))
+                waits.clear()
+                with no_sleep(waits), self.assertRaises(AiosError) as e:
+                    api.alias_config_id("fam")
+                self.assertEqual((e.exception.code, waits), ("RATE_LIMIT_EXCEEDED", waited[:1]))
+
+
 class RedirectTest(ClientCase):
     """A call carrying a password never follows a redirect, so the password is never sent on."""
 
@@ -818,8 +867,8 @@ class SignupCallersTest(ClientCase):
                 self.stand.routes[("GET", "/api/v1/user")] = answer(200, {"success": True})
                 with self.assertRaises(self.signup.SignupError) as e:
                     self.signup.delete(s, users, token, {"password": "pw"}, api_factory=lambda base, t: self.public())
-                self.assertEqual(e.exception.message,
-                                 "Your AIOStreams answered in a way AIOSubtitles doesn't know. Nothing was deleted.")
+                # the delete step's problem is titled "Nothing was deleted": its message doesn't say it again
+                self.assertEqual(e.exception.message, "Your AIOStreams answered in a way AIOSubtitles doesn't know.")
                 self.assertIsNotNone(users.open(token))
                 self.assertEqual([r for r in self.stand.requests if r[0] == "DELETE"], [])
             finally:

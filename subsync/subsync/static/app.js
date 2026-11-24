@@ -93,13 +93,21 @@
       at = to;
       paint(back);
     });
-    // Enter (or a phone keyboard's Go) in any field submits the form: before the last screen that is Continue
+    // Enter (or a phone keyboard's Go) in any field submits the form: before the last screen that is Continue; on the
+    // last it is Sign up, sent once, so a second press doesn't start a second sign-up (C2-0546)
+    var sent = false;
     form.addEventListener("submit", function (e) {
-      if (at === screens.length - 1) return;
+      if (at === screens.length - 1) {
+        if (sent) e.preventDefault();
+        sent = true;
+        return;
+      }
       e.preventDefault();
       enter(at + 1);
       paint(false);
     });
+    // a page the browser shows again from its history (Back after a sign-up that didn't come back) can be sent again
+    window.addEventListener("pageshow", function () { sent = false; });
     // Escape closes the layer at once, then takes the page back past the entries it added
     document.addEventListener("keydown", function (e) {
       if (e.key !== "Escape" || !body.classList.contains("open")) return;

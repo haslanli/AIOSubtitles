@@ -260,6 +260,56 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
         self.assertNotIn("Refreshed", text)
         self.assertIn("couldn", text)
 
+    def test_a_refresh_that_left_real_debrid_out_and_couldnt_put_itself_back_says_both(self):
+        # The steps by hand showed without the Real-Debrid notice the sign-up's page gives beside them
+        import html
+        from subsync import explain
+        uuid, _, _, _, token = self.sign_up()
+        main = self.fake.configs[uuid]["config"]
+        main["services"].append({"id": "realdebrid", "enabled": True, "credentials": {"apiKey": "rd-key"}})
+        main["presets"] = [p for p in main["presets"] if p["options"].get("name") != "AIOSubtitles"]
+        self.fake.refuse_save_for.add(uuid)                     # the sync config saves; the person's own doesn't
+        code, _, headers = http(f"{self.base}/u/{token}/configure", form(action="refresh", password=PASSWORD))
+        self.assertEqual((code, headers["Location"]), (303, "configure?done=refreshed-manual-rd"))
+        text = html.unescape(http(f"{self.base}/u/{token}/configure?done=refreshed-manual-rd")[1].decode())
+        steps = explain.PUBLIC_TEXTS["refresh_manual"] + " " + explain.PUBLIC_MANUAL_STEPS[0]
+        self.assertLess(text.index(steps), text.index(explain.PUBLIC_REAL_DEBRID_NOTICE))
+
+    def test_signing_up_again_deletes_the_earlier_sign_up_and_what_served_it(self):
+        # The earlier sign-up of the same config stayed, its link lost, its config holding their keys
+        import html
+        from subsync.store import REFUSED_BACKOFF_S
+        uuid, _, _, _, first = self.sign_up()
+        self.assertIsNotNone(self.pool.app(first))                  # its service runs
+        key = self.users.rows_key(first)
+        self.store.file_failed(f"p:{key}:f1", REFUSED_BACKOFF_S)    # a row of its own in the shared store
+        fields = dict(link=f"{INSTANCE}/stremio/{uuid}/ENCRYPTED/manifest.json", password=PASSWORD,
+                      languages="English", add_addon="on")
+        code, body, _ = http(self.base + "/signup", form(**fields))
+        self.assertEqual(code, 200)
+        self.assertIn("Your earlier sign-up of this config is deleted, with its own config on your AIOStreams; its "
+                      "personal link no longer works.", html.unescape(body.decode()))
+        self.assertIsNone(self.users.open(first))
+        self.assertIsNone(self.pool.live_app(first))
+        self.assertFalse(self.store.file_blocked(f"p:{key}:f1"))
+        self.assertEqual(http(f"{self.base}/u/{first}/configure")[0], 404)
+        self.assertEqual(self.users.count(), 1)
+
+    def test_one_address_signs_up_only_so_many_times_a_day(self):
+        # Five sign-ups an hour from one address filled the instance's 200 places in 40 hours
+        self.close()
+        self.start(SUBSYNC_SIGNUPS_PER_HOUR="2")
+        now = [time.time()]
+        self.service.gate.clock = lambda: now[0]
+        self.assertEqual([self.sign_up()[1] for _ in range(2)], [200, 200])
+        now[0] += 3601                                            # the hour's attempts aged out, not the day's
+        _, code, text, _, _ = self.sign_up()
+        self.assertEqual(code, 429)
+        self.assertIn("Too many sign-ups from your address in the last day. Try again tomorrow.", text)
+        self.assertEqual(self.users.count(), 2)
+        now[0] += 86400
+        self.assertEqual(self.sign_up()[1], 200)
+
     def test_a_refresh_whose_change_was_sent_but_not_checked_says_so(self):
         # A save sent but not checked (no answer, a failed read-back) was told as one that changed nothing
         import html

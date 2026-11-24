@@ -98,6 +98,8 @@ def every_page():
         "result-rd": pages.result_page(result(warning=explain.PUBLIC_REAL_DEBRID_WARNING)),
         "result-stored": pages.result_page(result(store_only=True)),
         "result-again": pages.result_page(result(changes=change_lines()[2:])),
+        # An earlier sign-up of the same config replaced
+        "result-replaced": pages.result_page(result(replaced=True)),
         "settings": pages.settings_page(s, RECORD, USAGE, LINK, now=0),
         "settings-kept": pages.settings_page(s, dict(RECORD, auto_password="x"), USAGE, LINK, now=0),
         "settings-full": pages.settings_page(s, RECORD, {"files": s.user_files_per_day, "bytes": 0}, LINK, now=0),
@@ -799,6 +801,17 @@ class ResultPageTest(unittest.TestCase):
         import dataclasses
         self.assertEqual({f.name for f in dataclasses.fields(SignupResult)}, set(vars(result())))
 
+    def test_an_earlier_sign_up_replaced_is_said_under_what_was_done(self):
+        # An earlier sign-up of the same config, whose place in it this one took, is deleted with its own config
+        from subsync import pages
+        words = ("Your earlier sign-up of this config is deleted, with its own config on your AIOStreams; its personal "
+                 "link no longer works.")
+        done = Tree(pages.result_page(result(replaced=True))).text()
+        self.assertIn("Done on your AIOStreams", done)
+        self.assertLess(done.index("Done on your AIOStreams"), done.index(words))
+        self.assertLess(done.index(words), done.index("What happens next"))
+        self.assertNotIn(words, Tree(pages.result_page(result())).text())
+
     def test_the_link_first_then_what_was_done_and_what_next(self):
         from subsync import explain, pages
         tree = Tree(pages.result_page(result()))
@@ -1024,7 +1037,8 @@ class SettingsPageTest(unittest.TestCase):
         with open(os.path.join(os.path.dirname(os.path.abspath(pages.__file__)), "public.py"), encoding="utf-8") as f:
             sent = set(re.findall(r'_see\("([a-z-]+)"\)', f.read()))               # the codes sent as they are
         self.assertLessEqual({"languages", "audio", "forgot", "tmdb-key", "tmdb-key-removed"}, sent)
-        sent |= {"refreshed", "refreshed-rd", "refreshed-manual", "refreshed-unchecked"}   # a refresh's, by its result
+        sent |= {"refreshed" + by_hand + rd for by_hand in ("", "-manual", "-unchecked")    # a refresh's, by its result
+                 for rd in ("", "-rd")}
         sent |= {kind + manual for kind in ("to-stored", "stored")                          # stored copies only
                  for manual in ("", "-manual", "-unchecked")}
         self.assertEqual(set(pages.DONE), sent)
@@ -1035,6 +1049,22 @@ class SettingsPageTest(unittest.TestCase):
         form = re.search(r'<form method="post" action="configure"><input type="hidden" name="action" value="refresh">'
                          r'(.*?)</form>', text, re.S).group(1)
         self.assertEqual(set(re.findall(r'name="([^"]+)"', form)), {"password", "link", "keep_password", "usenet"})
+
+    def test_a_refresh_that_left_real_debrid_out_and_couldnt_put_itself_back_says_both(self):
+        # Only the steps by hand showed; the sign-up's page shows the Real-Debrid notice beside them
+        from subsync import explain, pages
+        steps = " " + " ".join(explain.PUBLIC_MANUAL_STEPS)
+        for code, lead in (("refreshed-manual-rd", explain.PUBLIC_TEXTS["refresh_manual"]),
+                           ("refreshed-unchecked-rd", explain.PUBLIC_REFRESH_UNCHECKED)):
+            with self.subTest(code=code):
+                message, notice = pages.done_message(code, RECORD)
+                self.assertEqual((message, notice), (None, (lead + steps, explain.PUBLIC_REAL_DEBRID_NOTICE)))
+                tree = Tree(self.page(notice=notice))
+                warns = [a for tag, a in tree.elements if tag == "div" and a.get("class") == "note warn"]
+                self.assertEqual(warns, [{"class": "note warn", "role": "status", "id": "saved", "tabindex": "-1"},
+                                         {"class": "note warn", "role": "status"}])
+                text = tree.text()
+                self.assertLess(text.index(lead), text.index(explain.PUBLIC_REAL_DEBRID_NOTICE))
 
     def test_done_messages_are_fixed_texts(self):
         from subsync import explain, pages
@@ -1571,8 +1601,21 @@ class ScriptTest(unittest.TestCase):
         from subsync.ui import APP_JS
         guard = re.search(r'form\.addEventListener\("submit", function \(e\) \{(?P<body>.*?)\}\);', APP_JS, re.S)
         self.assertIsNotNone(guard, "the sign-up form has no submit guard")
-        self.assertRegex(guard["body"], r"^\s*if \(at === screens\.length - 1\) return;\s*e\.preventDefault\(\);\s*"
+        # on the last screen it is Sign up, sent once (test_sign_up_is_sent_once)
+        self.assertRegex(guard["body"], r"^\s*if \(at === screens\.length - 1\) \{\s*if \(sent\) e\.preventDefault\(\);"
+                                        r"\s*sent = true;\s*return;\s*\}\s*e\.preventDefault\(\);\s*"
                                         r"enter\(at \+ 1\);\s*paint\(false\);\s*$")
+
+    def test_sign_up_is_sent_once(self):
+        # Nothing stopped a second press of Sign up while the first was still working, and each press made a
+        # record and a config holding the person's keys; a page shown again from the browser's history can be sent
+        from subsync.ui import APP_JS
+        guard = re.search(r'var sent = false;\n    form\.addEventListener\("submit", function \(e\) \{\n'
+                          r'      if \(at === screens\.length - 1\) \{\n        if \(sent\) e\.preventDefault\(\);\n'
+                          r'        sent = true;\n        return;\n      \}\n', APP_JS)
+        self.assertIsNotNone(guard, "a second Sign up is sent too")
+        self.assertIn('window.addEventListener("pageshow", function () { sent = false; });', APP_JS)
+        self.assertEqual(APP_JS.count("sent = "), 3)          # set false, true on the first Sign up, false when shown
 
     def test_a_poll_leaves_the_parts_that_didnt_change_in_place(self):
         # Every poll of a page whose work runs (every 2 s) put in fresh copies of the back arrow, the body and

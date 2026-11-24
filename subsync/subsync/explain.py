@@ -906,10 +906,11 @@ GROUPS = [
             "carry. Raise it only after watching memory, processor use and the daily read total for a while."),
         "SUBSYNC_SIGNUPS_PER_HOUR": (
             "5",
-            "Sign-up attempts allowed per internet address per hour, counted before anything is fetched. Each attempt "
-            "makes the service contact that person's AIOStreams several times, so this stops one address from flooding "
-            "the service or someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is "
-            "stricter, higher helps many people behind one shared address."),
+            "Sign-up attempts allowed per internet address per hour, counted before anything is fetched; an IPv6 "
+            "address counts with the rest of its /64 block. Each attempt makes the service contact that person's "
+            "AIOStreams several times, so this stops one address from flooding the service or someone else's "
+            "AIOStreams. 5 is plenty for someone who mistypes a password; lower is stricter, higher helps many people "
+            "behind one shared address. One address can also sign up only that many times in 24 hours."),
         "SUBSYNC_USER_FILES_PER_DAY": (
             "200",
             "New files read per person per day (UTC). Files already in the shared store don't count, and neither does "
@@ -1390,6 +1391,9 @@ PUBLIC_TEXTS = {
     "usenet_paused": ("Usenet is paused until 00:00 UTC: your indexer or Usenet service answered with an error, so "
                       "AIOSubtitles stopped asking it today. Nothing else is affected."),
     "languages_chosen": "Languages: {names}.",
+    # an earlier sign-up of the same config, whose entry in it this one took, deleted
+    "earlier_deleted": ("Your earlier sign-up of this config is deleted, with its own config on your AIOStreams; its "
+                        "personal link no longer works."),
     "next": ("Play something in your app. For each file, AIOSubtitles offers synced copies of your subtitles in your "
              "app's subtitle list. A file nobody has played before takes a few seconds; if your app has already picked "
              "a subtitle by then, the synced copy is there the next time you open the file."),

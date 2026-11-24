@@ -932,10 +932,40 @@ class PublicUsenetTest(TempDirTest):
         self.assertIs(record["usenet_subtitles"], True)
 
     def test_a_usenet_only_setup_stops_with_usenet_off(self):
-        with self.assertRaises(self.signup.SignupError) as e:
-            self.run_signup(setup_of([ENGINE], [NEWZNAB, SUBS]), usenet="")
-        self.assertIn("Usenet", e.exception.message)
+        # With the box unticked it was told AIOSubtitles could read no Usenet service through it; the box is
+        # the field it is about. Its daily rebuild says the same
+        tick = 'Your config streams only through Usenet: tick "Sync Usenet files too" so AIOSubtitles can read its files.'
+        for config in (setup_of([ENGINE], [NEWZNAB, SUBS]), setup_of([NZBDAV], [TORRENTIO, NEWZNAB, SUBS])):
+            with self.subTest(services=ids(config)):
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.run_signup(config, usenet="")
+                self.assertEqual((e.exception.message, e.exception.field, e.exception.unusable), (tick, "usenet", True))
         self.assertEqual(self.fake.writes(), [])
+        uuid, result = self.run_signup(setup_of([TORBOX, ENGINE], [TORRENTIO, NEWZNAB, SUBS]), usenet="")
+        self.fake.configs[uuid]["config"]["services"] = [copy.deepcopy(ENGINE)]      # now Usenet only
+        api = self.api(INSTANCE, 10)
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup.rebuild(self.s, self.users.open(result.token), result.token, api, PASSWORD)
+        self.assertEqual((e.exception.message, e.exception.field), (tick, "usenet"))
+
+    def test_the_reason_names_usenet_only_where_people_can_turn_it_on(self):
+        # On an instance that runs Usenet but offers no box (no searches a day), the reason still named Usenet
+        # as something AIOSubtitles reads, and a Usenet-only config there has no box to tick
+        debrid_only = ("AIOSubtitles can't find any file it could read through your AIOStreams: no debrid service "
+                       "(AIOSubtitles reads files from debrid services only, not Usenet or torrents)")
+        no_box = self.settings(SUBSYNC_USENET_LISTINGS_PER_DAY="0")
+        for config, rest in ((setup_of([], [TORRENTIO, SUBS]), "."),
+                             (setup_of([ENGINE], [NEWZNAB, SUBS]), "; no stream source other than Usenet ones.")):
+            with self.subTest(services=ids(config)):
+                with self.assertRaises(self.signup.SignupError) as e:
+                    self.run_signup(config, settings=no_box, usenet="")
+                self.assertEqual((e.exception.message, e.exception.field), (debrid_only + rest, None))
+        with self.assertRaises(self.signup.SignupError) as e:       # the box offered: the reason names both
+            self.run_signup(setup_of([], [TORRENTIO, SUBS]), usenet="")
+        self.assertEqual((e.exception.message, e.exception.field), (
+            "AIOSubtitles can't find any file it could read through your AIOStreams: no debrid or Usenet service "
+            "AIOSubtitles can read (it reads ready debrid files, and Usenet files through services that stream part of "
+            "a file; not torrents, not Stremio's NNTP streams).", None))
 
     def test_real_debrid_with_usenet_reads_usenet_only(self):
         _, result = self.run_signup(setup_of([RD, ENGINE], [TORRENTIO, NEWZNAB, SUBS]))
@@ -1163,12 +1193,26 @@ class PagesTest(unittest.TestCase):
         self.assertIn("at most 7 extra searches", page)
         self.assertNotIn('name="usenet"', pages.signup_page(self.settings(SUBSYNC_USENET="off")))
 
-    def page(self, record, usenet_usage=None, **env):
+    def page(self, record, usenet_usage=None, error=None, field=None, **env):
         from subsync import pages
         base = {"languages": ["eng"], "sync_uuid": "s", "synced_at": 0}
         return pages.settings_page(self.settings(**env), dict(base, **record), {"files": 0, "bytes": 0},
-                                   "https://subs.test/u/T/manifest.json", now=0,
+                                   "https://subs.test/u/T/manifest.json", now=0, error=error, field=field,
                                    usenet_usage=usenet_usage or {"listings": 2, "stopped": False})
+
+    def test_a_problem_with_the_usenet_box_marks_it(self):
+        # "tick Sync Usenet files too" links to the box and marks it, on the sign-up and the settings page
+        from helpers import Tree
+        from subsync import pages
+        for text in (pages.signup_page(self.settings(), error="Tick it.", field="usenet"),
+                     self.page({}, error="Tick it.", field="usenet")):
+            tree = Tree(text)
+            box = tree.all("input", id="usenet")
+            self.assertEqual([(b.get("aria-invalid"), b["aria-describedby"]) for b in box],
+                             [("true", "problem-message usenet-help")])
+            self.assertEqual(tree.all("a", href="#usenet")[0].get("href"), "#usenet")
+        for text in (pages.signup_page(self.settings()), self.page({}), self.page({}, error="Wrong.", field="refresh")):
+            self.assertNotIn("aria-invalid", Tree(text).all("input", id="usenet")[0])
 
     def test_the_settings_row(self):
         on = {"usenet": True, "usenet_uuid": "u", "usenet_services": ["nzbdav", "torbox"]}

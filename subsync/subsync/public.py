@@ -76,8 +76,9 @@ class UserLimits:
 
     def __init__(self, settings, users, token):
         self.s, self.users, self.token = settings, users, token
-        # the sources' fair shares count per person under this opaque key (not the token, never logged)
-        self.who = (users.user_id(token) or "")[:16] or None
+        # the sources' fair shares and the Usenet files not found count per person under this opaque key (not the
+        # token, never logged; Users.who_key)
+        self.who = users.who_key(token)
         self.rows_key = users.rows_key(token)   # their own rows in the shared store
 
     def may_queue(self, queued):
@@ -423,6 +424,13 @@ class PublicService:
     def manifest_url(self, token):
         return personal_manifest_url(self.s, token)
 
+    def forget(self, token):
+        """A record just deleted: its service stops and writes nothing more of theirs (Pool.stop), its daily check is
+        forgotten, and its own rows in the shared store go (their waiting files and original subtitles)."""
+        self.pool.stop(token, forget=True)
+        self.checker.forget(token)
+        self.store.drop_rows_of(self.users.rows_key(token))
+
 
 # A request's line, headers and form come whole within this long of its first bytes, however slowly they trickle in:
 # a sender that keeps each wait under the connection's timeout can't hold one of SUBSYNC_MAX_CONNECTIONS for hours
@@ -618,16 +626,21 @@ class PublicHandler(Handler):
             form = self._form()
         except FormError as e:
             return self._html(e.code, pages.signup_page(svc.s, error=e.message))
+        ip = svc.client_ip(self)
         try:
             form["languages"] = form_languages(form)
-            svc.gate.check(svc.client_ip(self), form.get("invite"))
-            result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout)
+            svc.gate.check(ip, form.get("invite"))
+            # an earlier sign-up of the same config whose place this one took is deleted
+            result = signup(svc.s, svc.users, form, api_factory=svc.api_factory, timeout=svc.timeout,
+                            on_replaced=svc.forget)
         except SignupError as e:
-            # too many attempts (429) or a full instance (503): entering the cleared boxes again only costs a try
+            # too many attempts or sign-ups (429), a full or busy instance (503): entering the cleared boxes again only
+            # costs a try
             return self._html(e.code, pages.signup_page(svc.s, error=e.message, field=e.field,
                                                         order=_chosen(form, svc.s.max_languages),
                                                         audio=form.get("audio"), ticked=_ticked(form),
                                                         retry=e.code not in (429, 503)))
+        svc.gate.signed_up(ip)          # a record made: one of the address's sign-ups of the day
         return self._html(200, pages.result_page(result, svc.s), personal=True)
 
     def _configure(self, token, method):
@@ -685,8 +698,8 @@ class PublicHandler(Handler):
                 by_hand = "-unchecked" if result.unchecked else "-manual" if result.manual else ""
                 if result.store_only:          # stored copies only: moved there by this refresh, or still
                     return self._see(("to-stored" if result.to_store_only else "stored") + by_hand)
-                return self._see("refreshed" + by_hand if by_hand else "refreshed-rd" if result.warning
-                                 else "refreshed")
+                # Real-Debrid left out: its notice too, after the steps by hand when there are some
+                return self._see("refreshed" + by_hand + ("-rd" if result.warning else ""))
             if action == "forget-password":
                 forget_password(svc.users, token)
                 return self._see("forgot")
@@ -713,10 +726,9 @@ class PublicHandler(Handler):
                         error=e.message, field="delete" if e.field == "password" else e.field,
                         stored=store_only(record), settings=svc.s), personal=True)
                 # a request while it took (its AIOStreams calls) may have opened the record and made an App again: it
-                # stops now that the record is gone (Pool.app opens a record again after a stop, and finds none)
-                forget()
-                # then their own rows in the shared store: their waiting files and original subtitles
-                svc.store.drop_rows_of(svc.users.rows_key(token))
+                # stops now that the record is gone (Pool.app opens a record again after a stop, and finds none); then
+                # their own rows in the shared store go
+                svc.forget(token)
                 return self._html(200, pages.deleted_page(outcome, svc.s), personal=True)
         except SignupError as e:
             return page(e.code, error=e.message, field=e.field)

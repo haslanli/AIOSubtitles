@@ -864,7 +864,7 @@ def result(**kw):
     # the fields of signup.SignupResult, without importing signup (it needs cryptography), so the page tests run anywhere
     base = dict(token=TOKEN, manifest_url=LINK, changes=change_lines()[:2], warning=None,
                 added=True, manual=False, unchecked=False, languages=["eng", "spa"], store_only=False,
-                to_store_only=False, usenet=False, usenet_why=None, sync_made=True)
+                to_store_only=False, usenet=False, usenet_why=None, sync_made=True, replaced=False)
     base.update(kw)
     return types.SimpleNamespace(**base)
 

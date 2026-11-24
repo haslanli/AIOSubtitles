@@ -5,7 +5,8 @@ an id made from the service's secret and that token, and encrypted (AES-256-GCM)
 the token, so neither the database, nor the database and the secret together, open a record without the person's link.
 The service opens a record only while that person's requests come in. The subtitle entries their apps get carry a read
 key instead of the token (read_key): the token sealed with the secret, which opens only those entries. What
-the shared store keeps for them alone is under a key made from the secret and the token too (rows_key).
+the shared store keeps for them alone is under a key made from the secret and the token too (rows_key), and
+so are their counts in the subtitle sites' fair shares and their Usenet files not found (who_key).
 
 A record holds their AIOStreams address and the id of their config; the configs the service made there (the sync config
 and, with Usenet on, the Usenet config: each one's id, link and password); their languages, their answer for files with
@@ -108,6 +109,12 @@ class Users:
         and the refusals of their reads: worker.Worker._person_key): made from their token with the service's secret,
         unlike user_id, so nothing stored leads to it, only their link; Delete removes the rows by it."""
         return hmac.new(self.secret, b"rows:" + token.encode(), hashlib.sha256).hexdigest()[:32]
+
+    def who_key(self, token):
+        """The key a person is counted under in the subtitle sites' fair shares (sourcestate.Ledger) and the Usenet
+        files not found for them (worker.UsenetGate): made from their token with the service's secret under a label of
+        its own, as rows_key is, so neither the users database nor the store's other rows lead to it."""
+        return hmac.new(self.secret, b"who:" + token.encode(), hashlib.sha256).hexdigest()[:16]
 
     def read_key(self, token):
         """The key in the addresses of a person's subtitle entries: their token sealed with the service's

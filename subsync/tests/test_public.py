@@ -924,6 +924,16 @@ class PoolTest(unittest.TestCase):
         self.assertTrue(limits.may_start_file())                  # the next UTC day
         limits.before_read(11)
 
+    def test_a_persons_fair_share_key_leads_to_nothing_stored(self):
+        # The sites' fair shares and the Usenet files not found counted people under the first half of their
+        # record's id; now under a key of its own, made from their link (Users.who_key)
+        from subsync.public import UserLimits
+        limits = UserLimits(self.settings, self.users, self.tokens[0])
+        self.assertEqual(limits.who, self.users.who_key(self.tokens[0]))
+        self.assertNotIn(limits.who, self.users.user_id(self.tokens[0]))
+        self.assertNotIn(limits.who, self.users.rows_key(self.tokens[0]))
+        self.assertEqual(self.pool.app(self.tokens[0]).worker.who, limits.who)    # their worker counts them under it
+
     def test_records_survive_a_restart(self):
         from subsync.users import Users
         self.pool.close()

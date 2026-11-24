@@ -193,7 +193,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None, ticked
                            + ui.language_slots(LANGUAGE_OPTIONS, order, limit, "languages-q", "languages-help",
                                                err("languages"), marked=True)))
     usenet = (ui.choice("usenet", "Sync Usenet files too", explain.usenet_help(settings.usenet_listings_per_day),
-                        checked=ticked["usenet"]),) if usenet_allowed(settings) else ()
+                        checked=ticked["usenet"], error_id=err("usenet")),) if usenet_allowed(settings) else ()
     # With the instance's audio route on, each person answers for files with no subtitles of their own
     asks_audio = bool(audio_answers(settings))
     # the clean-up only where the instance asks one of those addons' sites itself
@@ -208,7 +208,7 @@ def signup_page(settings, error=None, field=None, order=None, audio=None, ticked
         + (_audio_group(settings, audio, error_id=err("audio")) if asks_audio else ""),
         last=explain.public_text("password_once", settings)))
     fields = ("link", "password", "languages") + (("invite",) if settings.invite else ()) \
-        + (("audio",) if asks_audio else ())
+        + (("audio",) if asks_audio else ()) + (("usenet",) if usenet_allowed(settings) else ())
     problem = _problem(error, field, "Sign-up didn't go through", fields,
                        extra=f"<p>{e(explain.PUBLIC_TEXTS['kept_note'])}</p>" if retry else "")
     # without the script the arrow is a plain link back to the start page
@@ -263,6 +263,8 @@ def result_page(result, settings=None):
                     else "AIOSubtitles is in your AIOStreams config already.")
     elif result.unchecked:          # sent, but it may not have gone through: listed as sent, not as made
         done.append(("Sent to your AIOStreams config, not checked:", changes))
+    if result.replaced:             # its place there was an earlier sign-up's, now deleted
+        done.append(texts["earlier_deleted"])
     if result.languages:
         done.append(texts["languages_chosen"].format(names=language_names(result.languages)))
     notes = []
@@ -345,9 +347,10 @@ def _audio_saved(record):
 
 
 # Every code a save sends the settings page back with (configure?done=<code>, public.py), and what the page then shows:
-# record -> (message, notice), fixed texts only. "stored" and "to-stored": stored copies only, still there or
-# moved there by this refresh (the page's note says the rest). "-manual": AIOSubtitles couldn't put itself back in their
-# config, and nothing there changed; "-unchecked": it sent the change but couldn't check it.
+# record -> (message, notice), fixed texts only; the notice is a text, or several in a tuple. "stored" and "to-stored":
+# stored copies only, still there or moved there by this refresh (the page's note says the rest). "-manual":
+# AIOSubtitles couldn't put itself back in their config, and nothing there changed; "-unchecked": it sent the change but
+# couldn't check it. "-rd": Real-Debrid was left out, its notice after the steps by hand.
 DONE = {
     "languages": lambda record: (_text("languages_saved").format(names=language_names(record["languages"])), None),
     "audio": lambda record: (_audio_saved(record), None),
@@ -355,6 +358,10 @@ DONE = {
     "refreshed-rd": lambda record: (_text("refreshed"), explain.PUBLIC_REAL_DEBRID_NOTICE),
     "refreshed-manual": lambda record: (None, _with_steps(_text("refresh_manual"))),
     "refreshed-unchecked": lambda record: (None, _with_steps(explain.PUBLIC_REFRESH_UNCHECKED)),
+    "refreshed-manual-rd": lambda record: (None, (_with_steps(_text("refresh_manual")),
+                                                  explain.PUBLIC_REAL_DEBRID_NOTICE)),
+    "refreshed-unchecked-rd": lambda record: (None, (_with_steps(explain.PUBLIC_REFRESH_UNCHECKED),
+                                                     explain.PUBLIC_REAL_DEBRID_NOTICE)),
     "forgot": lambda record: (_text("forgot"), None),
     "tmdb-key": lambda record: (_text("tmdb_saved"), None),
     "tmdb-key-removed": lambda record: (_text("tmdb_removed"), None),
@@ -473,13 +480,16 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
     # the note a save came back with (its message, else its notice) is focused by the script, as a problem's summary
     # is, so a screen reader reads it first: words already on a page as it loads are never announced
     saved = {"id": "saved", "focus": True}
+    notices = (notice,) if isinstance(notice, str) else notice or ()     # a text, or several in a tuple (DONE)
     notes = (ui.note("ok", message, role="status", **saved) if message else "") \
-        + (ui.note("warn", notice, role="status", **({} if message else saved)) if notice else "") \
+        + "".join(ui.note("warn", text, role="status", **({} if message or i else saved))
+                  for i, text in enumerate(notices)) \
         + (ui.note("warn", store_text, store_title) if stored else "") \
         + _state_note(record, state) \
         + (ui.note("warn", texts["limit_reached"], "Today's limit is reached") if full and not stored else "") \
         + _problem(error, field, "That didn't go through", ("refresh", "new_link", "languages")
-                   + (("audio",) if audio_answers(settings) else ()) + (("tmdb_key",) if personal_tmdb(settings) else ()))
+                   + (("audio",) if audio_answers(settings) else ()) + (("tmdb_key",) if personal_tmdb(settings) else ())
+                   + (("usenet",) if usenet_allowed(settings) else ()))
     # the figures with thousands separators, as setup writes them. A reached audio limit stops audio syncs
     # only, so it isn't "Today's limit is reached" (`full`): other files still sync
     today = "" if stored else (
@@ -529,7 +539,9 @@ def settings_page(settings, record, usage, manifest_url, message=None, error=Non
                    + _choices(*_keep_password(settings, kept),
                               *((ui.choice("usenet", "Sync Usenet files too",
                                            explain.usenet_help(settings.usenet_listings_per_day),
-                                           checked=bool(record.get("usenet"))),) if usenet_allowed(settings) else ()))
+                                           checked=bool(record.get("usenet")),
+                                           error_id="problem-message" if error and field == "usenet" else None),)
+                                if usenet_allowed(settings) else ()))
                    + f"<div class=\"actions\">{ui.button('Refresh', 'primary', type='submit')}</div>", cls="")
                    + forget + "</div>")
     delete = _row("delete-h", "Delete my data",

@@ -244,10 +244,11 @@ SUBSYNC_USER_OPENED_PER_DAY=5
 # after watching memory, processor use and the daily read total for a while.
 SUBSYNC_MAX_USERS=200
 
-# Sign-up attempts allowed per internet address per hour, counted before anything is fetched. Each attempt makes the
-# service contact that person's AIOStreams several times, so this stops one address from flooding the service or
-# someone else's AIOStreams. 5 is plenty for someone who mistypes a password; lower is stricter, higher helps many
-# people behind one shared address.
+# Sign-up attempts allowed per internet address per hour, counted before anything is fetched; an IPv6 address counts
+# with the rest of its /64 block. Each attempt makes the service contact that person's AIOStreams several times, so
+# this stops one address from flooding the service or someone else's AIOStreams. 5 is plenty for someone who
+# mistypes a password; lower is stricter, higher helps many people behind one shared address. One address can also
+# sign up only that many times in 24 hours.
 SUBSYNC_SIGNUPS_PER_HOUR=5
 
 # How many files the service works on at once for everyone, or auto for one per processor it may use. Recommended:

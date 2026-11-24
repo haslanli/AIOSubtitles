@@ -483,6 +483,9 @@ TRIES = 6                    # tries at a call AIOStreams asks to slow down
 SLOW_DOWN_WAIT = 6           # the wait for a "too many requests" that names none (stock AIOStreams: a 5-second window)
 RETRY_WAIT_CAP = 60          # the longest wait asked for that is waited out; a longer one is reported
 PUBLIC_RETRY_WAIT_CAP = 5    # the public sign-up's (a person is waiting on the page)
+PUBLIC_WHOLE_TIMEOUT = 75    # the public sign-up's and Refresh's whole time, every call within it (AiosApi.deadline):
+                             # under the front proxy's 100 s, so their page, the sign-up's with the only copy of the
+                             # personal link, reaches the person
 PUBLIC_TIMEOUT = 30          # public mode's longest wait for any call, from its start to its whole answer: the sign-up,
                              # the settings page and the daily check (signup.public_api)
 MAX_ANSWER = 16 * 1024 * 1024   # the largest AIOStreams answer read (a config, a stream or subtitle listing)
@@ -498,6 +501,8 @@ UNREACHABLE = 'UNREACHABLE'  # AiosError.code: no answer at all (a name not foun
                              # request the address rules stop): "Can't reach AIOStreams at …"
 TOO_SLOW = 'TOO_SLOW'        # AiosError.code: asked, but its whole answer didn't come within the call's wait:
                              # AIOStreams was reached, so it isn't UNREACHABLE
+OUT_OF_TIME = 'OUT_OF_TIME'  # AiosError.code: nothing was left of the caller's whole time (AiosApi.deadline), so the
+                             # call wasn't sent
 NOT_AIOSTREAMS = 'NOT_AIOSTREAMS'   # AiosError.code: something answered the status call, but not as AIOStreams does
 REAL_DEBRID = 'REAL_DEBRID'  # AiosError.code: a request to Real-Debrid, stopped before it was sent
 ALIAS_UNKNOWN = 'ALIAS_UNKNOWN'      # AiosError.code: this AIOStreams doesn't know an alias (alias_config_id)
@@ -508,13 +513,13 @@ LIMITED = 'AIOStreams is limiting requests from this machine; try again in a few
 
 class AiosError(Exception):
     """`code`: AIOStreams' own error code (or the HTTP status of a refusal without one), or aiosconfig's for the errors
-    it finds itself (UNREACHABLE, TOO_SLOW, NOT_AIOSTREAMS, BAD_ANSWER, UNREADABLE, REAL_DEBRID, ALIAS_UNKNOWN,
-    ALIAS_NO_CONFIG). `kind`: what an AIOStreams refusal means as aiosconfig read it (_reading; None for any other
-    error). Callers decide by these two, never by the message's words, which may quote AIOStreams. `detail`:
-    AIOStreams' own words for a refusal, when it gave some, wherever in its answer (shown by the public sign-up for a
-    refused config,). `answer`: for a refusal without words, what names it: its code, or
-    "HTTP <status>" for an answer read for its status alone; None otherwise. `reason`: the message
-    without the step it names, for the public pages, which name their own."""
+    it finds itself (UNREACHABLE, TOO_SLOW, OUT_OF_TIME, NOT_AIOSTREAMS, BAD_ANSWER, UNREADABLE, REAL_DEBRID,
+    ALIAS_UNKNOWN, ALIAS_NO_CONFIG). `kind`: what an AIOStreams refusal means as aiosconfig read it (_reading; None for
+    any other error). Callers decide by these two, never by the message's words, which may quote AIOStreams.
+    `detail`: AIOStreams' own words for a refusal, when it gave some, wherever in its answer (shown by the public
+    sign-up for a refused config,). `answer`: for a refusal without words, what names it: its code
+, or "HTTP <status>" for an answer read for its status alone; None otherwise. `reason`:
+    the message without the step it names, for the public pages, which name their own."""
 
     def __init__(self, message, fix=None, code=None, detail=None, reason=None, kind=None, answer=None):
         super().__init__(message)
@@ -644,6 +649,9 @@ class AiosApi:
         # the longest any call waits (the public sign-up's own bound), from its start to its whole answer: its
         # connections, any redirect, its status line, headers and body (net.Deadline)
         self.max_timeout = max_timeout
+        # a time.monotonic() by which every call has ended, set by a caller that has a whole time (the public sign-up
+        # and Refresh): each call then waits at most what is left of it, and none is sent once nothing is
+        self.deadline = None
         self.retry_wait_cap = retry_wait_cap    # a "too many requests" asking for a longer wait is reported, not waited
         self.tries = tries                      # tries at a call AIOStreams asks to slow down
         self.user_agent = user_agent
@@ -657,18 +665,36 @@ class AiosApi:
 
     def call(self, method, path, body=None, auth=None, timeout=None, raw=False):
         """One request. A short "too many requests" (stock AIOStreams allows 5 config API calls per 5 seconds) is
-        waited out and retried; a long one (10 new configs per hour) is reported."""
+        waited out and retried; a long one (10 new configs per hour), or one past the caller's deadline, is reported."""
         for attempt in range(self.tries):
             status, payload, wait = self._call(method, path, body, auth, timeout, raw)
-            if wait is None or wait > self.retry_wait_cap or attempt == self.tries - 1:
+            if wait is None or wait > self.retry_wait_cap or attempt == self.tries - 1 or not self._fits(wait):
                 return status, payload
             if attempt == 0:
                 self.on_wait(wait)
             time.sleep(wait)
 
+    def time_left(self):
+        """The seconds left before the deadline, never below 0; None without one."""
+        return None if self.deadline is None else max(0.0, self.deadline - time.monotonic())
+
+    def _fits(self, wait):
+        """Whether a wait ends before the deadline, with time left for the call after it."""
+        left = self.time_left()
+        return left is None or wait < left
+
     def _wait_at_most(self, timeout=None):
+        """A call's wait: its own (or the client's), within the client's longest and what is left before the
+        deadline; OUT_OF_TIME, the call not sent, when nothing is."""
         wait = timeout or self.timeout
-        return min(wait, self.max_timeout) if self.max_timeout else wait
+        if self.max_timeout:
+            wait = min(wait, self.max_timeout)
+        left = self.time_left()
+        if left is None:
+            return wait
+        if left <= 0:
+            raise self._too_slow(OUT_OF_TIME)
+        return min(wait, left)
 
     def _call(self, method, path, body, auth, timeout, raw):
         """(status, answer, the wait a "too many requests" asks for or None); a refusal's answer is None when it isn't
@@ -724,11 +750,16 @@ class AiosApi:
         if isinstance(e, urllib.error.URLError) and not (bound.passed and bound.made):
             return self._unreachable(TimeoutError('timed out') if bound.passed else e)
         if bound.passed or isinstance(e, TimeoutError):
-            return AiosError(f'AIOStreams at {self.base} took too long to answer.', 'Try again in a few minutes.',
-                             code=TOO_SLOW)
+            return self._too_slow(TOO_SLOW)
         if isinstance(e, http.client.IncompleteRead):
             return self._unreadable()
         return self._unreachable(e)
+
+    def _too_slow(self, code):
+        """The AiosError of a call whose answer didn't come in time (TOO_SLOW), or wasn't asked for with no time left
+        (OUT_OF_TIME)."""
+        return AiosError(f'AIOStreams at {self.base} took too long to answer.', 'Try again in a few minutes.',
+                         code=code)
 
     def _asked_wait(self, headers):
         """The seconds a "too many requests" asks to wait (Retry-After, else RateLimit-Reset); SLOW_DOWN_WAIT, never
@@ -839,7 +870,7 @@ class AiosApi:
         this AIOStreams, RATE_LIMIT_EXCEEDED while it limits requests, the HTTP status of its server error (500 to 599),
         and UNREACHABLE (the usual "Can't reach" message) when it can't be reached."""
         status, location, body, headers = self._ask_alias(alias)
-        if status == 429 and (wait := self._asked_wait(headers)) <= self.retry_wait_cap:
+        if status == 429 and (wait := self._asked_wait(headers)) <= self.retry_wait_cap and self._fits(wait):
             self.on_wait(wait)
             time.sleep(wait)
             status, location, body, headers = self._ask_alias(alias)

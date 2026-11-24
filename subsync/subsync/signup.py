@@ -16,25 +16,27 @@ import collections
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
 import threading
 import time
 import urllib.parse
+import weakref
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
 from .aiosconfig import (ALIAS_NO_CONFIG, ALIAS_UNKNOWN, BAD_ANSWER, CODE_WORD, MAX_ALIAS, MAX_LANGUAGES,
-                         NOT_AIOSTREAMS, PUBLIC_RETRY_WAIT_CAP, PUBLIC_TIMEOUT, TOO_SLOW, UNREACHABLE, UNREADABLE,
-                         UUID_RE, WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link, is_limited, is_subsync_preset,
-                         needs_sign_in, new_key, parse_languages, sync_config, sync_config_problems, usenet_route,
-                         usenet_sync_config, viewer_change, without_builtin_twins, without_subsync)
+                         NOT_AIOSTREAMS, PUBLIC_RETRY_WAIT_CAP, PUBLIC_TIMEOUT, PUBLIC_WHOLE_TIMEOUT, TOO_SLOW,
+                         UNREACHABLE, UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link,
+                         is_limited, is_subsync_preset, needs_sign_in, new_key, parse_languages, sync_config,
+                         sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins)
 from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
 from .settings import AUDIO_CHOICES
-from .users import new_token
+from .users import TOKEN, new_token
 from .version import user_agent
 
 log = logging.getLogger("subsync.signup")
@@ -45,6 +47,10 @@ USER_AGENT = user_agent("public")
 MAX_LINK = 2000
 MAX_PASSWORD = 500
 HOUR = 3600
+DAY = 24 * HOUR
+# the most addresses (an IPv6 one: its /64 block) the sign-up gate counts at once: past it a new one is told
+# AIOSubtitles is busy until counted ones age out, so a flood from ever new addresses can't grow its table without end
+MAX_SIGNUP_ADDRESSES = 50_000
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -74,6 +80,7 @@ class SignupResult:
     usenet: bool = False          # a Usenet config was made or kept
     usenet_why: str = None        # Usenet was asked for but no config made: "proxy", "nntp" or "none"
     sync_made: bool = True        # a sync config was made or kept (not for stored copies only, nor Usenet only)
+    replaced: bool = False        # an earlier sign-up of this config, whose entry this one took, was deleted
 
 
 def public_api(instance, timeout):
@@ -84,8 +91,24 @@ def public_api(instance, timeout):
 
 def personal_manifest_url(settings, token):
     """A person's personal link: their own AIOSubtitles' manifest (public.USER_PATH reads it back). The one place its
-    shape is written, since AIOSubtitles' entry in their config is found by it (_add_addon, delete)."""
+    shape is written, since AIOSubtitles' entry in their config is found by it (_add_addon, _entry_token)."""
     return f"{settings.public_base}/u/{token}/manifest.json"
+
+
+def _entry_token(preset):
+    """The token of the personal link an entry of AIOSubtitles in a config carries: a custom addon whose link ends as
+    personal_manifest_url's, at this instance's address or an earlier one; None for any other."""
+    if not isinstance(preset, dict) or preset.get("type") != "custom":
+        return None
+    options = preset.get("options")
+    link = options.get("manifestUrl") if isinstance(options, dict) else None
+    try:
+        path = urllib.parse.urlsplit(link).path if isinstance(link, str) else ""
+    except ValueError:          # a link urllib can't read (an unmatched "[")
+        return None
+    _, u, tail = path.rpartition("/u/")
+    token, _, rest = tail.partition("/")
+    return token if u and rest == "manifest.json" and re.fullmatch(TOKEN, token) else None
 
 
 # ------------------------------------------------------------------------------------------- what people type
@@ -280,38 +303,82 @@ def _plain(e, doing, own_password=False, making=False):
 
 
 FULL = "AIOSubtitles is full for now. Try again in a few days."
+BUSY = "AIOSubtitles is busy right now. Try again in a few minutes."
+TOO_MANY_ATTEMPTS = "Too many sign-up attempts from your address in the last hour. Try again in an hour."
+TOO_MANY_SIGNUPS = "Too many sign-ups from your address in the last day. Try again tomorrow."
+# the box's help right under it says the rest: AIOSubtitles is open only to invited people
+WRONG_INVITE = "That invite code isn't right."
+
+
+def _address_of(ip):
+    """What the sign-up gate counts as one address: an IPv6 address with the rest of its /64 block, which one
+    connection usually has whole; an IPv4 address written as IPv6 as that IPv4 address; anything else as it is."""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if address.version == 4:
+        return str(address)
+    if address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return str(ipaddress.IPv6Network((int(address) >> 64 << 64, 64)))
+
+
+class _Window:
+    """How many times each key was counted in the last `span` seconds; the counts are dropped in the order they were
+    made, so keeping it costs only what has aged out."""
+
+    def __init__(self, span):
+        self.span, self.made, self.counts = span, collections.deque(), collections.Counter()
+
+    def age(self, now):
+        while self.made and self.made[0][0] <= now - self.span:
+            _, key = self.made.popleft()
+            self.counts[key] -= 1
+            if not self.counts[key]:
+                del self.counts[key]
+
+    def add(self, key, now):
+        self.made.append((now, key))
+        self.counts[key] += 1
 
 
 class SignupGate:
-    """Checked before a sign-up contacts anything: the invite code, attempts per address per hour, the user cap (counted
-    again where the record is written, Users.create, since sign-ups run at once pass this count together)."""
+    """Checked before a sign-up contacts anything, per address (_address_of): the sign-ups it made in the last day
+    (as many as attempts in an hour) and its attempts in the last hour, at most MAX_SIGNUP_ADDRESSES addresses
+    counted at once; then the invite code and the user cap (counted again where the record is written, Users.create,
+    since sign-ups run at once pass this count together)."""
 
     def __init__(self, settings, count_users, clock=time.time):
         self.s, self.count_users, self.clock = settings, count_users, clock
-        self.attempts = collections.defaultdict(collections.deque)
+        self.attempts = _Window(HOUR)
+        self.signups = _Window(DAY)
         self.lock = threading.Lock()
 
     def check(self, ip, invite):
-        now = self.clock()
+        now, key = self.clock(), _address_of(ip)
         with self.lock:
-            for key in list(self.attempts):
-                seen = self.attempts[key]
-                while seen and seen[0] <= now - HOUR:
-                    seen.popleft()
-                if not seen:
-                    del self.attempts[key]
-            seen = self.attempts[ip]
-            if len(seen) >= self.s.signups_per_hour:
-                raise SignupError("Too many sign-up attempts from your address in the last hour. Try again in an hour.",
-                              429)
-            seen.append(now)   # every attempt counts, wrong invite codes included
+            self.attempts.age(now)
+            self.signups.age(now)
+            if self.signups.counts[key] >= self.s.signups_per_hour:
+                raise SignupError(TOO_MANY_SIGNUPS, 429)
+            if self.attempts.counts[key] >= self.s.signups_per_hour:
+                raise SignupError(TOO_MANY_ATTEMPTS, 429)
+            if key not in self.attempts.counts and len(self.attempts.counts) >= MAX_SIGNUP_ADDRESSES:
+                raise SignupError(BUSY, 503)
+            self.attempts.add(key, now)   # every attempt counts, wrong invite codes included
         # capitals don't matter: phones may type the code in capitals, setup suggests it in small letters
         if self.s.invite and not hmac.compare_digest(str(invite or "").strip().casefold().encode(),
                                                      self.s.invite.casefold().encode()):
-            raise SignupError("That invite code isn't right. AIOSubtitles is open only to invited people for now.", 403,
-                              field="invite")
+            raise SignupError(WRONG_INVITE, 403, field="invite")
         if self.count_users() >= self.s.max_users:
             raise SignupError(FULL, 503)
+
+    def signed_up(self, ip):
+        """A sign-up from this address made a record: it counts towards the address's sign-ups of the day (check)."""
+        now = self.clock()
+        with self.lock:
+            self.signups.add(_address_of(ip), now)
 
 
 # ------------------------------------------------------------------------------------------- the steps
@@ -403,20 +470,28 @@ class ConfigPlan:
     warning: tuple = None
 
 
+# A config with nothing AIOSubtitles could read but its Usenet files, the Usenet box unticked
+TICK_USENET = ('Your config streams only through Usenet: tick "Sync Usenet files too" so AIOSubtitles can read its '
+               'files.')
+
+
 def _configs_for(settings, viewer, manifest_url, want):
     """The ConfigPlan for a viewer's config, the one AIOSubtitles' configs are made from: a sync config when it has a
     debrid service AIOSubtitles may read; with `want` (the Usenet box) a Usenet config when it has a Usenet route;
     stored copies only when Real-Debrid is its only debrid service and there is no Usenet config. Raises
-    SignupError (`unusable`) when there is no file AIOSubtitles could read."""
+    SignupError (`unusable`) when there is no file AIOSubtitles could read: on an instance that offers the Usenet box,
+    left unticked for a config whose Usenet files it could read, the box is the field it is about."""
     real_debrid_only = realdebrid.real_debrid_only(viewer)
     sync = sync_config(viewer, manifest_url, names=OWN_NAMES)
-    # `usenet`: this instance reads Usenet files too, so the reason a config can't be used names both
-    problems = sync_config_problems(sync, usenet=settings.usenet)
+    # where people can turn Usenet on, the reason a config can't be used names both
+    problems = sync_config_problems(sync, usenet=settings.usenet_offered)
     if real_debrid_only or problems:
         sync = None
     usenet, services, why = _usenet_for(viewer, manifest_url, sync is None) if want else (None, [], None)
     stored = real_debrid_only and usenet is None
     if sync is None and usenet is None and not stored:      # so not Real-Debrid-only: `problems` says why
+        if not want and settings.usenet_offered and usenet_route(viewer, manifest_url, names=OWN_NAMES)[0]:
+            raise SignupError(TICK_USENET, field="usenet", unusable=True)
         raise SignupError("AIOSubtitles can't find any file it could read through your AIOStreams: "
                           + "; ".join(problems) + ".", unusable=True)
     left_out = not stored and realdebrid.SERVICE in realdebrid.debrid_in_use(viewer)
@@ -501,13 +576,60 @@ def sync_fingerprint(sync):
 @contextlib.contextmanager
 def _removed_on_failure(api, made):
     """Configs this service made in the block (`made`: their (id, link, password), added as they are made) are removed
-    again when the block fails, whatever the failure, so no config holds a person's keys with nothing using it."""
+    again when the block fails, whatever the failure, so no config holds a person's keys with nothing using it: also
+    when the failure is that the sign-up's or Refresh's whole time ran out (_within_time), so their removal isn't held
+    to it."""
     try:
         yield made
     except Exception:
+        api.deadline = None
         for fields in made:
             drop_sync(api, fields)
         raise
+
+
+SIGNUP_TOO_SLOW = ("Your AIOStreams answered too slowly, so the sign-up stopped and nothing was kept. Try again in a "
+                   "few minutes.")
+REFRESH_TOO_SLOW = "Your AIOStreams answered too slowly, so the refresh stopped. Try again in a few minutes."
+
+
+@contextlib.contextmanager
+def _within_time(api, too_slow):
+    """A sign-up's or Refresh's steps within their whole time (PUBLIC_WHOLE_TIMEOUT): each of their AIOStreams
+    calls waits at most what is left of it (AiosApi.deadline), and a step that failed once it ran out says `too_slow`
+    (what it made is removed, _removed_on_failure)."""
+    deadline = api.deadline = time.monotonic() + PUBLIC_WHOLE_TIMEOUT
+    try:
+        yield
+    except SignupError:
+        if time.monotonic() >= deadline:
+            raise SignupError(too_slow) from None
+        raise
+
+
+def _taken(lock, api):
+    """Whether `lock` was taken, waited for at most what is left of the API's whole time."""
+    left = api.time_left()
+    return lock.acquire(timeout=-1 if left is None else left)
+
+
+# (AIOStreams, config id) -> the lock of its sign-ups, kept only while one holds it or waits for it
+_signing_up = weakref.WeakValueDictionary()
+_signing_up_guard = threading.Lock()
+
+
+@contextlib.contextmanager
+def _one_at_a_time(api, instance, uuid):
+    """Sign-ups of one AIOStreams config run one at a time: the next reads the config once the one before put
+    itself there, so it takes that one's place (_replace_earlier) rather than both being kept."""
+    with _signing_up_guard:
+        lock = _signing_up.setdefault((instance_key(instance), uuid), threading.Lock())
+    if not _taken(lock, api):
+        raise SignupError(SIGNUP_TOO_SLOW)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _new_sync(api, instance, sync):
@@ -669,68 +791,112 @@ def form_audio(settings, form):
     return _audio_answer(form.get("audio"), settings)
 
 
-def signup(settings, users, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
+def signup(settings, users, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT, on_replaced=None):
+    """A new sign-up: its SignupResult, or SignupError. `on_replaced`: called with the token of each earlier sign-up of
+    this config it deleted once it took that one's place in the person's config, so the caller stops what
+    served it."""
     with _refusal_explained():
-        return _signup(settings, users, form, api_factory, timeout)
+        return _signup(settings, users, form, api_factory, timeout, on_replaced)
 
 
-def _signup(settings, users, form, api_factory, timeout):
+def _signup(settings, users, form, api_factory, timeout, on_replaced):
     langs = _languages(form.get("languages"), settings.max_languages)
     audio = form_audio(settings, form)              # refused before anything is read or made
     instance, uuid, alias = parse_link(form.get("link"))
     password = _password(form)
     api = api_factory(instance, timeout)
-    uuid = _config_id(api, uuid, alias)
-    viewer, metadata = _read_viewer(api, uuid, password)
-    token = new_token()
-    manifest_url = personal_manifest_url(settings, token)
-    # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles' own config
-    # then lacks those addons too, so it asks their sites itself: only the addons whose site it really asks
-    clean_up = cleanable_presets(settings) if form.get("add_addon") == "on" and form.get("clean_up") == "on" else ()
-    want = wants_usenet(settings, form)
-    record = {"instance": instance, "main_uuid": uuid, "languages": langs, "version": 1}
-    if audio:
-        record["audio"] = audio
-    base = without_builtin_twins(viewer, clean_up)[0] if clean_up else viewer
-    # judged on what the configs are made from: the clean-up takes out only subtitle addons, none of them a debrid
-    # service or a stream source, so the answer is the one for their own config. With Real-Debrid as the only debrid
-    # service and no Usenet config, stored copies only: no sync config, nothing of theirs read; the clean-up is
-    # left out, since AIOSubtitles then asks no subtitle site for them
-    plan = _configs_for(settings, base, manifest_url, want)
-    # nothing left behind: a config made here is removed again when a later step, or saving the record, fails
-    with _removed_on_failure(api, []) as made:
-        if plan.stored:
-            clean_up = ()
-            _to_store_only(record)
-            all_clear(settings, record, users.clock())
-        elif plan.sync is not None:
-            fields = _new_sync(api, instance, plan.sync)
-            made.append(fields)
-            _synced(settings, record, plan.sync, fields, users.clock())
-        else:                                                       # Usenet only
-            all_clear(settings, record, users.clock())
-        if plan.usenet is not None:
-            fields = _new_sync(api, instance, plan.usenet)
-            made.append(fields)
-            _usenet_synced(record, plan.usenet, fields, plan.sync is None, users.clock())
-        _usenet_state(record, want, plan.services, plan.why)
-        # the person chose it (unticked by default): AIOSubtitles refreshes by itself
-        if keeps_password(settings, form):
-            record["auto_password"] = password
-        # the record first: the person's own config gets the link only once the link works; the cap is counted again
-        # with the write, and a sign-up past it removes the configs it made
-        if not users.create(token, record, settings.max_users):
-            raise SignupError(FULL, 503)
-    changes, added, manual, unchecked = [], False, False, False
-    if form.get("add_addon") == "on":
-        changes, added, manual, unchecked = _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up)
+    with _within_time(api, SIGNUP_TOO_SLOW):
+        uuid = _config_id(api, uuid, alias)
+        with _one_at_a_time(api, instance, uuid):
+            viewer, metadata = _read_viewer(api, uuid, password)
+            token = new_token()
+            manifest_url = personal_manifest_url(settings, token)
+            # The clean-up goes with adding AIOSubtitles (alone it would leave fewer subtitles); AIOSubtitles'
+            # own config then lacks those addons too, so it asks their sites itself: only the addons whose site it
+            # really asks
+            clean_up = cleanable_presets(settings) if form.get("add_addon") == "on" and form.get("clean_up") == "on" \
+                else ()
+            want = wants_usenet(settings, form)
+            record = {"instance": instance, "main_uuid": uuid, "languages": langs, "version": 1}
+            if audio:
+                record["audio"] = audio
+            base = without_builtin_twins(viewer, clean_up)[0] if clean_up else viewer
+            # judged on what the configs are made from: the clean-up takes out only subtitle addons, none of them a
+            # debrid service or a stream source, so the answer is the one for their own config. With Real-Debrid as
+            # the only debrid service and no Usenet config, stored copies only: no sync config, nothing of
+            # theirs read; the clean-up is left out, since AIOSubtitles then asks no subtitle site for them
+            plan = _configs_for(settings, base, manifest_url, want)
+            # nothing left behind: a config made here is removed again when a later step, or saving the record, fails
+            with _removed_on_failure(api, []) as made:
+                if plan.stored:
+                    clean_up = ()
+                    _to_store_only(record)
+                    all_clear(settings, record, users.clock())
+                elif plan.sync is not None:
+                    fields = _new_sync(api, instance, plan.sync)
+                    made.append(fields)
+                    _synced(settings, record, plan.sync, fields, users.clock())
+                else:                                                       # Usenet only
+                    all_clear(settings, record, users.clock())
+                if plan.usenet is not None:
+                    fields = _new_sync(api, instance, plan.usenet)
+                    made.append(fields)
+                    _usenet_synced(record, plan.usenet, fields, plan.sync is None, users.clock())
+                _usenet_state(record, want, plan.services, plan.why)
+                # the person chose it (unticked by default): AIOSubtitles refreshes by itself
+                if keeps_password(settings, form):
+                    record["auto_password"] = password
+                # the record first: the person's own config gets the link only once the link works; the cap is counted
+                # again with the write, and a sign-up past it removes the configs it made
+                if not users.create(token, record, settings.max_users):
+                    raise SignupError(FULL, 503)
+            changes, added, manual, unchecked, replaced = [], False, False, False, False
+            if form.get("add_addon") == "on":
+                changes, added, manual, unchecked = _add_addon(api, uuid, password, viewer, manifest_url, metadata,
+                                                               clean_up)
+            if added:     # its entry took the place of an earlier sign-up's, which then goes
+                replaced = _replace_earlier(api, users, viewer, manifest_url, instance, uuid, on_replaced)
     log.info("signed up: %d language%s%s%s", len(langs), "" if len(langs) == 1 else "s",
              ", stored copies only" if plan.stored else ", Real-Debrid left out" if plan.warning else "",
              ", Usenet on" if plan.usenet is not None else "")
     return SignupResult(token=token, manifest_url=manifest_url, changes=changes, warning=plan.warning, added=added,
                         manual=manual, unchecked=unchecked, languages=langs, store_only=plan.stored,
                         usenet=plan.usenet is not None, usenet_why=plan.why if want else None,
-                        sync_made=plan.sync is not None and not plan.stored)
+                        sync_made=plan.sync is not None and not plan.stored, replaced=replaced)
+
+
+def _replace_earlier(api, users, viewer, manifest_url, instance, uuid, on_replaced):
+    """The earlier sign-ups of this AIOStreams config whose entries in it adding this one replaced (viewer_change takes
+    out every entry named AIOSubtitles), deleted (_delete_earlier), `on_replaced` called with each one's token
+. Whether one was deleted."""
+    replaced = False
+    for preset in viewer.get("presets") or []:
+        token = _entry_token(preset) if is_subsync_preset(preset, manifest_url, (ADDON_NAME.lower(),)) else None
+        if token is not None and _delete_earlier(api, users, token, instance, uuid):
+            if on_replaced is not None:
+                on_replaced(token)
+            replaced = True
+    return replaced
+
+
+def _delete_earlier(api, users, token, instance, uuid):
+    """An earlier sign-up of this AIOStreams config deleted as Delete deletes one: its configs removed from that
+    AIOStreams, then its record and usage. Only a record of this same config, and only once every config of its own is
+    removed within what is left of the sign-up's time, so none is left that no record names: one that isn't stays as it
+    was. Whether it was deleted."""
+    lock = users.locked(token)
+    if not _taken(lock, api):
+        return False
+    try:
+        record = users.open(token)
+        if record is None or record.get("main_uuid") != uuid \
+                or instance_key(record["instance"]) != instance_key(instance):
+            return False
+        removed = [drop_sync(api, config_fields(record, kind)) for kind in ("sync", "usenet")
+                   if record.get(f"{kind}_uuid")]
+        return all(removed) and users.delete(token)
+    finally:
+        lock.release()
 
 
 def refresh(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT):
@@ -768,64 +934,68 @@ def _refresh(settings, users, token, form, api_factory, timeout):
             instance = record["instance"]
         password = _password(form)
         api = api_factory(instance, timeout)
-        main_uuid = _config_id(api, main_uuid, alias)
-        viewer, metadata = _read_viewer(api, main_uuid, password)
-        manifest_url = personal_manifest_url(settings, token)
-        want = wants_usenet(settings, form)
-        was_stored = store_only(record)
-        # stored copies, both ways
-        plan = _configs_for(settings, viewer, manifest_url, want)
-        old = []                  # configs they no longer use, removed once the record is saved
-        fields = usenet_fields = None
-        # configs made here: removed again when anything fails before the record holds them, so nothing holds their
-        # keys unused
-        with _removed_on_failure(api, []) as made:
-            # the Usenet config first, as the daily rebuild: when it can't be made, nothing of the sync config's has
-            # changed yet
-            if plan.usenet is not None:
-                if moved or not record.get("usenet_uuid"):
-                    usenet_fields = _new_sync(api, instance, plan.usenet)
+        # its AIOStreams calls within its whole time, so its page comes back
+        with _within_time(api, REFRESH_TOO_SLOW):
+            main_uuid = _config_id(api, main_uuid, alias)
+            viewer, metadata = _read_viewer(api, main_uuid, password)
+            manifest_url = personal_manifest_url(settings, token)
+            want = wants_usenet(settings, form)
+            was_stored = store_only(record)
+            # stored copies, both ways
+            plan = _configs_for(settings, viewer, manifest_url, want)
+            old = []                  # configs they no longer use, removed once the record is saved
+            fields = usenet_fields = None
+            # configs made here: removed again when anything fails before the record holds them, so nothing holds their
+            # keys unused
+            with _removed_on_failure(api, []) as made:
+                # the Usenet config first, as the daily rebuild: when it can't be made, nothing of the sync config's has
+                # changed yet
+                if plan.usenet is not None:
+                    if moved or not record.get("usenet_uuid"):
+                        usenet_fields = _new_sync(api, instance, plan.usenet)
+                    else:
+                        usenet_fields = _put_sync(api, record, plan.usenet, kind="usenet")
+                    if usenet_fields[0] != record.get("usenet_uuid"):
+                        made.append(usenet_fields)
+                if plan.sync is not None:
+                    if was_stored or moved or not record.get("sync_uuid"):
+                        fields = _new_sync(api, instance, plan.sync)
+                    else:
+                        fields = _put_sync(api, record, plan.sync)
+                    if fields[0] != record.get("sync_uuid"):
+                        made.append(fields)
+                if record.get("sync_uuid") and (plan.sync is None or moved):
+                    old.append((record["instance"], config_fields(record, "sync")))
+                if record.get("usenet_uuid") and (plan.usenet is None or moved):
+                    old.append((record["instance"], config_fields(record, "usenet")))
+                record["instance"], record["main_uuid"] = instance, main_uuid
+                if plan.stored:
+                    _to_store_only(record)
+                    all_clear(settings, record, users.clock())
+                elif plan.sync is not None:
+                    record.pop("store_only", None)
+                    _synced(settings, record, plan.sync, fields, users.clock())
                 else:
-                    usenet_fields = _put_sync(api, record, plan.usenet, kind="usenet")
-                if usenet_fields[0] != record.get("usenet_uuid"):
-                    made.append(usenet_fields)
-            if plan.sync is not None:
-                if was_stored or moved or not record.get("sync_uuid"):
-                    fields = _new_sync(api, instance, plan.sync)
+                    record.pop("store_only", None)
+                    _take_config(record, "sync")
+                    all_clear(settings, record, users.clock())
+                if plan.usenet is not None:
+                    _usenet_synced(record, plan.usenet, usenet_fields, plan.sync is None, users.clock())
                 else:
-                    fields = _put_sync(api, record, plan.sync)
-                if fields[0] != record.get("sync_uuid"):
-                    made.append(fields)
-            if record.get("sync_uuid") and (plan.sync is None or moved):
-                old.append((record["instance"], config_fields(record, "sync")))
-            if record.get("usenet_uuid") and (plan.usenet is None or moved):
-                old.append((record["instance"], config_fields(record, "usenet")))
-            record["instance"], record["main_uuid"] = instance, main_uuid
-            if plan.stored:
-                _to_store_only(record)
-                all_clear(settings, record, users.clock())
-            elif plan.sync is not None:
-                record.pop("store_only", None)
-                _synced(settings, record, plan.sync, fields, users.clock())
-            else:
-                record.pop("store_only", None)
-                _take_config(record, "sync")
-                all_clear(settings, record, users.clock())
-            if plan.usenet is not None:
-                _usenet_synced(record, plan.usenet, usenet_fields, plan.sync is None, users.clock())
-            else:
-                _take_config(record, "usenet")
-            _usenet_state(record, want, plan.services, plan.why)
-            if keeps_password(settings, form):
-                record["auto_password"] = password
-            if not users.update(token, record):   # deleted meanwhile (it expired): nothing holds what was made here
-                raise SignupError(NOT_SIGNED_UP)
-        # the record first, as at sign-up: the person's own config is changed only once the record holds the refresh;
-        # still under the record's lock, so a delete can't come in between
-        changes, added, manual, unchecked = [], False, False, False
-        if form.get("add_addon") == "on":
-            changes, added, manual, unchecked = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata)
-    for where, gone in old:   # the configs they no longer use: removed
+                    _take_config(record, "usenet")
+                _usenet_state(record, want, plan.services, plan.why)
+                if keeps_password(settings, form):
+                    record["auto_password"] = password
+                if not users.update(token, record):   # deleted meanwhile (it expired): nothing holds what was made here
+                    raise SignupError(NOT_SIGNED_UP)
+            # the record first, as at sign-up: the person's own config is changed only once the record holds the
+            # refresh; still under the record's lock, so a delete can't come in between
+            changes, added, manual, unchecked = [], False, False, False
+            if form.get("add_addon") == "on":
+                changes, added, manual, unchecked = _add_addon(api, main_uuid, password, viewer, manifest_url, metadata)
+    # the configs they no longer use: removed, each call with its own wait, not held to the refresh's whole time, so
+    # none holding their keys is left behind for the page's sake
+    for where, gone in old:
         drop_sync(api_factory(where, timeout), gone)
     log.info("refreshed a sync config%s%s%s", ", stored copies only" if plan.stored else
              ", Real-Debrid left out" if plan.warning else "",
@@ -898,9 +1068,10 @@ def set_audio(users, token, choice, settings):
 
 
 def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_TIMEOUT, on_confirmed=None):
-    """Removes the sync config and the Usenet config from the person's AIOStreams, with their password also AIOSubtitles
-    from their own config, then their record and usage. Under the record's lock, so a refresh or the daily check can't
-    make a config for a record being deleted; once the password is accepted, the record is always deleted.
+    """Removes the sync config and the Usenet config from the person's AIOStreams, with their password also this
+    record's entry of AIOSubtitles from their own config, then their record and usage. Under the record's
+    lock, so a refresh or the daily check can't make a config for a record being deleted; once the password is
+    accepted, the record is always deleted.
     `on_confirmed`: called under the lock once the delete is certain (a typed password accepted), before anything is
     removed: a mistyped password, which deletes nothing, leaves the person's service as it was. Returns what
     was removed, each config by itself so the page names the one left: "sync_removed" and "usenet_removed"
@@ -913,21 +1084,23 @@ def delete(settings, users, token, form, api_factory=public_api, timeout=PUBLIC_
             password = _password(form)
             try:
                 viewer, _ = api.get_config(record["main_uuid"], password)
-            except AiosError as e:
+            except AiosError as e:      # the delete step's problem is titled "Nothing was deleted"
                 if e.code == BAD_ANSWER:
-                    raise SignupError(f"{UNKNOWN_ANSWER}. Nothing was deleted.") from None
-                raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True)
-                                  + " Nothing was deleted.", field=_field_of(e)) from None
+                    raise SignupError(f"{UNKNOWN_ANSWER}.") from None
+                raise SignupError(_plain(e, "Reading your AIOStreams config", own_password=True),
+                                  field=_field_of(e)) from None
         if on_confirmed is not None:
             on_confirmed()
         for kind in ("sync", "usenet"):          # no sync config for stored copies only or Usenet only
             outcome[f"{kind}_removed"] = not record.get(f"{kind}_uuid") or drop_sync(api, config_fields(record, kind))
         if viewer is not None:
-            manifest_url = personal_manifest_url(settings, token)
             try:
-                new, taken_out = without_subsync(viewer, manifest_url, names=(ADDON_NAME.lower(),))
-                if taken_out:
-                    api.save_config(record["main_uuid"], password, new)
+                # this record's own entry only, at this instance's address or an earlier one: another sign-up's entry in
+                # the same config, which may have taken this one's place, stays
+                presets = viewer.get("presets") or []
+                kept = [p for p in presets if _entry_token(p) != token]
+                if len(kept) < len(presets):
+                    api.save_config(record["main_uuid"], password, dict(viewer, presets=kept))
                 outcome["addon_removed"] = True
             except Exception as e:
                 _log_fault(e, "removing AIOSubtitles from a config")

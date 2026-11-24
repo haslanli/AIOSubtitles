@@ -205,6 +205,22 @@ class UsersTest(unittest.TestCase):
             other.close()
         self.assertEqual(self.users.count(), 0)                            # nothing was stored
 
+    def test_a_persons_who_key_is_made_from_their_link_alone(self):
+        # The key of their counts in the sites' fair shares and of their Usenet files not found was the first
+        # half of their record's id, so a copy of the data folder joined those rows to their record
+        key = self.users.who_key(self.token)
+        self.assertRegex(key, "^[0-9a-f]{16}$")
+        self.assertEqual(self.users.who_key(self.token), key)
+        self.assertNotEqual(self.users.who_key(self.users_module.new_token()), key)
+        for stored in (self.users.user_id(self.token), self.users.rows_key(self.token)):
+            self.assertNotIn(key, stored)
+        other = self.users_module.Users(self.path, bytes(32), clock=self.clock)
+        try:
+            self.assertNotEqual(other.who_key(self.token), key)
+        finally:
+            other.close()
+        self.assertEqual(self.users.count(), 0)                            # nothing was stored
+
     def test_touch_keeps_a_record(self):
         self.users.create(self.token, RECORD)
         self.clock.t += 170 * DAY
