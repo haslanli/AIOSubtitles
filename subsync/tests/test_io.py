@@ -826,7 +826,6 @@ class HasReferenceTest(unittest.TestCase):
                     "cues": [(s, d) for s, d in lines]}
             self.assertTrue(w._has_reference(FakeIndex(text=[text])))
             self.assertFalse(w._has_reference(FakeIndex(text=[dict(text, forced=True)])))
-            self.assertFalse(w._has_reference(object()))                          # not an index this module reads
 
 
 class StackedShareTest(unittest.TestCase):

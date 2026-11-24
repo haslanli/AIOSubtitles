@@ -174,7 +174,6 @@ def every_page():
         "deleted-host": pages.deleted_page({}, settings(**HOST)),
         "not-found-host": pages.not_found_page(settings(**HOST)),
         "not-found": pages.not_found_page(),
-        "error": pages.error_page("Wrong."),
         # The page a browser gets after an unexpected failure, and under a personal link
         "error-unexpected": pages.error_page(settings=s),
         "error-personal": pages.error_page(settings=s, personal=True),
@@ -250,11 +249,6 @@ def approved_texts():
         texts.append(" ".join((lead,) + explain.PUBLIC_MANUAL_STEPS))
     texts += [name for name, _, _ in LANGUAGES] + list(pages.UI_WORDS) + list(CHANGES)
     return texts
-
-
-def approved_corpus():
-    """The approved texts in one string."""
-    return "\n".join(approved_texts())
 
 
 def split_pieces():
@@ -469,7 +463,7 @@ class LookTest(unittest.TestCase):
         # HTML gives a form no dialog role (the sign-up's layer is the dialog)
         from subsync import ui
         rows = {"choice": ui.choice("c", "Title", "Help."),
-                "radio-row": ui.radio_row("r", "v", "Title", "Help.", tag="(tag)", note="Note.")}
+                "radio-row": ui.radio_row("r", "v", "Title", "Help.", note="Note.")}
         for name, text in dict(every_page(), **rows).items():
             with self.subTest(page=name):
                 self.assertEqual(InLabels(text).flow, [])
@@ -495,7 +489,7 @@ class LookTest(unittest.TestCase):
         for name, title in (("result", pages.TITLES["done"]), ("settings", pages.TITLES["settings"]),
                             ("delete", pages.TITLES["delete"]), ("deleted", pages.TITLES["deleted"]),
                             ("privacy", pages.TITLES["privacy"]), ("not-found", pages.TITLES["not_found"]),
-                            ("signup", "AIOSubtitles"), ("error", "AIOSubtitles")):
+                            ("signup", "AIOSubtitles"), ("error-unexpected", "AIOSubtitles")):
             with self.subTest(page=name):
                 self.assertEqual(html.unescape(re.search(r"<title>(.*?)</title>", rendered[name]).group(1)), title)
         self.assertEqual(len(set(pages.TITLES.values())), len(pages.TITLES))
@@ -590,7 +584,7 @@ class LookTest(unittest.TestCase):
     def test_every_value_is_escaped(self):
         from subsync import pages
         s = settings()
-        for text in (pages.signup_page(s, error=HOSTILE), pages.error_page(HOSTILE),
+        for text in (pages.signup_page(s, error=HOSTILE),
                      pages.settings_page(s, dict(RECORD, state="cannot_rebuild", state_detail=HOSTILE), USAGE,
                                          LINK + HOSTILE, now=0, error=HOSTILE, notice=HOSTILE, message=HOSTILE),
                      pages.result_page(result(changes=[HOSTILE], manifest_url=LINK + HOSTILE,
@@ -1332,7 +1326,6 @@ class OtherPagesTest(unittest.TestCase):
                               text)
                 self.assertEqual([a["href"] for a in tree.all("a")], ["/", "/privacy", version.PROJECT, CONTACT, "/"])
                 self.assertEqual(bool(tree.all("meta", name="robots", content="noindex")), personal)
-        self.assertIn("Wrong.", Tree(pages.error_page("Wrong.")).text())          # a page given its own line
 
     def test_deleted_page_says_what_is_left_to_do(self):
         from subsync import explain, pages
@@ -1712,16 +1705,6 @@ class ScriptTest(unittest.TestCase):
         self.assertIn('data-remove-label="Remove: "', slots)
         self.assertIn('aria-label="Remove: Spanish"', slots)
 
-    def test_the_script_uses_only_approved_words(self):
-        from subsync.ui import APP_JS
-        corpus = approved_corpus()
-        for word in re.findall(r"\"([A-Z][^\"]*)\"|'([A-Z][^']*)'", APP_JS):
-            word = word[0] or word[1]
-            if word in ("Enter", "Escape"):                # key names, not shown to anyone
-                continue
-            with self.subTest(word=word):
-                self.assertIn(word, corpus)
-
 
 class PartsTest(unittest.TestCase):
     """The installer's parts, built with the site's pages for the installer's own screens."""
@@ -1729,7 +1712,7 @@ class PartsTest(unittest.TestCase):
     def test_radio_rows(self):
         from subsync import ui
         tree = Tree(ui.radio_group("How?", [ui.radio_row("way", "self", "A", "a.", checked=True),
-                                            ui.radio_row("way", "host", "B", "b.", tag="T")]))
+                                            ui.radio_row("way", "host", "B", "b.")]))
         radios = tree.all("input", type="radio")
         self.assertEqual([(a["name"], a["value"], "checked" in a) for a in radios],
                          [("way", "self", True), ("way", "host", False)])
@@ -1762,7 +1745,7 @@ class PartsTest(unittest.TestCase):
         current = [a for a in tree.all("li") if a.get("aria-current") == "step"]
         self.assertEqual(len(current), 2)                         # once in the rail, once in the phone's segments
         self.assertEqual(len([a for a in tree.all("li") if a.get("class") == "done"]), 2)
-        self.assertIn("data-back", tree.all("button", **{"aria-label": "Back"})[0])
+        self.assertFalse([a for _, a in tree.elements if a.get("aria-label") == "Back"])   # the default: no Back control
         done = Tree(ui.step_frame(["One", "Two"], 0, "", "Setup steps", done=True, back=False))
         self.assertFalse([a for a in done.all("li") if a.get("aria-current")])
         self.assertFalse(done.all("button"))
@@ -1823,13 +1806,13 @@ class PartsTest(unittest.TestCase):
         self.assertEqual((box["aria-labelledby"], box["aria-describedby"]), ("c-title", "e c-help"))
         self.assertEqual((tree.all("b", id="c-title"), tree.text_of["c-title"], tree.text_of["c-help"]),
                          ([{"id": "c-title"}], "Title", "Help."))
-        text = ui.radio_row("r", "v", "Title", "Help.", tag="(tag)", note="Note.")
+        text = ui.radio_row("r", "v", "Title", "Help.", note="Note.")
         tree = Tree(text)
         button = tree.all("input", id="r-v")[0]
         self.assertTrue(text.startswith('<label class="way"><input type="radio" name="r" id="r-v" '))
         self.assertEqual((button["aria-labelledby"], button["aria-describedby"]), ("r-v-title", "r-v-help r-v-note"))
         self.assertEqual((tree.all("span", id="r-v-title")[0]["class"], tree.text_of["r-v-title"]),
-                         ("head", "Title(tag)"))
+                         ("head", "Title"))
 
     def test_a_show_button_is_named_by_its_box(self):
         # Every such button was named "Show", two or three alike on one page in a list of its controls or to

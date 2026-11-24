@@ -1669,8 +1669,6 @@ class Worker(threading.Thread):
     def _has_reference(self, index):
         """Has the file any text or image track a subtitle could be judged against (the most lenient test: any
         non-forced dialogue track, any plausible image track)?"""
-        if not hasattr(index, "text_tracks"):
-            return False
         return pipeline.choose_reference(index, 0, self.s.languages[0] if self.s.languages else DEFAULT_LANGUAGE,
                                          self.s.image_ref, self.s.prefer_plain, self.s.fallback_reference) is not None
 

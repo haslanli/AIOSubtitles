@@ -381,7 +381,7 @@ class ExtraSources:
     def _cand(source, cid, url, lang, release="", **flags):
         return {"id": cid, "source": source, "url": url, "lang": lang, "release": str(release or ""), "hash": "",
                 "hash_match": bool(flags.pop("hash_match", False)), "release_match": bool(flags.pop("release_match", False)),
-                "ai": bool(flags.pop("ai", False)), "hi": bool(flags.pop("hi", False)), **flags}
+                "ai": bool(flags.pop("ai", False)), **flags}
 
     # -- Stremio's OpenSubtitles v3 ----------------------------------------------------------------------
     def _osv3(self, type_, video_id, langs, hints):
@@ -491,7 +491,7 @@ class ExtraSources:
                                           it.get("download_url") or f"{self.s.tsdb_url}/get/{it.get('id')}",
                                           lang3(it.get("language")), it.get("release_name"),
                                           ai=bool(it.get("ai") or it.get("ai_transcribed")),
-                                          hi=bool(it.get("hearing_impaired")), release_match=matched, hash_match=own,
+                                          release_match=matched, hash_match=own,
                                           cues=it.get("cues") if isinstance(it.get("cues"), int) else None))
                 offset += len(items)
                 if not items or offset >= int(page.get("total") or 0):
@@ -548,7 +548,7 @@ class ExtraSources:
             got = self._get(f"{self.s.gestdown_url}/subtitles/get/{show}/{season}/{episode}/"
                             f"{urllib.parse.quote(lang_name(lang))}") or {}
             return [self._cand("gestdown", f"gd-{it.get('subtitleId')}", f"{self.s.gestdown_url}{it['downloadUri']}",
-                               lang, it.get("version"), hi=bool(it.get("hearingImpaired")))
+                               lang, it.get("version"))
                     for it in got.get("matchingSubtitles") or []
                     if it.get("completed") and site_path(it.get("downloadUri"))]
         return self._each_language("gestdown", type_, video_id, langs, one)
@@ -575,7 +575,7 @@ class ExtraSources:
             # its query, where SubDL's answer gives the key; the download address, kept here, has it as given
             name = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
             out.append(self._cand("subdl", f"subdl-{name}", f"{self.s.subdl_download_url}{url}{frag}",
-                                  lang3(it.get("language") or it.get("lang")), it.get("release_name"), hi=bool(it.get("hi"))))
+                                  lang3(it.get("language") or it.get("lang")), it.get("release_name")))
         return out
 
     # -- SubSource (key) --------------------------------------------------------------------------------
@@ -621,8 +621,7 @@ class ExtraSources:
             lang = SUBSOURCE_BY_NAME.get(str(it.get("language") or "").lower(), lang3(it.get("language")))
             out.append(self._cand("subsource", f"subsource-{sid}",
                                   f"{self.s.subsource_url}/subtitles/{sid}/download{frag}", lang, release,
-                                  ai=bool(MACHINE.search(str(it.get("productionType") or ""))),
-                                  hi=bool(it.get("hearingImpaired") or it.get("hi"))))
+                                  ai=bool(MACHINE.search(str(it.get("productionType") or "")))))
         return out
 
     # -- Wyzie (key, self-hosted only) ---------------------------------------------------------------------------
@@ -640,7 +639,7 @@ class ExtraSources:
             self._count("wyzie")
             got = self._get(f"{self.s.wyzie_url}/search?{urllib.parse.urlencode(q)}") or []
             return [self._cand("wyzie", f"wyzie-{it.get('id')}", it["url"], lang3(it.get("language") or lang),
-                               it.get("release") or it.get("display"), hi=bool(it.get("isHearingImpaired")))
+                               it.get("release") or it.get("display"))
                     for it in (got if isinstance(got, list) else []) if it.get("url")]
         return self._each_language("wyzie", type_, video_id, [x for x in langs if lang2(x)], one)
 

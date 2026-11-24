@@ -635,9 +635,9 @@ def not_found_page(settings=None):
     return _letter(TITLES["not_found"], "This page doesn't exist", content, settings=settings)
 
 
-def error_page(message=None, settings=None, personal=False):
-    """The page a browser gets when something fails unexpectedly: `message`, by default the line that says
-    the problem is on AIOSubtitles' side; `personal`: under a personal link, so it asks not to be indexed."""
-    content = (f"<div class=\"notes\">{ui.note('problem', message or explain.PUBLIC_TEXTS['went_wrong'], role='alert')}"
+def error_page(settings=None, personal=False):
+    """The page a browser gets when something fails unexpectedly: the line that says the problem is on
+    AIOSubtitles' side; `personal`: under a personal link, so it asks not to be indexed."""
+    content = (f"<div class=\"notes\">{ui.note('problem', explain.PUBLIC_TEXTS['went_wrong'], role='alert')}"
                "</div><div class=\"body\"><p><a href=\"/\">Back to the start page</a></p></div>")
     return _letter("AIOSubtitles", "Something went wrong", content, personal=personal, settings=settings)

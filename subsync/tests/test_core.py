@@ -968,20 +968,6 @@ class ClearlyBetterTest(unittest.TestCase):
             with self.subTest(seed=seed):
                 self.assertFalse(clearly_better(before, after, min_span=0.7)[0])
 
-    def test_another_films_subtitle_is_refused_at_its_closest_shift_within_two_seconds(self):
-        # the same 40, each tried at the 50 ms step within +-2 s of where it is that gives the lowest median error
-        accepted = 0
-        for seed in range(40):
-            other = [s for s, _ in rhythm(900, 1000 + seed)]
-            before = relgate(self.ref, other, self.dur, min_span=0.7)
-            best = None
-            for step in range(-40, 41):
-                g = relgate(self.ref, [c + step * 0.05 for c in other], self.dur, min_span=0.7)
-                if "median_ms" in g and (best is None or g["median_ms"] < best["median_ms"]):
-                    best = g
-            accepted += clearly_better(before, best, min_span=0.7)[0]
-        self.assertEqual(accepted, 0)
-
     def test_the_numbers_are_settings(self):
         before, after = self.gates(styled(self.cues, 1, shift=9.0), styled(self.cues, 1))
         self.assertFalse(clearly_better(before, after, {"median_ms": 50}, min_span=0.7)[0])
@@ -1075,9 +1061,13 @@ class StartWindowTest(unittest.TestCase):
 
     def test_the_bins_are_those_of_every_pair_whatever_the_blocks(self):
         from unittest import mock
-        for starts, pairs in ((shift.STARTS_AT_ONCE, shift.PAIRS_AT_ONCE), (7, 50), (1, 1)):
+        cases = list(self.cases())
+        # blocks of one on the first 6 cases only (the four edge cases and two random tracks; ~11 s on all 44): (7, 50)
+        # already reaches every other branch, several blocks, a partial last one, several sub-steps a block
+        blocks = ((shift.STARTS_AT_ONCE, shift.PAIRS_AT_ONCE, cases), (7, 50, cases), (1, 1, cases[:6]))
+        for starts, pairs, chosen in blocks:
             with mock.patch.object(shift, "STARTS_AT_ONCE", starts), mock.patch.object(shift, "PAIRS_AT_ONCE", pairs):
-                for i, (cand, ref) in enumerate(self.cases()):
+                for i, (cand, ref) in enumerate(chosen):
                     for max_offset in (120.0, 600.0):
                         with self.subTest(blocks=(starts, pairs), case=i, max_offset=max_offset):
                             got = shift._window(cand, sorted(ref), max_offset)

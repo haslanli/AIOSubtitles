@@ -133,7 +133,7 @@ class ExtraSourcesTest(unittest.TestCase):
         tsdb = [c for c in got if c["source"] == "tsdb"]
         self.assertEqual([(c["id"], c["lang"], c["cues"]) for c in tsdb],
                          [("tsdb-11", "eng", 900), ("tsdb-12", "rus", 870), ("tsdb-13", "eng", 1500)])
-        self.assertTrue(tsdb[1]["ai"] and tsdb[2]["hi"])
+        self.assertTrue(tsdb[1]["ai"])
         self.assertEqual(tsdb[0]["release"], "Movie.2010.WEB-DL")
         pages = [q for p, q in self.fake.calls if p.startswith("/tsdb/v1")]
         self.assertEqual([q.get("offset") for q in pages], ["0", "2"])

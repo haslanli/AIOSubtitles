@@ -315,19 +315,18 @@ def gauge(value, unit, share, full=False):
 
 # ------------------------------------------------------------------------------------------- the installer's parts
 
-def radio_row(name, value, title, text, checked=False, tag=None, note=None, invalid=False):
+def radio_row(name, value, title, text, checked=False, note=None, invalid=False):
     """A way to choose, one of a few: the whole row is a radio button; the picked one takes the chosen blue. `text`:
     its words under the title (none when empty). `note`: words shown under them only while this row is the one
     picked; the stylesheet hides them otherwise, so it works without the script, and a browser that can't tell shows
     them. `invalid`: the answer has a problem (its group is described by the problem's message, radio_group). Inside
-    the label only phrasing content, as in choice; the button is named by its title and tag alone, as there."""
+    the label only phrasing content, as in choice; the button is named by its title alone, as there."""
     rid = f"{name}-{value}"
     refs = described(f"{rid}-help" if text else None, f"{rid}-note" if note else None)
     return (f"<label class=\"way\"><input type=\"radio\" name=\"{e(name)}\" id=\"{e(rid)}\" value=\"{e(value)}\""
             f"{' checked' if checked else ''} aria-labelledby=\"{e(rid)}-title\""
             + (f" aria-describedby=\"{e(refs)}\"" if refs else "") + (" aria-invalid=\"true\"" if invalid else "")
-            + f"><span><span class=\"head\" id=\"{e(rid)}-title\"><b>{e(title)}</b>"
-            + (f"<i>{e(tag)}</i>" if tag else "") + "</span>"
+            + f"><span><span class=\"head\" id=\"{e(rid)}-title\"><b>{e(title)}</b></span>"
             + (f"<span id=\"{e(rid)}-help\">{e(text)}</span>" if text else "")
             + (f"<span class=\"if-chosen\" id=\"{e(rid)}-note\">{e(note)}</span>" if note else "") + "</span></label>")
 
@@ -346,10 +345,10 @@ def radio_group(legend, rows, help_text=None, id=None, labelled_by=None, describ
             + "<div class=\"options\">" + "".join(rows) + "</div></fieldset>")
 
 
-def step_frame(steps, current, content, rail_label, done=False, back=True):
+def step_frame(steps, current, content, rail_label, done=False, back=None):
     """The installer's frame: a step list on the left on desktop; on phones and tablets, segments on top with the back
     arrow, and the step's Continue in thumb reach. `current`: the index of the step shown; `done`: every step done;
-    `back`: the back arrow, a link when it is an address (the installer's pages work without the script)."""
+    `back`: the address the back arrow links to (none: no back arrow); a link, so the pages work without the script."""
     rail, segs = [], []
     for i, name in enumerate(steps):
         is_done, is_now = done or i < current, not done and i == current
@@ -357,10 +356,7 @@ def step_frame(steps, current, content, rail_label, done=False, back=True):
         here = " aria-current=\"step\"" if is_now else ""
         rail.append(f"<li{state}{here}><span class=\"dot\">{TICK_BOLD if is_done else ''}</span>{e(name)}</li>")
         segs.append(f"<li{state}{here}></li>")
-    if isinstance(back, str):
-        back_html = f"<a class=\"icon-btn\" href=\"{e(back)}\" aria-label=\"Back\">{BACK}</a>"
-    else:
-        back_html = (f"<button class=\"icon-btn\" type=\"button\" data-back aria-label=\"Back\">{BACK}</button>" if back else "")
+    back_html = f"<a class=\"icon-btn\" href=\"{e(back)}\" aria-label=\"Back\">{BACK}</a>" if back else ""
     return (f"<div class=\"frame\"><ol class=\"rail\" aria-label=\"{e(rail_label)}\">{''.join(rail)}</ol>"
             f"<main class=\"steparea\"><div class=\"fbar\">{back_html}<ol class=\"segs\" aria-hidden=\"true\">"
             f"{''.join(segs)}</ol></div>{content}</main></div>")

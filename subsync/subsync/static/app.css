@@ -126,7 +126,6 @@ input:target,select:target{scroll-margin-top:144px}
 .way input::after{content:"";width:10px;height:10px;border-radius:50%;background:var(--accent-bg);opacity:0}
 .way .head{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
 .way b{font-weight:700;font-size:19px;line-height:1.35;overflow-wrap:anywhere}
-.way i{font-style:normal;font-size:15px;font-weight:700;color:var(--accent-text);white-space:nowrap}
 .way .head~span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
 .way:has(input:checked) .head~span{color:var(--on-accent-bg)}
 /* words for the picked row only (AD567): hidden while another row is picked; a browser without :has shows them */
