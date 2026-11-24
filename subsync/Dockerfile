@@ -54,10 +54,6 @@ WORKDIR /opt/aiosubtitles/subsync
 ENV ORT_DISABLE_TELEMETRY=1
 COPY subsync/subsync ./subsync
 COPY VERSION /opt/aiosubtitles/VERSION
-# The notices and licences that travel with the image (NOTICE.md): this project's licence, and the Apache-2.0 text
-# Docker's two programs above come under, copied from the base image (Debian's base-files)
-COPY NOTICE.md LICENSE /opt/aiosubtitles/licences/
-RUN cp /usr/share/common-licenses/Apache-2.0 /opt/aiosubtitles/licences/Apache-2.0.txt
 COPY installer/*.py /opt/aiosubtitles/installer/
 COPY --chmod=755 installer/image-entry.sh /opt/aiosubtitles/entry
 # The pages' two typefaces, Atkinson Hyperlegible Next and Mono (SIL Open Font Licence 1.1, its text beside them),
@@ -83,6 +79,12 @@ ADD --chmod=644 --checksum=sha256:7888113072263cb471b93f66dd5e2ad70548dc526fa1ac
 ADD --chmod=644 --checksum=sha256:b3018ef2b09a0250b6e0c8e871c927098363e5fd4df890cc68e8358eb0aaf1bd \
     https://huggingface.co/PaddlePaddle/eslav_PP-OCRv5_mobile_rec_onnx/resolve/9a32171fc5718746875e1a261818884517975013/inference.onnx \
     ./subsync/ocr/eslav_rec.onnx
+# The notices and licences that travel with the image, in one folder (NOTICE.md): NOTICE.md, this project's licence,
+# and the text of every licence NOTICE.md's table names, which subsync/licences.py copies there from the image's own
+# files (Debian's Apache-2.0, GPL-3, GPL-2 and LGPL-2.1, Python's own, the typefaces' OFL above, each Python package's
+# own licence files); it stops the build unless every licence the table names has its text there
+COPY NOTICE.md LICENSE /opt/aiosubtitles/licences/
+RUN --mount=type=bind,source=subsync,target=/src python -I -B /src/licences.py
 # Both test suites run from a read-only view of the build context (they never become a layer), each in a temporary
 # folder of its own that is removed in the same step: nothing a test made stays in the image's /tmp.
 ARG SUBSYNC_TESTS=run

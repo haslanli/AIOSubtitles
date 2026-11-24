@@ -590,7 +590,7 @@ class PublicHandler(Handler):
             text = raw.decode("utf-8")
             fields = urllib.parse.parse_qs(text, keep_blank_values=True, max_num_fields=MAX_FIELDS)
         except (UnicodeDecodeError, ValueError):
-            raise FormError("The form couldn't be read. Send it again from the page.") from None
+            raise FormError("The form couldn't be read. Send it again from this page.") from None
         form = {k: v[0] for k, v in fields.items()}
         if "lang" in fields:
             form["lang"] = fields["lang"]           # every language slot's choice, in the page's order

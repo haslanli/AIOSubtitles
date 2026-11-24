@@ -523,6 +523,16 @@ class PublicHttpTest(ServerHarness, unittest.TestCase):
                 self.assertEqual(answers(data), [408])
                 self.assertIn(b"The form took too long to arrive. Send it again from this page.", data)
 
+    def test_a_form_that_cant_be_read_says_to_send_it_again_from_this_page(self):
+        # It said "from the page", where the form's other problems say "from this page"
+        import html
+        _, _, _, _, token = self.sign_up()
+        for path in ("/signup", f"/u/{token}/configure"):
+            with self.subTest(path=path):
+                code, body, _ = http(self.base + path, b"action=languages&languages=\xff\xfe")
+                self.assertEqual(code, 400)
+                self.assertIn("The form couldn't be read. Send it again from this page.", html.unescape(body.decode()))
+
     def test_a_client_that_stops_reading_the_answer_is_closed_quietly(self):
         # A write past the connection's timeout (the client stopped reading) was logged as a failed request
         # and answered with the "Something went wrong" page it couldn't read either

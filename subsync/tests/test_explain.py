@@ -25,12 +25,14 @@ def settings_read_by_the_code():
 # approved as written though longer than 125 words (a setting or question) or 160 (a fixed rule), each with its approved
 # word count, which is its own cap: the Usenet box's explanation, the audio limit's and the word check's with the
 # sentences added to them, the daily data limit's and the rule on what is kept with
-# its deletion sentence and the 7 days of each person's original subtitles
+# its deletion sentence and the 7 days of each person's original subtitles, and the
+# workers' memory sizing with what re-timing takes
 APPROVED_LONG = {
     "USENET": 140,
     "SUBSYNC_AUDIO_BUDGET_GB": 133,
     "SUBSYNC_TEXT_PAIRING": 143,
     "SUBSYNC_USER_DAILY_MB": 144,
+    "SUBSYNC_ACTIVE_WORKERS": 137,
     "Public mode: what is kept, and for how long": 215,
 }
 
@@ -292,7 +294,9 @@ APPROVED = {
         "nothing to do stops after a while (30 minutes by default). Past the limit, a person's requests get only "
         "copies already in the shared store until a worker frees up. Each worker takes about 2.5 MB of memory, plus up "
         "to 32 MB for the subtitles it downloaded in the last 10 minutes, so 100 take from about 250 MB to about 3.5 "
-        "GB; keep the limit within what the server's memory allows.",
+        "GB; keep the limit within what the server's memory allows. Re-timing needs more, for a few seconds at a "
+        "time: one alass run takes about 0.4 GB, up to about 1.2 GB for a 3-hour film, and at most one runs per "
+        "processor, so leave about 1 GB per processor for it too.",
     "SUBSYNC_MAX_CONNECTIONS":
         "Requests handled at once. Each one takes a thread and some memory, so past it the service answers \"busy, "
         "try again\" (HTTP 503) at once instead of running out of memory. Apps ask for subtitles again on their own. "
@@ -1001,6 +1005,12 @@ class NumbersTest(unittest.TestCase):
         from subsync.worker import FETCHED_CAP, LIST_TTL_S
         self.assertIn(f"plus up to {FETCHED_CAP // MB} MB for the subtitles it downloaded in the last "
                       f"{LIST_TTL_S // 60} minutes, so 100 take", explain.SETTINGS["SUBSYNC_ACTIVE_WORKERS"][1])
+        # Re-timing's memory is said too; "at most one runs per processor" is alass's own bound
+        from subsync import alass
+        from subsync.settings import available_cpus
+        self.assertIn("and at most one runs per processor, so leave about 1 GB per processor for it too.",
+                      explain.SETTINGS["SUBSYNC_ACTIVE_WORKERS"][1])
+        self.assertEqual(alass.RUNS_AT_ONCE, available_cpus())
 
     def test_the_language_check_and_the_shared_timing(self):
         from subsync.langcheck import MIN_WORDS

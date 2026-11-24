@@ -3,12 +3,14 @@ of both parts run in its build without leaving anything behind, and its entry sc
 never as root."""
 import fnmatch
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 import installer  # noqa: F401  (its __init__ puts subsync's folder on the import path)
+import licences   # subsync/licences.py, a step of the image's build
 from subsync import explain, ui
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -201,10 +203,121 @@ class Notice(unittest.TestCase):
         self.assertIn("|\n\nThe image carries this file and these licences' texts in /opt/aiosubtitles/licences/.\n\n",
                       self.notice)                                          # under the table
         final = self.text.split('\nFROM python@', 1)[1]
-        self.assertIn('\nCOPY NOTICE.md LICENSE /opt/aiosubtitles/licences/\n', final)
-        # the Apache-2.0 text Docker's programs come under: the base image's own copy (Debian's base-files)
-        self.assertIn('\nRUN cp /usr/share/common-licenses/Apache-2.0 /opt/aiosubtitles/licences/Apache-2.0.txt\n',
-                      final)
+        # The folder held NOTICE.md, LICENSE and the Apache-2.0 text only; licences.py puts the text of
+        # every licence the table names there, Apache-2.0's too, from the files its step finds in the image
+        self.assertIn('\nCOPY NOTICE.md LICENSE /opt/aiosubtitles/licences/\n'
+                      'RUN --mount=type=bind,source=subsync,target=/src python -I -B /src/licences.py\n', final)
+        self.assertNotIn('cp /usr/share/common-licenses/', final)
+        self.assertGreater(final.index('/src/licences.py'), final.index('./subsync/static/fonts/OFL.txt'))
+        self.assertLess(final.index('/src/licences.py'), final.index('--mount=type=bind,source=.,target=/src'))
+        self.assertEqual(licences.FOLDER, Path('/opt/aiosubtitles/licences'))
+        self.assertIn('\nWORKDIR /opt/aiosubtitles/subsync\n', final)
+        self.assertEqual(licences.FONTS, Path('/opt/aiosubtitles/subsync/subsync/static/fonts'))
+        self.assertEqual(licences.REQUIREMENTS, REPO / 'subsync' / 'requirements.txt')
+
+
+# Stand-ins for licence texts, each with its real heading or clause (the words licences.WORDS looks for)
+MIT = 'MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\n'
+BSD = 'Redistribution and use in source and binary forms\n    * Neither the name of the copyright holder nor\n'
+APACHE = '\n                                 Apache License\n                           Version 2.0, January 2004\n'
+DEBIAN = {'Apache-2.0': APACHE,
+          'GPL-3': '                    GNU GENERAL PUBLIC LICENSE\n                       Version 3, 29 June 2007\n',
+          'GPL-2': '                    GNU GENERAL PUBLIC LICENSE\n                       Version 2, June 1991\n',
+          'LGPL-2.1': '                  GNU LESSER GENERAL PUBLIC LICENSE\n                       Version 2.1, '
+                      'February 1999\n'}
+PYTHON = 'TERMS AND CONDITIONS FOR USING PYTHON\n\nPYTHON SOFTWARE FOUNDATION LICENSE VERSION 2\n'
+OFL = ('This Font Software is licensed under the SIL Open Font License, Version 1.1.\n\n'
+       'SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007\n')
+# Each pinned package's licence files ({info}: its .dist-info folder) where its wheel puts them: numpy's beside its code
+# too, onnxruntime's only there (its .dist-info has none)
+WHEELS = {'numpy': {'{info}/licenses/LICENSE.txt': BSD, '{info}/licenses/numpy/ma/LICENSE': BSD,
+                    'numpy/ma/LICENSE': BSD},
+          'onnxruntime': {'onnxruntime/LICENSE': MIT},
+          'silero-vad': {'{info}/licenses/LICENSE': MIT},
+          'cryptography': {'{info}/licenses/LICENSE': 'Apache-2.0 or BSD-3-Clause\n',
+                           '{info}/licenses/LICENSE.APACHE': APACHE, '{info}/licenses/LICENSE.BSD': BSD},
+          'cffi': {'{info}/licenses/LICENSE': MIT},
+          'pycparser': {'{info}/licenses/LICENSE': BSD}}
+# And files of theirs that are no licence file, which the folder doesn't get
+OTHERS = {'onnxruntime': {'onnxruntime/ThirdPartyNotices.txt': MIT, 'onnxruntime/__init__.py': ''},
+          'cryptography': {'{info}/sboms/sbom.json': '{}\n', '{info}/WHEEL': 'Wheel-Version: 1.0\n'}}
+
+
+class Licences(unittest.TestCase):
+    """subsync/licences.py, the build's step that puts the text of every licence NOTICE.md names in the image's licence
+    folder, run on stand-ins of what it reads in the image: Debian's texts, Python's, the typefaces'
+    and the licence files of requirements.txt's packages where their wheels put them."""
+
+    def setUp(self):
+        self.stand_in()
+
+    def stand_in(self):
+        """A new stand-in of what the step reads, and of the folder as the COPY before it leaves it."""
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        self.folder, self.debian, self.stdlib, self.fonts, self.site = (
+            root / name for name in ('licences', 'common-licenses', 'python3.13', 'fonts', 'site-packages'))
+        self.write(self.folder / 'NOTICE.md', (REPO / 'NOTICE.md').read_text())
+        self.write(self.folder / 'LICENSE', (REPO / 'LICENSE').read_text())
+        for name, text in DEBIAN.items():
+            self.write(self.debian / name, text)
+        self.write(self.stdlib / 'LICENSE.txt', PYTHON)
+        self.write(self.fonts / 'OFL.txt', OFL)
+        pins = dict(re.findall(r'^([A-Za-z0-9_.-]+)==(\S+)', licences.REQUIREMENTS.read_text(), re.M))
+        self.assertEqual(set(pins), set(WHEELS))
+        self.texts = set()                                    # the packages' licence files, as site-packages has them
+        for name, version in pins.items():
+            info = f"{name.replace('-', '_')}-{version}.dist-info"
+            texts = {path.format(info=info): text for path, text in WHEELS[name].items()}
+            files = texts | {path.format(info=info): text for path, text in OTHERS.get(name, {}).items()}
+            files[f'{info}/METADATA'] = f'Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n'
+            for path, text in files.items():
+                self.write(self.site / path, text)
+            self.write(self.site / info / 'RECORD', ''.join(f'{path},,\n' for path in [*files, f'{info}/RECORD']))
+            self.texts |= set(texts)
+
+    @staticmethod
+    def write(path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding='utf-8')
+
+    def collect(self):
+        licences.collect(folder=self.folder, debian=self.debian, fonts=self.fonts, stdlib=self.stdlib,
+                         path=[str(self.site)])
+
+    def test_the_folder_gets_the_text_of_every_licence_the_table_names(self):
+        self.collect()
+        found = {path.relative_to(self.folder).as_posix() for path in self.folder.rglob('*') if path.is_file()}
+        self.assertEqual(found, {'NOTICE.md', 'LICENSE', 'Apache-2.0.txt', 'GPL-3.0.txt', 'GPL-2.0.txt', 'LGPL-2.1.txt',
+                                 'Python.txt', 'OFL.txt'} | {f'site-packages/{path}' for path in self.texts})
+        self.assertIn('site-packages/onnxruntime/LICENSE', found)
+        for name, source in (('GPL-3.0.txt', self.debian / 'GPL-3'), ('Python.txt', self.stdlib / 'LICENSE.txt'),
+                             ('site-packages/numpy/ma/LICENSE', self.site / 'numpy' / 'ma' / 'LICENSE')):
+            self.assertEqual((self.folder / name).read_bytes(), source.read_bytes())
+        self.assertEqual(licences.named((REPO / 'NOTICE.md').read_text()),
+                         {'GPL-3.0', 'MIT', 'Apache-2.0', 'SIL Open Font Licence 1.1', 'BSD-3-Clause', 'LGPL-2.1',
+                          'GPL-2.0', 'PSF'})
+
+    def test_a_text_missing_from_the_base_image_stops_the_build(self):
+        (self.debian / 'GPL-3').unlink()
+        self.assertRaises(FileNotFoundError, self.collect)
+
+    def test_the_build_stops_unless_every_licence_has_its_text_there(self):
+        notice = (REPO / 'NOTICE.md').read_text()
+        for what, change, named in (
+                ('a package without a licence file', lambda: self.write(
+                    self.site / 'pycparser-3.12.dist-info' / 'RECORD', 'pycparser-3.12.dist-info/METADATA,,\n'),
+                 'pycparser'),
+                ('a package that is not installed', lambda: shutil.rmtree(self.site / 'cffi-2.1.1.dist-info'), 'cffi'),
+                ("a text without its licence's words", lambda: self.write(self.debian / 'GPL-2', APACHE), 'GPL-2.0'),
+                ('a licence with no text known', lambda: self.write(self.folder / 'NOTICE.md', notice.replace(
+                    '| numpy 2.5.4 | BSD-3-Clause |', '| numpy 2.5.4 | Zlib |')), 'Zlib')):
+            with self.subTest(what=what):
+                self.stand_in()
+                change()
+                with self.assertRaises(SystemExit) as stop:
+                    self.collect()
+                self.assertIn(named, str(stop.exception.code))
 
 
 class Entry(unittest.TestCase):

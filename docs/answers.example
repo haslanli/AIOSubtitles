@@ -270,7 +270,9 @@ SUBSYNC_AUDIO_AT_ONCE=auto
 # nothing to do stops after a while (30 minutes by default). Past the limit, a person's requests get only copies
 # already in the shared store until a worker frees up. Each worker takes about 2.5 MB of memory, plus up to 32 MB
 # for the subtitles it downloaded in the last 10 minutes, so 100 take from about 250 MB to about 3.5 GB; keep the
-# limit within what the server's memory allows.
+# limit within what the server's memory allows. Re-timing needs more, for a few seconds at a time: one alass run
+# takes about 0.4 GB, up to about 1.2 GB for a 3-hour film, and at most one runs per processor, so leave about 1 GB
+# per processor for it too.
 SUBSYNC_ACTIVE_WORKERS=100
 
 # Requests handled at once. Each one takes a thread and some memory, so past it the service answers "busy, try
