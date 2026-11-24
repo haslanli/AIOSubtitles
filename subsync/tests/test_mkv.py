@@ -170,20 +170,27 @@ class WindowPrerollTest(unittest.TestCase):
     starts: one starting where a cue cluster starts (20, 30 and 40 s here) came out up to 96 ms late and short by as
     much, every speech onset in it placed early by that, while the fit took it as whole."""
 
-    @unittest.skipUnless(have("ffmpeg"), "ffmpeg not installed")
+    @unittest.skipUnless(have("ffmpeg") and have("ffprobe"), "ffmpeg not installed")
     def test_a_window_where_a_cluster_starts_is_whole_and_on_time(self):
         import numpy as np
         data = fixture("tiny.mkv")
         index = open_index(RangeReader("http://127.0.0.1:9/tiny.mkv", "test", opener=Opener(data)))
+        path = os.path.join(FIXTURES, "tiny.mkv")
+        # the whole file decoded once from its start, on the file's own timeline: an older ffmpeg (Debian's 7.1) keeps
+        # the codec's priming before 0 (the audio's start_time is then negative, -0.064 s here) where a newer one drops
+        # it, so the samples before 0 are dropped here, and the window is compared with the same seconds of that
+        start_time = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=start_time", "-of", "csv=p=0",
+             path], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+        full = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le",
+             "-"], stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=True).stdout
+        full = np.frombuffer(full, np.int16).astype(np.int32)[max(0, round(-float(start_time or 0) * 16000)):]
         for start in (20.0, 20.03, 30.0, 40.0, 45.0):
             with self.subTest(start=start):
                 got = np.frombuffer(index.window_pcm(start, 6.0, 16000), np.int16).astype(np.int32)
-                # the same seconds of the whole file, decoded from its start and cut at `start` (-ss after the input)
-                whole = subprocess.run(
-                    ["ffmpeg", "-nostdin", "-v", "error", "-i", os.path.join(FIXTURES, "tiny.mkv"), "-ss",
-                     f"{start:.3f}", "-t", "6.000", "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
-                    stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=True).stdout
-                whole = np.frombuffer(whole, np.int16).astype(np.int32)
+                at = round(start * 16000)
+                whole = full[at:at + 6 * 16000]
                 self.assertEqual(len(got), 6 * 16000)
                 self.assertEqual(len(whole), len(got))
                 self.assertGreater(np.abs(whole).mean(), 100)                         # sound, not silence
