@@ -61,6 +61,47 @@ class ServicesNamedTest(unittest.TestCase):
                                                                    'presets': [link_addon(link, 'Accented')]})
                     self.assertEqual((new['presets'], changes), ([], ['"Accented" left out: its link names Real-Debrid']))
 
+    def test_standard_base64_settings_after_or_before_a_plain_path_part_are_read_too(self):
+        #'s run of base64 segments took in a plain part before the settings ("c", StremThru's
+        # "stremio/store"), and decoded from there, nothing of them was read: a Real-Debrid name after a "/" was missed
+        settings = json.dumps({'service': 'torbox', 'name': 'xxNoël', 'realdebrid': 'RDKEY123456'}, ensure_ascii=False)
+        standard = base64.b64encode(settings.encode()).decode().rstrip('=')
+        self.assertIn('/', standard)
+        for path in (f'c/{standard}', f'stremio/store/{standard}', f'c/{standard}/configure'):
+            link = f'https://addon.example/{path}/manifest.json'
+            with self.subTest(link=link):
+                self.assertEqual(realdebrid.services_named(link), {'torbox', 'realdebrid'})
+                new, changes = realdebrid.without_real_debrid({'services': [TORBOX],
+                                                               'presets': [link_addon(link, 'Prefixed')]})
+                self.assertEqual((new['presets'], changes), ([], ['"Prefixed" left out: its link names Real-Debrid']))
+
+    def test_a_setting_named_after_real_debrid_names_it(self):
+        # Words were read whole, so a setting's name that joins the service with another word, or settings in
+        # dotted parts (a token's header.payload.signature), hid it while the link named TorBox: the addon was kept
+        for settings in ({'torbox': 'TBKEY', 'realdebridApiKey': 'RDKEY'}, {'torbox': 'TBKEY', 'realDebridToken': 'x'},
+                         {'service': 'torbox', 'rdToken': 'RDKEY'}, {'stores': [{'torbox': 1, 'RDKey': 'x'}]}):
+            link = f'https://addon.example/{encoded(settings)}/manifest.json'
+            with self.subTest(settings=settings):
+                self.assertEqual(realdebrid.services_named(link), {'torbox', 'realdebrid'})
+                new, changes = realdebrid.without_real_debrid({'services': [TORBOX],
+                                                               'presets': [link_addon(link, 'Joined')]})
+                self.assertEqual((new['presets'], changes), ([], ['"Joined" left out: its link names Real-Debrid']))
+        dotted = f'{encoded({"alg": "HS256"})}.{encoded({"debrid": "realdebrid", "key": "x"})}.c2lnbmF0dXJl'
+        self.assertEqual(realdebrid.services_named(f'https://addon.example/torbox/{dotted}/manifest.json'),
+                         {'torbox', 'realdebrid'})
+        self.assertEqual(realdebrid.services_named('https://addon.example/myrealdebridkey=x/torbox/manifest.json'),
+                         {'torbox', 'realdebrid'})
+
+    def test_only_real_debrid_is_read_inside_joined_words(self):
+        # Other services stay whole words, so no addon left out today is kept; and a link's own text, which
+        # may be encrypted, isn't split at capitals, so it can't name Real-Debrid by chance
+        joined = encoded({"torboxApiKey": "x"})
+        self.assertEqual(realdebrid.services_named(f'https://addon.example/{joined}/manifest.json'), set())
+        self.assertEqual(realdebrid.services_named(f'https://addon.example/{encoded({"name": "rdToken"})}/torbox/'
+                                                   'manifest.json'), {'torbox'})    # a value, not a setting's name
+        self.assertEqual(realdebrid.services_named('https://addon.example/torbox/xKQrdTq9RdZ/manifest.json'),
+                         {'torbox'})
+
     def test_an_unreadable_link_names_nothing(self):
         self.assertEqual(realdebrid.services_named('https://mediafusion.example/D-q83hf8Hf73hf73Hfh38fh3/manifest.json'), set())
 

@@ -70,10 +70,10 @@ class Fake:
                     return self.send(200, {"matchingSubtitles": subs})
                 if u.path.startswith("/gestdown/subtitles/download/"):
                     return self.send(200, SRT.encode(), "text/plain")
-                if u.path == "/subdl/api/v1/subtitles":
+                if u.path == "/subdl/api/v1/subtitles":   # its download address with the key in it, as SubDL gives it
                     return self.send(200, {"status": True, "subtitles": [
                         {"release_name": "Show.S01E02.1080p.WEB", "lang": "english", "language": "EN",
-                         "url": "/subtitle/1-2.zip", "hi": 0}]})
+                         "url": f"/subtitle/1-2.zip?api_key={q.get('api_key')}", "hi": 0}]})
                 if u.path == "/subdl-dl/subtitle/1-2.zip":
                     return self.send(200, zipped(["Show.S01E01.srt", "Show.S01E02.srt", "readme.txt"]), "application/zip")
                 if u.path == "/wyzie/search":
@@ -161,6 +161,10 @@ class ExtraSourcesTest(unittest.TestCase):
         q = next(q for p, q in self.fake.calls if p == "/subdl/api/v1/subtitles")
         self.assertEqual((q["imdb_id"], q["type"], q["season_number"], q["episode_number"], q["api_key"]),
                          ("tt2", "tv", "1", "2", "k1"))
+        # SubDL's answer gives each address with the key in it; the id, which goes out in every entry made
+        # from the subtitle (variantOf), is the address's file name alone, and the download address keeps the key
+        self.assertEqual(subdl["id"], "subdl-1-2.zip")
+        self.assertEqual(subdl["url"], f"{self.fake.url}/subdl-dl/subtitle/1-2.zip?api_key=k1#S01E02")
         wy = [c for c in got if c["source"] == "wyzie"]
         self.assertEqual(sorted(c["lang"] for c in wy), ["eng", "rus"])
         self.assertTrue(all(q.get("key") == "k2" for p, q in self.fake.calls if p == "/wyzie/search"))

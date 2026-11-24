@@ -555,7 +555,10 @@ class ExtraSources:
             if not site_path(url):
                 continue
             frag = f"#S{season:02d}E{episode:02d}" if season is not None else ""   # which file of a zip to take
-            out.append(self._cand("subdl", f"subdl-{url.rsplit('/', 1)[-1]}", f"{self.s.subdl_download_url}{url}{frag}",
+            # the id goes out in every entry made from the subtitle (variantOf): the address's file name alone, never
+            # its query, where SubDL's answer gives the key; the download address, kept here, has it as given
+            name = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
+            out.append(self._cand("subdl", f"subdl-{name}", f"{self.s.subdl_download_url}{url}{frag}",
                                   lang3(it.get("language") or it.get("lang")), it.get("release_name"), hi=bool(it.get("hi"))))
         return out
 

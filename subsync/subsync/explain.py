@@ -1500,7 +1500,7 @@ PUBLIC_STATES = {
         "The last three checks couldn't reach your AIOStreams from the internet. While it can't be reached, AIOSubtitles "
         "can't sync new files for you; nothing needs doing once it is back.", False),
     # AIOStreams refused the config AIOSubtitles made from theirs (as words it on sign-up and Refresh);
-    # an error answer three checks in a row
+    # three checks in a row that failed, not each by not reaching it
     "config_refused": State(
         "Your AIOStreams didn't accept AIOSubtitles' new config",
         "AIOSubtitles tried to follow a change in your AIOStreams config, and your AIOStreams didn't accept the config "
@@ -1509,9 +1509,9 @@ PUBLIC_STATES = {
         False),
     "aiostreams_errors": State(
         "Your AIOStreams answered with an error",
-        "The last three checks got an error from your AIOStreams (it was busy or had a fault), so AIOSubtitles "
-        "couldn't follow changes in your config. It keeps using the config it made before and tries again at the next "
-        "check; nothing needs doing.", False),
+        "The last three checks got an error from your AIOStreams or couldn't reach it (it was busy or had a fault), so "
+        "AIOSubtitles couldn't finish checking your config. It keeps using the config it made before and tries again "
+        "at the next check; nothing needs doing.", False),
 }
 PUBLIC_NOTICE_LABEL = "AIOSubtitles: action needed"
 PUBLIC_NOTICE_DONE = "AIOSubtitles: nothing needs doing any more. This entry goes away by itself."

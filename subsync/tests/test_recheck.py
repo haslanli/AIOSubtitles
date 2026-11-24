@@ -114,13 +114,16 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
         self.assertEqual(self.record(token)["unreachable"], 0)
 
     def test_a_garbled_answer_is_not_counted_as_unreachable(self):
-        # It answered, so it is reached: an error, never three of them making the page say "unreachable"
+        # It answered, so it is reached: an error, never three of them making the page say "unreachable";
+        # Three of them say it answered with an error
         uuid, token = self.sign_up()
         checker = self.checker()
         self.fake.fault = "garbled"
+        states = []
         for _ in range(3):
-            self.assertIsNone(checker.check(token))
+            states.append(checker.check(token))
             self.clock.t += 24 * HOUR
+        self.assertEqual(states, [None, None, "aiostreams_errors"])
         self.assertEqual(self.record(token)["unreachable"], 0)
 
     def test_checks_start_in_the_background_at_most_once_a_period(self):
@@ -380,21 +383,71 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
         checker = self.checker()
         for n in range(1, UNREACHABLE_CHECKS):
             self.assertIsNone(checker.check(token))
-            self.assertEqual(self.record(token)["errors"], n)
+            self.assertEqual(self.record(token)["failed"], n)
             self.clock.t += 24 * HOUR
         self.assertEqual(checker.check(token), "aiostreams_errors")
         state = explain.PUBLIC_STATES["aiostreams_errors"]
         self.assertEqual(UNREACHABLE_CHECKS, 3)                               # as its text says
         self.assertEqual((state.title, state.text), (
             "Your AIOStreams answered with an error",
-            "The last three checks got an error from your AIOStreams (it was busy or had a fault), so AIOSubtitles "
-            "couldn't follow changes in your config. It keeps using the config it made before and tries again at the "
-            "next check; nothing needs doing."))
+            "The last three checks got an error from your AIOStreams or couldn't reach it (it was busy or had a "
+            "fault), so AIOSubtitles couldn't finish checking your config. It keeps using the config it made before "
+            "and tries again at the next check; nothing needs doing."))
         self.assertIsNone(App(self.s, None, None, None, state="aiostreams_errors").action())
         self.fake.refuse_save_for.clear()
         self.clock.t += 24 * HOUR
         self.assertIsNone(checker.check(token))
-        self.assertNotIn("errors", self.record(token))
+        self.assertNotIn("failed", self.record(token))
+
+    def failing_reads(self):
+        """Every read of AIOSubtitles' own configs answers a server error (a busy or faulty AIOStreams), while `dead`
+        still makes it answer nothing; `del self.api` ends it."""
+        make = self.api
+
+        def failing(base, timeout):
+            api = make(base, timeout)
+
+            def get_config(config_id, password):
+                raise api._error(500, {"success": False, "error": {"code": "INTERNAL", "message": "busy"}},
+                                 "Reading the config")
+            if not self.dead:
+                api.get_config = get_config
+            return api
+        self.api = failing
+
+    def test_an_error_answer_to_the_config_reads_counts_and_keeps_the_note(self):
+        # With no kept password these reads are the whole check, and their error answers counted for nothing:
+        # every such check was "all well", and it cleared the note an earlier error had given
+        uuid, token = self.sign_up()
+        self.failing_reads()
+        checker = self.checker()
+        for n in (1, 2):
+            self.assertIsNone(checker.check(token))
+            self.assertEqual(self.record(token)["failed"], n)
+            self.clock.t += 24 * HOUR
+        self.assertEqual(checker.check(token), "aiostreams_errors")
+        self.clock.t += 24 * HOUR
+        self.assertEqual(checker.check(token), "aiostreams_errors")          # a fourth keeps it
+        self.assertEqual(self.record(token)["unreachable"], 0)
+
+    def test_checks_that_fail_either_way_count_together(self):
+        # A check that couldn't reach their AIOStreams and one it answered with an error reset each other's
+        # count, so an AIOStreams down one day and failing the next was never noted. One count now; the "couldn't
+        # reach" note only when none of the last three reached it
+        uuid, token = self.sign_up()
+        self.failing_reads()
+        checker = self.checker()
+        states = []
+        for dead in (True, False, True, True, True, False, False):
+            self.dead = dead
+            states.append(checker.check(token))
+            self.clock.t += 24 * HOUR
+        self.assertEqual(states, [None, None, "aiostreams_errors", "aiostreams_errors", "unreachable",
+                                  "aiostreams_errors", "aiostreams_errors"])
+        del self.api                                                     # their AIOStreams answers again
+        self.assertIsNone(self.checker().check(token))
+        record = self.record(token)
+        self.assertEqual((record.get("state"), record.get("failed"), record["unreachable"]), (None, None, 0))
 
     def test_the_reason_a_config_cant_be_followed_ends_its_sentence(self):
         # Case 1 keeps "can't be followed as it is" (action needed), its reason always a sentence of its own

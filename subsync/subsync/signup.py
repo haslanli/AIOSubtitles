@@ -733,7 +733,7 @@ def all_clear(settings, record, now):
     """A record after a sign-up, a refresh or a rebuild: nothing to report, the next check a period from now."""
     record.update(state=None, unreachable=0, checked_at=now, next_check=now + settings.recheck_hours * HOUR)
     record.pop("state_detail", None)
-    record.pop("errors", None)
+    record.pop("failed", None)
     record.pop("main_gone_since", None)
 
 

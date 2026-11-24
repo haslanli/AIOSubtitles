@@ -32,8 +32,8 @@ LOOKED_AT = ("instance", "main_uuid", "sync_uuid", "usenet_uuid", "store_only")
 log = logging.getLogger("subsync.recheck")
 HOUR = 3600
 CONFIRM_GONE_S = HOUR        # their own config found gone is looked at again this much later before it counts
-UNREACHABLE_CHECKS = 3       # checks in a row that couldn't reach their AIOStreams (or, got an error answer
-                             # from it) before the settings page says so
+UNREACHABLE_CHECKS = 3       # checks in a row that failed (couldn't reach their AIOStreams, or, got an error
+                             # answer from it) before the settings page says so
 
 
 def _problem(e):
@@ -214,19 +214,10 @@ class Checker:
         record["checked_at"] = now
         record["next_check"] = now + self.s.recheck_hours * HOUR
         kind, detail = found["problem"] or (None, None)
-        if "unreachable" in (found["sync"], found["usenet"]) or kind == "unreachable":
-            record["unreachable"] = (record.get("unreachable") or 0) + 1
-            record.pop("errors", None)
-            if record["unreachable"] >= UNREACHABLE_CHECKS and not record.get("state"):
-                record["state"] = "unreachable"
+        reads = (found["sync"], found["usenet"], kind)   # each config's read, and the rebuild's problem
+        self._count_failed(record, reads)
+        if "unreachable" in reads:
             return
-        record["unreachable"] = 0
-        if record.get("state") == "unreachable":
-            record["state"] = None
-        if kind != "error":
-            record.pop("errors", None)
-            if record.get("state") == "aiostreams_errors":
-                record["state"] = None
         gone = "gone" in (found["sync"], found["usenet"])
         # their own config: gone only when seen gone twice, an hour apart (a slip of their AIOStreams is not a move)
         if found["main"] is False:
@@ -245,10 +236,7 @@ class Checker:
             record["state"] = None
         if kind is not None:     # the rebuild failed: AIOSubtitles keeps its configs, each at the link that opens it
             self._repair_links(record, found)
-        if kind == "error":      # an error answer passes; counted as "couldn't reach" is, never action needed
-            record["errors"] = (record.get("errors") or 0) + 1
-            if record["errors"] >= UNREACHABLE_CHECKS and not record.get("state"):
-                record["state"] = "aiostreams_errors"
+        if kind == "error":      # an error answer passes, counted with the failed checks, never action needed
             return
         if kind == "password":   # the kept password no longer opens their config: it is deleted, Refresh asks again
             record.pop("auto_password", None)
@@ -286,6 +274,28 @@ class Checker:
                                                                          "cannot_rebuild"):
             record["state"] = None
             record.pop("state_detail", None)
+
+    @staticmethod
+    def _count_failed(record, reads):
+        """One count of checks in a row that failed, by not reaching their AIOStreams or by its error
+        answer to any of the check's reads (`reads`: what each found); only a check that completes ends it. At
+        UNREACHABLE_CHECKS the settings page notes it: "couldn't reach" when none of the last ones reached their
+        AIOStreams (`unreachable` counts those in a row), else "answered with an error", whose words cover a mix of
+        both. Neither note takes an action's place."""
+        reached = "unreachable" not in reads
+        record["unreachable"] = 0 if reached else (record.get("unreachable") or 0) + 1
+        record.pop("errors", None)   # an earlier version's count of error answers alone
+        if not reached or "error" in reads:
+            record["failed"] = (record.get("failed") or 0) + 1
+        else:
+            record.pop("failed", None)
+        if record.get("state") in (None, "unreachable", "aiostreams_errors"):
+            if (record.get("failed") or 0) < UNREACHABLE_CHECKS:
+                record["state"] = None
+            elif record["unreachable"] >= UNREACHABLE_CHECKS:
+                record["state"] = "unreachable"
+            else:
+                record["state"] = "aiostreams_errors"
 
     @staticmethod
     def _repair_links(record, found):

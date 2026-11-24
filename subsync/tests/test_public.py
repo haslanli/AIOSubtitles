@@ -1141,6 +1141,30 @@ class KeptAppTest(unittest.TestCase):
         self.assertEqual((text, why), (SRT_FR, None))
         self.assertEqual(self.pool.active(), 1)
 
+    def test_past_the_cap_a_pick_or_pending_entry_serves_their_original(self):
+        # An App that can't queue the file (no worker free, or a full queue) answered its pick and pending
+        # entries "try again" (503) for as long as that lasted, while its "(original)" entry downloaded the original
+        from helpers import http, start_server, stop_server
+        from subsync.addon import no_subtitle_note, serve, token as entry_token
+        from subsync.sources import parse_extras
+        from subsync.worker import Job
+        self.pool.app(self.person())                              # the only worker
+        app = self.pool.app(self.person(languages=("fre",)))
+        self.assertIsNone(app.worker.who)                         # answered from the store only
+        app.worker.remember(Job("movie", "tt1", parse_extras(QUERY)))   # their list held these entries (Pool.seen)
+        self.assertIsNone(app.worker.known_originals(ALIAS))
+        server = start_server(serve(app, 0, host="127.0.0.1"))
+        self.addCleanup(stop_server, server)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        for route in ("pick", "pending"):
+            with self.subTest(route=route):
+                code, body, _ = http(f"{base}/{route}/{entry_token(ALIAS)}/fre.srt")
+                self.assertEqual((code, body.decode()), (200, SRT_FR))
+        self.assertEqual(app.worker.jobs, {})                     # nothing queued, nothing of the file read
+        self.store.kept_original_put(FILE_KEY, "fre", None)       # every French subtitle is in another language:
+        code, body, _ = http(f"{base}/pick/{entry_token(ALIAS)}/fre.srt")   # the note, as "(original)" answers
+        self.assertEqual((code, body.decode()), (200, no_subtitle_note("fre")))
+
     def test_past_the_cap_a_worker_once_one_is_free_with_what_it_knew(self):
         first = self.person()
         self.pool.app(first)

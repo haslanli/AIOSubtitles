@@ -1117,7 +1117,7 @@ class PublicUsenetTest(TempDirTest):
         self.fake.refuse_save_for.add(record["sync_uuid"])                  # whose save then fails
         checker = Checker(self.s, self.users, api_factory=self.api, clock=lambda: time.time() + 2 * 86400)
         self.assertIsNone(checker.check(result.token))      # an error answer (a 500) is counted, not reported
-        self.assertEqual(self.users.open(result.token)["errors"], 1)
+        self.assertEqual(self.users.open(result.token)["failed"], 1)        # with the checks that failed
         self.assertEqual(sorted(self.fake.configs), sorted([uuid, record["sync_uuid"]]))
 
     def test_a_gone_usenet_config_without_a_kept_password_is_reported(self):

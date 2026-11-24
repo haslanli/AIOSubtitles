@@ -650,6 +650,23 @@ class LanguageSyncStepsTest(unittest.TestCase):
         self.assertFalse(sync._listed_cached(e))
         self.assertEqual((self.store.get(kept)["outcome"], sync.passed), ("keep_original", [row["key"]]))
 
+    def test_a_stored_in_sync_original_keeps_its_aligned_to_another_languages_track_note(self):
+        # A fresh verdict and a stored one were listed by two builders, and the stored one's reason never
+        # said it was aligned to another language's track; its body is the original, unchanged, either way
+        sync = self.steps()
+        sha = hashlib.sha256(self.raw("os-b")).hexdigest()
+        self.store.put("f-1", sha, "eng", 1, "in_sync", "original passes against the release track", route="cues",
+                       detail={"rule": self.w.s.rule_id, "cross": True,
+                               "gate_original": {"within200": 0.9, "median_ms": 40}}, candidate_id="os-b")
+        e = sync._entry(1, self.cand("os-b"), self.raw("os-b"))
+        self.assertTrue(sync._listed_cached(e))
+        row = self.store.get(e["got"]["key"])
+        self.assertEqual((row["outcome"], row["reason"]), (
+            "synced", "in sync as it is (viewer's #2), aligned to another language's track: listed unchanged"))
+        self.assertEqual(self.store.body(row["key"]), self.texts["http://subs.test/os-b.srt"])
+        fresh = sync._in_sync_result(e, {"reason": "-", "cross": True})   # judged now, the same words
+        self.assertEqual(fresh["reason"], row["reason"])
+
     def test_the_fast_path_without_best_fit_judges_the_same_subtitle_from_another_source_once(self):
         # Its originals were checked and shifted before the same subtitle from another source was left out
         # (in _fit_all), so each copy was judged and its shift stored

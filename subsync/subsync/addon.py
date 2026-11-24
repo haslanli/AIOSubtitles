@@ -651,11 +651,7 @@ class Handler(BaseHTTPRequestHandler):
                     alias = alias_of(m.group(1), app.s.addon_key)
                 except ValueError:
                     return self._send(404, b"")
-                kept, first = app.kept_choice(alias, m.group(2))
-                if kept and first is None:   # every subtitle of the language is in another language
-                    return self._subtitle(no_subtitle_note(m.group(2)), "note")
-                return self._original(app, alias, m.group(2), time.time() + app.s.pick_wait, first,
-                                      unknown=None if kept else 404)
+                return self._kept_original(app, alias, m.group(2), time.time() + app.s.pick_wait)
             if path == NOTICE_PATH and keyed:
                 text = app.notice_text()
                 if text is None:   # fixed since the list that holds this entry was made (apps keep lists a while)
@@ -697,9 +693,10 @@ class Handler(BaseHTTPRequestHandler):
     def _entry_answer(self, app, alias, lang, end, deadline):
         """A pick or pending entry's answer once its wait for the file's job is over, the same for both in the same
         state: the synced copy when there is one (the store's too, also after a restart); while the file's
-        subtitle list isn't known by `end`, 503 for a file that is ours (read before, or worked on: the player asks
-        again), else 404; a waiting file's anchored guess; the original's text, downloaded by `deadline`; else the
-        one-line note."""
+        subtitle list isn't known by `end`, the original as the "(original)" entry serves it when no job can be queued
+        for the file now, else 503 for a file that is ours (read before, or worked on: the player asks again),
+        else 404; a waiting file's anchored guess; the original's text, downloaded by `deadline`; else the one-line
+        note."""
         if self._copy(app, alias, lang):
             return None
         left = lambda: max(0.0, end - time.time())   # noqa: E731
@@ -708,6 +705,10 @@ class Handler(BaseHTTPRequestHandler):
             originals = app.worker.known_originals(alias)
         if originals is None and app.worker.ask_list_again(alias):   # the list came back empty
             originals = app.worker.wait_for_originals(alias, left())
+        if originals is None and app.worker.cant_queue(alias):
+            # No job can give the list now: the original from this person's own list, fetched on this
+            # request's time, as their "(original)" entry serves it; "try again" only when it isn't downloaded in time
+            return self._kept_original(app, alias, lang, deadline, copy=True)
         if originals is None:
             # ours, its list not known yet: the player may ask again
             if app.store.resolve(alias) or app.worker.busy_with(alias):
@@ -721,6 +722,15 @@ class Handler(BaseHTTPRequestHandler):
             # track, when it beats the name-ranked guess
             return self._original(app, alias, lang, deadline, app.worker.measured_original(alias, lang), copy=True)
         return self._subtitle(no_subtitle_note(lang), "note")
+
+    def _kept_original(self, app, alias, lang, deadline, copy=False):
+        """The "(original)" entry's answer: the original the file's judging kept, else this person's likeliest
+        (_original); the note when every subtitle of the language is in another language, and 404 when this person has
+        none of it listed for the file and its judging kept none. With `copy`, as _original's."""
+        kept, first = app.kept_choice(alias, lang)
+        if kept and first is None:   # every subtitle of the language is in another language
+            return self._subtitle(no_subtitle_note(lang), "note")
+        return self._original(app, alias, lang, deadline, first, unknown=None if kept else 404, copy=copy)
 
     def _original(self, app, alias, lang, deadline, first=None, unknown=None, copy=False):
         """An original's text from this person's own list, checked (Worker.original_for). When the deadline came first:

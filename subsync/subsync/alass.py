@@ -23,17 +23,32 @@ _runs = threading.BoundedSemaphore(RUNS_AT_ONCE)
 TIMEOUT_S = 120                     # the longest a run may take, then it is stopped
 MEMORY_KB = 3 * 1024 * 1024         # address space of a run on Linux (3 GiB)
 CPU_S = TIMEOUT_S                   # processor seconds of a run on Linux (alass runs on one thread)
+# alass prints its errors, with its progress, on its normal output: "error: <what failed>", then "caused by: <why>"
+# lines, the last the closest to the cause. That last line is kept with a failure, at most ERROR_CHARS long;
+# it names only the run's own files and their placeholder text (timing_srt, plain_srt), no subtitle's words
+ERROR_LABELS = ("caused by:", "error:")
+ERROR_CHARS = 200
 
 
 class AlassFailed(Exception):
     pass
 
 
+def _last_error(output):
+    """alass's last error line in its output (bytes), without its label, cut to ERROR_CHARS; "" when it printed none."""
+    for line in reversed(output.decode("utf-8", "replace").splitlines()):
+        line = line.strip()
+        for label in ERROR_LABELS:
+            if line.startswith(label):
+                return line[len(label):].strip()[:ERROR_CHARS]
+    return ""
+
+
 def run(reference_srt, candidate_srt, alass="alass", timeout=TIMEOUT_S):
     """Both texts are timing-only SRT (the pipeline's timing_srt and plain_srt). Returns the candidate re-timed, as SRT
-    text. Raises AlassFailed when alass fails, passes its limits on Linux (MEMORY_KB, CPU_S) or runs longer than
-    `timeout` seconds (it is stopped then). A run waits while RUNS_AT_ONCE others run; its `timeout` counts from its
-    start."""
+    text. Raises AlassFailed when alass fails ("alass exit 1: <its last error line>"), writes no output, passes its
+    limits on Linux (MEMORY_KB, CPU_S) or runs longer than `timeout` seconds (it is stopped then). alass gets no input.
+    A run waits while RUNS_AT_ONCE others run; its `timeout` counts from its start."""
     with tempfile.TemporaryDirectory(prefix="subsync-") as d:
         ref, cand, out = os.path.join(d, "ref.srt"), os.path.join(d, "cand.srt"), os.path.join(d, "out.srt")
         with open(ref, "w", encoding="utf-8") as f:
@@ -43,10 +58,13 @@ def run(reference_srt, candidate_srt, alass="alass", timeout=TIMEOUT_S):
         try:
             with _runs:
                 p = subprocess.run(limited([alass, ref, cand, out], "alass", MEMORY_KB, CPU_S), capture_output=True,
-                                   timeout=timeout)
+                                   stdin=subprocess.DEVNULL, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise AlassFailed(f"alass timed out after {timeout} s") from None
-        if p.returncode != 0 or not os.path.exists(out):
-            raise AlassFailed(f"alass exit {p.returncode}")
+        if p.returncode != 0:
+            said = _last_error(p.stdout)
+            raise AlassFailed(f"alass exit {p.returncode}: {said}" if said else f"alass exit {p.returncode}")
+        if not os.path.exists(out):
+            raise AlassFailed("alass wrote no output")
         with open(out, encoding="utf-8-sig", errors="replace") as f:
             return f.read()

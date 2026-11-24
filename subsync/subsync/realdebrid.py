@@ -15,6 +15,7 @@ Standard library only, so ./setup imports this module too.
 import base64
 import binascii
 import copy
+import json
 import logging
 import re
 import urllib.parse
@@ -37,9 +38,18 @@ REASON = ("it reads parts of each file you watch from the machine it runs on, an
 REAL_DEBRID_ONLY = (f"AIOSubtitles can't work with Real-Debrid only, because {REASON}. "
                     "Add another supported service, such as TorBox, to use it.")
 
-_PARTS = re.compile(r"[?&|,;=]")              # an addon link's query and value separators
+# an addon link's query and value separators, and the dots between the parts of a token's settings (header.payload.
+# signature: each part is base64 of its own)
+_PARTS = re.compile(r"[?&|,;=.]")
 _BASE64_SEGMENT = re.compile(r"[A-Za-z0-9+_-]+")   # base64 text between two "/" (standard base64 writes "/" too)
+# A run of base64 segments is decoded from each segment to each later one while it is at most this long (an
+# addon's settings and the plain path parts around them are far shorter), else whole only, so no link costs more than
+# about two thousand decodes of a few KB
+_SUB_RUN_SEGMENTS = 64
+_SUB_RUN_CHARS = 8 * 1024
 _WORDS = re.compile(r"[a-z0-9]+")
+# the words of a setting's name, split at capitals too ("rdToken": rd, token; "realDebridKey": real, debrid, key)
+_NAME_WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 _RD_CODE = "rd"   # StremThru's store code, e.g. {"c":"rd"}
 _MIN_ENCODED = 16
 
@@ -135,9 +145,11 @@ def row_problem(stream):
 # ------------------------------------------------------------------------------------------- 1. the config
 
 def _encoded_pieces(link):
-    """The parts of an addon link that may be base64 text: each piece between its separators and its "/", and each
-    whole run of base64 text with the "/" in it kept (standard base64 writes "/" too, and decoded in pieces,
-    settings that hold accented or non-Latin text are read wrong from the first "/" on)."""
+    """The parts of an addon link that may be base64 text: each piece between its separators and its "/", and each run
+    of base64 text with the "/" in it kept (standard base64 writes "/" too, and decoded in pieces, settings
+    that hold accented or non-Latin text are read wrong from the first "/" on), from each of its segments to each later
+    one (a plain path part before or after the settings, such as "c", "stremio/store" or "configure", would
+    else be decoded with them, and nothing of them read)."""
     for part in _PARTS.split(link):
         segments = part.split("/")
         yield from segments
@@ -147,8 +159,16 @@ def _encoded_pieces(link):
                 run.append(segment)
                 continue
             if len(run) > 1:
-                yield "/".join(run)
+                yield from _sub_runs(run)
             run = []
+
+
+def _sub_runs(run):
+    """A run of two or more base64 segments joined with their "/": from each segment to each later one, or whole only
+    when it is longer than an addon's settings with plain parts around them (_SUB_RUN_SEGMENTS, _SUB_RUN_CHARS)."""
+    if len(run) > _SUB_RUN_SEGMENTS or sum(map(len, run)) > _SUB_RUN_CHARS:
+        return ["/".join(run)]
+    return ["/".join(run[start:end]) for start in range(len(run) - 1) for end in range(start + 2, len(run) + 1)]
 
 
 def _decoded_pieces(link):
@@ -163,16 +183,35 @@ def _decoded_pieces(link):
             continue
 
 
+def _setting_names(text):
+    """The names of the settings in decoded text that is JSON (each object's keys, at any depth); none otherwise."""
+    try:
+        todo = [json.loads(text)]
+    except (ValueError, RecursionError):
+        return []
+    names = []
+    while todo:
+        value = todo.pop()
+        if isinstance(value, dict):
+            names += value.keys()
+            todo += value.values()
+        elif isinstance(value, list):
+            todo += value
+    return names
+
+
 def services_named(link):
-    """The debrid services an addon link names as whole words ("torbox", "real-debrid", "put.io"), as written or inside
-    its base64 settings. An encrypted link names none."""
+    """The debrid services an addon link names ("torbox", "real-debrid", "put.io"), as written or inside its base64
+    settings: each as whole words, and Real-Debrid also in any word that holds "realdebrid" and in a setting's name
+    split at capitals ("rdToken", "realDebridKey"). Encrypted text isn't split, so it can't name Real-Debrid by
+    chance, and an encrypted link names none."""
     plain = urllib.parse.unquote(link or "")
-    words = []
-    for text in [plain] + list(_decoded_pieces(plain)):
-        words += _WORDS.findall(text.lower())
+    settings = list(_decoded_pieces(plain))
+    words = [w for text in [plain] + settings for w in _WORDS.findall(text.lower())]
+    name_words = [w.lower() for text in settings for name in _setting_names(text) for w in _NAME_WORDS.findall(name)]
     names = set(words) | {a + b for a, b in zip(words, words[1:])}   # two-word spellings: real-debrid, put.io
     named = names & DEBRID_SERVICES.keys()
-    if _RD_CODE in words:
+    if _RD_CODE in words or _RD_CODE in name_words or any(SERVICE in w for w in words):
         named.add(SERVICE)
     return named
 

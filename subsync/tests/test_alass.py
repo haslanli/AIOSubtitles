@@ -35,11 +35,47 @@ class AlassTest(unittest.TestCase):
         self.assertEqual(alass.run(REF, CANDIDATE, alass=prog), CANDIDATE)
 
     def test_a_failing_alass(self):
-        for script, why in (("exit 3", "alass exit 3"), ("exit 0", "alass exit 0")):   # the second writes nothing
+        # One that ends without writing its file was "alass exit 0"
+        for script, why in (("exit 3", "alass exit 3"), ("exit 0", "alass wrote no output")):   # 0 and no file written
             with self.subTest(script=script):
                 with self.assertRaises(alass.AlassFailed) as e:
                     alass.run(REF, CANDIDATE, alass=self.stand_in(script))
                 self.assertEqual(str(e.exception), why)
+
+    def test_a_failure_keeps_alass_own_last_error_line(self):
+        # alass prints its errors with its progress on its normal output, which was thrown away: every failure
+        # was "alass exit 1". Here, as alass-cli 2.0.0 prints them for a reference that isn't SRT
+        report = ("Guessing framerate ratio...\\n\\r1 / 6 [====>-----] 16.67 %% 4850.44/s 0s \\n"
+                  "error: processing subtitle file '$1' failed\\ncaused by: parsing the subtitle data failed\\n"
+                  "caused by: expected SubRip index line, found 'not a subtitle'\\n"
+                  "caused by: invalid digit found in string\\n\\n"
+                  "not: run with environment variable 'RUST_BACKTRACE=1' for detailed stack traces\\n")
+        long_cause = "x" * 300
+        for script, why in ((f'printf "{report}"; exit 1', "alass exit 1: invalid digit found in string"),
+                            ('printf "error: no room left\\n"; exit 2', "alass exit 2: no room left"),
+                            (f'printf "error: it failed\\ncaused by: {long_cause}\\n"; exit 1',
+                             "alass exit 1: " + "x" * alass.ERROR_CHARS),
+                            ('echo "error: on its error output" >&2; echo "no error line"; exit 1', "alass exit 1")):
+            with self.subTest(why=why):
+                with self.assertRaises(alass.AlassFailed) as e:
+                    alass.run(REF, CANDIDATE, alass=self.stand_in(script))
+                self.assertEqual(str(e.exception), why)
+        self.assertEqual(alass.ERROR_CHARS, 200)
+
+    def test_alass_gets_no_input(self):
+        # It got subsync's own input; a stand-in that copies its input to its output shows what it got
+        read, write = os.pipe()
+        os.write(write, b"subsync's own input\n")
+        os.close(write)
+        kept = os.dup(0)
+        os.dup2(read, 0)
+        os.close(read)
+        try:
+            got = alass.run(REF, CANDIDATE, alass=self.stand_in('cat > "$3"'))
+        finally:
+            os.dup2(kept, 0)
+            os.close(kept)
+        self.assertEqual(got, "")
 
     def test_a_run_past_the_time_limit_is_a_failure(self):
         prog = self.stand_in("exec sleep 30")

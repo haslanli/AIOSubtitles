@@ -739,6 +739,13 @@ class Worker(threading.Thread):
             return self.busy_with(alias)
         return self.submit(Job(*seen)) is not None
 
+    def cant_queue(self, alias):
+        """No job of the file is queued or running and this person's queue takes none now (public mode with
+        every worker place taken, or a full queue), though their subtitle list for it can be fetched (they asked about
+        it): a pick or pending entry then serves the original as their "(original)" entry does (original_for)."""
+        with self.cv:
+            return alias in self.seen and not self._busy(alias) and not self._may_queue()
+
     def known_originals(self, alias):
         """The original subtitle per language for a file subsync listed, or None if its list is not known."""
         with self.cv:
@@ -1933,8 +1940,11 @@ class Worker(threading.Thread):
                              "source": srclimits.source_of_url(original["url"]) or "config"})
         if not cands:
             return None, "unknown", None
-        ordered = self._name_order(cands, hints.get("filename"), hints.get("videoHash"),
-                                   (first, (original or {}).get("id")))
+        file_hash = hints.get("videoHash")
+        if not file_hash:   # the file's own, as its read chose the original by it (_process_row)
+            file_key = self.store.resolve(alias)
+            file_hash = file_key.split("-")[0] if file_key else None
+        ordered = self._name_order(cands, hints.get("filename"), file_hash, (first, (original or {}).get("id")))
         if not ordered:   # every one AI-made or forced, with SUBSYNC_SKIP_AI
             return None, "none", None
         job = Job(*seen) if seen else Job("original", lang)
@@ -2464,9 +2474,10 @@ class LanguageSync:
         outcome = got["outcome"]
         if outcome == "in_sync" and (e["rank"] > 0 or self.best_fit) and self.s.list_in_sync:
             text = self._text(e)   # stored before the switch was on: list it now, unchanged
+            detail = got.get("detail") or {}
             self.store.put(self.file_key, e["sha"], lang, e["rank"], "synced",
-                           f"in sync as it is (viewer's #{e['rank'] + 1}): listed unchanged", route=got.get("route"),
-                           detail=dict(got.get("detail") or {}, unchanged=True, stacked=self._stacked(e)),
+                           self._listed_reason(e["rank"], detail.get("cross"), snapped=False), route=got.get("route"),
+                           detail=dict(detail, unchanged=True, stacked=self._stacked(e)),
                            fmt=self._ext(e), body=text, candidate_id=e["cand"]["id"], offer=not self.best_fit,
                            original=text)
             outcome = "synced"
@@ -2531,12 +2542,21 @@ class LanguageSync:
                  else "original passes against the release track")
         if not ((e["rank"] > 0 or self.best_fit) and self.s.list_in_sync):
             return {k: v for k, v in r.items() if k not in ("body", "magnet")}
-        listed = f"in sync as it is (viewer's #{e['rank'] + 1})"
-        if r.get("cross"):
-            listed += ", aligned to another language's track"
         if r.get("body") is not None:
-            return dict(r, outcome="synced", reason=f"{listed}: lines snapped to the release's own")
-        return dict(r, outcome="synced", reason=f"{listed}: listed unchanged", body=self._text(e), unchanged=True)
+            return dict(r, outcome="synced", reason=self._listed_reason(e["rank"], r.get("cross"), snapped=True))
+        return dict(r, outcome="synced", reason=self._listed_reason(e["rank"], r.get("cross"), snapped=False),
+                    body=self._text(e), unchanged=True)
+
+    @staticmethod
+    def _listed_reason(rank, cross, snapped):
+        """The reason an original in sync as it is is listed with, judged now (_in_sync_result) or by a stored verdict
+        (_listed_cached): the viewer's rank, whether it was aligned to another language's track, and whether
+        its lines are snapped to the release's own or it is listed unchanged."""
+        listed = f"in sync as it is (viewer's #{rank + 1})"
+        if cross:
+            listed += ", aligned to another language's track"
+        how = "lines snapped to the release's own" if snapped else "listed unchanged"
+        return f"{listed}: {how}"
 
     def _record_fit(self, e, r, t0):
         """An alass (or audio-route) result of a download recorded (_record; an original in sync as it is as

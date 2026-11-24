@@ -165,6 +165,29 @@ class Store:
         self.lock = threading.RLock()
         self._language_in_keys()
         self._drop_title_aliases()
+        self._subdl_ids_without_key()
+
+    def _subdl_ids_without_key(self):
+        """SubDL's subtitle ids as an earlier version stored them: cut from SubDL's address with its query, where its
+        answer gives the key, so the key went out with each entry made from such a subtitle. They lose the
+        query (results, kept originals, originals), as extra.ExtraSources._subdl makes them now, so each stored copy is
+        still found by its id and the key leaves the store."""
+        keyed = "subdl-%?%"   # a LIKE pattern: an id that starts "subdl-" and has a query
+        with self._tx():
+            n = sum(self.db.execute(f"UPDATE {table} SET candidate_id=substr(candidate_id, 1, "
+                                    "instr(candidate_id, '?') - 1) WHERE candidate_id LIKE ?", (keyed,)).rowcount
+                    for table in ("results", "kept_original"))
+            for alias, text in self.db.execute("SELECT alias, langs FROM originals WHERE langs LIKE ?",
+                                               (f'%"{keyed}',)).fetchall():
+                langs = json.loads(text)
+                for original in langs.values():
+                    cid = (original or {}).get("id") or ""
+                    if cid.startswith("subdl-") and "?" in cid:
+                        original["id"] = cid.split("?", 1)[0]
+                        n += 1
+                self.db.execute("UPDATE originals SET langs=? WHERE alias=?", (json.dumps(langs), alias))
+        if n:
+            log.info("SubDL's key taken out of %d stored subtitle id%s", n, "" if n == 1 else "s")
 
     def _drop_title_aliases(self):
         """Links from a bare title to a file ("title:<type>/<id>"), which an earlier version made for a request that

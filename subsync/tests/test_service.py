@@ -138,6 +138,25 @@ class StoreTest(unittest.TestCase):
                                                       "name:a.mkv|3")], [None, None, FILE, FILE])
             self.assertEqual([r["key"] for r in st.offers(FILE, ["eng"])], [key])
 
+    def test_a_subdl_id_stored_with_subdls_key_loses_it_when_the_store_opens(self):
+        # An earlier version cut SubDL's ids from its address with the query, where SubDL's answer gives the
+        # key, so the key went out with every entry made from such a subtitle (variantOf); the ids lose it, and stored
+        # copies are still found by them
+        keyed, plain = "subdl-1234-5678.zip?api_key=MADEUPKEY", "subdl-1234-5678.zip"
+        url = "https://dl.subdl.com/subtitle/1234-5678.zip?api_key=MADEUPKEY"
+        with TempDir() as d:
+            st = Store(d)
+            key = st.put(FILE, SHA_A, "eng", 0, "synced", body="1\n00:00:01,000 --> 00:00:02,000\nx\n", fmt="srt",
+                         candidate_id=keyed)
+            other = st.put(FILE, SHA_B, "eng", 1, "keep_original", candidate_id="os-1?x=1")   # not SubDL's: as it is
+            st.kept_original_put(FILE, "eng", keyed, 0.9)
+            st.originals_put("p:rows:file", {"eng": {"url": url, "id": keyed}, "spa": None})
+            st.close()
+            st = closed_after(self, Store(d))
+            self.assertEqual((st.get(key)["candidate_id"], st.get(other)["candidate_id"]), (plain, "os-1?x=1"))
+            self.assertEqual(st.kept_original(FILE, "eng")["candidate_id"], plain)
+            self.assertEqual(st.originals_get("p:rows:file"), {"eng": {"url": url, "id": plain}, "spa": None})
+
     def test_cap_evicts_least_recently_served(self):
         with TempDir() as d:
             clock = Clock()
@@ -1936,6 +1955,22 @@ class OriginalEntryTest(OriginalEntryFixture):
         code, body, _ = self.get(f"http://subsync:8790/original/{token(self.ALIAS)}/eng.srt")
         self.assertEqual((code, body.decode()), (200, self.texts["e2"]))   # e1 refused when served: the next by name
         self.assertEqual(len(self.worker.jobs), 0)
+
+    def test_without_the_players_hash_the_next_original_is_still_one_made_for_the_file(self):
+        # The player sent no hash, so the file's read chose its original by the file's own hash: e3, made for
+        # it. Refused by the language check, the next was chosen in an order without that hash, and e1 was served
+        # where e4, made for this exact file too, comes first
+        made_for_it = dialogue_srt("eng", start=33.0)
+        self.cands += [{"id": cid, "url": f"http://subs.test/{cid}.srt", "lang": "eng", "release": "", "hash": "f" * 16}
+                       for cid in ("e3", "e4")]
+        self.downloads.files["http://subs.test/e3.srt"] = dialogue_srt("spa").encode()   # "English", but Spanish text
+        self.downloads.files["http://subs.test/e4.srt"] = made_for_it.encode()
+        self.read(True)
+        self.worker._candidates(self.job, dict(self.job.hints))
+        self.worker._set_originals(self.ALIAS, self.cands, "b.mp4", "f" * 16)   # as the file's read chose it
+        self.worker.remember(self.job)
+        self.assertEqual(self.worker.known_originals(self.ALIAS)["eng"]["id"], "e3")
+        self.assertEqual(self.worker.original_for(self.ALIAS, "eng", time.time() + 3), (made_for_it, None, None))
 
     def test_the_original_route_says_what_it_served(self):
         # The "(original)" entry's subtitle sent unchanged, or the note when none of its language is in it

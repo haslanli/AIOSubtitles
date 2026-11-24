@@ -383,6 +383,13 @@ class PipelineTest(unittest.TestCase):
             self.assertNotIn("alass_error", r)
             self.assertEqual(r["outcome"], "synced")
 
+    def test_alass_own_words_name_its_failure(self):
+        # alass prints its errors on its normal output, which was thrown away: a failure said "alass exit 1"
+        from subsync import alass
+        with self.assertRaises(alass.AlassFailed) as e:
+            alass.run("not a subtitle\n", read_text("tiny.srt"), alass=ALASS)
+        self.assertRegex(str(e.exception), r"^alass exit 1: \S.{0,199}$")
+
     def styled_offset(self):
         """tiny-offset.srt in another author's timing: lines up to 280 ms earlier or later, a fixed pattern."""
         pattern = (0, 120, -150, 260, -90, 30, -280, 180, 60, -210)
