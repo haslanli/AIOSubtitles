@@ -710,6 +710,22 @@ class LanguageSyncStepsTest(unittest.TestCase):
         self.assertEqual([r["candidate_id"] for r in self.store.offers("f-1", ["eng"], {"eng": 3})], ["os-b", "os-c"])
 
 
+    def test_a_pass_without_a_copy_is_never_offered_nor_served(self):
+        # A pass whose copy wasn't kept (public mode: not a re-timing of its original) was offered and
+        # published like any other: ranked first, it hid the copies behind it and a waiting pick got none
+        sync = self.steps(SUBSYNC_MAIN_ALTERNATIVES="2")
+        none = self.store.put("f-1", "d" * 64, "eng", 0, "synced", "re-timed", route="cues",
+                              detail={"rule": self.w.s.rule_id, "gate_synced": {"within200": 0.95, "median_ms": 40},
+                                      "gate_original": {"within200": 0.95, "median_ms": 40}},
+                              fmt="srt", candidate_id="os-d", offer=False)   # no body: no copy
+        kept = self.stored("os-b", 1, "synced", "re-timed", 0.9)
+        for key in (none, kept):
+            sync._offer(key)
+        self.assertEqual((sync.passed, self.published), ([kept], [kept]))
+        self.assertEqual(sync._result(), kept)
+        self.assertEqual([r["key"] for r in self.store.offers("f-1", ["eng"], {"eng": 3})], [kept])
+
+
 class AlassAfterOtherPassesTest(unittest.TestCase):
     """Best fit with the fast path (the defaults): a pass neither in sync as it is nor moved by one shift that passes
     the main rule leaves alass to run, on the other downloads when it is stored and on its own subtitle when it

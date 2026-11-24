@@ -331,6 +331,18 @@ class DeadlineTest(unittest.TestCase):
         self.assertTrue(4 < waits[0] <= 5, waits)
         self.assertEqual(waits[1:], [2, 30])
 
+    def test_a_connect_refused_for_time_ends_the_bound_before_its_timer(self):
+        # the clock can pass the end a moment before the timer's thread runs: a redirect's next hop refused then must
+        # find the bound passed, or the call's error reads "Can't reach" for an AIOStreams that answered
+        bound = net.Deadline(0.05).start()
+        bound._timer.cancel()                                        # its timer late, for as long as the test takes
+        time.sleep(0.1)
+        self.assertFalse(bound.passed)
+        with self.assertRaises(TimeoutError):
+            bound.wait(5)
+        self.assertTrue(bound.passed)
+        bound.end()
+
     def test_its_connections_are_shut_down_at_its_end(self):
         with socket.create_server(("127.0.0.1", 0)) as listener:
             port = listener.getsockname()[1]

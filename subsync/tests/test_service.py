@@ -66,6 +66,63 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(st.offers(FILE, ["eng"]), [])
             self.assertEqual(st.body(k3), "c")
 
+    def test_without_best_fit_the_list_and_the_pick_offer_one_copy(self):
+        # The offers best fit listed outlived it: once a host switched it off, a new verdict changed only
+        # last_good (the copy the pick serves) while the list kept showing the old best-fit copy
+        body = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+        for verdict, offered in (("a better copy", "new"), ("the first subtitle in sync as it is", None),
+                                 ("the copy offered no longer passing", None)):
+            with self.subTest(verdict=verdict), TempDir() as d:
+                st = closed_after(self, Store(d))
+                old = st.put(FILE, SHA_A, "eng", 1, "synced", body=body, fmt="srt", offer=False)
+                st.set_offers(FILE, "eng", [old])                         # best fit on
+                if verdict == "a better copy":                            # best fit off from here: offered at once
+                    new = st.put(FILE, SHA_B, "eng", 0, "synced", body=body, fmt="srt")
+                elif verdict == "the first subtitle in sync as it is":
+                    st.put(FILE, SHA_B, "eng", 0, "in_sync")
+                else:
+                    st.put(FILE, SHA_A, "eng", 1, "keep_original")
+                want = [new] if offered else []
+                self.assertEqual([r["key"] for r in st.offers(FILE, ["eng"], {"eng": 3})], want)
+                self.assertEqual((st.last_good(FILE, "eng") or {}).get("key"), want[0] if want else None)
+
+    def test_only_copies_that_exist_are_offered(self):
+        # A passing verdict with no copy at the head of a language's offers (its copy lost from disk, or judged
+        # again in sync as it is) hid the copies behind it, and a better-ranked one without a copy was offered instead
+        # of one that has it
+        body = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+        with TempDir() as d:
+            st = closed_after(self, Store(d))
+            k1 = st.put(FILE, SHA_A, "eng", 0, "synced", body=body, fmt="srt", offer=False)
+            k2 = st.put(FILE, SHA_B, "eng", 1, "synced", body=body, fmt="srt", offer=False)
+            st.set_offers(FILE, "eng", [k1, k2])
+            os.remove(st._copy_path(k1))                                  # its copy lost from disk
+            self.assertEqual([r["key"] for r in st.offers(FILE, ["eng"])], [k2])   # skipped before it is counted
+            # without best fit: a copy offered, judged again as in sync as it is (its copy goes), leaves what is
+            # offered, so a worse-ranked copy is offered after it
+            st.put(FILE, SHA_C, "spa", 1, "synced", body=body, fmt="srt")
+            st.put(FILE, SHA_C, "spa", 1, "in_sync")
+            self.assertIsNone(st.last_good(FILE, "spa"))
+            k4 = st.put(FILE, "d" * 64, "spa", 2, "synced", body=body, fmt="srt")
+            self.assertEqual([r["key"] for r in st.offers(FILE, ["spa"])], [k4])
+            st.put(FILE, "e" * 64, "spa", 0, "synced", fmt="srt")         # a pass whose copy wasn't kept: not offered
+            self.assertEqual(st.last_good(FILE, "spa")["key"], k4)
+
+    def test_an_audio_jobs_languages_count_as_judged_by_the_audio_route(self):
+        # Only a verdict of the audio route counted, so a language its job had nothing to judge in never did
+        with TempDir() as d:
+            clock = Clock()
+            st = closed_after(self, Store(d, clock=clock))
+            st.judged_put(FILE, ["eng"], "r1")                            # a first pass's
+            self.assertFalse(st.audio_judged(FILE, ["eng"]))
+            st.judged_put(FILE, ["eng", "spa"], "r1", audio=True)         # an audio job's
+            self.assertTrue(st.audio_judged(FILE, ["eng", "spa"]))
+            st.judged_put(FILE, ["eng", "spa"], "r1")                     # a later first pass leaves it so
+            self.assertTrue(st.audio_judged(FILE, ["eng", "spa"]))
+            clock.t += 2 * JUDGED_FOR_S + 1                               # kept as long as the judged rows
+            st.expire()
+            self.assertFalse(st.audio_judged(FILE, ["eng"]))
+
     def test_a_title_is_never_kept_as_a_files_name(self):
         # An earlier version linked the file read for a request with a hash but no size to the title alone
         # ("title:<type>/<id>"), so every other release of the title got its copies; those links go when the store

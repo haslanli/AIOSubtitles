@@ -271,16 +271,27 @@ def viewer_change(config, manifest_url, metadata=None, add_opensubtitles=False, 
     others = [p for p in presets if not is_subsync_preset(p, manifest_url, names)]
     changes = []
     if len(current) == 1 and current[0]['options'].get('manifestUrl') == manifest_url and current[0].get('enabled', True):
-        placed = _before_other_subtitles(others, current[0])
-        if placed != presets:
-            new['presets'] = placed
+        # in place when no other subtitle source comes before it: only the subtitle sources' order matters, so stream
+        # addons around it change nothing
+        if any(is_subtitle_preset(p) for p in presets[:presets.index(current[0])]):
+            new['presets'] = _before_other_subtitles(others, current[0])
             changes.append(f'moves "{name}" before your other subtitle sources (apps that list only a few subtitles '
                            'per language keep its entries)')
     else:
         new['presets'] = others
         new['presets'] = _before_other_subtitles(others, subsync_preset(new, manifest_url, metadata, name))
-        changes.append(f'updates the subtitle source "{name}" (new address)' if current
-                       else f'adds 1 subtitle source: {name} (synced copies of the subtitles you already get)')
+        same = [p for p in current if p['options'].get('manifestUrl') == manifest_url]
+        if not current:
+            changes.append(f'adds 1 subtitle source: {name} (synced copies of the subtitles you already get)')
+        elif not same:
+            changes.append(f'updates the subtitle source "{name}" (new address)')
+        else:   # its address was there already: say what really changes
+            if not any(p.get('enabled', True) for p in same):
+                changes.append(f'switches the subtitle source "{name}" back on')
+            if len(current) > 1:
+                extra = len(current) - 1
+                changes.append(f'removes {extra} extra entr{"y" if extra == 1 else "ies"} of the subtitle source '
+                               f'"{name}"')
     if add_opensubtitles:
         new['presets'].append(opensubtitles_preset(new, metadata))
         changes.append('adds 1 subtitle source: OpenSubtitles (Stremio\'s official one; it lists every language)')
@@ -476,8 +487,7 @@ PUBLIC_TIMEOUT = 30          # public mode's longest wait for any call, from its
                              # the settings page and the daily check (signup.public_api)
 MAX_ANSWER = 16 * 1024 * 1024   # the largest AIOStreams answer read (a config, a stream or subtitle listing)
 MAX_REFUSAL = 64 * 1024      # the most of an alias lookup's refusal read
-ERROR_EXCERPT = 300          # the most kept of AIOStreams' own words for an error: bytes of an answer that isn't JSON,
-                             # characters of its message (_one_line)
+ERROR_EXCERPT = 300          # the most kept of AIOStreams' own words for an error, in characters (_one_line)
 READ_SIZE = 64 * 1024        # an answer is read this much at a time, at most
 
 BAD_ANSWER = 'BAD_ANSWER'    # AiosError.code: an answer AIOStreams doesn't give (not JSON of the call's shape, too
@@ -486,6 +496,8 @@ UNREADABLE = 'UNREADABLE'    # AiosError.code: an answer that came but isn't who
                              # UTF-8): AIOStreams was reached
 UNREACHABLE = 'UNREACHABLE'  # AiosError.code: no answer at all (a name not found, a connection refused or timed out, a
                              # request the address rules stop): "Can't reach AIOStreams at …"
+TOO_SLOW = 'TOO_SLOW'        # AiosError.code: asked, but its whole answer didn't come within the call's wait:
+                             # AIOStreams was reached, so it isn't UNREACHABLE
 NOT_AIOSTREAMS = 'NOT_AIOSTREAMS'   # AiosError.code: something answered the status call, but not as AIOStreams does
 REAL_DEBRID = 'REAL_DEBRID'  # AiosError.code: a request to Real-Debrid, stopped before it was sent
 ALIAS_UNKNOWN = 'ALIAS_UNKNOWN'      # AiosError.code: this AIOStreams doesn't know an alias (alias_config_id)
@@ -496,21 +508,25 @@ LIMITED = 'AIOStreams is limiting requests from this machine; try again in a few
 
 class AiosError(Exception):
     """`code`: AIOStreams' own error code (or the HTTP status of a refusal without one), or aiosconfig's for the errors
-    it finds itself (UNREACHABLE, NOT_AIOSTREAMS, BAD_ANSWER, UNREADABLE, REAL_DEBRID, ALIAS_UNKNOWN, ALIAS_NO_CONFIG).
-    `kind`: what an AIOStreams refusal means as aiosconfig read it (_reading; None for any other error). Callers decide
-    by these two, never by the message's words, which may quote AIOStreams. `detail`: AIOStreams' own words
-    for a refusal, when it gave some (shown by the public sign-up for a refused config). `reason`: the message
+    it finds itself (UNREACHABLE, TOO_SLOW, NOT_AIOSTREAMS, BAD_ANSWER, UNREADABLE, REAL_DEBRID, ALIAS_UNKNOWN,
+    ALIAS_NO_CONFIG). `kind`: what an AIOStreams refusal means as aiosconfig read it (_reading; None for any other
+    error). Callers decide by these two, never by the message's words, which may quote AIOStreams. `detail`:
+    AIOStreams' own words for a refusal, when it gave some, wherever in its answer (shown by the public sign-up for a
+    refused config,). `answer`: for a refusal without words, what names it: its code, or
+    "HTTP <status>" for an answer read for its status alone; None otherwise. `reason`: the message
     without the step it names, for the public pages, which name their own."""
 
-    def __init__(self, message, fix=None, code=None, detail=None, reason=None, kind=None):
+    def __init__(self, message, fix=None, code=None, detail=None, reason=None, kind=None, answer=None):
         super().__init__(message)
         self.message, self.fix, self.code, self.detail, self.kind = message, fix, code, detail, kind
+        self.answer = answer
         self.reason = reason or message
 
 
 ALIAS_REDIRECTS = (301, 302, 303, 307, 308)
 # AIOStreams' codes for a config ID and password that open no config: a wrong password, or a config that is gone
 WRONG_PASSWORD_CODES = ('USER_INVALID_DETAILS', 'USER_INVALID_PASSWORD', 'USER_NOT_FOUND')
+CODE_WORD = re.compile(r'[A-Z][A-Z0-9_]{0,63}')   # an error code as AIOStreams and aiosconfig write them
 
 # What an AIOStreams refusal means (AiosError.kind), read once from its code, its own words and its HTTP status: for
 # the sentence the error gets (_plain) and for the callers that act on it (needs_sign_in, is_limited)
@@ -655,8 +671,9 @@ class AiosApi:
         return min(wait, self.max_timeout) if self.max_timeout else wait
 
     def _call(self, method, path, body, auth, timeout, raw):
-        """(status, answer, the wait a "too many requests" asks for or None). The call's wait bounds the whole request
-        (net.Deadline): a server that sends its answer a byte now and then fails it as timed out."""
+        """(status, answer, the wait a "too many requests" asks for or None); a refusal's answer is None when it isn't
+        JSON (a proxy's error page): nothing of it is read but its status. The call's wait bounds the whole
+        request (net.Deadline): a server that sends its answer a byte now and then fails it as too slow."""
         headers = {'User-Agent': self.user_agent, 'Accept': 'application/json'}
         data = None
         if body is not None:
@@ -691,12 +708,27 @@ class AiosApi:
             try:
                 return answer.status, _loads(payload), wait
             except ValueError:
-                return answer.status, {'error': {'code': 'RATE_LIMIT_EXCEEDED' if answer.status == 429 else None,
-                                                 'message': payload[:ERROR_EXCERPT].decode('utf-8', 'replace')}}, wait
+                return answer.status, None, wait
         except realdebrid.Blocked:
             raise self._blocked() from None
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
-            raise self._unreachable(TimeoutError('timed out') if bound.passed else e) from None
+            raise self._no_answer(e, bound) from None
+
+    def _no_answer(self, e, bound):
+        """The AiosError for a request that got no whole answer (`bound`, the call's net.Deadline: whether it ended the
+        request, and the connections made under it): a connection that failed (urllib's URLError: none made, or the
+        request not sent) can't reach AIOStreams, unless the bound ended it after a connection was made (a redirect's
+        next hop, after the first one answered): AIOStreams was reached, so it took too long, as a request sent whose
+        answer didn't come within the call's wait; an answer cut short came, so AIOStreams was reached
+."""
+        if isinstance(e, urllib.error.URLError) and not (bound.passed and bound.made):
+            return self._unreachable(TimeoutError('timed out') if bound.passed else e)
+        if bound.passed or isinstance(e, TimeoutError):
+            return AiosError(f'AIOStreams at {self.base} took too long to answer.', 'Try again in a few minutes.',
+                             code=TOO_SLOW)
+        if isinstance(e, http.client.IncompleteRead):
+            return self._unreadable()
+        return self._unreachable(e)
 
     def _asked_wait(self, headers):
         """The seconds a "too many requests" asks to wait (Retry-After, else RateLimit-Reset); SLOW_DOWN_WAIT, never
@@ -728,10 +760,13 @@ class AiosApi:
         try:
             return _loads(payload)
         except ValueError:      # cut short, not UTF-8, or nested too deep
-            raise AiosError(f'{self.base} answered, but its answer isn\'t the JSON AIOStreams sends (it may have been '
-                            'cut short).',
-                            'Try again; if it keeps happening, check the web server or proxy in front of AIOStreams.',
-                            code=UNREADABLE) from None
+            raise self._unreadable() from None
+
+    def _unreadable(self):
+        return AiosError(f'{self.base} answered, but its answer isn\'t the JSON AIOStreams sends (it may have been cut '
+                         'short).',
+                         'Try again; if it keeps happening, check the web server or proxy in front of AIOStreams.',
+                         code=UNREADABLE)
 
     def _object(self, status, body):
         """An answer's JSON object ({} for an empty answer); any other answer is BAD_ANSWER."""
@@ -743,7 +778,13 @@ class AiosApi:
 
     def _error(self, status, body, doing, making=False):
         """The AiosError for a call AIOStreams refused, in plain words (BAD_ANSWER for an answer that isn't
-        AIOStreams'). `making`: the call made a config (_plain)."""
+        AIOStreams'). `body` None: the answer is read for its HTTP status alone (one that isn't JSON, such as a proxy's
+        error page,; a server error of the status call), so none of it is quoted. `making`: the call
+        made a config (_plain)."""
+        if body is None:
+            answer, kind = f'HTTP {status}', _reading(None, None, status)
+            message = _plain(None, None, making, status) if kind else f'AIOStreams answered with an error ({answer}).'
+            return AiosError(f'{doing}: {message}', code=status, reason=message, kind=kind, answer=answer)
         if body and not isinstance(body, dict):
             return self._bad_answer(status)
         body = body or {}
@@ -752,12 +793,14 @@ class AiosApi:
             err = {'message': err}
         if not isinstance(err, dict):
             return self._bad_answer(status)
-        said, detail = err.get('message'), body.get('detail')
-        said = _one_line(said) if isinstance(said, str) else None
-        words = said or (_one_line(detail) if isinstance(detail, str) else None)
-        message = _plain(err.get('code'), words, making, status)
-        return AiosError(f'{doing}: {message}', code=err.get('code') or status, detail=said, reason=message,
-                         kind=_reading(err.get('code'), words, status))
+        code, said, detail = err.get('code'), err.get('message'), body.get('detail')
+        # AIOStreams' own words, in its error or beside it
+        words = (_one_line(said) if isinstance(said, str) else None) or (
+            _one_line(detail) if isinstance(detail, str) else None)
+        message = _plain(code, words, making, status)
+        return AiosError(f'{doing}: {message}', code=code or status, detail=words, reason=message,
+                         kind=_reading(code, words, status),
+                         answer=code if not words and isinstance(code, str) and CODE_WORD.fullmatch(code) else None)
 
     def _succeeded(self, status, body, doing, ok=(200,), making=False):
         """The answer of a call AIOStreams says succeeded; raises its refusal (_error) otherwise."""
@@ -768,7 +811,12 @@ class AiosApi:
     # ------------------------------------------------------------------------------------------- reads
 
     def status(self):
+        """AIOStreams' status answer's data (its version, its presets' settings). A limit or a server error is
+        reported as one, by its HTTP status alone: an AIOStreams that is busy or restarting is at a right address
+; any other answer that isn't AIOStreams' status is NOT_AIOSTREAMS."""
         status, body = self.call('GET', '/api/v1/status', timeout=QUICK_TIMEOUT)
+        if status == 429 or 500 <= status <= 599:
+            raise self._error(status, None, 'Reading AIOStreams\' status')
         data = body.get('data') if isinstance(body, dict) else None
         if status != 200 or not isinstance(data, dict) or 'version' not in data:
             raise AiosError(f'{self.base} answered, but not like AIOStreams (HTTP {status}).',
@@ -842,7 +890,7 @@ class AiosApi:
         except realdebrid.Blocked:
             raise self._blocked() from None
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
-            raise self._unreachable(TimeoutError('timed out') if bound.passed else e) from None
+            raise self._no_answer(e, bound) from None
         return status, location, body, headers
 
     def _config_id_in(self, location):

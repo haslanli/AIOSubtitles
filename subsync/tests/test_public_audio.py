@@ -578,6 +578,31 @@ class CopyFromTheStoreTest(Base):
         self.assertIsNone(app.text_of(best))
         self.assertEqual(app.ready_copy("name:a.mkv|1000", "eng"), (yours, SYNCED))
 
+    def test_a_pick_serves_the_first_copy_that_exists(self):
+        # The pick served last_good's copy only, so a first offer whose copy wasn't kept (not a re-timing of
+        # its original) made it serve the original though the list showed the next one
+        import hashlib
+        import tempfile
+        from subsync.addon import App
+        folder = tempfile.mkdtemp(dir=self.dir)
+        with open(os.path.join(folder, "orig.srt"), "w", encoding="utf-8") as f:
+            f.write(SRT)
+        srv = RangeServer(folder)
+        self.addCleanup(srv.close)
+        store = closed_after(self, Store(os.path.join(self.dir, "public"), keep_texts=False))
+        none = store.put(self.FILE, "d" * 64, "eng", 0, "synced", body=SYNCED, fmt="srt", candidate_id="c0",
+                         offer=False)                                     # no original: no copy kept
+        kept = store.put(self.FILE, hashlib.sha256(SRT.encode()).hexdigest(), "eng", 1, "synced", body=SYNCED,
+                         fmt="srt", candidate_id="c1", original=SRT, offer=False)
+        store.set_offers(self.FILE, "eng", [none, kept])                  # a list made before this rule
+        store.alias("name:a.mkv|1000", self.FILE)
+        listing = Listing(subtitles=[{"id": "c1", "url": srv.url("orig.srt"), "lang": "eng"}])
+        w = Worker(self.settings(), store, listing, Safety(), limits=Limits(who="b" * 16))
+        self.workers.append(w)
+        w.remember(Job("movie", "tt1", {"filename": "a.mkv", "videoSize": 1000}))
+        app = App(w.s, store, w, Safety())
+        self.assertEqual(app.ready_copy("name:a.mkv|1000", "eng"), (kept, SYNCED))
+
     def test_a_copy_rebuilt_again_is_kept_as_the_newest(self):
         # The rebuilt copies kept an hour, at most TEXT_KEEP_ENTRIES: one rebuilt again after its hour kept
         # its first place, so the next new copy dropped it at once and its next download fetched the original again

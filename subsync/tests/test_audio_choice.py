@@ -454,6 +454,24 @@ class PickedTest(Base):
         self.assertTrue(w.waits_for_pick(self.alias))
         self.assertEqual(len(w.jobs), 0)
 
+    def test_after_an_audio_sync_a_language_it_had_nothing_to_judge_doesnt_queue_the_file_again(self):
+        # The audio sync judged both languages, but one it had nothing to judge in (every subtitle of it
+        # refused by the language check, say) got no verdict of the audio route, so each subtitle request queued the
+        # file again
+        from subsync.addon import App
+        s = self.settings(SUBSYNC_LANGUAGES="eng,spa")
+        w = self.first_pass(self.worker(Limits(), settings=s, subs=self.subs("eng", "spa")))
+        w._sync_all = lambda *a: None                   # the fit stores no verdict in either language
+        self.assertTrue(w.pick(self.alias))
+        job = w.jobs.pop(self.alias)
+        w.queue.clear()
+        w.process(job)
+        self.assertTrue(self.store.audio_judged(self.file_key(), ["eng", "spa"]))
+        app = App(w.s, self.store, w, Safety())
+        for _ in range(3):
+            app.subtitles("movie", "tt1", f"filename=tiny-nosub.mp4&videoSize={self.size}")
+        self.assertEqual(len(w.jobs), 0)
+
     def test_an_open_person_can_still_pick(self):
         limits = Limits(opened_per_day=0)
         w = self.first_pass(self.worker(limits, settings=self.settings("open")))
@@ -524,6 +542,8 @@ class SelfHostedTest(Base):
         for env in ({"SUBSYNC_AUDIO_WHEN": "open"}, {"SUBSYNC_AUDIO_ON_PICK": "off"}):
             with self.subTest(env=env):
                 self.store.db.execute("DELETE FROM budget")
+                # the last one's audio sync covered the file's language: it would open it no more
+                self.store.db.execute("DELETE FROM audio_covered")
                 w = self.first_pass(self.worker(settings=self.self_hosted(**env)))
                 self.assertEqual(self.queued_audio(w), [(self.alias, True, True)])
                 self.assertFalse(w.audio_allowed(Job("movie", "tt1", self.hints)))   # the first pass: index only

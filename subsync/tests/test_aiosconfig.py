@@ -241,8 +241,10 @@ class AnswerLimitsTest(ClientCase):
                 with self.assertRaises(AiosError) as e:
                     self.api(timeout=1).call("GET", "/api/v1/status")
                 self.assertLess(time.monotonic() - t0, 3)
-                self.assertIn("Can't reach", e.exception.message)
-                self.assertIn("timed out", e.exception.message)
+                # asked, and its answer came too slowly: reached, so not "can't reach"
+                self.assertEqual((e.exception.code, e.exception.message, e.exception.fix),
+                                 (aiosconfig.TOO_SLOW, f"AIOStreams at {self.stand.url} took too long to answer.",
+                                  "Try again in a few minutes."))
 
     def test_a_slow_but_steady_answer_within_the_timeout_is_read(self):
         self.stand.routes[("GET", "/api/v1/status")] = drip(200, b'{"a": 1}', 0.05)
@@ -275,8 +277,10 @@ class WholeCallBoundTest(ClientCase):
         with self.assertRaises(AiosError) as e:
             call()
         self.assertLess(time.monotonic() - t0, within)
-        self.assertEqual(e.exception.code, aiosconfig.UNREACHABLE)
-        self.assertIn("timed out", e.exception.message)
+        # asked, and no whole answer within the bound: too slow, not unreachable
+        self.assertEqual((e.exception.code, e.exception.message, e.exception.fix),
+                         (aiosconfig.TOO_SLOW, f"AIOStreams at {self.stand.url} took too long to answer.",
+                          "Try again in a few minutes."))
 
     def test_a_trickled_status_line_and_headers_end_at_the_timeout(self):
         self.stand.routes[("GET", "/api/v1/status")] = slow_head(200, self.VERSION)
@@ -306,6 +310,25 @@ class WholeCallBoundTest(ClientCase):
         other.routes[("GET", "/api/v1/status")] = slow_head(200, self.VERSION, seconds=0.7)
         self.assertEqual(self.api(timeout=5).status(), {"version": "2.37.0"})
         self.assert_timed_out(lambda: self.api(timeout=1).status())
+
+    def test_a_redirect_followed_after_the_bound_took_too_long(self):
+        # the first hop's status line and Location come at once, then its headers never end: the bound cuts them, the
+        # redirect is followed with no time left, and its connection fails (urllib's URLError). AIOStreams answered,
+        # so the call took too long; it is no "Can't reach"
+        other = Stand()
+        self.addCleanup(other.close)
+        other.routes[("GET", "/api/v1/status")] = answer(200, {"success": True, "data": {"version": "2.37.0"}})
+
+        def hop(h):
+            h.wfile.write(f"HTTP/1.1 302 Found\r\nLocation: {other.url}/api/v1/status\r\nX-Pad: ".encode())
+            for _ in range(30):
+                h.wfile.write(b"a")
+                h.wfile.flush()
+                time.sleep(0.1)
+        self.stand.routes[("GET", "/api/v1/status")] = hop
+        self.assert_timed_out(lambda: self.api(timeout=1).status())
+        self.stand.routes[("GET", "/api/v1/status")] = answer(302, {}, Location=f"{other.url}/api/v1/status")
+        self.assertEqual(self.api(timeout=5).status(), {"version": "2.37.0"})   # a whole redirect in time is followed
 
     def test_a_body_cut_at_the_bound_without_a_length_is_not_taken_for_the_answer(self):
         def endless(h):   # no Content-Length: the body ends when the connection does
@@ -422,7 +445,8 @@ class EveryFailureIsAnAiosErrorTest(ClientCase):
                              "Reading the config: That config ID and password don't match"),
                             ({"success": False, "detail": "a detail"}, "Reading the config: a detail"),
                             ([], "Reading the config: AIOStreams gave an error without a message."),
-                            (b"<html>Bad gateway</html>", "Reading the config: <html>Bad gateway</html>")):
+                            (b"<html>Bad gateway</html>",     # read for its status alone
+                             "Reading the config: AIOStreams answered with an error (HTTP 502).")):
             with self.subTest(body=body):
                 self.stand.routes[("GET", "/api/v1/user")] = answer(502, body)
                 with self.assertRaises(AiosError) as e:
@@ -591,6 +615,11 @@ class ErrorKindsTest(ClientCase):
 
 
 GARBLED = {"cut short": b'{"success": true, "data": {"vers', "not UTF-8": b'{"success": true, "x": "\xff"}'}
+# a stock nginx error page, as a proxy in front of AIOStreams answers ({0}: its status and reason)
+NGINX = ("<html>\r\n<head><title>{0}</title></head>\r\n<body>\r\n<center><h1>{0}</h1></center>\r\n<hr><center>nginx"
+         "</center>\r\n</body>\r\n</html>\r\n")
+PAGES = {429: NGINX.format("429 Too Many Requests").encode(), 405: NGINX.format("405 Not Allowed").encode(),
+         502: NGINX.format("502 Bad Gateway").encode()}
 
 
 class SetupWordsTest(ClientCase):
@@ -661,6 +690,76 @@ class SetupWordsTest(ClientCase):
                 self.assertEqual(e.exception.code, "RATE_LIMIT_EXCEEDED" if status == 429 else status)
                 self.assertEqual(len(self.stand.requests), asked)
                 self.assertEqual(waits, [2] if asked == 2 else [])
+
+    def test_an_answer_cut_short_before_its_length_is_unreadable_not_unreachable(self):
+        # A body that ends before its Content-Length (a proxy dropping the connection half-way) raised
+        # IncompleteRead, taken for no answer at all; it came, so AIOStreams was reached
+        for name, route, call in (("status", ("GET", "/api/v1/status"), lambda api: api.status()),
+                                  ("a config", ("GET", "/api/v1/user"), lambda api: api.get_config(UUID, "pw")),
+                                  ("a refusal", ("PUT", "/api/v1/user"),
+                                   lambda api: api.save_config(UUID, "pw", CONFIG))):
+            with self.subTest(answer=name):
+                self.stand.routes[route] = cut_short(500 if name == "a refusal" else 200)
+                with self.assertRaises(AiosError) as e:
+                    call(self.api())
+                self.assertEqual((e.exception.code, f"{e.exception.message} {e.exception.fix}"),
+                                 (aiosconfig.UNREADABLE, f"{self.stand.url} answered, but its answer isn't the JSON "
+                                  "AIOStreams sends (it may have been cut short). Try again; if it keeps happening, "
+                                  "check the web server or proxy in front of AIOStreams."))
+
+    def test_an_answer_too_slow_to_come_is_not_unreachable(self):
+        # A call asked whose answer didn't come within its wait (a config AIOStreams takes long to make, its
+        # addons checked) was "can't reach"; a connection that fails still is
+        def slow(h):
+            time.sleep(2)
+            answer(201, {"success": True, "data": {"uuid": UUID, "encryptedPassword": "E"}})(h)
+        self.stand.routes[("POST", "/api/v1/user")] = slow
+        with self.assertRaises(AiosError) as e:
+            self.api(timeout=1).create_config(CONFIG, "pw")
+        self.assertEqual((e.exception.code, f"{e.exception.message} {e.exception.fix}"),
+                         (aiosconfig.TOO_SLOW, f"AIOStreams at {self.stand.url} took too long to answer. Try again "
+                                               "in a few minutes."))
+        with self.assertRaises(AiosError) as e:
+            AiosApi("http://127.0.0.1:9", timeout=1).create_config(CONFIG, "pw")
+        self.assertEqual(e.exception.code, aiosconfig.UNREACHABLE)
+
+    def test_an_error_page_that_isnt_json_is_named_by_its_status_and_never_read_for_words(self):
+        # A proxy's error page was taken for AIOStreams' own words: its markup was the message, and nginx's
+        # "405 Not Allowed" read as AIOStreams asking for a sign-in
+        for code, method, call, words in (
+                (502, "GET", lambda api: api.get_config(UUID, "pw"),
+                 "Reading the config: AIOStreams answered with an error (HTTP 502)."),
+                (405, "PUT", lambda api: api.save_config(UUID, "pw", CONFIG),
+                 "Saving the config: AIOStreams answered with an error (HTTP 405).")):
+            with self.subTest(code=code):
+                self.stand.routes[(method, "/api/v1/user")] = answer(code, PAGES[code])
+                with self.assertRaises(AiosError) as e:
+                    call(self.api())
+                self.assertEqual((e.exception.message, e.exception.code, e.exception.kind, e.exception.detail),
+                                 (words, code, None, None))
+        self.stand.routes[("PUT", "/api/v1/user")] = answer(429, PAGES[429], **{"Retry-After": "3600"})
+        with self.assertRaises(AiosError) as e:                  # a "too many requests" is still a limit
+            self.api().save_config(UUID, "pw", CONFIG)
+        self.assertEqual((e.exception.message, e.exception.kind), (f"Saving the config: {aiosconfig.LIMITED}",
+                                                                   aiosconfig.LIMITING))
+
+    def test_a_limiting_or_failing_aiostreams_is_not_called_another_server(self):
+        # The status call took AIOStreams' own "too many requests" (a wait past the cap) and a server error
+        # for an answer not like AIOStreams', and the address for a wrong one
+        refusal = {"success": False, "error": {"code": "INTERNAL_SERVER_ERROR"}}
+        for status, body, headers, words, kind in (
+                (429, {"success": False, "error": {"code": "RATE_LIMIT_EXCEEDED"}}, {"Retry-After": "3600"},
+                 "Reading AIOStreams' status: AIOStreams is limiting requests from this machine; try again in a few "
+                 "minutes.", aiosconfig.LIMITING),
+                (503, refusal, {}, "Reading AIOStreams' status: AIOStreams answered with an error (HTTP 503).", None),
+                (502, PAGES[502], {},
+                 "Reading AIOStreams' status: AIOStreams answered with an error (HTTP 502).", None)):
+            with self.subTest(status=status):
+                self.stand.routes[("GET", "/api/v1/status")] = answer(status, body, **headers)
+                with no_sleep([]), self.assertRaises(AiosError) as e:
+                    self.api().status()
+                self.assertEqual((e.exception.message, e.exception.fix, e.exception.code, e.exception.kind),
+                                 (words, None, status, kind))
 
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, NEEDS)
@@ -892,6 +991,78 @@ class SignupCallersTest(ClientCase):
                 with no_sleep([]), self.assertRaises(self.signup.SignupError) as e:
                     self.signup._config_id(self.public(), None, "fam")
                 self.assertEqual(e.exception.message, words)
+
+    def read_viewer_says(self, status_route=None, config_route=None):
+        """The page's message and marked field when reading the person's config meets these answers."""
+        self.stand.routes[("GET", "/api/v1/status")] = status_route or answer(
+            200, {"success": True, "data": {"version": "2.37.0"}})
+        if config_route is not None:
+            self.stand.routes[("GET", "/api/v1/user")] = config_route
+        with no_sleep([]), self.assertRaises(self.signup.SignupError) as e:
+            self.signup._read_viewer(self.public(), UUID, "pw")
+        return e.exception.message, e.exception.field
+
+    def test_an_answer_cut_short_is_not_said_to_be_unreachable(self):
+        # A body cut before its Content-Length said "can't reach your AIOStreams" and marked the link
+        unknown = ("Reading your AIOStreams config: your AIOStreams answered in a way AIOSubtitles doesn't know. Try "
+                   "again in a few minutes.", None)
+        self.assertEqual(self.read_viewer_says(status_route=cut_short(200)), unknown)
+        self.assertEqual(self.read_viewer_says(config_route=cut_short(200)), unknown)
+
+    def test_an_answer_too_slow_to_come_is_not_said_to_be_unreachable(self):
+        # AIOStreams making a config past the public 30 s was "can't reach your AIOStreams … Check the link",
+        # though it was reached a moment before; no field is marked
+        def slow(route):
+            def answer_late(h):
+                time.sleep(2)
+                route(h)
+            return answer_late
+        self.stand.routes[("POST", "/api/v1/user")] = slow(answer(201, {"success": True, "data": {
+            "uuid": UUID, "encryptedPassword": "E"}}))
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._new_sync(self.signup.public_api(self.stand.url, 1), self.stand.url, CONFIG)
+        self.assertEqual((e.exception.message, e.exception.field),
+                         ("Making AIOSubtitles' config on your AIOStreams: your AIOStreams took too long to answer. "
+                          "Try again in a few minutes.", None))
+        self.stand.routes[("GET", "/stremio/u/fam/manifest.json")] = slow(redirect(302, f"/stremio/{UUID}/E/x"))
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._config_id(self.signup.public_api(self.stand.url, 1), None, "fam")
+        self.assertEqual((e.exception.message, e.exception.field),
+                         ("Opening your alias link: your AIOStreams took too long to answer. Try again in a few "
+                          "minutes.", None))
+
+    def test_an_error_page_that_isnt_json_is_named_by_its_status(self):
+        # A proxy's error page was quoted as "your AIOStreams answered", markup and all
+        self.assertEqual(self.read_viewer_says(config_route=answer(502, PAGES[502])),
+                         ("Reading your AIOStreams config: your AIOStreams answered with an error (HTTP 502). Try "
+                          "again in a few minutes.", None))
+        self.stand.routes[("POST", "/api/v1/user")] = answer(502, PAGES[502])
+        with self.assertRaises(self.signup.SignupError) as e:
+            self.signup._new_sync(self.public(), self.stand.url, CONFIG)
+        self.assertEqual(e.exception.message, "Making AIOSubtitles' config on your AIOStreams: your AIOStreams "
+                                              "answered with an error (HTTP 502). Try again in a few minutes.")
+
+    def test_a_limiting_or_failing_aiostreams_leaves_the_link_unmarked(self):
+        # Its status answer said the link wasn't AIOStreams and marked it, so people replaced a right link
+        self.assertEqual(self.read_viewer_says(status_route=answer(
+            429, {"success": False, "error": {"code": "RATE_LIMIT_EXCEEDED"}}, **{"Retry-After": "3600"})),
+            ("Reading your AIOStreams config: your AIOStreams is limiting requests from AIOSubtitles right now. Try "
+             "again in a few minutes.", None))
+        self.assertEqual(self.read_viewer_says(status_route=answer(
+            503, {"success": False, "error": {"code": "INTERNAL_SERVER_ERROR"}})),
+            ("Reading your AIOStreams config: your AIOStreams answered with an error (HTTP 503). Try again in a few "
+             "minutes.", None))
+
+    def test_an_error_without_words_names_its_code_and_words_beside_it_are_quoted(self):
+        # A bare code was the page's whole explanation, and AIOStreams' words beside its error were said as
+        # AIOSubtitles' own
+        self.assertEqual(self.read_viewer_says(config_route=answer(
+            500, {"success": False, "error": {"code": "INTERNAL_SERVER_ERROR"}})),
+            ("Reading your AIOStreams config: your AIOStreams answered with an error (INTERNAL_SERVER_ERROR). Try "
+             "again in a few minutes.", None))
+        self.assertEqual(self.read_viewer_says(config_route=answer(
+            400, {"success": False, "detail": "Invalid preset options"})),
+            ('Reading your AIOStreams config: your AIOStreams answered "Invalid preset options".', None))
 
 
 if __name__ == "__main__":

@@ -103,6 +103,16 @@ class RecheckTest(RecheckHarness, unittest.TestCase):
         self.assertEqual(record["unreachable"], 0)
         self.assertNotEqual(record.get("state"), "unreachable")
 
+    def test_a_slow_aiostreams_is_not_counted_as_unreachable(self):
+        # Asked, and its answer too slow to come within the check's wait: it was reached, so it is no check
+        # that couldn't reach it
+        uuid, token = self.sign_up()
+        checker = self.checker()
+        checker.timeout = 1
+        self.fake.fault, self.fake.hang_s = "hang", 1.5
+        self.assertIsNone(checker.check(token))
+        self.assertEqual(self.record(token)["unreachable"], 0)
+
     def test_a_garbled_answer_is_not_counted_as_unreachable(self):
         # It answered, so it is reached: an error, never three of them making the page say "unreachable"
         uuid, token = self.sign_up()

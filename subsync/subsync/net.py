@@ -152,12 +152,13 @@ class Deadline:
     redirect's too) connects within the time left and is shut down once `seconds` have passed since the start, so a
     server that sends its status line, its headers or its body a byte now and then, each within a read's own wait,
     holds the request no longer. The read in progress then ends, with an error or cut short; `passed` says the bound
-    ended it. A duplicate of each connection's socket is held until the end: while it is, the connection's number
-    can't go to another one."""
+    ended it, and `made` counts the connections made under it (one made means the server was reached). A duplicate of
+    each connection's socket is held until the end: while it is, the connection's number can't go to another one."""
 
     def __init__(self, seconds):
         self.seconds = seconds
         self.passed = False
+        self.made = 0
         self._lock = threading.Lock()
         self._held = []
         self._end_at = self._timer = self._outer = None
@@ -200,9 +201,10 @@ class Deadline:
 
     def wait(self, timeout):
         """A connect's wait: `timeout` (seconds, or None for none), never past the end; TimeoutError once it has
-        come."""
+        come, and the bound ended then if its timer hasn't yet, so `passed` holds from the first connect it refuses."""
         left = self._end_at - time.monotonic()
         if self.passed or left <= 0:
+            self._end()
             raise TimeoutError("timed out")
         return left if timeout is None else min(timeout, left)
 
@@ -210,6 +212,7 @@ class Deadline:
         """A new connection's socket, shut down at the end (at once if it has come)."""
         held = sock.dup()
         with self._lock:
+            self.made += 1
             self._held.append(held)
             if self.passed:
                 _shut(held)

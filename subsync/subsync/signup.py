@@ -25,11 +25,11 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from . import explain, realdebrid
-from .aiosconfig import (ALIAS_NO_CONFIG, ALIAS_UNKNOWN, BAD_ANSWER, MAX_ALIAS, MAX_LANGUAGES, NOT_AIOSTREAMS,
-                         PUBLIC_RETRY_WAIT_CAP, PUBLIC_TIMEOUT, UNREACHABLE, UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES,
-                         AiosApi, AiosError, install_link, is_limited, is_subsync_preset, needs_sign_in, new_key,
-                         parse_languages, sync_config, sync_config_problems, usenet_route, usenet_sync_config,
-                         viewer_change, without_builtin_twins, without_subsync)
+from .aiosconfig import (ALIAS_NO_CONFIG, ALIAS_UNKNOWN, BAD_ANSWER, CODE_WORD, MAX_ALIAS, MAX_LANGUAGES,
+                         NOT_AIOSTREAMS, PUBLIC_RETRY_WAIT_CAP, PUBLIC_TIMEOUT, TOO_SLOW, UNREACHABLE, UNREADABLE,
+                         UUID_RE, WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link, is_limited, is_subsync_preset,
+                         needs_sign_in, new_key, parse_languages, sync_config, sync_config_problems, usenet_route,
+                         usenet_sync_config, viewer_change, without_builtin_twins, without_subsync)
 from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
@@ -188,7 +188,8 @@ def _config_id(api, uuid, alias):
         if isinstance(e.code, int):   # its server error (500 to 599): the AIOStreams fails for now, not the link
             raise SignupError(f"{ALIAS_STEP}: your AIOStreams answered with an error (HTTP {e.code}). Try again in a "
                               "few minutes.", field="link") from None
-        raise SignupError(_plain(e, ALIAS_STEP), field="link") from None
+        # no box is marked for an answer too slow to come: AIOStreams was reached at that link
+        raise SignupError(_plain(e, ALIAS_STEP), field=None if e.code == TOO_SLOW else "link") from None
 
 
 @contextlib.contextmanager
@@ -257,6 +258,8 @@ def _plain(e, doing, own_password=False, making=False):
     if e.code == UNREACHABLE:
         return (f"{doing}: AIOSubtitles can't reach your AIOStreams from the internet. Check the link, and that "
                 "your AIOStreams can be opened from outside your home network.")
+    if e.code == TOO_SLOW:       # asked, so it is reached
+        return f"{doing}: your AIOStreams took too long to answer. Try again in a few minutes."
     if e.code == UNREADABLE:     # it answered, so it is reached
         return f"{doing}: your AIOStreams answered in a way AIOSubtitles doesn't know. Try again in a few minutes."
     if is_limited(e):
@@ -271,6 +274,8 @@ def _plain(e, doing, own_password=False, making=False):
         return f'{doing}: your AIOStreams refused the config: "{e.detail}".'
     if e.detail:
         return f'{doing}: your AIOStreams answered "{e.detail}".'
+    if e.answer:                 # an error answer without words: by its code, or its HTTP status
+        return f"{doing}: your AIOStreams answered with an error ({e.answer}). Try again in a few minutes."
     return f"{doing}: {e.reason}"
 
 
@@ -311,9 +316,12 @@ class SignupGate:
 
 # ------------------------------------------------------------------------------------------- the steps
 
-def _read_viewer(api, uuid, password):
+def _read_viewer(api, uuid, password, metadata=True):
+    """(the person's config, the presets' details AIOStreams' status gives, for adding AIOSubtitles to it); without
+    `metadata` the status isn't asked and the details are {}: the daily rebuild changes nothing in their config
+."""
     try:
-        status = api.status()
+        status = api.status() if metadata else {}
         viewer, _ = api.get_config(uuid, password)
     except AiosError as e:
         if e.code == BAD_ANSWER:
@@ -436,9 +444,6 @@ def _usenet_synced(record, usenet, fields, subtitles, now=None):
         record["synced_at"] = now
 
 
-_CODE_WORD = re.compile(r"[A-Z][A-Z0-9_]{0,63}")   # an error code as AIOStreams and aiosconfig write them
-
-
 def _log_fault(e, doing):
     """A best-effort step that failed, for the operator (the person is told by the page), never by its text, which may
     hold a link: AIOStreams' answer (an AiosError) by what it means (its kind) or else its code, when that is a code
@@ -448,16 +453,16 @@ def _log_fault(e, doing):
         what = type(e).__name__
     elif e.kind:
         what = e.kind
-    elif isinstance(e.code, int) or (isinstance(e.code, str) and _CODE_WORD.fullmatch(e.code)):
+    elif isinstance(e.code, int) or (isinstance(e.code, str) and CODE_WORD.fullmatch(e.code)):
         what = e.code
     else:
         what = "an error answer"
     log.warning("%s failed: %s", doing, what)
 
 
-# AiosError codes of a call that got no answer saying how it went (none at all, or one AIOSubtitles can't read): a save
-# may have gone through
-NO_VERDICT = (UNREACHABLE, UNREADABLE, BAD_ANSWER)
+# AiosError codes of a call that got no answer saying how it went (none at all, none in time, or one AIOSubtitles can't
+# read): a save may have gone through
+NO_VERDICT = (UNREACHABLE, TOO_SLOW, UNREADABLE, BAD_ANSWER)
 
 
 def _add_addon(api, uuid, password, viewer, manifest_url, metadata, clean_up=()):
@@ -590,7 +595,7 @@ def rebuild(settings, record, token, api, password, force=False, force_usenet=Fa
     Usenet route) gets its configs; a config that became Real-Debrid-only without a Usenet route moves the record to
     stored copies only, its sync fields taken out. The Usenet config follows the person's box. Raises SignupError
     (field "password" when the password is refused). Their own config is never changed."""
-    viewer, _ = _read_viewer(api, record["main_uuid"], password)
+    viewer, _ = _read_viewer(api, record["main_uuid"], password, metadata=False)
     manifest_url = personal_manifest_url(settings, token)
     plan = _configs_for(settings, viewer, manifest_url, _usable_now(settings, record))
     if plan.stored:

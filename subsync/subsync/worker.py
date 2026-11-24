@@ -1557,7 +1557,8 @@ class Worker(threading.Thread):
         if job.to_audio:
             self.store.file_detail_update(file_key, audio_only=sorted(audio_only | job.to_audio))
         if reference or job.audio or not self.s.audio_route:
-            self.store.judged_put(file_key, self.s.languages, job.rule)
+            # an audio job's languages count as judged by the audio route, one with nothing to judge too
+            self.store.judged_put(file_key, self.s.languages, job.rule, audio=bool(job.audio))
         # else: the first pass of a person whose choice is off, on a file with no track: nothing was judged, so
         # nothing is marked; everyone else who can pick it, or open it, still gets their own first pass
         log.info("done %s file=%s bytes=%d requests=%d", job.label, file_key, reader.bytes, reader.requests)
@@ -2173,7 +2174,7 @@ class LanguageSync:
         # the downloads' texts by candidate id, and the ids of those the language check refused
         self.texts, self.refused = {}, set()
         self.fingerprints = set()   # the subtitles judged so far, by fingerprint and sha256 (_duplicate)
-        self.passed = []            # best fit: the keys of passing results
+        self.passed = []            # best fit: the keys of passing results with a copy (_offer)
         self.best_rank = None       # best fit: the fit rank of the best pass published so far (_offer)
         # D1: a subtitle of this language passed the main rule against its own language
         self.settled = False
@@ -2526,9 +2527,13 @@ class LanguageSync:
         return r["outcome"] in ("synced", "in_sync")
 
     def _offer(self, key):
-        """Best fit: a passing result; a pick waiting for this language gets the best one so far."""
+        """Best fit: a passing result with a stored copy (one without can't be served, so it is never offered,
+); a pick waiting for this language gets the best one so far."""
+        row = self.store.get(key) or {}
+        if not row.get("body_bytes"):
+            return
         self.passed.append(key)
-        rank = self.w.fit_rank(self.store.get(key) or {})
+        rank = self.w.fit_rank(row)
         if self.best_rank is None or rank < self.best_rank:
             self.best_rank = rank
             self.w._publish(self.job.alias, self.lang, key)

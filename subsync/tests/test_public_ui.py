@@ -39,12 +39,15 @@ def css_media(query):
     return APP_CSS[start:end - 1]
 
 
-# The signed-up page's lines for the changes to a person's config, as the owner approved them
+# The signed-up page's lines for the changes to a person's config, as the owner approved them (the last two:
+#)
 CHANGES = ("Adds 1 subtitle source: AIOSubtitles (synced copies of the subtitles you already get)",
            "Removes 2 subtitle addons AIOSubtitles now searches itself: SubDL, OpenSubtitles",
            "Updates the subtitle source \"AIOSubtitles\" (new address)",
            "Moves \"AIOSubtitles\" before your other subtitle sources (apps that list only a few subtitles per language "
-           "keep its entries)")
+           "keep its entries)",
+           "Switches the subtitle source \"AIOSubtitles\" back on",
+           "Removes 1 extra entry of the subtitle source \"AIOSubtitles\"")
 
 
 CONTACT = "mailto:host@example.com"

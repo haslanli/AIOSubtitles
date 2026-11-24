@@ -338,6 +338,17 @@ class SignupTest(SignupHarness, unittest.TestCase):
                                               f"refused the config: \"{TESTER_ERROR}\".")
         self.assertNotIn("fault in AIOSubtitles", e.exception.message)
 
+    def test_the_daily_rebuild_asks_no_status(self):
+        # It read AIOStreams' status for the presets' details only adding AIOSubtitles to a config uses, and
+        # the rebuild never changes the person's config: one call fewer per person a day
+        uuid, result = self.run_signup(viewer())
+        self.fake.configs[uuid]["config"]["presets"].append(dict(TORRENTIO, instanceId="tio2"))
+        record = self.users.open(result.token)
+        self.fake.requests.clear()
+        self.assertTrue(self.signup.rebuild(self.s, record, result.token, self.api(INSTANCE, 10), PASSWORD).changed)
+        self.assertNotIn(("GET", "/api/v1/status"), self.fake.requests)
+        self.assertIn(("GET", "/api/v1/user"), self.fake.requests)
+
     def test_a_sync_config_that_does_not_answer_is_removed(self):
         self.fake.fault = "no_manifest"
         with self.assertRaises(self.signup.SignupError):
@@ -725,7 +736,7 @@ class SignupTest(SignupHarness, unittest.TestCase):
         # Every failure once the save was sent said "nothing there was changed", though it may have gone
         # through (AIOSubtitles added, with the clean-up the subtitle addons taken out). A save AIOStreams answered
         # with an error, or one never sent, still changed nothing
-        from subsync.aiosconfig import BAD_ANSWER, LIMITING, UNREACHABLE, UNREADABLE, AiosError
+        from subsync.aiosconfig import BAD_ANSWER, LIMITING, TOO_SLOW, UNREACHABLE, UNREADABLE, AiosError
 
         def api(save_error=None, read_error=None):
             def factory(base, timeout):
@@ -746,6 +757,7 @@ class SignupTest(SignupHarness, unittest.TestCase):
                 return client
             return factory
         unchecked = [("no answer to the save", AiosError("timed out", code=UNREACHABLE), None, False),
+                     ("no answer to the save in time", AiosError("too slow", code=TOO_SLOW), None, False),
                      ("an answer cut short", AiosError("cut short", code=UNREADABLE), None, False),
                      ("an answer of another shape", AiosError("odd", code=BAD_ANSWER), None, False),
                      ("no answer to the read-back", None, AiosError("timed out", code=UNREACHABLE), True),

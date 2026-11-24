@@ -130,7 +130,40 @@ class ViewerChange(unittest.TestCase):
         old, _ = plan.viewer_change(VIEWER, 'http://old:8790/OLD/manifest.json', META)
         new, changes = plan.viewer_change(old, URL, META)
         self.assertEqual([p['options']['manifestUrl'] for p in new['presets'] if p['type'] == 'custom'], [URL])
-        self.assertIn('updates', changes[0])
+        self.assertEqual(changes, ['updates the subtitle source "subsync" (new address)'])
+
+    def test_subsync_first_among_the_subtitle_sources_stays_whatever_stream_addons_follow(self):
+        # A stream addon after subsync moved it behind that addon and saved the config (AIOStreams then checks
+        # every addon again), said as a move "before your other subtitle sources", even with none
+        streams = [p for p in VIEWER['presets'] if not plan.is_subtitle_preset(p)]
+        ours = plan.subsync_preset(VIEWER, URL, META)
+        other = VIEWER['presets'][-1]
+        for presets in ([streams[0], ours, streams[1], other], [streams[0], ours, streams[1]], [ours] + streams):
+            with self.subTest(presets=[p['type'] for p in presets]):
+                config = dict(VIEWER, presets=presets)
+                self.assertEqual(plan.viewer_change(config, URL, META), (config, []))
+        new, changes = plan.viewer_change(dict(VIEWER, presets=[streams[0], other, ours, streams[1]]), URL, META)
+        self.assertEqual([p['type'] for p in new['presets']], ['zilean', 'custom', 'opensubtitles-v3-plus', 'newznab'])
+        self.assertEqual(changes, ['moves "subsync" before your other subtitle sources (apps that list only a few '
+                                   'subtitles per language keep its entries)'])
+
+    def test_an_entry_of_this_address_switched_off_or_repeated_is_said_as_it_is(self):
+        # Both were "(new address)", though the address was the same; the entry is still switched back on and
+        # the extra entries removed, one entry of this address left
+        ours = plan.subsync_preset(VIEWER, URL, META)
+        off = dict(ours, enabled=False)
+        old = dict(ours, options=dict(ours['options'], manifestUrl='http://old:8790/OLD/manifest.json'))
+        for presets, said in (
+                ([off], ['switches the subtitle source "subsync" back on']),
+                ([ours, dict(ours)], ['removes 1 extra entry of the subtitle source "subsync"']),
+                ([ours, dict(ours), old], ['removes 2 extra entries of the subtitle source "subsync"']),
+                ([off, dict(off)], ['switches the subtitle source "subsync" back on',
+                                    'removes 1 extra entry of the subtitle source "subsync"'])):
+            with self.subTest(said=said):
+                new, changes = plan.viewer_change(dict(VIEWER, presets=list(VIEWER['presets']) + presets), URL, META)
+                self.assertEqual(changes, said)
+                entries = [p for p in new['presets'] if plan.is_subsync_preset(p, URL)]
+                self.assertEqual([(p['options']['manifestUrl'], p['enabled']) for p in entries], [(URL, True)])
 
     def test_opensubtitles_offer_is_the_official_one(self):
         # Stremio's official OpenSubtitles (preset `opensubtitles`), not the slow community V3+

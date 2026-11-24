@@ -282,13 +282,13 @@ class App:
         return file_key, out
 
     def ready_copy(self, alias, lang):
-        """The synced copy a pick or pending entry serves for a file and language now: the store's best (also after a
-        restart), else, while best fit still judges, the pass the file's job published, which is also tried when the
-        store's best can't be served to this person (public mode: made from a subtitle only someone else's list has,
-); (key, text), or None."""
+        """The synced copy a pick or pending entry serves for a file and language now: the store's best whose copy
+        exists, the one the list shows first (also after a restart), else, while best fit still judges, the
+        pass the file's job published, which is also tried when the store's best can't be served to this person
+        (public mode: made from a subtitle only someone else's list has); (key, text), or None."""
         file_key = self.store.resolve(alias)
-        good = self.store.last_good(file_key, lang) if file_key else None
-        key = good["key"] if good else None
+        best = self.store.offers(file_key, [lang]) if file_key else []
+        key = best[0]["key"] if best else None
         text = self.text_of(key)
         if text is None:
             published = self.worker.published(alias, lang)

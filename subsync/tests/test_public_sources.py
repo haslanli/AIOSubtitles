@@ -119,6 +119,16 @@ class TextlessStoreTest(unittest.TestCase):
         store.set_offers(FILE, "eng", [key2])
         self.assertEqual(store.offers(FILE, ["eng"]), [])                     # nothing to rebuild it from: not offered
 
+    def test_a_pass_whose_copy_isnt_kept_is_never_offered(self):
+        # A better-ranked pass whose copy can't be kept as a re-timing of its original replaced the one that
+        # has a copy, and listed first it hid it
+        store = closed_after(self, Store(self.dir, keep_texts=False))
+        kept = store.put(FILE, sha(SRT), "eng", 1, "synced", body=SYNCED, fmt="srt", candidate_id="c1", original=SRT)
+        none = store.put(FILE, sha("x"), "eng", 0, "synced", body="nope", fmt="srt", candidate_id="c2")   # no original
+        self.assertEqual(store.last_good(FILE, "eng")["key"], kept)
+        store.set_offers(FILE, "eng", [none, kept])                       # a list made before this rule
+        self.assertEqual([r["key"] for r in store.offers(FILE, ["eng"])], [kept])
+
     def test_texts_kept_before_public_mode_are_dropped(self):
         old = closed_after(self, Store(self.dir))
         key = old.put(FILE, sha(SRT), "eng", 0, "synced", body=SYNCED, fmt="srt", candidate_id="c1")

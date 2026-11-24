@@ -5,11 +5,14 @@ results    one row per (file, language, subtitle), so one subtitle listed under 
 : key subsync:<ALGO_VERSION>:<oshash>-<size>:<lang>:<sha256(subtitle)[:16]>
 last_good  per (file, language): the synced result a viewer is offered; a new or better-ranked subtitle replaces it
            only when it passes; an original that passes as it is clears it (nothing to offer). With best fit
-           the worker sets it from its ranking instead (set_offers).
-offers     per (file, language): the offered results, best fit first (last_good is the first)
+           the worker sets it from its ranking instead (set_offers). A verdict with no copy is never offered.
+offers     per (file, language): the offered results, best fit first (last_good is the first); without best fit they go
+           when last_good changes
 judged     per (file, language): when every subtitle of that language was last judged for the file, and under which
            pass rule; a language with no subtitle at all counts as judged. With many people of different languages
            sharing the store (public mode), a file read for one language is read again for another.
+audio_covered  per (file, language): an audio job judged it (judged_put), so it counts as judged by the audio route even
+           when it had nothing to judge; kept as long as judged's rows
 files      per file: served size, hash, whether it has a usable text track; per file hint: its read failures and back-off
            (read_at: the last failure, or the last request the back-off met)
 aliases    file hints (AIOS videoHash, or file name + size) -> file key, so a listing finds a file read earlier
@@ -102,6 +105,8 @@ CREATE TABLE IF NOT EXISTS offers (file_key TEXT NOT NULL, lang TEXT NOT NULL, p
   updated REAL NOT NULL, PRIMARY KEY (file_key, lang, pos));
 CREATE INDEX IF NOT EXISTS offers_key ON offers(key);
 CREATE TABLE IF NOT EXISTS judged (file_key TEXT NOT NULL, lang TEXT NOT NULL, rule TEXT NOT NULL, at REAL NOT NULL,
+  PRIMARY KEY (file_key, lang));
+CREATE TABLE IF NOT EXISTS audio_covered (file_key TEXT NOT NULL, lang TEXT NOT NULL, at REAL NOT NULL,
   PRIMARY KEY (file_key, lang));
 CREATE TABLE IF NOT EXISTS usenet_misses (key TEXT PRIMARY KEY, at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS over_cap (alias TEXT PRIMARY KEY, cap INTEGER NOT NULL, at REAL NOT NULL);
@@ -285,7 +290,8 @@ class Store:
                 file_key = self.db.execute("SELECT file_key FROM results WHERE key=?", (key,)).fetchone()
                 self._drop(key)
                 if file_key:   # judged again on the next play, so the copy comes back as a recipe
-                    self.db.execute("DELETE FROM judged WHERE file_key=?", file_key)
+                    for table in ("judged", "audio_covered"):
+                        self.db.execute(f"DELETE FROM {table} WHERE file_key=?", file_key)
             for root, _, names in os.walk(os.path.join(self.root, "bodies")):
                 for n in names:
                     os.remove(os.path.join(root, n))
@@ -347,20 +353,33 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (key, file_key, sub_sha, lang, rank, outcome, reason, route,
                              json.dumps(detail or {}), fmt, body_bytes, candidate_id, now, now, retry))
-            if outcome == "synced" and offer:
+            if outcome == "synced" and body_bytes and offer:
                 lg = self.last_good(file_key, lang)
                 if lg is None or rank is None or lg["rank"] is None or rank <= lg["rank"]:
-                    self.db.execute("INSERT OR REPLACE INTO last_good VALUES (?,?,?,?,?)", (file_key, lang, key, rank, now))
+                    self._offer_only(file_key, lang, key, rank, now)
             elif outcome == "in_sync" and rank == 0 and offer:
                 # the subtitle a viewer sees first is fine as it is: no synced copy to offer
-                self.db.execute("DELETE FROM last_good WHERE file_key=? AND lang=?", (file_key, lang))
-            elif outcome == "keep_original":
-                # judged again and no longer passing (another pass rule, the language check): no longer offered
+                self._offer_only(file_key, lang, None)
+            elif not body_bytes:
+                # a verdict with no copy (judged again and no longer passing, in sync as it is, or a copy that couldn't
+                # be kept) is never offered, so it hides no copy behind it
+                if offer and (self.last_good(file_key, lang) or {}).get("key") == key:
+                    self._offer_only(file_key, lang, None)
                 self.db.execute("DELETE FROM last_good WHERE key=?", (key,))
                 self.db.execute("DELETE FROM offers WHERE key=?", (key,))
         if body_bytes:   # the cap is checked when a copy was added
             self.enforce_cap()
         return key
+
+    def _offer_only(self, file_key, lang, key, rank=None, now=None):
+        """Lock held, best fit off (put with offer): `key` is what a file and language offer now (None: nothing), and
+        the list of offers best fit made goes with what it replaces, so the list and the pick serve the same copy
+."""
+        self.db.execute("DELETE FROM offers WHERE file_key=? AND lang=?", (file_key, lang))
+        if key is None:
+            self.db.execute("DELETE FROM last_good WHERE file_key=? AND lang=?", (file_key, lang))
+        else:
+            self.db.execute("INSERT OR REPLACE INTO last_good VALUES (?,?,?,?,?)", (file_key, lang, key, rank, now))
 
     def results_of(self, file_key, lang):
         """Every stored result of a file and language: candidate_id, outcome, reason, detail."""
@@ -389,7 +408,8 @@ class Store:
 
     def offers(self, file_key, langs, counts=None):
         """The synced results to list for a file: per language its offers in order (up to counts[lang], default 1),
-        else its last_good."""
+        else its last_good; only those whose copy exists, skipped before they are counted, so a missing one hides none
+        behind it."""
         out = []
         for lang in langs:
             n = (counts or {}).get(lang, 1)
@@ -399,10 +419,9 @@ class Store:
             if not keys:
                 lg = self.last_good(file_key, lang)
                 keys = [lg["key"]] if lg else []
-            for key in keys[:n]:
-                r = self.get(key)
-                if r and r["outcome"] == "synced" and os.path.exists(self._copy_path(r["key"])):
-                    out.append(r)
+            listed = [r for r in map(self.get, keys)
+                      if r and r["outcome"] == "synced" and os.path.exists(self._copy_path(r["key"]))]
+            out += listed[:n]
         return out
 
     def served(self, key):
@@ -537,11 +556,15 @@ class Store:
         return bool(row and self.clock() - row[0] < within)
 
     # -- which languages were judged for a file -------------------------------------------------------------------
-    def judged_put(self, file_key, langs, rule):
+    def judged_put(self, file_key, langs, rule, audio=False):
+        """`audio`: an audio job judged them, so each counts as judged by the audio route (audio_judged), one it had
+        nothing to judge too. A new table holds that mark, so an older image still writes these rows."""
         now = self.clock()
         with self._tx():
             for lang in langs:
                 self.db.execute("INSERT OR REPLACE INTO judged VALUES (?,?,?,?)", (file_key, lang, rule, now))
+                if audio:
+                    self.db.execute("INSERT OR REPLACE INTO audio_covered VALUES (?,?,?)", (file_key, lang, now))
 
     def judged_all(self, file_key, langs, rule, since):
         """Whether every one of langs was judged for the file under this rule at `since` or later. `rule`: the rule, or a
@@ -572,10 +595,12 @@ class Store:
             self.db.execute("DELETE FROM pickable WHERE alias=?", (alias,))
 
     def audio_judged(self, file_key, langs):
-        """Whether every one of langs has a verdict of the audio route for the file (a copy, or the original kept)."""
+        """Whether every one of langs was judged by the audio route for the file: a verdict of it (a copy, or the
+        original kept), or an audio job that had nothing to judge in that language."""
         with self.lock:
             have = {row[0] for row in self.db.execute(
-                "SELECT DISTINCT lang FROM results WHERE file_key=? AND route='audio'", (file_key,))}
+                "SELECT lang FROM results WHERE file_key=? AND route='audio' UNION SELECT lang FROM audio_covered "
+                "WHERE file_key=?", (file_key, file_key))}
         return all(lang in have for lang in langs)
 
     def drop_rows_of(self, rows_key):
@@ -670,7 +695,8 @@ class Store:
             self.db.execute("DELETE FROM budget WHERE day < ?", (day_of(now - 40 * DAY),))
             self.db.execute("DELETE FROM pickable WHERE created < ?", (now - KEEP_PICKABLE_S,))
             self.db.execute("DELETE FROM originals WHERE updated < ?", (now - KEEP_PICKABLE_S,))
-            self.db.execute("DELETE FROM judged WHERE at < ?", (now - 2 * JUDGED_FOR_S,))
+            for table in ("judged", "audio_covered"):
+                self.db.execute(f"DELETE FROM {table} WHERE at < ?", (now - 2 * JUDGED_FOR_S,))
             self.db.execute("DELETE FROM kept_original WHERE at < ?", (now - RETRY_KEEP_ORIGINAL_S,))
             self.db.execute("DELETE FROM title_language WHERE until IS NOT NULL AND until < ?", (now,))
             # a file nobody asked for in 180 days and with no result left: its names and details; and the marks no

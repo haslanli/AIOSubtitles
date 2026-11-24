@@ -844,7 +844,8 @@ class Tree(html.parser.HTMLParser):
 def change_lines():
     """The lines aiosconfig.viewer_change writes for a sign-up, as the signed-up page gets them: AIOSubtitles added with
     the subtitle addons it now searches itself removed, then its address updated, then moved before another subtitle
-    source (a shortened stand-in kept the real lines out of the approved-words test)."""
+    source, then its entry switched back on, then an extra entry of it removed (a shortened stand-in kept the
+    real lines out of the approved-words test)."""
     from subsync.aiosconfig import viewer_change
     ours = {"type": "custom", "instanceId": "a", "enabled": True,
             "options": {"name": "AIOSubtitles", "manifestUrl": LINK, "resources": ["subtitles"]}}
@@ -853,7 +854,8 @@ def change_lines():
     old = dict(ours, options=dict(ours["options"], manifestUrl=f"{BASE}/u/{'O' * 43}/manifest.json"))
     other = {"type": "subhero", "instanceId": "h", "enabled": True, "options": {"name": "SubHero"}}
     lines = []
-    for presets, clean_up in ((twins, ("subdl", "opensubtitles")), ([old], ()), ([other, ours], ())):
+    for presets, clean_up in ((twins, ("subdl", "opensubtitles")), ([old], ()), ([other, ours], ()),
+                              ([dict(ours, enabled=False)], ()), ([ours, dict(ours, instanceId="b")], ())):
         lines += viewer_change({"presets": presets}, LINK, name="AIOSubtitles", clean_up=clean_up)[1]
     return lines
 
