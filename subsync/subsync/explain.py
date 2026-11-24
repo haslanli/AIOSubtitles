@@ -535,7 +535,8 @@ GROUPS = [
         "SUBSYNC_403_BACKOFF_S": (
             "900",
             "After a debrid service refuses a read (HTTP 403 or 429, usually a per-account limit), subsync stops all "
-            "reads for this many seconds, doubling with each refusal in a row up to 6 hours; the refused file itself "
+            "reads for this many seconds (on a public instance, only that person's reads), doubling with each refusal in a row "
+            "up to 6 hours; the refused file itself "
             "waits 1, 6, then 24 hours. Recommended: 900 (15 minutes). Shorter: copies resume sooner, but subsync keeps "
             "knocking on a limit your own playback needs too."),
         "SUBSYNC_RETRY_STOPPED_S": (
@@ -852,7 +853,7 @@ GROUPS = [
         "SUBSYNC_ANILIST_URL": (
             "https://graphql.anilist.co",
             "The address of AniList's API, which AIOSubtitles asks which country an anime comes from: its original "
-            "language is Japanese unless AniList names China, Taiwan, Hong Kong or Korea. Change it only if it moves."),
+            "language is Japanese unless AniList names another country. Change it only if it moves."),
         "SUBSYNC_OSV3PLUS_URL": (
             "https://opensubtitles.stremio.homes",
             "The address of OpenSubtitles V3+, a source subsync searches itself. Change it only if the service moves."),
