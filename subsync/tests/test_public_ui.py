@@ -401,6 +401,45 @@ class LookTest(unittest.TestCase):
         self.assertLessEqual(slot, px(rules(phone, ".slot select:target")["scroll-margin-top"]))
         self.assertLess(px(rules(phone, ".slot select:target")["scroll-margin-top"]), slot + 24)
 
+    def test_on_phones_a_rows_problem_is_next_to_its_boxes_where_its_link_shows_it(self):
+        # On phones a settings row stacks its heading, its problem, its explanation, then its boxes; the
+        # problem's link scrolls to the boxes (the languages' first box, the answers' group), so the problem, above
+        # several lines of explanation, stayed above the screen. There it now comes after the explanation, next to the
+        # boxes, and each link keeps the room for its three lines (desktop unchanged: beside the boxes already)
+        from subsync import pages
+        from subsync.ui import APP_CSS
+
+        def rules(block, selector):
+            found = re.search(r"(?m)^\s*" + re.escape(selector) + r"\{([^}]*)\}", block)
+            self.assertIsNotNone(found, selector)
+            return dict((part.strip() for part in d.split(":", 1)) for d in found.group(1).split(";") if d.strip())
+
+        def px(value):
+            return float(re.fullmatch(r"([\d.]+)px", value).group(1))
+        phone = css_media("(max-width:1023px),(max-height:599px)")
+        self.assertEqual(rules(phone, ".row .about"), {"display": "flex", "flex-direction": "column"})
+        self.assertEqual(rules(phone, ".row .about>.field-error"), {"order": "1"})     # after the heading and help
+        self.assertFalse(".row .about>" in APP_CSS.replace(phone, ""))                  # on phones only
+        # the rows whose problem is in the explanation's column, as the error's own child there
+        for row in ("languages", "audio"):
+            page = pages.settings_page(settings(SUBSYNC_AUDIO_ROUTE="on"), RECORD, USAGE, LINK, now=0, error="Wrong.",
+                                       field=row)
+            with self.subTest(row=row):
+                about = re.search(rf'<h2 id="{row}-h">[^<]*</h2>(.*?)</div><form', page).group(1)
+                self.assertRegex(about, rf'^<p class="field-error" id="{row}-error">Wrong\.</p><p class="help" '
+                                        rf'id="{row}-help">[^<]*</p>$')
+        line = float(rules(APP_CSS, "body")["font"].split("/")[1].split()[0])
+        error = rules(APP_CSS, ".field-error")
+        problem = (3 * px(error["font-size"]) * float(error["line-height"])
+                   + px(rules(phone, ".row .controls")["margin-top"]))
+        # the languages' link: their first box, under its own label
+        slot = problem + px(rules(APP_CSS, ".slot label")["font-size"]) * line + px(rules(phone, ".slot")["row-gap"])
+        self.assertLessEqual(slot, px(rules(phone, ".slot select:target")["scroll-margin-top"]))
+        # the answers' link: their group, the first thing in the row's form
+        room = px(rules(phone, ".row fieldset:target")["scroll-margin-top"])
+        self.assertLessEqual(problem, room)
+        self.assertLess(room, problem + 24)                                             # and little more
+
     def test_the_breakpoints_of_the_16_shapes(self):
         from subsync.ui import APP_CSS
         self.assertIn("@media (max-width:1023px),(max-height:599px)", APP_CSS)

@@ -58,6 +58,8 @@ LABELS = {
     'AIOS_PASSWORD': 'Its password',
     'TEST_READ': 'Do the test read now?',
     'REMOVE_OPENSUBTITLES': 'setup also added OpenSubtitles to your config. Take that out too?',
+    'REMOVE_HERE_ONLY': ("Setup can't read your config on AIOStreams, so it can't take subsync out of it. Remove "
+                         "subsync from this machine only?"),
     'HOST_ADDRESS': 'Web address',
     'SUBSYNC_TRUSTED_PROXY': 'Trusted proxy',
     'SUBSYNC_PUBLIC_INVITE': 'Invite code',
@@ -367,8 +369,9 @@ def _limit(lim, value, problem, text=None):
 
 
 def _limit_ids(asked):
-    """The limits' fields, as `step` takes them: each one's id is its setting (ui.number_field's, ui.segmented's)."""
-    return {lim.setting: lim.setting for lim in asked}
+    """The limits' fields, as `step` takes them: each one's id is its setting (ui.number_field's); a row of buttons',
+    its first button (ui.segmented: the row can't take focus)."""
+    return {lim.setting: ui.slot_id(1, lim.setting) if lim.kind == 'segmented' else lim.setting for lim in asked}
 
 
 def _choose(problem, asked):
@@ -523,12 +526,14 @@ def remove_text(keys, count=''):
 
 
 def after_setup(route, rows, details, running_version, ready, problem=None, offer_opensubtitles=False, config='',
-                rollback=None, removing=None, sign_in=False, username='', written=()):
+                rollback=None, removing=None, sign_in=False, username='', written=(), here_only=False):
     """The page after setup: the status, updates, your answers, removing. `ready`: update.Ready, from comparing this
     setup's version with the service's. `rollback`: (the earlier version, its database copy's name or None) while one
     is recorded. `removing`: what removing does (remove_text). `sign_in`: removing asks AIOStreams' sign-in to save
-    configs, under the lines it wrote before asking (`written`). `problem`: a refused removal (key, message), summed
-    up under the heading as on the steps (the script focuses it), linking to its field in the Remove row."""
+    configs, under the lines it wrote before asking (`written`). `here_only`: removing couldn't read the config, so it
+    offers, under the password, to remove subsync from this machine only. `problem`: a refused removal (key,
+    message), summed up under the heading as on the steps (the script focuses it), linking to its field in the Remove
+    row."""
     status = ('<div class="grid12 band">' + ui.check_rows(list(rows))
               + '<dl class="details">' + ''.join(f'<div><dt>{e(label)}</dt><dd>{e(value)}</dd></div>'
                                                  for label, value in details) + '</dl></div>')
@@ -565,6 +570,11 @@ def after_setup(route, rows, details, running_version, ready, problem=None, offe
     else:
         controls = _input('AIOS_CONFIG_PASSWORD', CONFIG_PASSWORD.format(config=config), '', problem,
                           kind='password', reveal=True)
+        # the box to remove subsync from this machine only, its question alone: the explanation is the answers file's
+        # and README's (its last sentence is REMOVE's and RESTORE's too, which no page shows)
+        if here_only:
+            controls += ui.choices(ui.choice(_field_id('REMOVE_HERE_ONLY'), LABELS['REMOVE_HERE_ONLY'], '',
+                                             name='REMOVE_HERE_ONLY', value='yes'))
         if sign_in:
             controls += (_rows(written) + _input('AIOS_USERNAME', SIGN_IN_TO_SAVE, username, problem)
                          + _input('AIOS_PASSWORD', LABELS['AIOS_PASSWORD'], '', problem, kind='password', reveal=True))

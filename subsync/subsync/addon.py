@@ -351,8 +351,8 @@ class App:
         if self.action() is not None:     # public mode: one entry after the others while only the person can fix something
             out.append({"id": "aiosubtitles-notice", "url": f"{self.s.public_base}{NOTICE_PATH}",
                         "lang": self.s.languages[0], "label": explain.PUBLIC_NOTICE_LABEL})
-        # public mode: not in the log (DEBUG), which names only the titles synced, never every title asked for, as the
-        # privacy page says
+        # public mode: not in the log (DEBUG), which names only the titles worked on, never every title asked for, as
+        # the privacy page says
         log.log(logging.DEBUG if self.s.public else logging.INFO, "answer %s/%s: %d entries (%d to pick) in %d ms",
                 type_, video_id, len(out), sum(str(e.get("id", "")).startswith("subsync-pick-") for e in out),
                 (time.time() - t0) * 1000)

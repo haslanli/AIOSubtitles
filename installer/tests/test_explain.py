@@ -276,7 +276,7 @@ class Documents(unittest.TestCase):
                                        'SUBSYNC_AUDIO_ROUTE'])
         self.assertEqual(keys[2][7:], [lim.setting for lim in limits.hosting(usenet=True, audio=True)
                                        if lim.setting not in keys[1]])
-        self.assertEqual(keys[3], ['REMOVE', 'REMOVE_OPENSUBTITLES'])
+        self.assertEqual(keys[3], ['REMOVE', 'REMOVE_OPENSUBTITLES', 'REMOVE_HERE_ONLY'])
         self.assertEqual(keys[4], ['RESTORE'])
         self.assertEqual(len(keys), 5)
         notes = {'AUDIO': 'In an answers file: no, pick or open.',

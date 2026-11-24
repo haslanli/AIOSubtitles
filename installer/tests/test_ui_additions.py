@@ -102,6 +102,9 @@ class UiAdditions(unittest.TestCase):
                       'aria-describedby="s-error s-help" aria-invalid="true">', row)
         self.assertIn('</div><span class="seg-unit">GB</span></div><p class="help" id="s-help">H.</p></div>', row)
         self.assertIn('aria-labelledby="s-label">', ui.segmented('s', 'S', ['1'], '1'))
+        # Its first button has the id a problem's link goes to (the row can't take focus); the others none
+        self.assertIn('<label><input type="radio" id="s-1" name="s" value="1"><span>1</span></label><label><input '
+                      'type="radio" name="s" value="2"><span>2</span></label>', row)
 
     def test_a_problems_summary_links_to_its_field(self):
         # The public pages' summary, for setup's steps too (pages._problem uses it)

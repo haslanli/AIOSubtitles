@@ -165,9 +165,9 @@ RULES = [
      "their personal link leads to. Your AIOStreams password is kept only if you tick \"Keep my password\", in the "
      "same encrypted record, until you untick it. For each synced subtitle only its new timing (never its text), with "
      "the names and sizes of the files it fits, is shared and kept 180 days after last use, without who played them; "
-     "logs name the titles synced, never who asked. Your record is deleted when you delete it on your settings page, "
-     "or 180 days after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may hold it "
-     "longer."),
+     "logs name the titles worked on, never who asked. Your record is deleted when you delete it on your settings "
+     "page, or 180 days after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may hold "
+     "it longer."),
     ("Public mode: the timing is shared, not the subtitles",
      "When someone already synced a subtitle for the file you play, AIOSubtitles reuses that work: it keeps only how "
      "the subtitle was re-timed, never its text. Your copy is made from the original subtitle, downloaded again for you "
@@ -367,6 +367,11 @@ QUESTIONS = {
         "yes",
         "Asked when you remove subsync, if setup had added OpenSubtitles to your config. Yes takes it out again, "
         "leaving your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles."),
+    "REMOVE_HERE_ONLY": (
+        "no",
+        "Asked when removing subsync, only when AIOStreams can't be reached or your config is gone from it. Yes "
+        "removes subsync's container, its stored copies and setup's files here, and lists what stays on AIOStreams. No "
+        "changes nothing."),
     # removing and restoring each ask their own yes, never CONFIRM's, so an answers file made for installing never
     # removes or restores anything
     "REMOVE": (
@@ -1445,10 +1450,11 @@ PRIVACY_PARTS = (
      "its title, name and size), under a key that only your personal link leads to. {usenet_held} {keep_stored} "
      "({backups}). For each synced subtitle only "
      "its new timing (never its text), with the names and sizes of the files it fits, is shared and kept 180 days "
-     "after last use, without who played them. Logs name the titles synced, never who asked."),
+     "after last use, without who played them. Logs name the titles worked on, never who asked."),
     ("Who else sees your requests",
      "{front} The subtitle links your app gets don't carry your personal link: their key opens only your subtitles, "
-     "never your settings. AIOSubtitles itself keeps no log of requests. {backups_kept}"),
+     "never your settings. AIOSubtitles' own log notes the titles it works on and when, never who asked, your internet "
+     "address or your links. {backups_kept}"),
     ("How long it is kept",
      "until you delete your data on your settings page, or {keep} after your last request; then AIOSubtitles' own "
      "config can't be removed from your AIOStreams, because opening your record needs your link."),

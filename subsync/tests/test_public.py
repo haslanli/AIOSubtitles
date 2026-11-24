@@ -72,18 +72,21 @@ class PublicSettingsTest(unittest.TestCase):
                 self.assertIn("SUBSYNC_TRUSTED_PROXY", problems[0])
                 self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "gateway"}).conflicts(), [])   # self-hosted: unused
 
-    def test_a_trusted_proxy_that_is_neither_gateway_nor_an_ip_address_stops_public_mode(self):
+    def test_a_trusted_proxy_that_is_neither_gateway_nor_an_ipv4_address_stops_public_mode(self):
         # A request's own address is compared with each entry as written, so a range, a name or a typo never
-        # matched, and every visitor counted as the web server's one address for the sign-up limit
-        s = Settings({"SUBSYNC_TRUSTED_PROXY": "127.0.0.1, 172.18.0.0/16, caddy", "SUBSYNC_PUBLIC": "on"})
+        # matched, and every visitor counted as the web server's one address for the sign-up limit;: nor does
+        # an IPv6 address, since subsync listens on IPv4 only
+        s = Settings({"SUBSYNC_TRUSTED_PROXY": "127.0.0.1, 172.18.0.0/16, caddy, fd00::1", "SUBSYNC_PUBLIC": "on"})
         self.assertEqual(s.conflicts(), [
-            "SUBSYNC_TRUSTED_PROXY must be gateway or IP addresses separated by commas, like 172.18.0.1: 172.18.0.0/16 "
-            "isn't one.",
-            "SUBSYNC_TRUSTED_PROXY must be gateway or IP addresses separated by commas, like 172.18.0.1: caddy isn't "
-            "one."])
+            "SUBSYNC_TRUSTED_PROXY must be gateway or IPv4 addresses separated by commas, like 172.18.0.1: "
+            "172.18.0.0/16 isn't one.",
+            "SUBSYNC_TRUSTED_PROXY must be gateway or IPv4 addresses separated by commas, like 172.18.0.1: caddy isn't "
+            "one.",
+            "SUBSYNC_TRUSTED_PROXY must be gateway or IPv4 addresses separated by commas, like 172.18.0.1: fd00::1 "
+            "isn't one."])
         self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "caddy"}).conflicts(), [])          # self-hosted: unused
-        self.assertEqual(Settings({"SUBSYNC_TRUSTED_PROXY": "172.18.0.1, fd00::1", "SUBSYNC_PUBLIC": "on"}).conflicts(),
-                         [])
+        taken = Settings({"SUBSYNC_TRUSTED_PROXY": "172.18.0.1, 10.0.0.2", "SUBSYNC_PUBLIC": "on"})
+        self.assertEqual(taken.conflicts(), [])
 
     def test_syncs_at_once(self):
         from unittest import mock
@@ -1538,18 +1541,20 @@ class PublicTextsTest(unittest.TestCase):
                 ({"SUBSYNC_FRONT_PROXY": "Cloudflare", "SUBSYNC_BACKUP_DAYS": "30"},
                  "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet address "
                  "and the links you open, your personal link included. The subtitle links your app gets don't carry "
-                 "your personal link: their key opens only your subtitles, never your settings. AIOSubtitles itself "
-                 "keeps no log of requests. Backups of the stored data are kept for up to 30 days."),
+                 "your personal link: their key opens only your subtitles, never your settings. AIOSubtitles' own log "
+                 "notes the titles it works on and when, never who asked, your internet address or your links. "
+                 "Backups of the stored data are kept for up to 30 days."),
                 ({}, "The web server in front of AIOSubtitles passes every request on and so sees your internet address "
                      "and the links you open, your personal link included; whoever hosts this instance runs it. The "
                      "subtitle links your app gets don't carry your personal link: their key opens only your "
-                     "subtitles, never your settings. AIOSubtitles itself keeps no log of requests. Whoever hosts this "
-                     "instance decides whether backups of the stored data are made and how long they are kept.")):
+                     "subtitles, never your settings. AIOSubtitles' own log notes the titles it works on and when, "
+                     "never who asked, your internet address or your links. Whoever hosts this instance decides "
+                     "whether backups of the stored data are made and how long they are kept.")):
             with self.subTest(env=env):
                 s = Settings(env)
                 parts = explain.privacy_parts(s, asked_sources(s, "series"))
                 text = " ".join(f"{head}: {text}" for head, text in parts)   # the parts in order, under their headings
-                self.assertIn("Logs name the titles synced, never who asked. Who else sees your requests: " + added
+                self.assertIn("Logs name the titles worked on, never who asked. Who else sees your requests: " + added
                               + " How long it is kept:", text)
 
     def test_the_privacy_text_says_what_reading_a_track_of_pictures_means(self):

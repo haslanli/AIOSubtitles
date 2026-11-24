@@ -555,8 +555,9 @@ class App:
         return self.page(screens.check('host', s.live('hostcheck'), running, stop=s.stops.get('hostcheck')))
 
     # ------------------------------------------------------------------------------------- after setup
-    def after_setup(self, problem=None, sign_in=False, username='', written=()):
-        """The page after setup; after a removal that asks AIOStreams' sign-in, its form with the sign-in fields."""
+    def after_setup(self, problem=None, sign_in=False, username='', written=(), here_only=False):
+        """The page after setup; after a removal that asks AIOStreams' sign-in, its form with the sign-in fields; after
+        one that can't read the config, with the box to remove subsync from this machine only."""
         e = engine.Engine({}, page=True)
         rows, details = e.status_parts()
         prev = e.prev
@@ -572,7 +573,7 @@ class App:
                                              offer_opensubtitles=offer,
                                              config=engine.short(e.keys.get('VIEWER_UUID', '')), rollback=rollback,
                                              removing=screens.remove_text(e.keys), sign_in=sign_in, username=username,
-                                             written=written))
+                                             written=written, here_only=here_only))
 
     def after_answers(self, method, one):
         """Change your answers: the installed route's own steps, filled in."""
@@ -591,7 +592,7 @@ class App:
         if method != 'POST':
             return self.go('')
         e = engine.Engine({k: v for k, v in one.items() if k in ('AIOS_CONFIG_PASSWORD', 'REMOVE_OPENSUBTITLES',
-                                                                    'REMOVE', *SIGN_IN)}, page=True)
+                                                                    'REMOVE_HERE_ONLY', 'REMOVE', *SIGN_IN)}, page=True)
         if not e.prev and self.removed:     # removed meanwhile: a second Remove (a double click) waited for it
             return self.page(self.removed)
         host = e.prev.get('route') == 'host'
@@ -601,10 +602,12 @@ class App:
         try:
             e.remove_host() if host else e.remove()
         except engine.Problem as p:
-            # a question the form didn't have yet (AIOStreams' sign-in) is asked, not marked wrong
+            # a question the form didn't have yet (AIOStreams' sign-in) is asked, not marked wrong; once the config
+            # can't be read, the box to remove subsync from this machine only is shown under the password
             return self.after_setup(problem=(p.field, '' if p.missing else p.message),
                                     sign_in=p.field in SIGN_IN or bool(one.get('AIOS_USERNAME')),
-                                    username=one.get('AIOS_USERNAME', ''), written=[tuple(r) for r in e.out.rows])
+                                    username=one.get('AIOS_USERNAME', ''), written=[tuple(r) for r in e.out.rows],
+                                    here_only=not host and e.offered_here_only)
         except (Stop, AiosError) as s:      # what it did before it stopped, and the way out (Docker's last lines)
             return self.page(screens.working(heading, [tuple(r) for r in e.out.rows], False,
                                              stop=(s.message, getattr(s, 'page_fix', s.fix))))

@@ -509,7 +509,8 @@ SYNCED = "1\n00:00:01,500 --> 00:00:02,500\nHello there, Kenobi.\n\n2\n00:00:03,
 
 class AnswerLogTest(Base):
     """The privacy page says the logs name the titles synced, never who asked, and that no log of requests is
-    kept, yet every subtitle list answered left a line naming the title asked for, synced or not."""
+    kept, yet every subtitle list answered left a line naming the title asked for, synced or not. It now says
+    the log notes the titles AIOSubtitles works on and when, which stays true only without that line."""
 
     def test_a_public_instance_logs_no_line_per_subtitle_list(self):
         from subsync.addon import App

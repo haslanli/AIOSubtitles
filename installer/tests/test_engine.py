@@ -634,6 +634,97 @@ class RemovalStops(Offline):
         self.assertTrue((self.state / 'secrets.env').exists())
 
 
+class RemoveHereOnly(Offline):
+    """Removing reads the config first, so with AIOStreams gone, or the config gone from it, it failed every
+    time (a terminal asked again, --yes stopped, the page showed the error again) and the container, its stored copies
+    and setup's files stayed, the container restarting after every reboot. It now offers, with its own yes, to remove
+    only what is on this machine, and lists what stays on AIOStreams."""
+
+    QUESTION = ("Setup can't read your config on AIOStreams, so it can't take subsync out of it. Remove subsync from "
+                "this machine only?")
+
+    def aiostreams_gone(self):
+        """No answer from AIOStreams at any of its addresses from here on: every connection refused, as when its
+        container is gone."""
+        gone = mock.patch('socket.create_connection', side_effect=ConnectionRefusedError(61, 'Connection refused'))
+        gone.start()
+        self.addCleanup(gone.stop)
+
+    def assert_removed_here(self, out):
+        said = flat(out)
+        self.assertIn('Removed the subsync container and its stored copies', said)
+        self.assertIn('Done.', said)
+        self.assertNotIn('takes subsync out of your config', said)                 # it can't, so it doesn't say so
+        self.assertFalse(self.aios.subsync_up)
+        for state_file in engine.STATE_FILES:
+            self.assertFalse((self.state / state_file).exists(), state_file)
+        self.assertIn(f"• subsync's entry in your config {engine.short(UUID)}, if that config still exists: take it "
+                      "out on AIOStreams' configure page", said)
+        return said
+
+    def test_without_aiostreams_its_own_yes_removes_what_is_on_this_machine(self):
+        self.aios.users[UUID]['config'] = {'services': [TORBOX, ENGINE], 'presets': [ZILEAN, NEWZNAB, SUBS]}
+        keys = self.install(USENET='yes')
+        self.aiostreams_gone()
+        code, out = self.again('--uninstall')                                        # no is its default
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'{self.QUESTION} [y/n]', flat(out))
+        self.assertIn("✗ AIOS_CONFIG_PASSWORD: Can't reach AIOStreams at", flat(out))
+        self.assertTrue(self.aios.subsync_up)
+        for state_file in engine.STATE_FILES:
+            self.assertTrue((self.state / state_file).exists(), state_file)
+        code, out = self.again('--uninstall', REMOVE_HERE_ONLY='yes')                # REMOVE isn't asked: its own yes
+        self.assertEqual(code, 0, out)
+        said = self.assert_removed_here(out)
+        self.assertIn(f"• subsync's own configs on AIOStreams ({engine.short(keys['SYNC_UUID'])}, "
+                      f"{engine.short(keys['USENET_UUID'])}), if it still has them: they do nothing without subsync",
+                      said)
+
+    def test_with_the_config_gone_subsyncs_own_configs_are_still_deleted(self):
+        keys = self.install()
+        del self.aios.users[UUID]                                                    # deleted on AIOStreams
+        code, out = self.again('--uninstall', REMOVE_HERE_ONLY='yes')
+        self.assertEqual(code, 0, out)
+        said = self.assert_removed_here(out)
+        self.assertIn("Deleted subsync's own config", said)
+        self.assertNotIn(keys['SYNC_UUID'], self.aios.users)
+        self.assertNotIn("subsync's own configs on AIOStreams", said)
+
+    def test_in_a_terminal_no_asks_for_the_password_again(self):
+        self.install()
+        with typing('wrong', 'n', PASSWORD, 'y', 'y') as typed:     # the password, no, it again, OpenSubtitles, yes
+            code, out = self.run_main('--uninstall')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(typed.call_count, 5)
+        said = flat(out)
+        self.assertLess(said.index(self.QUESTION), said.index("That config ID and password don't match a config on "
+                                                               'this AIOStreams.'))
+        self.assertIn('This takes subsync out of your config', said)                # removed as before
+        self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
+
+    def test_any_other_error_offers_nothing(self):
+        self.install()
+        with mock.patch.object(engine.Aios, 'get_config', side_effect=refused(502, {}, 'Reading the config')):
+            code, out = self.again('--uninstall', REMOVE_HERE_ONLY='yes')
+        self.assertEqual(code, 1, out)
+        self.assertNotIn(self.QUESTION, flat(out))
+        self.assertTrue((self.state / 'secrets.env').exists())
+
+    def test_on_the_page_the_box_comes_once_the_config_cant_be_read(self):
+        self.install()
+        self.aiostreams_gone()
+        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE': 'yes'}, page=True)
+        with self.assertRaises(engine.Problem) as caught:
+            e.remove()
+        self.assertEqual(caught.exception.field, 'AIOS_CONFIG_PASSWORD')
+        self.assertTrue(caught.exception.message.startswith("Can't reach AIOStreams at"), caught.exception.message)
+        self.assertTrue(e.offered_here_only)
+        e = engine.Engine({'AIOS_CONFIG_PASSWORD': PASSWORD, 'REMOVE_HERE_ONLY': 'yes'}, page=True)
+        e.remove()
+        self.assertIn(engine.VIEWER_ENTRY_STAYS.format(config=engine.short(UUID)), e.stays)
+        self.assertFalse((self.state / 'secrets.env').exists())
+
+
 class WebServerRule(Offline):
     """Only the terminal's pause after the rule said to reload the web server; the page shows the rule's intro
     alone, so a page user added the rule, went on, and the check said the address doesn't answer."""
@@ -1369,6 +1460,51 @@ class StartedButSilent(Offline):
         self.assertNotIn('subsync is running', out)
         self.assertEqual(asked, [engine.CONTAINER] * 45)                 # every 2 seconds for 90 seconds
         self.assertEqual(self.ours(), [])                                # your config is left as it was
+
+
+class HandSetLines(Offline):
+    """A line of state/subsync.env written by hand that subsync's start refuses made setup save the configs,
+    replace a working container that then exited at once, wait 90 seconds and say "started but does not answer", the
+    reason only in Docker's log. It now stops when Save is pressed, before anything is saved or restarted, with
+    subsync's own sentence."""
+
+    def test_saving_stops_before_anything_changes_and_goes_through_once_corrected(self):
+        self.install()
+        path = self.state / 'subsync.env'
+        path.write_text(path.read_text() + 'SUBSYNC_SYNCS_AT_ONCE=al\n')
+        files = {path: path.read_text() for path in self.state.iterdir() if path.is_file()}
+        configs, started = copy.deepcopy(self.aios.users), self.started_count
+        code, out = self.again()
+        self.assertEqual(code, 1, out)
+        self.assertIn("✗ Setup stopped before changing anything: subsync wouldn't start with state/subsync.env as it "
+                      "is. SUBSYNC_SYNCS_AT_ONCE must be a whole number from 1, or auto. Correct or remove that line "
+                      "in state/subsync.env, then run ./setup again.", flat(out))
+        self.assertNotIn('Updated', out)
+        self.assertEqual({path: path.read_text() for path in self.state.iterdir() if path.is_file()}, files)
+        self.assertEqual((self.aios.users, self.started_count), (configs, started))
+        path.write_text(path.read_text().replace('SUBSYNC_SYNCS_AT_ONCE=al', 'SUBSYNC_SYNCS_AT_ONCE=2'))
+        code, out = self.again()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.env()['SUBSYNC_SYNCS_AT_ONCE'], '2')
+        self.assertEqual(self.started_count, started + 1)
+
+    def test_only_what_the_kept_lines_add_is_said(self):
+        # setup's own lines are checked where it asks them; here, in setup's container, gateway (a public instance's
+        # trusted proxy) is looked up on the wrong machine, so a check of the whole file would refuse one subsync takes
+        own = {'SUBSYNC_PUBLIC': 'on', 'SUBSYNC_TRUSTED_PROXY': 'gateway'}
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'subsync.env').write_text('SUBSYNC_CONTACT=https://x.example\n')
+        with mock.patch('subsync.settings.default_gateway', return_value=None):
+            self.assertTrue(engine.Settings(own).conflicts())
+            engine.check_env(own, (), engine.ENV_REFUSED_WAY_OUT_TRY)              # nothing added: no stop
+            (self.state / 'subsync.env').write_text('SUBSYNC_CONTACT=x.example\nSUBSYNC_MAX_TRIES=x\n')
+            with self.assertRaises(ui.Stop) as caught:
+                engine.check_env(own, (), engine.ENV_REFUSED_WAY_OUT_TRY)
+        self.assertEqual(caught.exception.message,
+                         engine.ENV_REFUSED + " SUBSYNC_MAX_TRIES must be a whole number from 1, like 6. "
+                         "SUBSYNC_CONTACT must start with https://, http:// or mailto:, like mailto:you@example.com.")
+        self.assertEqual((caught.exception.fix, caught.exception.page_fix),
+                         (engine.ENV_REFUSED_WAY_OUT, engine.ENV_REFUSED_WAY_OUT_TRY))
 
 
 class StepResults(TmpState):

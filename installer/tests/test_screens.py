@@ -816,7 +816,8 @@ class RefusedAnswerSummary(unittest.TestCase):
                     samples.Offline(401, {'error': {'code': 'USER_INVALID_PASSWORD'}})).message),
                 ('choices-problem', 'LANGUAGES-1', plan.parse_languages('Klingon')[1]),    # the first box
                 ('limits-problem', 'SUBSYNC_DAILY_BUDGET_GB', limits.check(limits.DAILY, '0')[1]),
-                ('host-limits-languages-problem', 'SUBSYNC_MAX_LANGUAGES', 'Choose 1, 2, 3 or 4.'),
+                # a row of buttons' first button: the row can't take focus
+                ('host-limits-languages-problem', 'SUBSYNC_MAX_LANGUAGES-1', 'Choose 1, 2, 3 or 4.'),
                 ('host-address-problem', 'host_address', screens.hosting.ADDRESS_REFUSED)):
             html, _ = states[name]
             with self.subTest(screen=name):
@@ -855,9 +856,12 @@ class RefusedAnswerSummary(unittest.TestCase):
                     html = draw((key, 'Refused.'))
                     # (a row of buttons' message is the page's own: limits.choose)
                     field = re.search(r'<p id="problem-message"><a href="#([^"]+)">[^<]+</a></p>', html).group(1)
-                    # the languages' is their first box: their group can't take focus
-                    self.assertEqual(field, key if name.endswith('limits') else
-                                     'LANGUAGES-1' if key == 'LANGUAGES' else key.lower())
+                    # the languages' is their first box and a row of buttons' its first button: neither group can
+                    # take focus
+                    segmented = name.endswith('limits') and key in {
+                        lim.setting for lim in limits.hosting(True, True) if lim.kind == 'segmented'}
+                    self.assertEqual(field, f'{key}-1' if segmented or key == 'LANGUAGES' else
+                                     key if name.endswith('limits') else key.lower())
                     self.assertEqual(html.count(f' id="{field}"'), 1)
 
     def test_only_a_field_the_step_drew_for_the_question_is_linked(self):

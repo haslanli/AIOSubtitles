@@ -481,6 +481,11 @@ html:not(.js) .screens{margin-top:24px}
   .today{margin-top:40px;padding-top:0}
   .rows{margin-top:56px;gap:56px}
   .row .controls{margin-top:20px}
+  /* a row's problem next to its boxes, under the row's explanation, so its link, which scrolls to the boxes, shows it
+     (C2-0578); a link to a row's answers (a group) keeps the room for it and the controls' margin */
+  .row .about{display:flex;flex-direction:column}
+  .row .about>.field-error{order:1}
+  .row fieldset:target{scroll-margin-top:96px}
   .letter .actions .btn{width:100%}
   /* the installer frame on phones: segments on top, Continue in thumb reach */
   .frame{display:block;padding:0}

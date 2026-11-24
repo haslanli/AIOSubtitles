@@ -289,6 +289,10 @@ def every_state():
     add('after-wrong-password', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
                                                     problem=wrong, config='1a2b3c4d…'),
         *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…', wrong[1])
+    # removing couldn't read the config: the box to remove subsync from this machine only, under the password
+    add('after-here-only', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
+                                               problem=wrong, config='1a2b3c4d…', here_only=True),
+        *shown, update.RUNNING.format(version='1.1.0'), 'Password of your config 1a2b3c4d…', wrong[1])
     saving = [('warn', 'Saving the config: This AIOStreams asks you to sign in before configs can be saved.', None)]
     add('after-sign-in', screens.after_setup('yourself', status, details, '1.1.0', update.Ready('1.1.0', 'newest'),
                                              problem=('AIOS_USERNAME', ''), config='1a2b3c4d…', sign_in=True,

@@ -30,7 +30,7 @@ from pathlib import Path
 
 from installer import aios, docs, dockerenv, hosting, limits, plan, screens, ui, update, where
 from installer.aios import Aios, AiosError  # noqa: F401  (tests reach the client through here)
-from installer.aios import WRONG_PASSWORD_CODES, needs_sign_in
+from installer.aios import NO_CONFIG, UNREACHABLE, WRONG_PASSWORD_CODES, needs_sign_in
 from installer.ui import Asker, Stop, stop
 from installer.update import real_folder, remove_entry
 from subsync import digits, explain, origlang, realdebrid
@@ -100,11 +100,26 @@ REMOVE_FAILED = "Removing the subsync container failed; setup's files were kept,
 # AIOStreams failing to delete one of subsync's configs (AIOStreams' own message under it): the same, for its keys
 DELETE_FAILED = ("Deleting {config} on AIOStreams failed; setup's files were kept, so removing it again finishes the "
                  'job.')
+# A line of state/subsync.env written by hand that subsync's start refuses (check_env): found before anything is saved
+# or restarted, subsync's own sentences after it; the page's way out on a personal install (its Save checks
+# again) and on a public instance (its install step's Try again)
+ENV_REFUSED = "Setup stopped before changing anything: subsync wouldn't start with state/subsync.env as it is."
+ENV_REFUSED_WAY_OUT = 'Correct or remove that line in state/subsync.env, then run ./setup again.'
+ENV_REFUSED_WAY_OUT_SAVE = 'Correct or remove that line in state/subsync.env, then press Save again.'
+ENV_REFUSED_WAY_OUT_TRY = 'Correct or remove that line in state/subsync.env, then press Try again.'
+# The lines of state/subsync.env a personal install writes besides explain.WRITTEN_BY_SETUP: the limits it asks, and
+# the setting SUBSYNC_AUDIO_WHEN replaced, which goes (the audio answer carries it, known_audio)
+PERSONAL_OWNED = limits.names([limits.DAILY, limits.USENET]) + ('SUBSYNC_AUDIO_ON_PICK',)
 # A config an earlier setup gave subsync, after another was chosen: setup keeps no password for it, so it only names it,
 # in the review under your config and after removing, in what stays (Engine.earlier_configs)
 EARLIER_CONFIG = ("Your earlier config {old} still lists subsync. Setup looks after this one from now on, so it won't "
                   "take subsync out of {old}: do that on AIOStreams' configure page if you no longer want it there.")
 EARLIER_CONFIG_STAYS = "subsync's entry in your earlier config {old}: take it out on AIOStreams' configure page"
+# Removing subsync from this machine only, when its config on AIOStreams can't be read: what stays there,
+# subsync's own configs only when deleting them failed
+VIEWER_ENTRY_STAYS = ("subsync's entry in your config {config}, if that config still exists: take it out on "
+                      "AIOStreams' configure page")
+OWN_CONFIGS_STAY = "subsync's own configs on AIOStreams ({ids}), if it still has them: they do nothing without subsync"
 # Setup never turns an installed folder into the other route: it is removed first
 ROUTE_STOPS = {
     'yourself': ("A public instance runs here; setup can't turn it into an install for yourself.",
@@ -215,6 +230,19 @@ def env_settings():
     switches setup asks again; a number or an on/off setting written wrong there reads as its default
     (Settings.written_wrong)."""
     return Settings(env_values())
+
+
+def check_env(own, owned, page_fix):
+    """Stops, before anything is saved or restarted, when subsync wouldn't start with state/subsync.env as this run
+    writes it: setup's own lines (`own`, those it writes: `owned`, plan.merge_env) with every other line of the file,
+    as Compose reads them, through subsync's own start check (Settings.conflicts). Only what the kept lines add is
+    said: setup's own lines are its answers, checked when asked, and here, in setup's container, one may read otherwise
+    than where subsync runs (gateway, found on the machine it runs on)."""
+    merged, _ = plan.merge_env(own, env_values(), owned=owned)
+    alone = Settings(own).conflicts()
+    problems = [problem for problem in Settings(merged).conflicts() if problem not in alone]
+    if problems:
+        raise Stop(' '.join([ENV_REFUSED, *problems]), ENV_REFUSED_WAY_OUT, page_fix=page_fix)
 
 
 def env_audio_when():
@@ -1068,6 +1096,7 @@ class Engine:
         self.cache = self.offer_cache_setting()
         if not self.ask.yesno('CONFIRM', 'Save these changes?', True):
             stop('Nothing was changed.', 'Run ./setup again when you are ready.')
+        check_env(self.subsync_env(), PERSONAL_OWNED, ENV_REFUSED_WAY_OUT_SAVE)
         # subsync's own config first: subsync needs it to start. Yours changes only once subsync answers, since
         # AIOStreams fetches an addon's manifest when a config that lists it is saved.
         if self.has_sync:
@@ -1199,11 +1228,32 @@ class Engine:
         self.forget_rule()
         if self.s['public_kind'] == 'path':
             self.proxy_rule()
+        env, kept = plan.merge_env(self.subsync_env(), env_values(as_written=True), owned=PERSONAL_OWNED)
+        write_env(STATE / 'subsync.env', env)
+        if kept:
+            self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
+        if self.audio:
+            self.s['audio_when'] = self.audio_when
+        self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio, usenet=self.usenet,
+                      audio_budget=self.audio_budget or self.audio_budget_kept,   # for when it's on again
+                      manifest_url=self.manifest_url)
+        for kept in ('cache_before', 'added_opensubtitles'):
+            self.s.setdefault(kept, self.prev.get(kept))
+        earlier = self.earlier_configs()
+        if earlier:
+            self.s['earlier_configs'] = earlier
+        self._deploy('subsync', 'subsync is running (it restarts by itself after a reboot)')
+        self.save_viewer()
+
+    def subsync_env(self):
+        """Setup's own lines of state/subsync.env for this run: install writes them, with every other line of the file
+        kept as the person wrote it (PERSONAL_OWNED). Before subsync's configs are saved (the review's check,
+        check_env), a config not saved yet has no link."""
         def link(kind):
-            if not self.keys.get(f'{kind}_UUID'):
+            encrypted = getattr(self, f'{kind.lower()}_encrypted', None)       # known once the config is saved
+            if not (self.keys.get(f'{kind}_UUID') and encrypted):
                 return ''
-            return install_link(self.s['aios_internal'], self.keys[f'{kind}_UUID'],
-                                getattr(self, f'{kind.lower()}_encrypted'))
+            return install_link(self.s['aios_internal'], self.keys[f'{kind}_UUID'], encrypted)
         env = plan.subsync_env({
             'sync_manifest': link('SYNC'), 'sync_password': self.keys.get('SYNC_PASSWORD', ''),
             'usenet': self.usenet, 'usenet_manifest': link('USENET') if self.usenet else '',
@@ -1220,24 +1270,7 @@ class Engine:
                 env['SUBSYNC_BIND'] = '127.0.0.1'
         asked = limits.personal(audio=False, usenet=self.usenet)
         env.update(limits.env_lines(asked, self.limit_values))
-        # the setting SUBSYNC_AUDIO_WHEN replaced goes: the audio answer carries it (known_audio)
-        env, kept = plan.merge_env(env, env_values(as_written=True),
-                                   owned=limits.names([limits.DAILY, limits.USENET]) + ('SUBSYNC_AUDIO_ON_PICK',))
-        write_env(STATE / 'subsync.env', env)
-        if kept:
-            self.out.ok(f"Kept the lines of state/subsync.env that ./setup doesn't set: {', '.join(kept)}")
-        if self.audio:
-            self.s['audio_when'] = self.audio_when
-        self.s.update(languages=[three for _, _, three in self.languages], audio=self.audio, usenet=self.usenet,
-                      audio_budget=self.audio_budget or self.audio_budget_kept,   # for when it's on again
-                      manifest_url=self.manifest_url)
-        for kept in ('cache_before', 'added_opensubtitles'):
-            self.s.setdefault(kept, self.prev.get(kept))
-        earlier = self.earlier_configs()
-        if earlier:
-            self.s['earlier_configs'] = earlier
-        self._deploy('subsync', 'subsync is running (it restarts by itself after a reboot)')
-        self.save_viewer()
+        return env
 
     def earlier_configs(self):
         """The configs earlier installs gave subsync, other than this run's, the last one first: their IDs only, never a
@@ -1638,15 +1671,16 @@ class Engine:
     def host_install(self):
         self.show_step('hostinstall', 'host')
         self.forget_rule()
-        if self.secret_new:
-            self.out.ok('Made the secret key and kept it in state/subsync.env, readable only by your user.')
         answers = {'HOST_ADDRESS': self.address, 'SUBSYNC_TRUSTED_PROXY': self.trusted_proxy,
                    'SUBSYNC_PUBLIC_INVITE': self.invite, 'SUBDL_KEY': self.keys.get('SUBDL_KEY', ''),
                    'SUBSYNC_SUBSOURCE_KEY': self.keys.get('SUBSYNC_SUBSOURCE_KEY', ''),
                    'TMDB_KEY': self.keys.get('TMDB_KEY', '')}
-        env = hosting.public_env(answers, self.secret, self.limit_values, usenet=self.host_usenet, audio=self.host_audio,
+        own = hosting.public_env(answers, self.secret, self.limit_values, usenet=self.host_usenet, audio=self.host_audio,
                                  tmdb_personal=self.host_tmdb_personal)
-        env, kept = plan.merge_env(env, env_values(as_written=True), owned=hosting.OWNED)
+        check_env(own, hosting.OWNED, ENV_REFUSED_WAY_OUT_TRY)
+        if self.secret_new:
+            self.out.ok('Made the secret key and kept it in state/subsync.env, readable only by your user.')
+        env, kept = plan.merge_env(own, env_values(as_written=True), owned=hosting.OWNED)
         write_env(STATE / 'subsync.env', env)
         self.secret_new = False
         if kept:
@@ -1734,37 +1768,48 @@ class Engine:
     def remove(self):
         """Takes subsync out of the config your apps use, deletes subsync's own configs and removes the container with
         its stored copies (./setup --uninstall, and Remove subsync on the page). A removal stopped half way is finished
-        by the next one. `self.stays`: what is left."""
+        by the next one. When the config can't be read (AIOStreams can't be reached, or no config opens with its ID
+        and that password), it offers, with its own yes, to remove only what is on this machine;
+        `self.offered_here_only`: it did. `self.stays`: what is left."""
         s, keys = self.prev, self.keys
         if not s:
             stop('subsync is not set up here.')
         self.aios = saved_aios(s)
         self.out.say(self.out.paint('1', '  Removing subsync'))
         uuid = keys.get('VIEWER_UUID')
+        self.offered_here_only = here_only = False
 
         def check_password(value):
+            nonlocal here_only
             try:
                 self.viewer, _ = self.aios.get_config(uuid, value)
             except AiosError as e:
-                return False, e.message, value
+                # a config that is gone reads as a wrong password does: AIOStreams can't tell them apart
+                if e.code == UNREACHABLE or e.kind == NO_CONFIG:
+                    self.offered_here_only = True
+                    here_only = self.ask.yesno('REMOVE_HERE_ONLY', screens.LABELS['REMOVE_HERE_ONLY'], False)
+                return (True, '', value) if here_only else (False, e.message, value)
             return True, '', value
         password = self.ask.text('AIOS_CONFIG_PASSWORD', screens.CONFIG_PASSWORD.format(config=short(uuid)),
                                  secret=True, check=check_password)
-        new, removed = plan.without_subsync(self.viewer, s.get('manifest_url'))
-        self.out.wrap(screens.remove_text(keys, f' ({removed} entr{"y" if removed == 1 else "ies"})'))
-        added = s.get('added_opensubtitles')
-        if added and any(p.get('instanceId') == added for p in new.get('presets') or []):
-            if self.ask.yesno('REMOVE_OPENSUBTITLES', screens.LABELS['REMOVE_OPENSUBTITLES'], True):
-                new['presets'] = [p for p in new['presets'] if p.get('instanceId') != added]
-                removed += 1
-        if not self.ask.yesno('REMOVE', 'Remove subsync?', False):       # its own yes, never CONFIRM's
-            stop('Nothing was changed.')
+        removed = 0
+        if not here_only:
+            new, removed = plan.without_subsync(self.viewer, s.get('manifest_url'))
+            self.out.wrap(screens.remove_text(keys, f' ({removed} entr{"y" if removed == 1 else "ies"})'))
+            added = s.get('added_opensubtitles')
+            if added and any(p.get('instanceId') == added for p in new.get('presets') or []):
+                if self.ask.yesno('REMOVE_OPENSUBTITLES', screens.LABELS['REMOVE_OPENSUBTITLES'], True):
+                    new['presets'] = [p for p in new['presets'] if p.get('instanceId') != added]
+                    removed += 1
+            if not self.ask.yesno('REMOVE', 'Remove subsync?', False):       # its own yes, never CONFIRM's
+                stop('Nothing was changed.')
         if (STATE / 'compose.yaml').exists():
             guard(s.get('install_id'), unlabelled_own(s))
         if removed:
             path = backup(self.viewer, uuid)
             self.with_sign_in(lambda: self.aios.save_config(uuid, password, new))
             self.out.ok(f'Your config no longer lists subsync (copy before: {shown(path)})')
+        undeleted = []
         for kind, name in (('SYNC', screens.REMOVED_CONFIGS['own']), ('USENET', screens.REMOVED_CONFIGS['usenet'])):
             if keys.get(f'{kind}_UUID'):
                 try:
@@ -1772,9 +1817,13 @@ class Engine:
                     self.out.ok(f'Deleted {name}')
                 except AiosError as e:
                     # already gone: an earlier removal deleted it. Else state/secrets.env, the only record of the
-                    # config's ID and password, is kept, as with Docker failing (take_down)
-                    if str(e.code) not in WRONG_PASSWORD_CODES:
+                    # config's ID and password, is kept, as with Docker failing (take_down); removing from this
+                    # machine only, the config is named in what stays instead
+                    if str(e.code) in WRONG_PASSWORD_CODES:
+                        continue
+                    if not here_only:
                         stop(DELETE_FAILED.format(config=name), e.message)
+                    undeleted.append(short(keys[f'{kind}_UUID']))
         if (STATE / 'compose.yaml').exists():
             self.take_down()
         if s.get('cache_before'):
@@ -1784,6 +1833,10 @@ class Engine:
         self.stays = image_stays(s)
         if s.get('public_kind') == 'path':
             self.stays.append(f"the rule in your web server for {s.get('public_base')}: remove it there and reload the web server")
+        if here_only:
+            self.stays.append(VIEWER_ENTRY_STAYS.format(config=short(uuid)))
+        if undeleted:
+            self.stays.append(OWN_CONFIGS_STAY.format(ids=', '.join(undeleted)))
         self.stays += [EARLIER_CONFIG_STAYS.format(old=short(old)) for old in s.get('earlier_configs', [])]
         self.stays.append(f'this folder, {host_folder()}, with copies of your config in state/backups/ (./setup --restore FILE puts one back)')
         self.say_what_stays()

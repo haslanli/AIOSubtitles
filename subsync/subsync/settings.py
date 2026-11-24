@@ -67,17 +67,11 @@ def default_gateway():
 
 
 def unknown_proxies(value):
-    """The entries of a SUBSYNC_TRUSTED_PROXY value (comma-separated) that are neither gateway nor an IP address: a
-    request's own address is compared with each entry as written, so a network range or a name never matches. ./setup
-    checks its answer with this too."""
-    unknown = []
-    for entry in (a.strip() for a in value.split(",")):
-        if entry and entry.lower() != "gateway":
-            try:
-                ipaddress.ip_address(entry)
-            except ValueError:
-                unknown.append(entry)
-    return unknown
+    """The entries of a SUBSYNC_TRUSTED_PROXY value (comma-separated) that are neither gateway nor an IPv4 address: a
+    request's own address is compared with each entry as written, so a network range or a name never matches, nor
+    does an IPv6 address, since subsync listens on IPv4 only. ./setup checks its answer with this too."""
+    return [entry for entry in (a.strip() for a in value.split(","))
+            if entry and entry.lower() != "gateway" and not _ipv4(entry)]
 
 
 def _ipv4(value):
@@ -519,7 +513,7 @@ class Settings:
             out.append("SUBSYNC_TRUSTED_PROXY says gateway, but this machine has no default gateway to trust: give your "
                        "web server's address instead.")
         if self.public:
-            out += [f"SUBSYNC_TRUSTED_PROXY must be gateway or IP addresses separated by commas, like 172.18.0.1: "
+            out += [f"SUBSYNC_TRUSTED_PROXY must be gateway or IPv4 addresses separated by commas, like 172.18.0.1: "
                     f"{entry} isn't one." for entry in self.unknown_proxies]
         if self.public and self.contact and not self.contact.lower().startswith(CONTACT_SCHEMES):
             out.append("SUBSYNC_CONTACT must start with https://, http:// or mailto:, like mailto:you@example.com.")

@@ -43,9 +43,9 @@ IN_DOCKER = ("Web server running in Docker: run it on this machine's network (ne
 # setup's answer to SUBSYNC_TRUSTED_PROXY when none is given: the web server reaches the instance through the port
 # Docker publishes, from its network's gateway
 TRUSTED_PROXY = 'gateway'
-# an answer with an entry subsync never matches (a network range, a name), so the sign-up limit would count every
-# visitor as the web server's one address
-TRUSTED_PROXY_REFUSED = "Type gateway or IP addresses separated by commas, like 172.18.0.1: {entry} isn't one."
+# an answer with an entry subsync never matches (a network range, a name, an IPv6 address), so the sign-up limit would
+# count every visitor as the web server's one address
+TRUSTED_PROXY_REFUSED = "Type gateway or IPv4 addresses separated by commas, like 172.18.0.1: {entry} isn't one."
 # the lines of state/subsync.env this route writes; every other line there is kept as the hoster wrote it
 OWNED = ('SUBSYNC_PUBLIC', 'SUBSYNC_PUBLIC_BASE', 'SUBSYNC_SECRET_KEY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_TRUSTED_PROXY',
          'SUBSYNC_SUBDL_KEY', 'SUBSYNC_SUBSOURCE_KEY', 'SUBSYNC_USENET', 'SUBSYNC_AUDIO_ROUTE', 'SUBSYNC_TMDB_KEY',
@@ -74,7 +74,7 @@ def check_invite(value):
 
 
 def check_trusted_proxy(value):
-    """(good, message, value) for the trusted proxy question: gateway or IP addresses, as subsync takes them."""
+    """(good, message, value) for the trusted proxy question: gateway or IPv4 addresses, as subsync takes them."""
     text = (value or '').strip()
     unknown = unknown_proxies(text)
     return (False, TRUSTED_PROXY_REFUSED.format(entry=unknown[0]), text) if unknown else (True, '', text)

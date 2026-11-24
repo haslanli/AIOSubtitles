@@ -25,15 +25,15 @@ def settings_read_by_the_code():
 # approved as written though longer than 125 words (a setting or question) or 160 (a fixed rule), each with its approved
 # word count, which is its own cap: the Usenet box's explanation, the audio limit's and the word check's with the
 # sentences added to them, the daily data limit's and the rule on what is kept with
-# its deletion sentence and the 7 days of each person's original subtitles, and the
-# workers' memory sizing with what re-timing takes
+# its deletion sentence, the 7 days of each person's original subtitles and the
+# titles its logs name, and the workers' memory sizing with what re-timing takes
 APPROVED_LONG = {
     "USENET": 140,
     "SUBSYNC_AUDIO_BUDGET_GB": 133,
     "SUBSYNC_TEXT_PAIRING": 143,
     "SUBSYNC_USER_DAILY_MB": 144,
     "SUBSYNC_ACTIVE_WORKERS": 137,
-    "Public mode: what is kept, and for how long": 215,
+    "Public mode: what is kept, and for how long": 216,
 }
 
 
@@ -98,7 +98,7 @@ class ExplainTest(unittest.TestCase):
         for name, text in self.texts():
             texts.setdefault(name, []).append(text)
         self.assertEqual(word_cap("USENET"), 140)
-        self.assertEqual(word_cap("Public mode: what is kept, and for how long"), 215)     # 171 before
+        self.assertEqual(word_cap("Public mode: what is kept, and for how long"), 216)     # 171 before
         self.assertEqual(word_cap("SUBSYNC_AUDIO_AT_ONCE"), 125)
         self.assertEqual(word_cap("AUDIO"), 125)
         self.assertEqual(word_cap("Real-Debrid is never used"), 160)
@@ -611,15 +611,15 @@ class Group3Test(unittest.TestCase):
                          "AIOSubtitles runs behind Cloudflare, which passes every request on and so sees your internet "
                          "address and the links you open, your personal link included. The subtitle links your app "
                          "gets don't carry your personal link: their key opens only your subtitles, never your "
-                         "settings. AIOSubtitles itself keeps no log of requests. Backups of the stored data are kept "
-                         "for up to 30 days.")
+                         "settings. AIOSubtitles' own log notes the titles it works on and when, never who asked, your "
+                         "internet address or your links. Backups of the stored data are kept for up to 30 days.")
         self.assertEqual(self.privacy(other)["Who else sees your requests"],
                          "The web server in front of AIOSubtitles passes every request on and so sees your internet "
                          "address and the links you open, your personal link included; whoever hosts this instance "
                          "runs it. The subtitle links your app gets don't carry your personal link: their key opens "
-                         "only your subtitles, never your settings. AIOSubtitles itself keeps no log of requests. "
-                         "Whoever hosts this instance decides whether backups of the stored data are made and how long "
-                         "they are kept.")
+                         "only your subtitles, never your settings. AIOSubtitles' own log notes the titles it works on "
+                         "and when, never who asked, your internet address or your links. Whoever hosts this instance "
+                         "decides whether backups of the stored data are made and how long they are kept.")
         for s, field, keep, stored in (
                 (owner, "(the encrypted backups keep it up to 30 days more)",
                  "; the encrypted backups keep it up to 30 days more.", "(and up to 30 days more in the encrypted backups)"),
@@ -730,9 +730,9 @@ class Round4Test(unittest.TestCase):
         # with: it said 180 days whatever SUBSYNC_USER_KEEP_DAYS said, and left out the host's backups
         rule = dict(explain.RULES)["Public mode: what is kept, and for how long"]
         self.assertTrue(rule.endswith(
-            "; logs name the titles synced, never who asked. Your record is deleted when you delete it on your settings "
-            "page, or 180 days after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host keeps may "
-            "hold it longer."), rule[-200:])
+            "; logs name the titles worked on, never who asked. Your record is deleted when you delete it on your "
+            "settings page, or 180 days after your last request by default (SUBSYNC_USER_KEEP_DAYS); backups the host "
+            "keeps may hold it longer."), rule[-200:])
         self.assertEqual(explain.SETTINGS["SUBSYNC_USER_KEEP_DAYS"][0], "180")
         self.assertEqual(Settings({}).user_keep_days, 180)
 

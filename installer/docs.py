@@ -34,7 +34,7 @@ HOSTING_SETTINGS = ('SUBSYNC_TRUSTED_PROXY', 'SUBSYNC_PUBLIC_INVITE', 'SUBSYNC_S
 HOSTING = ('HOST_ADDRESS', *HOSTING_SETTINGS) + tuple(
     name for name in limits.names(limits.hosting(usenet=True, audio=True)) if name not in YOURSELF_LIMITS)
 # Removing and restoring each ask their own yes (REMOVE, RESTORE), never CONFIRM's
-REMOVING = ('REMOVE', 'REMOVE_OPENSUBTITLES')
+REMOVING = ('REMOVE', 'REMOVE_OPENSUBTITLES', 'REMOVE_HERE_ONLY')
 RESTORING = ('RESTORE',)
 PARTS = ('Install it for yourself (ROUTE=yourself)',
          'Host a public instance (ROUTE=host). SUBDL_KEY, TMDB_KEY, SUBSYNC_USENET_LISTINGS_PER_DAY and '

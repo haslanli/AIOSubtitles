@@ -188,15 +188,18 @@ class CommandLine(FlowFixture):
 
     def test_the_readme_says_what_uninstall_deletes(self):
         # it left out the Usenet config, the stored copies and a public instance's records; and, on a public instance,
-        # the database copies made before updates, which stay and hold everyone's records (engine.remove_host)
+        # the database copies made before updates, which stay and hold everyone's records (engine.remove_host);
+        # and that without AIOStreams it removes what is on this machine only (engine.remove)
         readme = ' '.join((REPO / 'README.md').read_text().split())
         self.assertIn("```bash ./setup --uninstall ``` Takes subsync out of your config, deletes subsync's own configs "
                       'on your AIOStreams (its Usenet config too) and removes the container with its stored copies. It '
                       "then lists what stays: the subsync image, your web server's rule for subsync, and this folder "
-                      'with the copies of your config. On a public instance it removes AIOSubtitles with everyone\'s '
-                      "records and stored copies, after you confirm; the sync configs it made on people's AIOStreams "
-                      'stay, and so do the copies of the databases made before updates, in `state/backups/`, which hold '
-                      "everyone's records: delete them yourself when you no longer need them. ```bash", readme)
+                      "with the copies of your config. If AIOStreams can't be reached any more, or your config is gone "
+                      'from it, it offers to remove only what is on this machine. On a public instance it removes '
+                      "AIOSubtitles with everyone's records and stored copies, after you confirm; the sync configs it "
+                      "made on people's AIOStreams stay, and so do the copies of the databases made before updates, in "
+                      "`state/backups/`, which hold everyone's records: delete them yourself when you no longer need "
+                      'them. ```bash', readme)
         self.assertIn("the database copies made before updates in state/backups/, which hold everyone's records",
                       (REPO / 'installer' / 'engine.py').read_text())
 

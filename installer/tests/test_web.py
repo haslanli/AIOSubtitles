@@ -3,6 +3,7 @@ security header, each piece of work once, the idle stop, and both routes and the
 through the real engine (a stand-in AIOStreams, Docker faked)."""
 import ast
 import contextlib
+import copy
 import html
 import io
 import re
@@ -842,6 +843,29 @@ class Personal(YourselfSteps, BackgroundWork, FlowFixture):
         # in the page's words for its row of buttons (the terminal's are "Type 0.5, 1, 2 or 4 (GB per file).")
         self.assertIn('<p class="field-error" id="SUBSYNC_AUDIO_BUDGET_GB-error">Choose 0.5, 1, 2 or 4 GB.</p>', text)
 
+    def test_a_hand_set_line_subsync_refuses_stops_save_before_anything_changes(self):
+        # Save created subsync's configs and replaced the container, which exited at once; the page said it
+        # "started but does not answer" after 90 seconds, the reason only in Docker's log
+        self.state.mkdir(parents=True)
+        path = self.state / 'subsync.env'
+        path.write_text('SUBSYNC_SYNCS_AT_ONCE=al\n')
+        self.walk_to_review()
+        configs = copy.deepcopy(self.aios.users)
+        status, _, text = self.b.post('review', {'CONFIRM': 'yes'})
+        self.assertEqual(status, 200)
+        self.assertIn("Setup stopped before changing anything: subsync wouldn't start with state/subsync.env as it "
+                      "is. SUBSYNC_SYNCS_AT_ONCE must be a whole number from 1, or auto.<span class=\"more\">Correct "
+                      "or remove that line in state/subsync.env, then press Save again.</span>", text)
+        self.assertIn('Save these changes', text)                                # the button it names
+        self.assertEqual((path.read_text(), self.aios.users), ('SUBSYNC_SYNCS_AT_ONCE=al\n', configs))
+        self.assertFalse(self.aios.subsync_up)
+        path.write_text('SUBSYNC_SYNCS_AT_ONCE=2\n')                             # Save checks again
+        status, headers, _ = self.b.post('review', {'CONFIRM': 'yes'})
+        self.assertEqual((status, headers['Location']), (303, f'/{self.app.key}/install'))
+        _, _, text = self.b.settle('install')
+        self.assertIn('subsync is running (it restarts by itself after a reboot)', text)
+        self.assertEqual(engine.read_kv(path)['SUBSYNC_SYNCS_AT_ONCE'], '2')
+
     def test_the_sign_in_is_labelled_by_why_aiostreams_asks(self):
         # it always said "(admin)", though only the cache setting needs an admin account
         self.aios.gated = True
@@ -1404,7 +1428,8 @@ class Hosting(BackgroundWork, RouteFixture):
                       'class="seg-row"><div class="seg" id="SUBSYNC_MAX_LANGUAGES" role="radiogroup" '
                       'aria-labelledby="SUBSYNC_MAX_LANGUAGES-label" aria-describedby="SUBSYNC_MAX_LANGUAGES-error '
                       'SUBSYNC_MAX_LANGUAGES-help" aria-invalid="true">', page)
-        self.assertIn('<a href="#SUBSYNC_MAX_LANGUAGES">Choose 1, 2, 3 or 4.</a>', page)
+        self.assertIn('<a href="#SUBSYNC_MAX_LANGUAGES-1">Choose 1, 2, 3 or 4.</a>', page)     # its first button
+        self.assertIn('<input type="radio" id="SUBSYNC_MAX_LANGUAGES-1" name="SUBSYNC_MAX_LANGUAGES" value="1">', page)
         self.assertNotIn('SUBSYNC_MAX_LANGUAGES must be', page)
 
     def test_a_public_instance_through_the_page(self):
@@ -1469,8 +1494,8 @@ class Hosting(BackgroundWork, RouteFixture):
         status, _, text = b.post('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': '172.18.0.0/16',
                                              'go': 'next'})
         self.assertEqual(status, 200)
-        self.assertIn('<p class="field-error" id="subsync_trusted_proxy-error">Type gateway or IP addresses separated '
-                      "by commas, like 172.18.0.1: 172.18.0.0/16 isn't one.</p>", text)
+        self.assertIn('<p class="field-error" id="subsync_trusted_proxy-error">Type gateway or IPv4 addresses '
+                      "separated by commas, like 172.18.0.1: 172.18.0.0/16 isn't one.</p>", text)
         self.assertRegex(text, r'<input[^>]*name="SUBSYNC_TRUSTED_PROXY"[^>]*value="172\.18\.0\.0/16"')   # as typed
         status, headers, _ = b.post('address', {'HOST_ADDRESS': ADDRESS, 'SUBSYNC_TRUSTED_PROXY': '172.18.0.1',
                                                 'go': 'next'})
@@ -1521,6 +1546,30 @@ class Hosting(BackgroundWork, RouteFixture):
         self.assertIn('AIOSubtitles is running (it restarts by itself after a reboot)', text)
         status, headers, _ = b.post('hostinstall', {'go': 'next'})
         self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostcheck'))
+
+    def test_a_hand_set_line_subsync_refuses_stops_the_install_before_anything_changes(self):
+        # A public instance has no Save: its install step wrote the file and replaced the instance, which
+        # exited at once; the page said it "started but does not answer" after 90 seconds
+        self.state.mkdir(parents=True)
+        path = self.state / 'subsync.env'
+        path.write_text('SUBSYNC_CONTACT=subs.example.com/questions\n')
+        b = Browser(web.App(port=8822))
+        self.walk_to_limits(b)
+        b.post('hostlimits', {'SUBSYNC_MAX_USERS': '150', 'go': 'next'})
+        _, _, text = b.settle('hostinstall')
+        self.assertIn("Setup stopped before changing anything: subsync wouldn't start with state/subsync.env as it "
+                      "is. SUBSYNC_CONTACT must start with https://, http:// or mailto:, like mailto:you@example.com."
+                      "<span class=\"more\">Correct or remove that line in state/subsync.env, then press Try "
+                      "again.</span>", text)
+        self.assertIn('name="go" value="again">Try again</button>', text)       # the button it names
+        self.assertEqual((path.read_text(), self.up), ('SUBSYNC_CONTACT=subs.example.com/questions\n', False))
+        self.assertNotIn('Made the secret key', text)                            # it wasn't kept anywhere yet
+        path.write_text('SUBSYNC_CONTACT=https://subs.example.com/questions\n')
+        status, headers, _ = b.post('hostinstall', {'go': 'again'})              # Try again checks again
+        self.assertEqual((status, headers['Location']), (303, f'/{b.app.key}/hostinstall'))
+        _, _, text = b.settle('hostinstall')
+        self.assertIn('AIOSubtitles is running (it restarts by itself after a reboot)', text)
+        self.assertEqual(engine.read_kv(path)['SUBSYNC_CONTACT'], 'https://subs.example.com/questions')
 
     def test_a_limit_changed_after_the_install_is_installed(self):
         # Continue on the install page showed the same page again, and the new number was never written
@@ -1749,6 +1798,28 @@ class Removing(BackgroundWork, FlowFixture):
         self.assertFalse((self.state / 'settings.json').exists())
         self.assertEqual([p['type'] for p in self.aios.users[UUID]['config']['presets']], ['zilean', 'newznab'])
         self.assertFalse(any('adminpw' in page or PASSWORD in page for page in self.b.pages))
+
+    def test_without_aiostreams_the_page_offers_to_remove_subsync_from_this_machine_only(self):
+        # The page showed the password's error again on every try, and nothing here could be removed
+        self.run_setup(dict(self.ANSWERS, TEST_READ='no'))
+        self.assertNotIn('REMOVE_HERE_ONLY', self.b.get('')[2])                       # not before it's needed
+        question = ("Setup can't read your config on AIOStreams, so it can't take subsync out of it. Remove subsync "
+                    "from this machine only?")
+        with mock.patch('socket.create_connection', side_effect=ConnectionRefusedError(61, 'Connection refused')):
+            text = self.remove()
+            form = self.b.pages[-1].split('action="remove">')[1].split('</form>')[0]
+            self.assertIn("Can't reach AIOStreams at", text)
+            self.assertRegex(form, r'name="AIOS_CONFIG_PASSWORD".*<div class="choices"><label class="choice"><input '
+                                   r'type="checkbox" id="remove_here_only" name="REMOVE_HERE_ONLY" value="yes" '
+                                   r'aria-labelledby="remove_here_only-title"><span><b id="remove_here_only-title">'
+                                   + re.escape(html.escape(question))
+                                   + '</b></span></label></div>.*Remove subsync</button>')
+            self.assertTrue((self.state / 'settings.json').exists())
+            text = self.remove(REMOVE_HERE_ONLY='yes')
+        self.assertIn('These stay, in case you set it up again', text)
+        self.assertIn(f"subsync's entry in your config {UUID[:8]}…, if that config still exists: take it out on "
+                      "AIOStreams' configure page", text)
+        self.assertFalse((self.state / 'settings.json').exists())
 
     def test_the_form_sends_remove_and_confirm_alone_removes_nothing(self):
         # The page's Remove subsync sent CONFIRM=yes, the answer to "Save these changes?" too; it sends REMOVE

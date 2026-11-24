@@ -225,8 +225,9 @@ REMOVE = "Remove: "   # a slot's remove button is named this and its language (t
 
 
 def slot_id(place, name="lang"):
-    """The id of the language slots' box in `place` (from 1). A problem with the languages links to the first one: the
-    slots' group can't take focus."""
+    """The id of the box or button in `place` (from 1) of a group named `name`: the language slots' (language_slots),
+    a row of buttons' (segmented). A problem with the group links to the first one: the group can't take focus
+."""
     return f"{name}-{place}"
 
 
@@ -387,10 +388,13 @@ def number_field(id, label, value, help_text=None, unit=None, keypad="numeric", 
 
 
 def segmented(name, label, options, value, help_text=None, unit=None, error=None):
-    """One value of a few, as joined rectangles (radio buttons underneath); the group's id is `name`. `error`: the
-    problem with the value, under the label and outside the row, as field() shows it."""
-    items = "".join(f"<label><input type=\"radio\" name=\"{e(name)}\" value=\"{e(v)}\"{' checked' if str(v) == str(value) else ''}>"
-                    f"<span>{e(v)}</span></label>" for v in options)
+    """One value of a few, as joined rectangles (radio buttons underneath); the group's id is `name`, its first button's
+    slot_id(1, name), which a problem links to. `error`: the problem with the value, under the label and outside the
+    row, as field() shows it."""
+    first = f" id=\"{e(slot_id(1, name))}\""
+    items = "".join(f"<label><input type=\"radio\"{first if i == 0 else ''} name=\"{e(name)}\" value=\"{e(v)}\""
+                    f"{' checked' if str(v) == str(value) else ''}><span>{e(v)}</span></label>"
+                    for i, v in enumerate(options))
     error_html, attrs = _limit_error(name, error, help_text)
     return (f"<div class=\"limit field\"><span class=\"label\" id=\"{e(name)}-label\">{e(label)}</span>{error_html}"
             f"<div class=\"seg-row\"><div class=\"seg\" id=\"{e(name)}\" role=\"radiogroup\" "

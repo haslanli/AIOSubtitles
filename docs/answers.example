@@ -295,6 +295,11 @@ REMOVE=no
 # your config as it was before subsync; no keeps it, so your apps keep getting OpenSubtitles' subtitles.
 REMOVE_OPENSUBTITLES=yes
 
+# Asked when removing subsync, only when AIOStreams can't be reached or your config is gone from it. Yes removes
+# subsync's container, its stored copies and setup's files here, and lists what stays on AIOStreams. No changes
+# nothing.
+REMOVE_HERE_ONLY=no
+
 
 # ==================================================================================================================
 # Restoring a saved copy (./setup --restore FILE --answers FILE). AIOS_CONFIG_PASSWORD above is asked here too,
