@@ -22,6 +22,7 @@ import ipaddress
 import itertools
 import math
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -41,9 +42,23 @@ _CARRY_IPV4 = tuple(ipaddress.ip_network(p) for p in ("::ffff:0:0/96", "::ffff:0
 # and the next (the other family's first) what is left, so a host whose IPv6 address never answers is still reached
 # over IPv4, and a name answering dozens of addresses that never answer holds a request for two waits, not dozens.
 CONNECT_WAITS = 2
-# one TLS context for every opener, made as urllib's HTTPSHandler makes its own (certificates and names checked, ALPN
-# http/1.1): each new one loads the system's CA store again
-_TLS = http.client._create_https_context(http.client.HTTPSConnection._http_vsn)
+
+
+def _tls_context():
+    """One TLS context for every opener, made as urllib's HTTPSHandler makes its own (certificates and names checked,
+    ALPN http/1.1): each new one loads the system's CA store again. http.client's own maker exists from Python
+    3.12; before it (setup 1.3.0's update finishes on the machine's Python, 3.9 and up) the same steps by hand."""
+    make = getattr(http.client, "_create_https_context", None)
+    if make is not None:
+        return make(http.client.HTTPSConnection._http_vsn)
+    context = ssl._create_default_https_context()
+    context.set_alpn_protocols(["http/1.1"])
+    if context.post_handshake_auth is not None:
+        context.post_handshake_auth = True
+    return context
+
+
+_TLS = _tls_context()
 
 
 class Refused(OSError):

@@ -306,6 +306,27 @@ class _Closable:
         pass
 
 
+class TlsContextBefore312Test(unittest.TestCase):
+    """setup 1.3.0's update finishes on the machine's Python (3.9 and up), where http.client has no
+    _create_https_context (it came in 3.12): importing net there raised AttributeError, so the update ended in a
+    traceback, not its message. The context is now made by the same steps by hand there, with the same settings."""
+
+    def test_the_context_is_the_same_without_http_clients_maker(self):
+        import http.client
+        import importlib
+        import ssl
+        real = net._tls_context()
+        with unittest.mock.patch.object(http.client, "_create_https_context", None):
+            by_hand = net._tls_context()
+            importlib.reload(net)                      # the import itself, as on Python 3.9 to 3.11
+        importlib.reload(net)
+        for name in ("verify_mode", "check_hostname", "options", "minimum_version", "maximum_version",
+                     "post_handshake_auth"):
+            self.assertEqual(getattr(by_hand, name), getattr(real, name), name)
+        self.assertEqual(by_hand.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(by_hand.check_hostname)
+
+
 class DeadlineTest(unittest.TestCase):
     """A request's whole bound, held around it, covers every connection the gate opens on its thread."""
 
