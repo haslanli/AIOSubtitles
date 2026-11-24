@@ -402,7 +402,8 @@ def _state_note(record, state):
 
 def _form(action, content, cls="controls"):
     """A settings form: posts to the page itself with its action's name."""
-    return (f"<form{f' class=\"{cls}\"' if cls else ''} method=\"post\" action=\"configure\"><input type=\"hidden\" name=\"action\" "
+    cls_attr = f' class="{cls}"' if cls else ''
+    return (f"<form{cls_attr} method=\"post\" action=\"configure\"><input type=\"hidden\" name=\"action\" "
             f"value=\"{e(action)}\">{content}</form>")
 
 

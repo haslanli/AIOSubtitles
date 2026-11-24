@@ -280,7 +280,8 @@ def start(route='yourself'):
     form = (f'<form id="ways" method="post">{ui.radio_group(QUESTION, rows)}<div class="go">'
             f'{ui.button("Continue", "primary", type="submit", arrow=True)}</div></form>')
     main = f'<main class="grid"><h1>{e(TITLE)}</h1>{what}{form}<div class="page-end" aria-hidden="true"></div></main>'
-    dock = f'<div class="dock">{ui.button("Continue", "primary", type="submit", attrs="form=\"ways\"", arrow=True)}</div>'
+    go = ui.button("Continue", "primary", type="submit", attrs='form="ways"', arrow=True)
+    dock = f'<div class="dock">{go}</div>'
     return ui.page(TITLE, f'<div class="wrap">{ui.top(explain.CONTACT, start="./", site=False)}{main}</div>{dock}',
                    'start')
 

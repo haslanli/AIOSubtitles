@@ -208,7 +208,8 @@ def choice(id, title, help_text, name=None, checked=False, needs=None, value="on
     once, as its description; the whole row still ticks it. A row without an explanation (`help_text` empty)
     has none written, nor a description pointing at one, as in radio_row."""
     refs = described(error_id, f"{id}-help" if help_text else None)
-    return (f"<label class=\"choice\"{f' data-needs=\"{e(needs)}\"' if needs else ''}><input type=\"checkbox\" "
+    needs_attr = f' data-needs="{e(needs)}"' if needs else ''
+    return (f"<label class=\"choice\"{needs_attr}><input type=\"checkbox\" "
             f"id=\"{e(id)}\" name=\"{e(name or id)}\" value=\"{e(value)}\"{' checked' if checked else ''} "
             f"aria-labelledby=\"{e(id)}-title\"" + (f" aria-describedby=\"{e(refs)}\"" if refs else "")
             + (" aria-invalid=\"true\"" if error_id else "")
@@ -253,8 +254,9 @@ def language_slots(languages, chosen, limit, labelled_by, help_id, error_id=None
                   f"<button class=\"tool\" type=\"button\" data-remove-slot aria-label=\"{e(REMOVE)}{e(current_name)}\" "
                   f"hidden>{CROSS}</button>")
         box = e(slot_id(i + 1, name))
+        empty = '' if current else ' class="empty"'
         rows.append(f"<div class=\"slot\" data-slot><label for=\"{box}\">{e(label)}</label><div class=\"sel\">"
-                    f"<select id=\"{box}\" name=\"{e(name)}\"{'' if current else ' class=\"empty\"'}>{options}"
+                    f"<select id=\"{box}\" name=\"{e(name)}\"{empty}>{options}"
                     f"</select>{CHEVRON}</div>{remove}</div>")
     return (("<input type=\"hidden\" name=\"lang_ui\" value=\"1\">" if marked else "")
             + f"<div class=\"slots\" id=\"languages\" role=\"group\" "
