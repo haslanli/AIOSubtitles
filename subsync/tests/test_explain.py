@@ -318,7 +318,7 @@ APPROVED = {
 
 
 class LimitsTest(unittest.TestCase):
-    def test_the_ad446_defaults(self):
+    def test_the_default_limits(self):
         from subsync.settings import available_cpus
         s = Settings({})
         self.assertEqual(s.syncs_at_once, available_cpus())
@@ -343,7 +343,7 @@ class LimitsTest(unittest.TestCase):
                          (3 * 1048576, 1572864, 5767168, 7 * 1048576))
         self.assertEqual((s.daily_budget, s.audio_budget, s.file_cap), (2 * 10 ** 9, 500_000_000, 6 * 10 ** 9))
 
-    def test_the_documented_defaults_are_the_ad446_ones(self):
+    def test_the_documented_defaults_are_the_default_limits(self):
         documented = {name: explain.SETTINGS[name][0] for name in (
             "SUBSYNC_SYNCS_AT_ONCE", "SUBSYNC_ACTIVE_WORKERS", "SUBSYNC_MAX_CONNECTIONS", "SUBSYNC_USER_FILES_PER_DAY",
             "SUBSYNC_USER_DAILY_MB", "SUBSYNC_DAILY_BUDGET_GB")}
@@ -380,7 +380,7 @@ class LimitsTest(unittest.TestCase):
                       "raised; an index over 32 MB (64 MB in an MP4 file) is never read, whatever the cap.", text)
         self.assertIn("100 is far above normal use", explain.SETTINGS["SUBSYNC_DAILY_BUDGET_GB"][1])
 
-    def test_the_media_and_language_texts_approved_in_ad644(self):
+    def test_the_approved_media_and_language_texts(self):
         # The owner's words, as approved
         settings, rules = explain.SETTINGS, dict(explain.RULES)
         for key, sentence in (

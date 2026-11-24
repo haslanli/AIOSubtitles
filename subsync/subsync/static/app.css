@@ -128,7 +128,7 @@ input:target,select:target{scroll-margin-top:144px}
 .way b{font-weight:700;font-size:19px;line-height:1.35;overflow-wrap:anywhere}
 .way .head~span{display:block;margin-top:6px;font-size:16px;line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
 .way:has(input:checked) .head~span{color:var(--on-accent-bg)}
-/* words for the picked row only (AD567): hidden while another row is picked; a browser without :has shows them */
+/* words for the picked row only: hidden while another row is picked; a browser without :has shows them */
 .way:not(:has(input:checked)) .if-chosen{display:none}
 .sheet .ways{margin-top:32px}
 .sheet .ways .help{margin-top:8px}
@@ -210,7 +210,7 @@ h1 br.phone{display:none}
 .what p+p{margin-top:16px}
 .need{grid-column:7/12;margin-top:clamp(48px,7vh,72px)}
 .go{display:flex;align-items:center;gap:20px;margin-top:32px}
-/* the installer's start (AD464, AD467, AD468): the two ways on the right */
+/* the installer's start: the two ways on the right */
 .p-start .grid>form{grid-column:7/13;margin-top:clamp(48px,7vh,72px);min-width:0}
 .p-start .what h2{margin-top:32px}
 .dock{display:none}
@@ -481,8 +481,8 @@ html:not(.js) .screens{margin-top:24px}
   .today{margin-top:40px;padding-top:0}
   .rows{margin-top:56px;gap:56px}
   .row .controls{margin-top:20px}
-  /* a row's problem next to its boxes, under the row's explanation, so its link, which scrolls to the boxes, shows it
-     (C2-0578); a link to a row's answers (a group) keeps the room for it and the controls' margin */
+  /* a row's problem next to its boxes, under the row's explanation, so its link, which scrolls to the boxes, shows it;
+     a link to a row's answers (a group) keeps the room for it and the controls' margin */
   .row .about{display:flex;flex-direction:column}
   .row .about>.field-error{order:1}
   .row fieldset:target{scroll-margin-top:96px}

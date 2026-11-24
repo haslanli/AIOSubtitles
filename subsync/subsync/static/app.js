@@ -94,7 +94,7 @@
       paint(back);
     });
     // Enter (or a phone keyboard's Go) in any field submits the form: before the last screen that is Continue; on the
-    // last it is Sign up, sent once, so a second press doesn't start a second sign-up (C2-0546)
+    // last it is Sign up, sent once, so a second press doesn't start a second sign-up
     var sent = false;
     form.addEventListener("submit", function (e) {
       if (at === screens.length - 1) {
