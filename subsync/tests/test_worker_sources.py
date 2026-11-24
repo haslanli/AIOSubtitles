@@ -667,6 +667,17 @@ class LanguageSyncStepsTest(unittest.TestCase):
         fresh = sync._in_sync_result(e, {"reason": "-", "cross": True})   # judged now, the same words
         self.assertEqual(fresh["reason"], row["reason"])
 
+    def test_why_the_other_audio_track_failed_is_kept_in_the_stored_detail(self):
+        # The audio route's note on a dual-audio file's other track (pipeline.sync_subtitle) was never stored
+        # or logged, so a kept original couldn't say why that track didn't fit either; it is shown on no page
+        sync = self.steps()
+        other = {"index": 1, "language": "jpn", "why": "too little speech"}
+        e = sync._entry(0, self.cand("os-a"), self.raw("os-a"))
+        sync._record(e, {"outcome": "keep_original", "reason": "below the bar", "route": "audio", "other_track": other},
+                     time.time())
+        (detail,) = self.store.db.execute("SELECT detail FROM results").fetchone()
+        self.assertEqual(json.loads(detail)["other_track"], other)
+
     def test_the_fast_path_without_best_fit_judges_the_same_subtitle_from_another_source_once(self):
         # Its originals were checked and shifted before the same subtitle from another source was left out
         # (in _fit_all), so each copy was judged and its shift stored

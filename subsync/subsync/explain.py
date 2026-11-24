@@ -575,10 +575,11 @@ GROUPS = [
             "Wyzie Subs have their own key settings."),
         "SUBSYNC_SOURCE_TIMEOUT_S": (
             "5",
-            "How long AIOSubtitles waits for each subtitle site it searches itself, in seconds. A site that answers later "
-            "is left out for this play and its answer is kept for the next one, so a slow site never makes your first "
-            "subtitle late. Recommended: 5. Longer: slow sites count more often, but your first subtitle can come later. "
-            "A site that fails three times in ten minutes is paused for ten minutes, then tried again."),
+            "How long AIOSubtitles waits for each subtitle site it searches itself, in seconds. A site that answers "
+            "later, within a minute, is left out for this play and its answer is kept for the next one, so a slow site "
+            "never makes your first subtitle late. Recommended: 5. Longer: slow sites count more often, but your first "
+            "subtitle can come later. A site that fails three times in ten minutes (an answer that takes more than a "
+            "minute counts as failing) is paused for ten minutes, then tried again."),
         "SUBSYNC_SKIP_CONFIG_SOURCES": (
             "on",
             "On: a subtitle site that is already an addon in your AIOStreams config (for example OpenSubtitles or "

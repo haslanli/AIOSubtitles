@@ -396,13 +396,6 @@ class App:
         detail = self.store.file_detail(file_key) if file_key else None
         return (detail or {}).get("reference") is False
 
-    def _to_fit(self, alias, langs):
-        """Of `langs`, those this person's subtitle list for the file has a subtitle of (all of them while that list
-        isn't known): the audio route gives a verdict to those only, and waiting for one it can't give would queue the
-        file again on every request."""
-        originals = self.worker.known_originals(alias)
-        return langs if originals is None else [lang for lang in langs if originals.get(lang)]
-
     def kept_choice(self, alias, lang):
         """The kept original of a file and language: (True, candidate id or None) when the file's judging chose
         one (None: every subtitle of the language is in another language), (False, None) when it chose none."""
@@ -463,7 +456,7 @@ class App:
             no_track = detail.get("reference") is False
             # this person's languages only the audio route can judge here: all of them on a file with no track of its
             # own, else those whose subtitles a first pass found too long for its only track; it gives a
-            # verdict only to those it has a subtitle to fit (_to_fit)
+            # verdict only to those it has a subtitle to fit (Worker.to_fit)
             audio_langs = self.s.languages if no_track else self.worker.left_to_audio(detail)
             if judged is False and not (no_track and self.s.audio_route and self.s.audio_choice == "off"):
                 # read lately, but not for every language asked here (another person's, in public mode); for a
@@ -471,7 +464,7 @@ class App:
                 # this person waits for their own pick, which alone can judge what their first pass left
                 recent = self.worker.waits_for_pick(job.alias)
             elif recent and self.s.audio_choice != "off" and audio_langs and not self.worker.waits_for_pick(job.alias) \
-                    and not self.store.audio_judged(file_key, self._to_fit(job.alias, audio_langs)):
+                    and not self.store.audio_judged(file_key, self.worker.to_fit(job.alias, audio_langs)):
                 # Such a file, read lately for someone else and not judged by the audio route yet: the waiting
                 # file is each person's own, so this person gets their own first pass (an index read) and can pick it,
                 # or open it; never someone whose choice is off

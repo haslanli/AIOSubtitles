@@ -10,11 +10,11 @@ person, a file or a link.
 
 Answers are kept per title in the store and shared by everyone: a found answer with no expiry, so a title is looked up
 once, except one that holds TMDB's value, kept TMDB_KEEP_S (TMDB's terms allow 6 months) and then looked up again in
-the background like one not found; not found 7 days and a failed service 10 minutes, so those are asked again. An
-answer found without TMDB is asked at TMDB once a key comes, and only TMDB's answer replaces it (a TMDB that didn't
-answer is asked again 10 minutes later). A lookup runs in the background and never holds a job: a file read before the
-answer comes uses the rules for an unknown language, and is judged again once it is known (worker). An operator's list
-(SUBSYNC_ORIGINAL_LANGUAGES) overrides any lookup.
+the background like one not found; not found 7 days (an anime number Kitsu or AniList doesn't know too) and a failed
+service 10 minutes, so those are asked again. An answer found without TMDB is asked at TMDB once a key comes, and only
+TMDB's answer replaces it (a TMDB that didn't answer is asked again 10 minutes later). A lookup runs in the background
+and never holds a job: a file read before the answer comes uses the rules for an unknown language, and is judged again
+once it is known (worker). An operator's list (SUBSYNC_ORIGINAL_LANGUAGES) overrides any lookup.
 """
 import hashlib
 import json
@@ -33,9 +33,11 @@ from .version import user_agent
 log = logging.getLogger("subsync.origlang")
 
 USER_AGENT = user_agent("subsync")
-TIMEOUT_S = 5.0
+TIMEOUT_S = 5.0              # each read of a service's answer
+ANSWER_WAIT_MAX_S = 30.0     # its whole answer: one that takes longer failed, so it is asked again FAILED_S later
 KEY_CHECK_TIMEOUT_S = 10.0   # the wait for TMDB's answer to a key being checked (check_key)
 MAX_BYTES = 64 * 1024
+HOUR = 3600
 DAY = 86400
 NOT_FOUND_S = 7 * DAY        # a found answer is kept with no expiry, unless it holds TMDB's value:
 TMDB_KEEP_S = 180 * DAY      # TMDB's terms allow keeping its data 6 months
@@ -44,6 +46,11 @@ PAUSE_S = 60                 # a 429 or 503 without Retry-After
 PAUSE_MIN_S, PAUSE_MAX_S = 1.0, 3600.0   # the pause a Retry-After asks for is kept within these
 BAD_KEY_S = 3600             # a key TMDB refused isn't tried again for an hour
 MAX_PENDING = 200            # lookups waiting at once; a title past that is looked up on a later request
+# One person's allowance (public mode): at most PERSON_PENDING of those lookups waiting at once, and
+# PERSON_PER_HOUR new titles started in a clock hour; past either, their title is looked up on a later request. The
+# episodes of a series share one lookup, so nobody who only plays things comes near either
+PERSON_PENDING = 10
+PERSON_PER_HOUR = 100
 ANILIST_GAP_S = 2.0          # AniList allows 30 requests a minute at present
 THREADS = 2
 COUNTRY = {"JP": "jpn", "CN": "chi", "TW": "chi", "HK": "chi", "KR": "kor"}
@@ -55,6 +62,10 @@ V3_KEY = re.compile(r"[0-9a-fA-F]{32}")
 # ASCII digits only: \d also takes other scripts' digits, which int would read as a different title
 IMDB = re.compile(r"tt[0-9]{1,10}")
 NUMBER = re.compile(r"[0-9]{1,9}")
+
+
+class Unknown(Exception):
+    """Kitsu or AniList doesn't know the anime number asked (HTTP 404): a made-up number, most likely."""
 
 
 class Failed(Exception):
@@ -238,7 +249,7 @@ def make_lookup(settings, store, clock=time.time):
 class Lookup:
     def __init__(self, settings, store, clock=time.time):
         self.s, self.store, self.clock = settings, store, clock
-        self.timeout = TIMEOUT_S
+        self.timeout, self.answer_wait_max = TIMEOUT_S, ANSWER_WAIT_MAX_S
         self.anilist_gap = ANILIST_GAP_S
         self.overrides = dict(settings.original_languages or {})
         self.pool = ThreadPoolExecutor(max_workers=THREADS, thread_name_prefix="subsync-language")
@@ -248,6 +259,10 @@ class Lookup:
         self.bad_keys = {}                # a refused key's SHA-256 -> clock time it may be tried again
         self.tmdb_later = {}              # title TMDB didn't answer for -> clock time it may be asked again
         self.max_pending = MAX_PENDING
+        self.person_pending, self.person_per_hour = PERSON_PENDING, PERSON_PER_HOUR
+        self.pending_of = {}              # person -> how many of their lookups are waiting or running
+        self.hour = None                  # the clock hour started_of counts in
+        self.started_of = {}              # person -> the lookups they started in that hour
         self.wikidata_lock = threading.Lock()
         self.anilist_lock = threading.Lock()
         self.anilist_last = 0.0
@@ -271,11 +286,12 @@ class Lookup:
             return ""
         return "" if self.bad_keys.get(hashlib.sha256(key.encode()).hexdigest(), 0) > self.clock() else key
 
-    def start(self, video_id, key=""):
+    def start(self, video_id, key="", who=None):
         """Starts the title's lookup in the background unless its answer is kept (an answer found without TMDB is
         looked up again with a key, once TMDB answers: FAILED_S after a try it didn't), an override names it, or it is
         running already (then that lookup). Returns its Future, or None; never waits. Past MAX_PENDING lookups waiting,
-        None: a later request asks again."""
+        or past the allowance of the person asking (`who`: public mode's Worker.who; _within_allowance), None: a later
+        request asks again."""
         title = title_of(video_id)
         if title is None or title in self.overrides:
             return None
@@ -288,16 +304,35 @@ class Lookup:
             if kept is not None and not (key and title.startswith("tt") and not kept.get("tmdb_asked")
                                          and self.tmdb_later.get(title, 0) <= now):
                 return None
-            if len(self.flying) >= self.max_pending:
+            if len(self.flying) >= self.max_pending or not self._within_allowance(who, now):
                 return None
             fut = self.pool.submit(self._lookup, title, key, kept if _found(kept) else None)
             self.flying[title] = fut
-        fut.add_done_callback(lambda _f, t=title: self._landed(t))
+            if who is not None:
+                self.pending_of[who] = self.pending_of.get(who, 0) + 1
+                self.started_of[who] = self.started_of.get(who, 0) + 1
+        fut.add_done_callback(lambda _f, t=title, w=who: self._landed(t, w))
         return fut
 
-    def _landed(self, title):
+    def _within_allowance(self, who, now):
+        """Whether `who` may start one more lookup now (lock held): fewer than PERSON_PENDING of theirs waiting and
+        PERSON_PER_HOUR started in this clock hour. None, a self-hosted install's one viewer, has no allowance
+        of its own: MAX_PENDING bounds it."""
+        if who is None:
+            return True
+        hour = int(now // HOUR)
+        if hour != self.hour:          # a new hour: everyone's count starts again
+            self.hour, self.started_of = hour, {}
+        return self.pending_of.get(who, 0) < self.person_pending \
+            and self.started_of.get(who, 0) < self.person_per_hour
+
+    def _landed(self, title, who):
         with self.lock:
             self.flying.pop(title, None)
+            if who is not None:
+                left = self.pending_of.pop(who, 0) - 1
+                if left > 0:
+                    self.pending_of[who] = left
 
     # -- one lookup --------------------------------------------------------------------------------------------
     def _lookup(self, title, key, kept=None):
@@ -305,9 +340,10 @@ class Lookup:
         it: while TMDB doesn't answer, it stays as it was, with no expiry, and when Wikidata doesn't, its Wikidata part
         stays. A found answer that holds TMDB's value is kept TMDB_KEEP_S."""
         answer = {"tmdb": None, "tmdb_asked": False, "wikidata": None, "anime": None, "via": None, "failed": []}
+        known = True       # False: an anime number Kitsu or AniList doesn't know (_anime)
         try:
             if title.startswith(("mal:", "kitsu:")):
-                self._anime(title, answer)
+                known = self._anime(title, answer)
             else:
                 if key:
                     try:
@@ -348,7 +384,7 @@ class Lookup:
         found = _found(answer)
         if answer["failed"] and kept is None:
             until = now + FAILED_S
-        elif not found:
+        elif not found or not known:   # an unknown anime number answers by the rule, kept as a title not found
             until = now + NOT_FOUND_S
         else:
             until = now + TMDB_KEEP_S if _from_tmdb(answer) else None    # found: TMDB's 6 months, else no expiry
@@ -380,18 +416,23 @@ class Lookup:
         return self.paused.get(service, 0) > self.clock()
 
     def _get(self, service, url, headers=None, data=None):
-        """JSON from one service through the request gate (TMDB's, which carry a key, never following a redirect).
-        Any failure becomes Failed(service, reason): the address (which may hold a key) is never in it, and no exception
-        is chained."""
+        """JSON from one service through the request gate (TMDB's, which carry a key, never following a redirect): each
+        read within `timeout`, the whole request (net.Deadline: its connections, status line, headers and body) within
+        `answer_wait_max`, so a service that sends its answer a byte now and then holds a lookup thread no longer
+. Any failure becomes Failed(service, reason): the address (which may hold a key) is never in it, and
+        no exception is chained."""
         if self._paused(service):
             raise Failed(service, "paused after too many requests")
         req = urllib.request.Request(url, data=data, headers={"user-agent": USER_AGENT, **(headers or {})})
         why, code = None, None
+        bound = net.Deadline(self.answer_wait_max)
         try:
-            with (_open_keyed(req, self.timeout) if service == "tmdb" else realdebrid.urlopen(req, timeout=self.timeout)) \
-                    as r:
+            with bound, (_open_keyed(req, self.timeout) if service == "tmdb"
+                         else realdebrid.urlopen(req, timeout=self.timeout)) as r:
                 body = r.read(MAX_BYTES + 1)
-            if len(body) > MAX_BYTES:
+            if bound.passed:   # its connection was shut at the bound: what came may be cut short
+                why = "timed out"
+            elif len(body) > MAX_BYTES:
                 why = "answer too large"
             else:
                 return json.loads(body or b"null")
@@ -399,6 +440,8 @@ class Lookup:
             code = e.code
             retry = e.headers.get("Retry-After") if e.headers else None
             e.close()
+            if bound.passed:   # read from a status line the bound cut short: no answer of the service's
+                raise Failed(service, "timed out") from None
             if code == 404:
                 return None
             why = f"HTTP {code}"
@@ -407,9 +450,9 @@ class Lookup:
                 wait = PAUSE_S if wait is None else min(max(wait, PAUSE_MIN_S), PAUSE_MAX_S)
                 self.paused[service] = self.clock() + wait
         except (urllib.error.URLError, OSError, ValueError) as e:
-            why = "timed out" if "timed out" in str(getattr(e, "reason", e)) else type(e).__name__
+            why = "timed out" if bound.passed or "timed out" in str(getattr(e, "reason", e)) else type(e).__name__
         except Exception as e:
-            why = type(e).__name__
+            why = "timed out" if bound.passed else type(e).__name__
         raise Failed(service, why, code)
 
     def _tmdb(self, tt, key):
@@ -459,32 +502,41 @@ class Lookup:
         return out
 
     def _anime(self, title, answer):
+        """An anime number's answer: Japanese by the rule, unless AniList names another country of origin (a Kitsu
+        number through its MyAnimeList number). Returns False when Kitsu or AniList doesn't know the number (Unknown):
+        its answer is then kept NOT_FOUND_S, as a title not found, so made-up numbers don't stay for ever."""
         kind, number = title.split(":")
+        answer["anime"], answer["via"] = "jpn", "rule"
         mal = number
         if kind == "kitsu":
             try:
                 mal = self._kitsu_mal(number)
+            except Unknown:
+                return False
             except Failed:
                 answer["failed"].append("kitsu")
                 mal = None
             if mal is None:
-                answer["anime"], answer["via"] = "jpn", "rule"
-                return
+                return True
         try:
             country = self._anilist(int(mal))
+        except Unknown:
+            return False
         except Failed:
             answer["failed"].append("anilist")
             country = None
-        if country is None:
-            answer["anime"], answer["via"] = "jpn", "rule"
-        else:
+        if country is not None:
             answer["anime"], answer["via"] = COUNTRY.get(country, "none"), "anilist"
+        return True
 
     def _kitsu_mal(self, number):
+        """Kitsu's MyAnimeList number for a Kitsu number, or None when it has no such mapping; Unknown when Kitsu
+        doesn't know the number."""
         query = urllib.parse.urlencode({"include": "mappings", "fields[anime]": "id",
                                         "fields[mappings]": "externalSite,externalId"})
-        got = self._get("kitsu", f"{self.s.kitsu_url}/anime/{number}?{query}",
-                        {"accept": "application/vnd.api+json"}) or {}
+        got = self._get("kitsu", f"{self.s.kitsu_url}/anime/{number}?{query}", {"accept": "application/vnd.api+json"})
+        if got is None:      # HTTP 404
+            raise Unknown("kitsu")
         for inc in got.get("included") or []:
             attrs = inc.get("attributes") or {}
             if inc.get("type") == "mappings" and attrs.get("externalSite") == "myanimelist/anime" \
@@ -493,7 +545,8 @@ class Lookup:
         return None
 
     def _anilist(self, mal):
-        """AniList's country of origin for a MyAnimeList number ("JP"), or None when AniList doesn't know it."""
+        """AniList's country of origin for a MyAnimeList number ("JP"), or None when it names none; Unknown when
+        AniList doesn't know the number."""
         body = json.dumps({"query": ANILIST_QUERY, "variables": {"id": mal}}).encode()
         with self.anilist_lock:
             wait = self.anilist_last + self.anilist_gap - time.monotonic()
@@ -504,6 +557,8 @@ class Lookup:
                                                                "accept": "application/json"}, data=body)
             finally:
                 self.anilist_last = time.monotonic()
-        media = ((got or {}).get("data") or {}).get("Media") or {}
+        if got is None:      # HTTP 404
+            raise Unknown("anilist")
+        media = (got.get("data") or {}).get("Media") or {}
         country = media.get("countryOfOrigin")
         return str(country).upper() if country else None

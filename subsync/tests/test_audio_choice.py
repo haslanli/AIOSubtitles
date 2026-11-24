@@ -1127,6 +1127,59 @@ class UsenetTest(Base):
         self.assertTrue(self.w.waits_for_pick(self.alias))
         self.assertLessEqual(self.link.hits, 1 + 1 + worker_mod.USENET_MAX_RE_RESOLVE)   # its link asked at most twice
 
+    def listed_by_its_audio_job(self):
+        """A picked file's audio job whose first pass's Usenet row is gone (its hour is over; or the first pass read it
+        through debrid, which no longer has it): the audio job lists the file on Usenet itself."""
+        job = self.picked()
+        rows = self.w.usenet_finder.rows
+        when, kept_row, address = rows[self.alias]
+        rows[self.alias] = (when - worker_mod.USENET_ROW_KEPT_S - 1, kept_row, address)
+        return job
+
+    def test_an_audio_jobs_own_usenet_listing_makes_the_files_first_read(self):
+        # A read of a file the audio job listed on Usenet itself is the file's first Usenet read: one that
+        # fails stops Usenet for the day and backs the file off for this person alone, as a first pass's does
+        job = self.listed_by_its_audio_job()
+        self.link.target = self.srv.url("gone.mp4")
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            self.w.process(job)
+        self.assertEqual((self.usenet.listings, job.kept), (2, None))   # listed again, by the audio job itself
+        self.assertIn("INFO:subsync.worker:Usenet stopped until 00:00 UTC: the first read of a Usenet file failed",
+                      logs.output)
+        self.assertTrue(self.counts.stopped_)
+        self.assertTrue(self.w._file_blocked(self.alias))                # for this person
+        self.assertFalse(self.store.file_blocked(self.alias))            # never for anyone else
+        self.assertTrue(self.w.waits_for_pick(self.alias))               # it waits for another pick
+
+    def test_a_refused_first_read_of_an_audio_jobs_own_usenet_listing_stops_usenet(self):
+        # Refused, it stops Usenet and backs the file off for this person, as a first pass's refusal does
+        job = self.listed_by_its_audio_job()
+        self.srv.fault = "403"
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            self.w._run(job, "audio")
+        self.assertEqual((self.usenet.listings, job.kept), (2, None))
+        self.assertIn("INFO:subsync.worker:Usenet stopped until 00:00 UTC: the first read of a Usenet file was refused",
+                      logs.output)
+        self.assertIn("WARNING:subsync.worker:refused movie/tt1 (HTTP 403): no reads for 900 s", logs.output)
+        self.assertTrue(self.counts.stopped_)
+        self.assertTrue(self.w._file_blocked(self.alias))
+        self.assertFalse(self.store.file_blocked(self.alias))
+        self.assertTrue(self.w.waits_for_pick(self.alias))
+
+    def test_a_refused_read_where_the_first_pass_read_stops_nothing(self):
+        # The usual audio job reads where its first pass did; a refusal of that read is no first read's
+        job = self.picked()
+        self.srv.fault = "403"
+        with self.assertLogs("subsync.worker", "INFO") as logs:
+            self.w._run(job, "audio")
+        self.assertEqual(self.usenet.listings, 1)
+        self.assertIsNotNone(job.kept)
+        self.assertIn("WARNING:subsync.worker:refused movie/tt1 (HTTP 403): no reads for 900 s", logs.output)
+        self.assertFalse(any("Usenet stopped" in line for line in logs.output))
+        self.assertFalse(self.counts.stopped_)
+        self.assertFalse(self.w._file_blocked(self.alias))
+        self.assertTrue(self.w.waits_for_pick(self.alias))
+
 
 # --------------------------------------------------------------------------------------------------- the start lines
 
@@ -1180,6 +1233,44 @@ class SmallTrackTest(unittest.TestCase):
         self.assertTrue(w.pick(first.alias))
         audio_job()
         self.assertEqual(len(synced), 1)                            # judged by the audio route: nothing to read
+
+    def test_a_language_your_list_has_no_subtitle_of_waits_for_no_verdict_of_the_audio_route(self):
+        # The audio route judges only the languages that have a subtitle to fit, so one your list has none of
+        # never gets its verdict, and the known-file shortcut never applied: an audio job read the file again and used
+        # up one of your audio syncs. As in the addon, it counts only those your list has a subtitle of
+        srv = RangeServer(FIXTURES)
+        self.addCleanup(srv.close)
+        tmp = TempDir()
+        folder = tmp.__enter__()
+        self.addCleanup(tmp.__exit__, None, None, None)
+        url = "http://subs.test/big.srt"
+        patcher = FakeDownloads({url: dialogue_srt("eng", n=200)}).patch()   # 200 lines; the file's track has 30
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        row = {"url": srv.url("tiny.mkv"), "streamData": {"torrent": {"infoHash": "a" * 40, "fileIdx": 0}}}
+        s = Settings({"SUBSYNC_DATA": folder, "SUBSYNC_AUDIO_ROUTE": "on", "SUBSYNC_LANGUAGES": "eng,spa",
+                      "SUBSYNC_EXTRA_SOURCES": ""})
+        store = closed_after(self, Store(folder))
+        w = Worker(s, store, Listing(row, [{"id": "big", "lang": "eng", "url": url, "release": "Movie"}]), Safety())
+        first = Job("movie", "tt1", {"filename": "tiny.mkv", "videoSize": os.path.getsize(os.path.join(FIXTURES,
+                                                                                                         "tiny.mkv"))})
+        w.process(first)
+        file_key = store.resolve(first.alias)
+        self.assertTrue(store.judged_all(file_key, ["eng", "spa"], s.rule_id, 0))
+        self.assertTrue(w.waits_for_pick(first.alias))
+        self.assertIsNone(w.known_originals(first.alias)["spa"])      # your list: no Spanish subtitle
+        store.put(file_key, "a" * 64, "eng", 0, "keep_original", "x", route="audio", body="1\n", fmt="srt",
+                  candidate_id="big", original="1\n")              # English judged by the audio route (another's sync)
+        self.assertTrue(w.pick(first.alias))
+        with w.cv:
+            w.queue.clear()
+            job = w.jobs.pop(first.alias)
+        synced = []
+        w._sync_all = lambda job, *a: synced.append(job)
+        w.process(job)
+        self.assertEqual(synced, [])                                # nothing to read
+        # while your list isn't known, every language of yours counts
+        self.assertEqual(w.to_fit("name:other.mkv|1", ["eng", "spa"]), ["eng", "spa"])
 
     def test_everyone_else_gets_a_first_pass_and_a_pick_of_their_own(self):
         # The first pass marks the languages it left to the audio route in the file's detail;

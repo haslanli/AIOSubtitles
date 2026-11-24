@@ -954,8 +954,13 @@ class NumbersTest(unittest.TestCase):
                       f"minutes. A site that asks AIOSubtitles to slow down waits as long as it asks, at most "
                       f"{longest}.",
                       dict(explain.RULES)["A failing subtitle site is paused"])
-        self.assertIn(f"fails {WORDS[sl.PAUSE_FAILURES]} times in {WORDS[sl.PAUSE_WINDOW_S // 60]} minutes is paused "
-                      f"for {WORDS[sl.PAUSE_S // 60]} minutes", explain.SETTINGS["SUBSYNC_SOURCE_TIMEOUT_S"][1])
+        # An answer that takes longer than srclimits.ANSWER_WAIT_MAX_S counts as failing
+        minute = {60: "a minute"}[sl.ANSWER_WAIT_MAX_S]
+        self.assertIn(f"A site that answers later, within {minute}, is left out for this play",
+                      explain.SETTINGS["SUBSYNC_SOURCE_TIMEOUT_S"][1])
+        self.assertIn(f"fails {WORDS[sl.PAUSE_FAILURES]} times in {WORDS[sl.PAUSE_WINDOW_S // 60]} minutes (an answer "
+                      f"that takes more than {minute} counts as failing) is paused for {WORDS[sl.PAUSE_S // 60]} "
+                      "minutes", explain.SETTINGS["SUBSYNC_SOURCE_TIMEOUT_S"][1])
 
     def test_the_sites_limits_and_the_subtitles_a_file_takes(self):
         from subsync import srclimits as sl

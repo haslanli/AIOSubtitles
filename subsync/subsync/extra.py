@@ -5,14 +5,16 @@ key; SubDL, SubSource and Wyzie with a key. A subtitle made from the very releas
 found there, and only such a subtitle fits a file as closely as its own track.
 
 All sources are asked at once. Each answer must come within SUBSYNC_SOURCE_TIMEOUT_S; a later answer is still kept
-(srclimits.SEARCH_TTL_S, "nothing found" EMPTY_TTL_S), so the next play of the title has it. An answer is kept by what
-its request is made of (ASKED_WITH), so another release of the same episode reuses it; an ask or an id lookup still
-running is waited for, not made again; an answer part of which failed is kept EMPTY_TTL_S, one part of which was busy
-not at all (Partial). A source that keeps failing is paused (sourcestate.Health); a site's own limits are counted
-(sourcestate.Ledger). A source the user's config already has is skipped (`skip`): its answers come through the config.
+(srclimits.SEARCH_TTL_S, "nothing found" EMPTY_TTL_S), so the next play of the title has it, unless it takes more than
+srclimits.ANSWER_WAIT_MAX_S: then the source failed. An answer is kept by what its request is made of (ASKED_WITH), so
+another release of the same episode reuses it; an ask or an id lookup still running is waited for, not made again; an
+answer part of which failed is kept EMPTY_TTL_S, one part of which was busy not at all (Partial). A source that keeps
+failing is paused (sourcestate.Health); a site's own limits are counted (sourcestate.Ledger). A source the user's
+config already has is skipped (`skip`): its answers come through the config.
 Only an IMDb id is sent as one; for other ids (Kitsu, MAL) only the lookups that need no id are made. No key or link is
 ever logged or put in a subtitle's address.
 """
+import http.client
 import json
 import logging
 import os
@@ -155,18 +157,25 @@ class ExtraSources:
     # -- asking ------------------------------------------------------------------------------------------------
     def _get(self, url, headers=None, timeout=None, lookup=False):
         """A source's JSON answer. 404 is NotFound, 423 Busy, and "too many requests" (429, or 503 with Retry-After:
-        sourcestate's rule) Limited; any other error is raised as it is. `lookup`: a request to another site for an id
-        the source needs (Cinemeta's TVDB id), not a request of the source itself."""
+        sourcestate's rule) Limited; any other error is raised as it is. Each read waits `timeout` (by default the
+        source's wait, at least MIN_TIMEOUT_S), the whole request at most srclimits.ANSWER_WAIT_MAX_S (net.Deadline: its
+        connections, redirects, status line, headers and body), so a site that sends its answer a byte now and then
+        holds a search thread no longer: TimeoutError then, a failure. `lookup`: a request to another site
+        for an id the source needs (Cinemeta's TVDB id), not a request of the source itself."""
         if not lookup:
             self.asking.requests = getattr(self.asking, "requests", 0) + 1
         req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT,
                                                    **(headers or {})})
+        wait = timeout or max(self.s.source_timeout, srclimits.MIN_TIMEOUT_S)
+        bound = net.Deadline(srclimits.ANSWER_WAIT_MAX_S)
         try:
-            with realdebrid.urlopen(req, timeout=timeout or max(self.s.source_timeout, srclimits.MIN_TIMEOUT_S)) as r:
-                return json.loads(r.read(srclimits.ANSWER_MAX_BYTES) or b"null")
+            with bound, realdebrid.urlopen(req, timeout=wait) as r:
+                body = r.read(srclimits.ANSWER_MAX_BYTES)
         except urllib.error.HTTPError as e:
             code, retry = e.code, e.headers.get("Retry-After") if e.headers else None
             e.close()
+            if bound.passed:   # read from a status line the bound cut short: no answer of the site's
+                raise TimeoutError("timed out") from None
             if code == 404:
                 raise NotFound() from None
             if code == 423:
@@ -174,6 +183,13 @@ class ExtraSources:
             if code == 429 or (code == 503 and retry):
                 raise Limited(retry) from None
             raise
+        except (OSError, http.client.HTTPException):   # its connection shut at the bound fails the read it was in
+            if bound.passed:
+                raise TimeoutError("timed out") from None
+            raise
+        if bound.passed:       # its connection was shut at the bound: what came may be cut short
+            raise TimeoutError("timed out")
+        return json.loads(body or b"null")
 
     def _id(self, kind, key, lookup):
         """An id another site gives for a title, kept for the process; "none" is asked again after EMPTY_TTL_S (then

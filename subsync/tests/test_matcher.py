@@ -905,6 +905,14 @@ class AudioResultTest(unittest.TestCase):
         r = self.judged(decision="in_sync", audio_track=0, audio_language="eng")      # the first track is a track too
         self.assertEqual(r["audio_track"], {"index": 0, "language": "eng"})
 
+    def test_why_the_other_audio_track_failed_is_kept(self):
+        # When every track tried keeps the original, the fit names the other track and why it failed; that
+        # note was worked out and dropped here, so a dual-audio file's kept original never said why
+        other = {"index": 1, "language": "jpn", "why": "too little speech"}
+        r = self.judged(decision="keep_original", why="below the bar", other_track=other)
+        self.assertEqual((r["outcome"], r["reason"], r["other_track"]), ("keep_original", "below the bar", other))
+        self.assertNotIn("other_track", self.judged(decision="keep_original"))
+
     def test_a_fit_that_keeps_the_original_says_why(self):
         r = self.judged(decision="keep_original")
         self.assertEqual((r["outcome"], r["reason"]), ("keep_original", "below the bar or shift under 100 ms"))

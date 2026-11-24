@@ -853,6 +853,8 @@ def sync_subtitle(index, text, lang, rules, *, alass="alass", audio=True, vad=No
         out["close_call"] = fit["close_call"]
     if fit.get("audio_track") is not None:    # the fit on another audio track than the default (a dub)
         out["audio_track"] = {"index": fit["audio_track"], "language": fit.get("audio_language")}
+    if fit.get("other_track"):   # every track tried kept the original: the other one and why (on no page)
+        out["other_track"] = fit["other_track"]
     if fit["decision"] == "in_sync":
         return dict(out, outcome="in_sync", reason=("original fits the speech as it is (release lead removed)" if fit.get("why")
                                                     else "original passes against speech (release lead removed)"))

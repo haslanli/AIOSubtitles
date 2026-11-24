@@ -4,13 +4,14 @@ no network."""
 import hashlib
 import json
 import logging
+import threading
 import time
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from helpers import Clock, closed_after, LookupServices, start_server, stop_server, TempDir
+from helpers import Clock, closed_after, LookupServices, start_server, stop_server, TempDir, wait_until
 from subsync import origlang
 from subsync.settings import Settings
 from subsync.store import Store
@@ -218,6 +219,29 @@ class FailureTest(Base):
                 self.failing(code=429, headers=(("Retry-After", asked),))
                 self.assertEqual(self.lookup.paused["tmdb"], self.clock() + pause)
 
+    def test_an_answer_that_trickles_past_the_whole_wait_fails_and_is_asked_again_in_ten_minutes(self):
+        # Each read waited at most TIMEOUT_S, the whole answer for ever, so a service that sent its answer a
+        # byte now and then held one of the two lookup threads as long as it liked; now its whole request ends at
+        # ANSWER_WAIT_MAX_S (30 s), as one that didn't answer
+        self.assertEqual(origlang.ANSWER_WAIT_MAX_S, 30)
+        self.srv.find["tt1375666"] = {"movie_results": [{"id": 27205, "original_language": "en"}]}
+        self.srv.wikidata["tt1375666"] = [binding("Q1860", iso1="en")]
+        self.srv.trickle.update({"tmdb", "sparql"})                 # TMDB's keyed request and Wikidata's
+        self.lookup.answer_wait_max = 1.0
+        t0 = time.monotonic()
+        with self.assertLogs("subsync", level="DEBUG") as cm:
+            logging.getLogger("subsync").debug("start")
+            got = self.ask("tt1375666")
+        self.assertLess(time.monotonic() - t0, 4)
+        self.assertEqual(got["failed"], ["tmdb", "wikidata"])
+        self.assertIn("INFO:subsync.origlang:original language tt1375666: TMDB didn't answer (timed out)", cm.output)
+        until = self.store.db.execute("SELECT until FROM title_language").fetchone()[0]
+        self.assertEqual(until, self.clock() + 600)
+        self.assert_no_secret(cm.output, got)
+        self.srv.trickle.clear()                                    # an answer within the wait is read whole
+        self.clock.t += 601
+        self.assertEqual(origlang.choose(self.ask("tt1375666")), ("eng", "tmdb"))
+
     def test_not_found(self):
         got = self.ask("tt9999999")
         self.assertEqual((got["tmdb"], got["wikidata"], got["failed"]), (None, [], []))
@@ -293,6 +317,46 @@ class KeySafetyTest(Base):
         futs = [self.lookup.start(f"tt{n}", key="") for n in range(21, 27)]
         self.lookup.close()
         self.assertTrue(any(f.cancelled() for f in futs))
+
+
+class AllowanceTest(Base):
+    """One person (public mode's Worker.who) may have at most PERSON_PENDING lookups waiting at once, of the
+    MAX_PENDING everyone shares, and start PERSON_PER_HOUR new titles an hour; past either, their title isn't looked up
+    now (a later request asks again), and everyone else's still is. Nothing is asked here: a lookup is a stand-in."""
+
+    def held(self):
+        """Every lookup started waits until the event returned is set."""
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.lookup._lookup = lambda title, key, kept=None: gate.wait(10)
+        return gate
+
+    def test_one_person_has_at_most_ten_lookups_waiting(self):
+        self.assertEqual((origlang.MAX_PENDING, origlang.PERSON_PENDING), (200, 10))
+        gate = self.held()
+        mine = [self.lookup.start(f"tt9{n:08d}", key="", who="a") for n in range(11)]
+        self.assertNotIn(None, mine[:10])
+        self.assertIsNone(mine[10])                                         # past their ten: a later request asks
+        theirs = self.lookup.start("tt1375666", key="", who="b")
+        self.assertIsNotNone(theirs)                                        # someone else's still starts
+        self.assertIs(self.lookup.start("tt1375666", key="", who="a"), theirs)   # running already: no new lookup
+        self.assertIsNotNone(self.lookup.start("tt1", key=""))              # a self-hosted install's own viewer
+        gate.set()
+        for fut in mine[:10]:
+            fut.result(timeout=10)
+        self.assertTrue(wait_until(lambda: "a" not in self.lookup.pending_of))
+        self.assertIsNotNone(self.lookup.start("tt900000010", key="", who="a"))   # ended: room for theirs again
+
+    def test_one_person_starts_at_most_a_hundred_new_titles_an_hour(self):
+        self.assertEqual(origlang.PERSON_PER_HOUR, 100)
+        self.held()
+        self.lookup.person_pending = origlang.MAX_PENDING                  # the hour's count alone here
+        mine = [self.lookup.start(f"tt9{n:08d}", key="", who="a") for n in range(101)]
+        self.assertNotIn(None, mine[:100])
+        self.assertIsNone(mine[100])
+        self.assertIsNotNone(self.lookup.start("tt1375666", key="", who="b"))
+        self.clock.t += 3600                                                # the next hour
+        self.assertIsNotNone(self.lookup.start("tt900000100", key="", who="a"))
 
 
 class TmdbLaterTest(Base):
@@ -533,6 +597,25 @@ class KeepTest(Base):
         self.assertEqual(origlang.choose(self.ask("tt1")), ("eng", "tmdb"))     # looked up again, kept 6 months more
         self.assertEqual(tmdb_calls(), 2)
         self.assertEqual(self.until("tt1"), self.clock() + 180 * DAY)
+
+    def test_an_anime_number_kitsu_or_anilist_doesnt_know_is_kept_seven_days(self):
+        # A made-up anime number (HTTP 404) was kept for ever, so anyone could fill the shared store with them;
+        # it still answers Japanese by the rule, now kept as a title not found is. A number they know keeps its answer
+        # with no expiry, as before
+        self.assertEqual(origlang.NOT_FOUND_S, 7 * DAY)
+        self.srv.kitsu["99"] = None                                     # Kitsu knows it: no MyAnimeList mapping
+        self.srv.kitsu["1376"] = 5114                                   # whose MyAnimeList number AniList doesn't know
+        self.srv.anilist[5] = None                                      # AniList knows it: no country of origin
+        for video_id in ("mal:777", "kitsu:987654321", "kitsu:1376", "kitsu:99", "mal:5"):
+            self.assertEqual(origlang.choose(self.ask(video_id)), ("jpn", "rule"), video_id)
+        for title in ("mal:777", "kitsu:987654321", "kitsu:1376"):
+            self.assertEqual(self.until(title), self.clock() + 7 * DAY, title)
+        for title in ("kitsu:99", "mal:5"):
+            self.assertIsNone(self.until(title), title)
+        self.clock.t += 7 * DAY + 1
+        self.store.expire()
+        self.assertEqual(sorted(r[0] for r in self.store.db.execute("SELECT title FROM title_language")),
+                         ["kitsu:99", "mal:5"])
 
     def test_tmdbs_answers_kept_before_get_their_six_months(self):
         # An answer holding TMDB's value that an earlier version kept with no expiry gets one, counted from

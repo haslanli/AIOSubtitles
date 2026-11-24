@@ -47,10 +47,12 @@ PAUSE_S = 600
 RETRY_AFTER_MIN_S = 60             # a site's own Retry-After pauses it at least this long,
 RETRY_AFTER_MAX_S = 3600           # and at most this long
 
-# A site's answer is read up to ANSWER_MAX_BYTES, its request waits at least MIN_TIMEOUT_S (a shorter
-# SUBSYNC_SOURCE_TIMEOUT_S still bounds how long a file waits for the answers)
+# A site's answer is read up to ANSWER_MAX_BYTES, each of its request's reads waits at least MIN_TIMEOUT_S (a shorter
+# SUBSYNC_SOURCE_TIMEOUT_S still bounds how long a file waits for the answers), and the whole request at most
+# ANSWER_WAIT_MAX_S: a site whose answer takes longer, a byte now and then, counts as failing
 ANSWER_MAX_BYTES = 4 * 1024 * 1024
 MIN_TIMEOUT_S = 5.0
+ANSWER_WAIT_MAX_S = 60.0
 
 # Answers kept for every person: a found list for SEARCH_TTL_S, "nothing found" for EMPTY_TTL_S.
 SEARCH_TTL_S = 6 * 3600

@@ -1044,6 +1044,15 @@ class SignupCallersTest(ClientCase):
                                  "Updating AIOSubtitles' config on your AIOStreams: your AIOStreams is limiting "
                                  "requests from AIOSubtitles right now. Try again in a few minutes.")
 
+    def test_a_real_debrid_link_marks_the_link_field(self):
+        # The page said why the request was stopped, word for word as before, but marked no field, unlike an
+        # AIOStreams that can't be reached or isn't one; stopped before any connection
+        with self.assertLogs("subsync.realdebrid", "WARNING"), self.assertRaises(self.signup.SignupError) as e:
+            self.signup._read_viewer(self.signup.public_api("https://real-debrid.com", 5), UUID, "pw")
+        self.assertEqual((e.exception.message, e.exception.field),
+                         ("Reading your AIOStreams config: Stopped a request to Real-Debrid: AIOSubtitles never uses "
+                          "Real-Debrid.", "link"))
+
     def test_an_alias_link_on_a_busy_or_failing_aiostreams(self):
         # The link is fine; the page names what its AIOStreams did
         for status, words in ((429, "Opening your alias link: your AIOStreams is limiting requests from AIOSubtitles "

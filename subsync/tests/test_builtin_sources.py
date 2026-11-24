@@ -390,6 +390,24 @@ class WaitPauseCacheTest(SourcesHarness, unittest.TestCase):
         self.assertEqual({c["source"] for c in got}, {"osv3", "tsdb"})
         self.assertEqual(len(self.fake.asked("/tsdb")), n)           # from the cache
 
+    def test_an_answer_that_trickles_past_a_minute_counts_as_failing(self):
+        # Each read waited at most the source's wait, the whole answer for ever, so a site that sent its answer
+        # a byte now and then held one of the search threads as long as it liked and never counted as failing; now its
+        # whole request ends at srclimits.ANSWER_WAIT_MAX_S (a minute), and three such answers pause it
+        self.assertEqual(srclimits.ANSWER_WAIT_MAX_S, 60)
+        self.fake.mode["tsdb"] = "trickle"
+        ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")
+        with mock.patch.object(srclimits, "ANSWER_WAIT_MAX_S", 1.0):
+            t0 = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                ex._get(f"{self.fake.url}/tsdb/v1/by-imdb/tt1")
+            self.assertLess(time.monotonic() - t0, 3)
+            for _ in range(srclimits.PAUSE_FAILURES):
+                self.assertEqual(ex.search("movie", "tt1"), [])
+        self.assertIn("tsdb", ex.health.status())
+        self.fake.mode.pop("tsdb")                                    # an answer within the wait is read whole
+        self.assertEqual(len(ex._get(f"{self.fake.url}/tsdb/v1/by-imdb/tt1")["subtitles"]["items"]), 2)
+
     def test_a_failing_source_is_paused_then_tried_once(self):
         self.fake.mode["tsdb"] = "500"
         ex = self.extra(SUBSYNC_EXTRA_SOURCES="tsdb")

@@ -543,6 +543,14 @@ class Job:
         return f"title:{self.type}/{self.video_id}"
 
     @property
+    def later_usenet_read(self):
+        """An audio job reading its Usenet file where its first pass did (the row and address it kept): not the
+        file's first Usenet read, so its failure or refusal stops no Usenet and backs nothing off. An audio job
+        that listed the file on Usenet itself (its first pass's row gone, or read through debrid) makes the file's
+        first read."""
+        return self.usenet and self.kept is not None
+
+    @property
     def aliases(self):
         """The aliases the store may know the file by: `alias`, and with a file name its name and size (a file read for
         a request that named it is found again by one that also gives its hash)."""
@@ -909,13 +917,16 @@ class Worker(threading.Thread):
         return (cls, -within, med if med is not None else 1e9)
 
     def start_lookup(self, video_id):
-        """Starts the title's original-language lookup in the background (nothing if it is kept or running); with this
-        person's own TMDB key in public mode, else the service's."""
-        if self.lookup is not None:
-            try:
-                self.lookup.start(video_id, key=self.s.tmdb_key)
-            except Exception as e:   # a lookup never stops a request
-                log.warning("original-language lookup not started: %s", type(e).__name__)
+        """Starts the title's original-language lookup in the background (nothing if it is kept or running); in public
+        mode with this person's own TMDB key and within their own allowance (origlang.PERSON_PENDING,
+        PERSON_PER_HOUR), else with the service's key. Never for a person answered from stored copies only
+        (public.StoreOnly: limits with no person's key): nothing of theirs is read."""
+        if self.lookup is None or (self.limits is not None and self.who is None):
+            return
+        try:
+            self.lookup.start(video_id, key=self.s.tmdb_key, who=self.who)
+        except Exception as e:   # a lookup never stops a request
+            log.warning("original-language lookup not started: %s", type(e).__name__)
 
     def rule_for(self, video_id):
         """The rule a file of this title is judged under now (origlang.rule): the title's answer as kept, or none."""
@@ -1195,11 +1206,11 @@ class Worker(threading.Thread):
             requeued = self._requeue(job)
         except Refused as e:
             # most likely a per-account limit: every read waits (from when the refusal was seen, _refused); this file
-            # backs off 1 h / 6 h / 24 h for this viewer, but a Usenet file in its audio sync doesn't (only a
-            # first read backs a Usenet file off)
+            # backs off 1 h / 6 h / 24 h for this viewer, but not a Usenet file its audio sync reads where its first
+            # pass did (only a first read backs a Usenet file off; Job.later_usenet_read)
             unfinished = True
             wait = self._refused(job)
-            if not (job.audio and job.usenet):
+            if not job.later_usenet_read:
                 self._viewer_backs_off(job.alias)
             log.warning("refused %s (%s): no reads for %d s", job.label, e, wait)
         except ReadFailed as e:
@@ -1480,7 +1491,7 @@ class Worker(threading.Thread):
                              # The audio job reads at the address its first pass resolved, so the Usenet
                              # service doesn't fetch the NZB again; when it stops answering, the link is asked again
                              # as any reader does (at most twice)
-                             resolved=job.kept[1] if job.usenet and job.kept is not None else None)
+                             resolved=job.kept[1] if job.later_usenet_read else None)
         if counts:
             job.file_counted = True
             self.limits.file_started()
@@ -1497,14 +1508,13 @@ class Worker(threading.Thread):
                 self.store.file_failed(job.alias, NEVER_AGAIN if isinstance(e, OtherFormat) else REFUSED_BACKOFF_S)
                 return
             except Refused:
-                if job.usenet and not job.audio:
+                if job.usenet and not job.later_usenet_read:
                     self.usenet_finder.stop("the first read of a Usenet file was refused")
                 raise
             except ReadFailed as e:
-                if job.usenet and job.audio:
-                    # A read during the audio sync (its first pass read the file, through debrid when this job
-                    # listed it on Usenet itself) doesn't stop Usenet: nothing backs off, and the file waits for another
-                    # pick
+                if job.later_usenet_read:
+                    # The audio sync reads where its first pass read the file: no first read, so Usenet isn't
+                    # stopped and nothing backs off; the file waits for another pick
                     log.info("read failed %s (%s): it waits for another pick", job.label, e)
                     self._wait_again(job)
                     return
@@ -1526,7 +1536,7 @@ class Worker(threading.Thread):
                     retry = self.store.file_failed(job.alias, READ_FAILED_BACKOFF_S)
                 log.info("read failed %s (%s), retry %s", job.label, e, "never" if retry is None
                          else time.strftime("%H:%M", time.gmtime(retry)) if retry else "-")
-                if job.audio:   # a debrid file's audio job: it backs off as any read, and waits for another pick
+                if job.audio:   # its file backs off as after any first read, and waits for another pick
                     self._wait_again(job)
                 return
         # the file could be read: a back-off is for failures in a row, so the earlier ones no longer count
@@ -1634,10 +1644,19 @@ class Worker(threading.Thread):
         marked = set((detail or {}).get("audio_only") or ())
         return tuple(lang for lang in self.s.languages if lang in marked)
 
+    def to_fit(self, alias, langs):
+        """Of `langs`, those this viewer's subtitle list for the file has a subtitle of (all of them while that list
+        isn't known): the audio route gives a verdict to those only, and waiting for one it can't give would read or
+        queue the file again (in the addon here)."""
+        originals = self.known_originals(alias)
+        return langs if originals is None else [lang for lang in langs if originals.get(lang)]
+
     def _audio_unjudged(self, job, file_key):
-        """Whether the audio route still has to judge a stored file for this job: an audio job's every language (its
-        pick, or "open", queued it), or a first pass's languages left to it (left_to_audio)."""
+        """Whether the audio route still has to judge a stored file for this job: of an audio job's every language (its
+        pick, or "open", queued it), or of a first pass's languages left to it (left_to_audio), those it has a subtitle
+        to fit (to_fit)."""
         langs = self.s.languages if job.audio else self.left_to_audio(self.store.file_detail(file_key))
+        langs = self.to_fit(job.alias, langs)
         return bool(langs) and not self.store.audio_judged(file_key, langs)
 
     def _audio_queued(self, alias):
@@ -2220,8 +2239,8 @@ class LanguageSync:
     # a judged result's facts kept in its stored detail (_record)
     RECORDED = ("route", "reference", "gate_original", "gate_synced", "gate_snapped", "refined", "unchanged", "magnet",
                 "shift", "model", "windows", "audio_s", "lines", "dialogue", "alass_error", "fast", "better",
-                "audio_track", "shift_fit", "cross", "aligned", "recentred_ms", "text", "text_original", "sections",
-                "section_checks", "close_call")
+                "audio_track", "other_track", "shift_fit", "cross", "aligned", "recentred_ms", "text", "text_original",
+                "sections", "section_checks", "close_call")
 
     def __init__(self, worker, job, index, file_key, lang, candidates, oshash=None, filename=None):
         self.w, self.s, self.store = worker, worker.s, worker.store

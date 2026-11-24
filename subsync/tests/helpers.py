@@ -1428,12 +1428,14 @@ class DebridLink:
 class LookupServices:
     """The original-language lookup's services: TMDB at /tmdb, Wikidata's query service at /sparql, Kitsu at
     /kitsu, AniList at /anilist."""
+    TRICKLE_S = 0.05
 
     def __init__(self):
         self.calls, self.lock = [], threading.Lock()
         self.find, self.details, self.wikidata, self.kitsu, self.anilist = {}, {}, {}, {}, {}
         self.status = {}            # service -> (code, headers) to answer with instead
         self.delay = {}             # service -> seconds
+        self.trickle = set()        # services whose answer's body comes a byte every TRICKLE_S
         self.active, self.most_active = {}, {}
         outer = self
 
@@ -1449,7 +1451,16 @@ class LookupServices:
                     self.send_header(k, v)
                 self.send_header("content-length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                if urllib.parse.urlsplit(self.path).path.split("/")[1] not in outer.trickle:
+                    self.wfile.write(body)
+                    return
+                for i in range(len(body)):
+                    try:
+                        self.wfile.write(body[i:i + 1])
+                        self.wfile.flush()
+                    except OSError:      # the client went
+                        return
+                    time.sleep(outer.TRICKLE_S)
 
             def handle_any(self, method):
                 url = urllib.parse.urlsplit(self.path)
@@ -1545,13 +1556,17 @@ def tsdb_item(i, lang, release, cues=900):
 
 class FakeSources:
     """Answers like the built-in sources. `mode` per source: None, "500", "404", "423", "429", "503" (no Retry-After),
-    "503-retry" (with one), "slow"; /hop?to=<address> answers with a redirect there."""
+    "503-retry" (with one), "slow", "trickle" (its answer's body a byte every TRICKLE_S, each read within its own
+    wait); /hop?to=<address> answers with a redirect there."""
+    TRICKLE_S = 0.05
 
     def __init__(self):
         self.calls, self.headers, self.mode, self.slow_s = [], [], {}, 1.5
         outer = self
 
         class H(BaseHTTPRequestHandler):
+            trickle = False
+
             def log_message(self, *a):
                 pass
 
@@ -1563,7 +1578,16 @@ class FakeSources:
                 for k, v in (extra or {}).items():
                     self.send_header(k, v)
                 self.end_headers()
-                self.wfile.write(body)
+                if not self.trickle:
+                    self.wfile.write(body)
+                    return
+                for i in range(len(body)):
+                    try:
+                        self.wfile.write(body[i:i + 1])
+                        self.wfile.flush()
+                    except OSError:      # the client went
+                        return
+                    time.sleep(outer.TRICKLE_S)
 
             def items(self, rows):
                 return {"subtitles": {"total": len(rows), "limit": 100, "offset": 0,
@@ -1578,6 +1602,8 @@ class FakeSources:
                 mode = outer.mode.get(top)
                 if mode == "slow":
                     time.sleep(outer.slow_s)
+                elif mode == "trickle":
+                    self.trickle = True
                 elif mode == "500":
                     return self.send(500, {"error": "down"})
                 elif mode == "429":

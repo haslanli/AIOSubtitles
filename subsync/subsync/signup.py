@@ -28,10 +28,11 @@ from dataclasses import dataclass, field
 
 from . import explain, realdebrid
 from .aiosconfig import (ALIAS_NO_CONFIG, ALIAS_UNKNOWN, BAD_ANSWER, CODE_WORD, MAX_ALIAS, MAX_LANGUAGES,
-                         NOT_AIOSTREAMS, PUBLIC_RETRY_WAIT_CAP, PUBLIC_TIMEOUT, PUBLIC_WHOLE_TIMEOUT, TOO_SLOW,
-                         UNREACHABLE, UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES, AiosApi, AiosError, install_link,
-                         is_limited, is_subsync_preset, needs_sign_in, new_key, parse_languages, sync_config,
-                         sync_config_problems, usenet_route, usenet_sync_config, viewer_change, without_builtin_twins)
+                         NOT_AIOSTREAMS, PUBLIC_RETRY_WAIT_CAP, PUBLIC_TIMEOUT, PUBLIC_WHOLE_TIMEOUT, REAL_DEBRID,
+                         TOO_SLOW, UNREACHABLE, UNREADABLE, UUID_RE, WRONG_PASSWORD_CODES, AiosApi, AiosError,
+                         install_link, is_limited, is_subsync_preset, needs_sign_in, new_key, parse_languages,
+                         sync_config, sync_config_problems, usenet_route, usenet_sync_config, viewer_change,
+                         without_builtin_twins)
 from .extra import cleanable_presets
 from .langs import DEFAULT_LANGUAGE
 from .langs import name as lang_name
@@ -451,10 +452,10 @@ def _read_viewer(api, uuid, password, metadata=True, typed_link=True):
 
 def _field_of(e):
     """The field an AIOStreams error is about: the password it refused, or the link it couldn't reach (or where
-    something else than AIOStreams answered)."""
+    something else than AIOStreams answered, or that points to Real-Debrid)."""
     if str(e.code) in WRONG_PASSWORD_CODES:
         return "password"
-    if e.code in (UNREACHABLE, NOT_AIOSTREAMS):
+    if e.code in (UNREACHABLE, NOT_AIOSTREAMS, REAL_DEBRID):
         return "link"
     return None
 

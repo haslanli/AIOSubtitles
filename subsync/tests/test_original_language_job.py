@@ -53,14 +53,15 @@ class Running(concurrent.futures.Future):
 
 
 class FakeLookup:
-    """Answers by title as told; records every start; a start is left running for ever (Running), and any wait for one
-    is recorded in `waits`."""
+    """Answers by title as told; records every start (its id and key in `started`, the person asking in `who`); a start
+    is left running for ever (Running), and any wait for one is recorded in `waits`."""
 
     def __init__(self, answers=None):
-        self.answers, self.started, self.waits = dict(answers or {}), [], []
+        self.answers, self.started, self.who, self.waits = dict(answers or {}), [], [], []
 
-    def start(self, video_id, key=""):
+    def start(self, video_id, key="", who=None):
         self.started.append((video_id, key))
+        self.who.append(who)
         return Running(self.waits)
 
     def peek(self, video_id):
@@ -169,6 +170,18 @@ class JobTest(Base):
         w = self.worker(SUBSYNC_TMDB_KEY="eyJ.persons-own-token")
         self.run_job(w)
         self.assertEqual(self.lookup.started[0][1], "eyJ.persons-own-token")
+
+    def test_a_persons_lookups_are_counted_as_theirs_and_none_starts_for_stored_copies_only(self):
+        # Each person's lookups count against their own allowance (origlang.PERSON_PENDING, PERSON_PER_HOUR),
+        # so nobody fills every place; a person answered from stored copies only reads nothing, so none starts for them
+        from helpers import Limits
+        from subsync.public import StoreOnly
+        s = Settings({"SUBSYNC_DATA": self.dir, "SUBSYNC_PUBLIC": "on", "SUBSYNC_PUBLIC_BASE": "http://subsync.test"})
+        store = closed_after(self, Store(self.dir))
+        Worker(s, store, self.listing, Safety(), limits=Limits(who="a" * 16), lookup=self.lookup).start_lookup("tt1")
+        Worker(s, store, self.listing, Safety(), limits=StoreOnly(), lookup=self.lookup).start_lookup("tt2")
+        Worker(s, store, self.listing, Safety(), lookup=self.lookup).start_lookup("tt3")    # a self-hosted install's
+        self.assertEqual(list(zip(self.lookup.started, self.lookup.who)), [(("tt1", ""), "a" * 16), (("tt3", ""), None)])
 
     def test_no_lookup_no_change(self):
         self.lookup = None
