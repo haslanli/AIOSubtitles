@@ -365,7 +365,13 @@ class Fetch(unittest.TestCase):
                 tried.append(address)
                 raise OSError(f'test: no connection to {address[0]}')
             return real_connect(address, *args, **kwargs)
-        for address, reason in ((base, 'SSH-2.0-OpenSSH_9.6'), ('https://subtitles..example.com', 'idna')):
+        try:                    # IDNA's own words for the name, which differ by Python version (3.14: "'idna' codec
+            'subtitles..example.com'.encode('idna')     # can't encode ...", 3.12: "label empty or too long")
+        except UnicodeError as e:
+            idna_words = str(e)
+        else:
+            self.fail('IDNA accepted a name with an empty label')
+        for address, reason in ((base, 'SSH-2.0-OpenSSH_9.6'), ('https://subtitles..example.com', idna_words)):
             with self.subTest(address=address), mock.patch.object(socket, 'create_connection', connect):
                 out = Rows()
                 self.assertFalse(hosting.check(address, out))
@@ -373,7 +379,7 @@ class Fetch(unittest.TestCase):
                 kind, text = out.rows[-1]
                 self.assertEqual(kind, 'bad')
                 self.assertTrue(text.startswith(f"The sign-up page doesn't load at {address}: "), text)
-                self.assertIn(reason, text)                     # its own words (IDNA's differ by Python version)
+                self.assertIn(reason, text)                     # its own words
                 self.assertNotIn('\n', text)
         self.assertEqual(tried, [])
 

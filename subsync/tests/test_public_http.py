@@ -721,8 +721,18 @@ def trickle(port, head, rest, gap):
                 break
         select.select([sock], [], [], 10)
         seconds = time.monotonic() - t0
-        sock.shutdown(socket.SHUT_WR)
         data = b""
+        sock.setblocking(False)                       # what has come already, before a reset could end the socket
+        try:
+            while chunk := sock.recv(65536):
+                data += chunk
+        except OSError:                               # nothing more yet, or reset
+            pass
+        sock.settimeout(10)
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:                               # the server closed it first: Linux says ENOTCONN, macOS nothing
+            pass
         try:
             while chunk := sock.recv(65536):
                 data += chunk
